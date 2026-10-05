@@ -19,13 +19,12 @@
 // yoktur; karantinalı testin başarısızlığı bu denetimde zaten sayılmaz (yalnızca atlama sayılır).
 // Konsol: AC başına tek satır + özet. Ayrıntı: `<out>/<faz|ci|ids>.json`.
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isPhase, loadAcceptance, PHASES } from "./acceptance.mjs";
 import { collectTags, groupById } from "./collect.mjs";
 import { loadConditions } from "./conditions.mjs";
-import { execute, formatResult, parseVitestReport, plan, summarizeResults } from "./run.mjs";
+import { execute, formatResult, parseVitestReport, plan, reportMismatch, spawnIsolated, summarizeResults } from "./run.mjs";
 import { loadPilot } from "../lib/pilot.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -189,8 +188,10 @@ export function runtimeSkipAudit({ root, artifactDir, vitestBin, env }) {
   const jsonFile = path.join(artifactDir, "ci.all.vitest.json");
   const logFile = path.join(artifactDir, "ci.all.log");
   rmSync(jsonFile, { force: true });
-  const args = ["run", "--root", root, "--reporter=json", `--outputFile.json=${jsonFile}`];
-  const r = spawnSync(vitestBin, args, { cwd: root, encoding: "utf8", env: env ?? process.env, maxBuffer: 256 * 1024 * 1024 });
+  // T-008k: `default` reporter da açık (stdout'taki tek `Tests` özet satırı JSON raporuyla karşılaştırılır);
+  // vitest süreç grubunda koşar ve bitince grup SIGKILL ile sonlandırılır (`spawnIsolated`, T-008j).
+  const args = ["run", "--root", root, "--reporter=json", `--outputFile.json=${jsonFile}`, "--reporter=default"];
+  const r = spawnIsolated(vitestBin, args, { cwd: root, env: env ?? process.env });
   const spawnError = r.error ? `\n[spawn hatası] ${r.error.message}` : "";
   writeFileSync(logFile, `$ ${[vitestBin, ...args].join(" ")}\n[çıkış ${r.status}]\n--- stdout ---\n${r.stdout ?? ""}\n--- stderr ---\n${r.stderr ?? ""}${spawnError}\n`);
   const shownLog = displayPath(root, logFile);
@@ -205,6 +206,11 @@ export function runtimeSkipAudit({ root, artifactDir, vitestBin, env }) {
   const outcomes = parseVitestReport(json, root);
   if (outcomes === null) {
     audit.errors.push(`RUNTIME_SKIP_UNVERIFIABLE çalışma anı atlama denetimi: vitest JSON raporu okunamadı (çıkış ${r.status}), bkz. ${shownLog}`);
+    return audit;
+  }
+  const mismatch = reportMismatch(outcomes, r.stdout ?? "");
+  if (mismatch !== null) {
+    audit.errors.push(`REPORT_MISMATCH çalışma anı atlama denetimi: ${mismatch}, bkz. ${shownLog}`);
     return audit;
   }
   audit.total = outcomes.length;
