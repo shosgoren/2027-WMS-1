@@ -357,7 +357,7 @@ function lockKeyName(key) {
 //   - anahtar: düz, '…' ('' kaçışlı) veya "…" (ters bölü yok); `?`, `<<`, `&`, `*`, `!`, `|`, `>`,
 //     `%`, `@`, `` ` ``, `-`, `[`, `{`, `#` ile başlayan düz anahtar yok;
 //   - değer: düz skaler, tırnaklı skaler, tek satırlık akış (`{…}`, `[…]`; düğüm başında gösterge,
-//     tırnak dışında `&`/`!`/` #` yok — bkz. `checkFlow`); çapa/takma ad/etiket/blok skaler (`|`,
+//     tırnak dışında `&`/`!`/` #` yok — bkz. `parseFlow`); çapa/takma ad/etiket/blok skaler (`|`,
 //     `>`), satır sonu yorumu, belge imleri yok;
 //   - aynı eşlemede yinelenen anahtar yok (tırnaklı/tırnaksız aynı ad dahil); boş blok yok;
 //   - yalnızca tam satır yorum (`# …`) ve boş satır atlanır; `lockfileVersion` 9.x olmalı.
@@ -417,36 +417,111 @@ function unquote(s, ln) {
 }
 
 /**
- * Tek satırlık akış koleksiyonu (T-015: düğüm konumlu denetim). YAML'da çapa/takma ad/etiket/blok
- * göstergeleri (`&`, `*`, `!`, `|`, `>` …) yalnızca bir düğümün **başında** gösterge sayılır; düz
- * skalerin içindeki `*`, `>`, `|`, `^`, `~`, boşluk sıradan karakterdir (pnpm `engines`:
- * `{node: 6.* || 8.* || >= 10.*}`). Kabul edilen dil:
+ * @typedef {string | null | FlowSeq | FlowMap} FlowValue
+ * Ayrıştırılmış akış düğümü: skaler (tırnaktan arındırılmış), değersiz anahtarın değeri (`null`),
+ * dizi veya eşleme (anahtarlar tırnaktan arındırılmış, `''` kaçışı açılmış; T-016).
+ */
+
+/**
+ * Ayrıştırılmış akış eşlemesi / dizisi. JSDoc tür takma adı `Map<…>`/`[]` ile kendine başvuramadığından
+ * (TS2456) sınıf olarak tanımlanır; davranış `Map`/`Array` ile aynıdır.
+ * @extends {Map<string, FlowValue>}
+ */
+export class FlowMap extends Map {}
+/** @extends {Array<FlowValue>} */
+export class FlowSeq extends Array {}
+
+/**
+ * @param {readonly FlowValue[]} xs
+ * @returns {FlowSeq}
+ */
+export function flowSeq(xs) {
+  const out = new FlowSeq();
+  out.push(...xs);
+  return out;
+}
+
+/**
+ * Tek satırlık akış koleksiyonunu ayrıştırır (T-015 düğüm konumlu denetim; T-016 yapı üretir).
+ * YAML'da çapa/takma ad/etiket/blok göstergeleri (`&`, `*`, `!`, `|`, `>` …) yalnızca bir düğümün
+ * **başında** gösterge sayılır; düz skalerin içindeki `*`, `>`, `|`, `^`, `~`, boşluk sıradan
+ * karakterdir (pnpm `engines`: `{node: 6.* || 8.* || >= 10.*}`). Kabul edilen dil:
  *   - dengeli `{…}` / `[…]`; en dıştaki kapanıştan sonra metin yok;
  *   - düğüm: tırnaklı skaler, iç içe akış koleksiyonu veya `PLAIN_FORBIDDEN_START` / `:` ile
  *     başlamayan düz skaler; boş düğüm (`{a: }`, `[,]`) yok;
  *   - `anahtar: değer` ayırıcısı (`: `) yalnızca `{…}` içinde ve girdi başına bir kez;
  *   - tırnaklı skaler/kapanmış koleksiyondan sonra yalnızca boşluk, `,`, `: ` veya kapanış;
- *   - düz skaler içinde `&`, `!`, tırnak, `` ` `` ve satır sonu yorumu (` #`) yok.
- * Geri kalan her biçim `LockfileError` (fail-closed).
+ *   - düz skaler içinde `&`, `!`, tırnak, `` ` `` ve satır sonu yorumu (` #`) yok;
+ *   - (T-016) eşleme anahtarı skalerdir (koleksiyon anahtarı yok) ve normalize edilmiş biçimiyle
+ *     eşleme içinde tekildir (`{a: 1, 'a': 2}` yok).
+ * Geri kalan her biçim `LockfileError` (fail-closed). Çağıranlar ham metni regex'le değil bu
+ * çıktının anahtar–değer çiftleriyle değerlendirir (T-016: `"tarball":` tırnaklı anahtar açığı).
  * @param {string} raw `{` veya `[` ile başlar
  * @param {number} ln
+ * @returns {FlowValue}
  */
-function checkFlow(raw, ln) {
-  /** @type {Array<{ close: "}" | "]", hasKey: boolean }>} */
+export function parseFlow(raw, ln) {
+  /**
+   * @type {Array<{ close: "}" | "]", hasKey: boolean, map: FlowMap | null,
+   *   seq: FlowSeq | null, key: string | undefined, value: FlowValue | undefined }>}
+   */
   const stack = [];
   /** "node": düğüm başı bekleniyor · "plain": düz skalerin içi · "after": düğüm bitti. */
   let phase = /** @type {"node" | "plain" | "after"} */ ("node");
   /** Son belirteç `: ` ayırıcısı mı (değer zorunlu)? */
   let needValue = false;
+  /** Süren düz skalerin başlangıç konumu. */
+  let plainStart = -1;
+  /** @type {FlowValue | undefined} */
+  let root;
   /** @type {(why: string) => never} */
   const fail = (why) => {
     throw new LockfileError(`satır ${ln}: ${why}`);
   };
+  /** Tamamlanan düğümü üst koleksiyona yerleştirir. @param {FlowValue} v */
+  const emit = (v) => {
+    const top = stack[stack.length - 1];
+    if (top === undefined) {
+      root = v;
+      return;
+    }
+    if (top.seq !== null) {
+      top.seq.push(v);
+      return;
+    }
+    if (top.hasKey) {
+      top.value = v;
+      return;
+    }
+    if (typeof v !== "string") fail("akış eşlemesinde koleksiyon anahtarı desteklenmez");
+    top.key = v;
+  };
+  /** Eşlemede bekleyen `anahtar[: değer]` girdisini işler. */
+  const commit = () => {
+    const top = stack[stack.length - 1];
+    if (top === undefined || top.map === null) return;
+    if (top.key !== undefined) {
+      if (top.map.has(top.key)) fail(`akış eşlemesinde yinelenen anahtar "${top.key}"`);
+      top.map.set(top.key, top.hasKey ? (top.value ?? null) : null);
+    }
+    top.key = undefined;
+    top.value = undefined;
+    top.hasKey = false;
+  };
+  /** Süren düz skaleri bitirir. @param {number} i */
+  const endPlain = (i) => {
+    if (phase !== "plain") return;
+    emit(raw.slice(plainStart, i).trim());
+    phase = "after";
+  };
   /** @param {number} i @param {string} ch */
   const close = (i, ch) => {
     if (needValue) fail("akış koleksiyonunda boş değer");
-    if (stack.pop()?.close !== ch) fail("dengesiz akış koleksiyonu");
+    commit();
+    const frame = stack.pop();
+    if (frame?.close !== ch) fail("dengesiz akış koleksiyonu");
     if (stack.length === 0 && i !== raw.length - 1) fail("akış koleksiyonundan sonra metin");
+    emit(/** @type {FlowValue} */ (frame.map ?? frame.seq));
     phase = "after";
   };
   for (let i = 0; i < raw.length; i++) {
@@ -456,12 +531,21 @@ function checkFlow(raw, ln) {
       if (ch === "'" || ch === '"') {
         const q = unquote(raw.slice(i), ln);
         i = raw.length - q.rest.length - 1;
+        if (stack.length === 0) fail("akış koleksiyonu dışında skaler");
+        emit(q.value);
         phase = "after";
         needValue = false;
         continue;
       }
       if (ch === "{" || ch === "[") {
-        stack.push({ close: ch === "{" ? "}" : "]", hasKey: false });
+        stack.push({
+          close: ch === "{" ? "}" : "]",
+          hasKey: false,
+          map: ch === "{" ? new FlowMap() : null,
+          seq: ch === "[" ? new FlowSeq() : null,
+          key: undefined,
+          value: undefined,
+        });
         needValue = false;
         continue;
       }
@@ -472,18 +556,21 @@ function checkFlow(raw, ln) {
       if (ch === "," || ch === ":") fail(`akış koleksiyonunda boş düğüm ("${ch}")`);
       // Düğüm başında çapa, takma ad, etiket, blok skaler, ayrılmış göstergeler: desteklenmez.
       if (PLAIN_FORBIDDEN_START.test(ch)) fail(`akış koleksiyonunda desteklenmeyen gösterge "${ch}"`);
+      if (stack.length === 0) fail("akış koleksiyonu dışında skaler");
       phase = "plain";
+      plainStart = i;
       needValue = false;
       continue;
     }
     // phase: "plain" | "after"
     if (ch === ",") {
-      const top = stack[stack.length - 1];
-      if (top !== undefined) top.hasKey = false;
+      endPlain(i);
+      commit();
       phase = "node";
       continue;
     }
     if (ch === "}" || ch === "]") {
+      endPlain(i);
       close(i, ch);
       continue;
     }
@@ -491,6 +578,7 @@ function checkFlow(raw, ln) {
       const top = stack[stack.length - 1];
       if (top === undefined || top.close !== "}" || top.hasKey) fail("akış koleksiyonunda desteklenmeyen eşleme biçimi");
       if (raw[i + 1] !== " ") fail('akışta ":" sonrası boşluk yok');
+      endPlain(i);
       top.hasKey = true;
       phase = "node";
       needValue = true;
@@ -507,7 +595,8 @@ function checkFlow(raw, ln) {
       fail(`akış koleksiyonunda desteklenmeyen gösterge "${ch}"`);
     }
   }
-  if (stack.length !== 0) fail("kapanmayan akış koleksiyonu");
+  if (stack.length !== 0 || root === undefined) fail("kapanmayan akış koleksiyonu");
+  return root;
 }
 
 /**
@@ -523,7 +612,7 @@ function parseScalar(raw, ln) {
     return q.value;
   }
   if (raw[0] === "{" || raw[0] === "[") {
-    checkFlow(raw, ln);
+    parseFlow(raw, ln);
     return raw;
   }
   if (PLAIN_FORBIDDEN_START.test(raw)) throw new LockfileError(`satır ${ln}: desteklenmeyen değer biçimi "${raw}"`);
@@ -703,7 +792,69 @@ function depKey(name, value) {
 
 const SNAPSHOT_DEP_SECTIONS = ["dependencies", "optionalDependencies"];
 const IMPORTER_DEP_SECTIONS = new Set(["dependencies", "devDependencies", "optionalDependencies"]);
-const NON_INTEGRITY_RE = /\b(?:tarball|commit|repo|directory|path|type)\s*:/;
+
+/**
+ * `packages:` girdisinin `resolution` alanını ayrıştırılmış anahtar–değer çiftleriyle değerlendirir
+ * (T-016). Tek kabul edilen biçim yalnızca `integrity` anahtarlı ve skaler değerli eşlemedir (blok
+ * veya akış; anahtar tırnaklı/tırnaksız fark etmez). Başka her biçim — `tarball`, `directory`,
+ * `repo`, `commit`, `type`, `path`, bilinmeyen anahtar, eşleme olmayan değer, boş eşleme — için
+ * normalize edilmiş kararlı metin döner (parmak izine girer, fail-closed); integrity-yalnız ise `null`.
+ * @param {LockNode} res
+ * @param {string} where hata iletisi için
+ * @returns {string | null}
+ */
+function nonIntegrityResolution(res, where) {
+  /** @type {FlowValue} */
+  let v;
+  if (res.kind === "map") {
+    v = new FlowMap([...res.entries].map(([k, n]) => [k, lockNodeFlow(n, where)]));
+  } else if (res.kind === "scalar") {
+    v = lockScalarFlow(res.value, where);
+  } else {
+    v = flowSeq(res.items.map((x) => lockScalarFlow(x, where)));
+  }
+  if (v instanceof FlowMap && v.size === 1 && typeof v.get("integrity") === "string") return null;
+  return JSON.stringify(flowPlain(v));
+}
+
+/**
+ * Blok düğümünü akış değerine çevirir (skalerdeki akış metni ayrıştırılır).
+ * @param {LockNode} n
+ * @param {string} where
+ * @returns {FlowValue}
+ */
+function lockNodeFlow(n, where) {
+  if (n.kind === "scalar") return lockScalarFlow(n.value, where);
+  if (n.kind === "seq") return flowSeq(n.items.map((x) => lockScalarFlow(x, where)));
+  return new FlowMap([...n.entries].map(([k, c]) => [k, lockNodeFlow(c, where)]));
+}
+
+/**
+ * `parseScalar` çıktısı: `{`/`[` ile başlıyorsa akış koleksiyonudur (ham metin) → ayrıştırılır.
+ * @param {string} value
+ * @param {string} where
+ * @returns {FlowValue}
+ */
+function lockScalarFlow(value, where) {
+  if (value[0] !== "{" && value[0] !== "[") return value;
+  try {
+    return parseFlow(value, 0);
+  } catch (e) {
+    if (e instanceof LockfileError) throw new LockfileError(`${where}: ${e.message}`);
+    throw e;
+  }
+}
+
+/**
+ * Akış değerinin JSON'a uygun biçimi (eşlemeler nesne dizisi olarak, anahtar sırası korunur).
+ * @param {FlowValue} v
+ * @returns {unknown}
+ */
+function flowPlain(v) {
+  if (v instanceof FlowMap) return { map: [...v].map(([k, x]) => [k, flowPlain(x)]) };
+  if (v instanceof FlowSeq) return [...v].map(flowPlain);
+  return v;
+}
 
 /**
  * `pnpm-lock.yaml`'ın korunan parmak izi (T-008h M6, T-008i M6). Sıralı satırlar:
@@ -715,7 +866,8 @@ const NON_INTEGRITY_RE = /\b(?:tarball|commit|repo|directory|path|type)\s*:/;
  *     `optionalDependencies` üzerinden geçişli her düğümün snapshot ve `packages:` girdisi tamamen
  *     (sürüm, peer çözümü, `resolution`/integrity, engines …). Eksik düğüm `<yok>` olarak yazılır;
  *   - herhangi bir yerdeki takma ad değeri (`x: other@ver`, `npm:` önekli specifier/sürüm);
- *   - herhangi bir paketin integrity dışı çözümlemesi (`tarball`, `commit`/`repo`, `directory`, `path`).
+ *   - herhangi bir paketin integrity dışı çözümlemesi: `resolution` ayrıştırılmış anahtarlarıyla
+ *     yalnızca `{integrity: <skaler>}` değilse (tırnaklı `"tarball"` dahil; T-016, `nonIntegrityResolution`).
  * Desteklenmeyen biçim `LockfileError` fırlatır (çağıran korunan sayar).
  * @param {string | null} text
  * @returns {string}
@@ -780,15 +932,8 @@ export function lockfileGuarded(text) {
     lockMap(node, `packages.${key}`);
     if (isGuardedPackage(lockKeyName(key))) out.push(`package ${key} ${canon(node)}`);
     const res = node.kind === "map" ? node.entries.get("resolution") : undefined;
-    const resText =
-      res === undefined
-        ? ""
-        : res.kind === "scalar"
-          ? res.value
-          : res.kind === "map"
-            ? `{${[...res.entries].map(([k, v]) => `${k}: ${canon(v)}`).join(", ")}}`
-            : canon(res);
-    if (NON_INTEGRITY_RE.test(resText)) out.push(`resolution ${key} ${resText}`);
+    const nonIntegrity = res === undefined ? null : nonIntegrityResolution(res, `packages.${key}.resolution`);
+    if (nonIntegrity !== null) out.push(`resolution ${key} ${nonIntegrity}`);
   }
 
   // Bağımlılık kapanışı (geçişli).

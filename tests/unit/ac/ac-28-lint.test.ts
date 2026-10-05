@@ -315,3 +315,159 @@ describe("AC-28 lint (T-015): yanlış pozitif ve bekçi yükleyicisi muafiyeti"
     60_000,
   );
 });
+
+// T-016 eklemeleri (yalnızca ekleme; yukarıdaki vakalar değişmedi): security-reviewer (int/faz0-pooler
+// @ 1e92a8a) lint MINOR'ları — createRequire takma adı, göreli ön ekli dinamik şablon / eval, büyük/küçük
+// harf duyarsız SET/RESET ve parçalanmış tenant ayarı dizesi. Her madde: saldırı → tek error; yanlış
+// pozitif kontrolü → hata yok.
+const LOADER_RULE_ID = "wms/no-aliased-module-loader";
+const RAW_RULES = new Set([RULE_ID, SYNTAX_RULE_ID, LOADER_RULE_ID]);
+
+/** Madde 2: `createRequire` takma adları ve dönüş değerinin atandığı adlar → `wms/no-aliased-module-loader`. */
+const ALIASED_LOADER_SOURCES: Record<string, string> = {
+  'const load = createRequire(u); load("postgres")':
+    'import { createRequire } from "node:module";\n\nconst load = createRequire(import.meta.url);\nexport const pg = load("postgres");\n',
+  'import { createRequire as cr } + cr(u)("pg")':
+    'import { createRequire as cr } from "node:module";\n\nexport const pg = cr(import.meta.url)("pg");\n',
+  'module (önek yok) + takma ad: mk(u) → l("pg-native")':
+    'import { createRequire as mk } from "module";\n\nconst l = mk(import.meta.url);\nexport const pg = l("pg-native");\n',
+  'ad alanı: nm.createRequire(u) → l("pg")':
+    'import * as nm from "node:module";\n\nconst l = nm.createRequire(import.meta.url);\nexport const pg = l("pg");\n',
+  'yapı bozumu: { createRequire: mk } = await import("node:module")':
+    'const { createRequire: mk } = await import("node:module");\nconst l = mk(import.meta.url);\nexport const pg = l("pg");\n',
+  'zincir: a = createRequire(u); b = a; b("pg")':
+    'import { createRequire } from "node:module";\n\nconst a = createRequire(import.meta.url);\nconst b = a;\nexport const pg = b("pg");\n',
+  'atama + bind: let l; l = cr.bind(null)(u); l("postgres")':
+    'import { createRequire as cr } from "node:module";\n\nlet l: (id: string) => unknown;\nl = cr.bind(null)(import.meta.url);\nexport const pg = l("postgres");\n',
+  "yükleyiciye değişken: load(n)":
+    'import { createRequire } from "node:module";\n\nconst load = createRequire(import.meta.url);\nexport const f = (n: string) => load(n);\n',
+  "yükleyiciye göreli dinamik şablon: load(`../${n}`)":
+    'import { createRequire } from "node:module";\n\nconst load = createRequire(import.meta.url);\nexport const f = (n: string) => load(`../${n}`);\n',
+};
+
+/** Madde 2 yanlış pozitif: izlenmeyen adlar ve serbest belirteçler → hata yok. */
+const ALIASED_LOADER_ALLOWED: Record<string, string> = {
+  'createRequire yükleyicisiyle serbest paket ("zod") ve göreli statik yol':
+    'import { createRequire } from "node:module";\n\nconst load = createRequire(import.meta.url);\nexport const z = load("zod");\nexport const c = load("./local.cjs");\n',
+  'yükleyici olmayan "load" adlı fonksiyon: load("postgres") (compose servis adı)':
+    'declare function load(service: string): unknown;\n\nexport const svc = load("postgres");\n',
+  "aynı ad başka kapsamda yükleyici değil":
+    'import { createRequire } from "node:module";\n\nexport const outer = () => {\n  const load = createRequire(import.meta.url);\n  return load("zod");\n};\nexport const inner = (load: (s: string) => unknown) => load("pg");\n',
+};
+
+/** Madde 3: göreli ön ekli dinamik şablon ve dinamik kod yürütme → `no-restricted-syntax`. */
+const CODE_EXEC_SOURCES: Record<string, string> = {
+  "import(`../${x}`)": "export const f = (x: string): Promise<unknown> => import(`../${x}`);\n",
+  "import(`./drivers/${x}.js`)": "export const f = (x: string): Promise<unknown> => import(`./drivers/${x}.js`);\n",
+  "require(`../${x}`)": "declare const require: (id: string) => unknown;\n\nexport const f = (x: string) => require(`../${x}`);\n",
+  'eval("…")': 'export const v = eval("1 + 1");\n',
+  "(0, eval)(…)": 'export const v = (0, eval)("1 + 1");\n',
+  "globalThis.eval(…)": 'export const v = globalThis.eval("1 + 1");\n',
+  'new Function("…")': 'export const fn = new Function("return 1");\n',
+  'Function("…")': 'export const fn = Function("return 1");\n',
+  'module._load("pg")': 'declare const module: { _load(id: string): unknown };\n\nexport const pg = module._load("pg");\n',
+  'Module["_load"]("pg")': 'declare const Module: { _load(id: string): unknown };\n\nexport const pg = Module["_load"]("pg");\n',
+};
+
+/** Madde 3 yanlış pozitif → hata yok. */
+const CODE_EXEC_ALLOWED: Record<string, string> = {
+  "statik göreli şablon import(`./x.js`)": "export const f = (): Promise<unknown> => import(`./x.js`);\n",
+  'alan adlı yöntem: redis.eval("lua")': 'declare const redis: { eval(s: string): unknown };\n\nexport const v = redis.eval("return 1");\n',
+  "eval/Function adlı özellik okuması": 'declare const o: { eval: number; Function: string };\n\nexport const a = [o.eval, o.Function];\n',
+};
+
+/** Madde 4: büyük/küçük harf duyarsız SET/RESET ve parçalanmış tenant ayarı → `no-restricted-syntax`. */
+const SET_RESET_SOURCES: Record<string, string> = {
+  "SQL: set role": 'export const q = "set role app_admin";\n',
+  "SQL: reset all": 'export const q = "reset all";\n',
+  "SQL: set search_path": 'export const q = "set search_path to evil, public";\n',
+  "SQL: Set Local (karışık harf)": 'export const q = "Set Local statement_timeout = 0";\n',
+  "şablon: reset role": "export const q = `reset role`;\n",
+  '"SELECT set_" + "config(…)"': "export const q = \"SELECT set_\" + \"config('x', $1, false)\";\n",
+  '"app." + "current_tenant" + "_id"': 'export const k = "app." + "current_tenant" + "_id";\n',
+  "ifadeli şablonda _config": "export const q = (s: string) => `SELECT ${s}_config('x', $1, false)`;\n",
+  '"set_".concat(…)': 'export const q = "set_".concat("config");\n',
+  "+= ile current_tenant": 'let k = "app.";\nk += "current_tenant_id";\nexport const key = k;\n',
+};
+
+/** Madde 4 yanlış pozitif → hata yok. */
+const SET_RESET_ALLOWED: Record<string, string> = {
+  'sözcük içi: "reset_" / "offset_" / "asset_" birleştirmesi':
+    'export const f = (n: string) => ["reset_" + n, "offset_" + n, "asset_" + n];\n',
+  'SET/RESET ile başlamayan: "Settings", "setup ", "reset-password"':
+    'export const a = ["Settings", "setup step", "reset-password"];\n',
+  "birleştirme dışında tek başına parça (ör. sözlük anahtarı)": 'export const keys = ["set_x", "app_config"];\n',
+};
+
+/** Ham istemci/tenant ayarı kurallarının (üçü) raporları. */
+function rawHits(result: ESLint.LintResult): ESLint.LintResult["messages"] {
+  return result.messages.filter((m) => m.ruleId !== null && RAW_RULES.has(m.ruleId));
+}
+
+describe("AC-28 lint (T-016): createRequire takma adı, dinamik şablon/eval, SET/RESET", () => {
+  it.each(Object.entries(ALIASED_LOADER_SOURCES))(
+    `@AC-28 createRequire takma adı (%s) → ${LOADER_RULE_ID} error (tek rapor)`,
+    async (_name, code) => {
+      const result = await lint(code, TENANT_MODULE_PATH);
+      const hits = rawHits(result);
+      expect(hits).toHaveLength(1);
+      expect(hits[0]?.ruleId).toBe(LOADER_RULE_ID);
+      expect(hits[0]?.severity).toBe(2);
+    },
+    60_000,
+  );
+
+  it.each(Object.entries(ALIASED_LOADER_ALLOWED))(
+    "@AC-28 createRequire yanlış pozitif yok (%s)",
+    async (_name, code) => {
+      const result = await lint(code, TENANT_MODULE_PATH);
+      expect(rawHits(result)).toHaveLength(0);
+      expect(result.errorCount).toBe(0);
+    },
+    60_000,
+  );
+
+  it.each([...Object.entries(CODE_EXEC_SOURCES), ...Object.entries(SET_RESET_SOURCES)])(
+    `@AC-28 packages/domain içinde (%s) → ${SYNTAX_RULE_ID} error (tek rapor)`,
+    async (_name, code) => {
+      const result = await lint(code, TENANT_MODULE_PATH);
+      const hits = rawHits(result);
+      expect(hits).toHaveLength(1);
+      expect(hits[0]?.ruleId).toBe(SYNTAX_RULE_ID);
+      expect(hits[0]?.severity).toBe(2);
+    },
+    60_000,
+  );
+
+  it.each([...Object.entries(CODE_EXEC_ALLOWED), ...Object.entries(SET_RESET_ALLOWED)])(
+    "@AC-28 yanlış pozitif yok (%s)",
+    async (_name, code) => {
+      const result = await lint(code, TENANT_MODULE_PATH);
+      expect(rawHits(result)).toHaveLength(0);
+      expect(result.errorCount).toBe(0);
+    },
+    60_000,
+  );
+
+  it(
+    "@AC-28 T-016 vakaları scripts/guards/cli.mjs muafiyetine girmez; packages/db/src altında serbest",
+    async () => {
+      const samples = [
+        ALIASED_LOADER_SOURCES['const load = createRequire(u); load("postgres")'],
+        CODE_EXEC_SOURCES["import(`../${x}`)"],
+        CODE_EXEC_SOURCES['eval("…")'],
+        SET_RESET_SOURCES["SQL: set role"],
+        SET_RESET_SOURCES['"SELECT set_" + "config(…)"'],
+      ];
+      for (const code of samples) {
+        expect(code).toBeDefined();
+        const inLoader = await lint(code as string, GUARD_LOADER_PATH);
+        expect(rawHits(inLoader), code).toHaveLength(1);
+        const inDb = await lint(code as string, DB_PACKAGE_PATH);
+        expect(rawHits(inDb), code).toHaveLength(0);
+        expect(inDb.errorCount, code).toBe(0);
+      }
+    },
+    60_000,
+  );
+});
