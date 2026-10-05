@@ -13,6 +13,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD .env içinde tanımlı olmalı}
       POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB .env içinde tanımlı olmalı}
       WMS_APP_PASSWORD: ${WMS_APP_PASSWORD:?WMS_APP_PASSWORD .env içinde tanımlı olmalı}
+      WMS_AUTH_PASSWORD: ${WMS_AUTH_PASSWORD:?WMS_AUTH_PASSWORD .env içinde tanımlı olmalı}
     ports:
       - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
@@ -35,6 +36,7 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB .env içinde tanımlı olmalı}
       WMS_APP_PASSWORD: ${WMS_APP_PASSWORD:?WMS_APP_PASSWORD .env içinde tanımlı olmalı}
+      WMS_AUTH_PASSWORD: ${WMS_AUTH_PASSWORD:?WMS_AUTH_PASSWORD .env içinde tanımlı olmalı}
       PGBOUNCER_ADMIN_PASSWORD: ${PGBOUNCER_ADMIN_PASSWORD:?PGBOUNCER_ADMIN_PASSWORD .env içinde tanımlı olmalı}
       PGBOUNCER_DEFAULT_POOL_SIZE: ${PGBOUNCER_DEFAULT_POOL_SIZE:-20}
       PGBOUNCER_MAX_PREPARED_STATEMENTS: ${PGBOUNCER_MAX_PREPARED_STATEMENTS:-1000}
@@ -47,7 +49,7 @@ services:
         case "$$PGBOUNCER_DEFAULT_POOL_SIZE" in ''|*[!0-9]*) echo "PGBOUNCER_DEFAULT_POOL_SIZE sayı olmalı" >&2; exit 1;; esac
         case "$$PGBOUNCER_MAX_PREPARED_STATEMENTS" in ''|*[!0-9]*) echo "PGBOUNCER_MAX_PREPARED_STATEMENTS sayı olmalı" >&2; exit 1;; esac
         case "$$POSTGRES_DB" in ''|*[!A-Za-z0-9_]*) echo "POSTGRES_DB yalnızca harf/rakam/_ içerebilir" >&2; exit 1;; esac
-        case "$$WMS_APP_PASSWORD$$PGBOUNCER_ADMIN_PASSWORD" in *'"'*) echo "parolalar çift tırnak içeremez" >&2; exit 1;; esac
+        case "$$WMS_APP_PASSWORD$$WMS_AUTH_PASSWORD$$PGBOUNCER_ADMIN_PASSWORD" in *'"'*) echo "parolalar çift tırnak içeremez" >&2; exit 1;; esac
         umask 077
         mkdir -p /tmp/pgbouncer
         sed -e "s/__POSTGRES_DB__/$$POSTGRES_DB/g" \
@@ -56,6 +58,7 @@ services:
             /etc/pgbouncer-template/pgbouncer.ini > /tmp/pgbouncer/pgbouncer.ini
         printf '"%s" "%s"\n' \
           wms_app "$$WMS_APP_PASSWORD" \
+          wms_auth "$$WMS_AUTH_PASSWORD" \
           pgbouncer_admin "$$PGBOUNCER_ADMIN_PASSWORD" > /tmp/pgbouncer/userlist.txt
         exec /usr/bin/pgbouncer /tmp/pgbouncer/pgbouncer.ini
     ports:

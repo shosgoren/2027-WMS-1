@@ -6,9 +6,10 @@
 // bu dosyada kullanılmaz (T-002d güvenlik notu).
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { APP_ROLE, PGBOUNCER_ADMIN_URL_VAR, parsePoolSize, readIntEnv, redactUrl } from "./env.ts";
+import { APP_ROLE, AUTH_ROLE, PGBOUNCER_ADMIN_URL_VAR, PROBE_ROLE, parsePoolSize, readAuthDatabaseUrl, readIntEnv, redactUrl } from "./env.ts";
 
 const env = readIntEnv(process.env);
+const authUrl = readAuthDatabaseUrl(process.env);
 
 /** Bağlanır; sürücü hatasındaki URL/parola/host maskelenir (G-09). */
 async function connect(url: string): Promise<pg.Client> {
@@ -68,6 +69,80 @@ describe(`harness (target=${env.target}) — app role via pooler`, () => {
   });
 });
 
+describe(`harness (target=${env.target}) — auth role via pooler`, () => {
+  let auth: pg.Client;
+
+  beforeAll(async () => {
+    auth = await connect(authUrl);
+  });
+
+  afterAll(async () => {
+    await auth?.end();
+  });
+
+  it(`connects as the identity role ${AUTH_ROLE}`, async () => {
+    const r = await auth.query<{ current_user: string }>("SELECT current_user");
+    expect(r.rows).toEqual([{ current_user: AUTH_ROLE }]);
+  });
+
+  it("identity role has the same restricted attributes as the application role", async () => {
+    const r = await auth.query(
+      `SELECT rolcanlogin, rolsuper, rolbypassrls, rolcreatedb, rolcreaterole, rolreplication
+         FROM pg_catalog.pg_roles WHERE rolname = current_user`,
+    );
+    expect(r.rows).toEqual([
+      { rolcanlogin: true, rolsuper: false, rolbypassrls: false, rolcreatedb: false, rolcreaterole: false, rolreplication: false },
+    ]);
+  });
+
+  it("identity role is a member of no role", async () => {
+    const r = await auth.query<{ granted: string }>(
+      `SELECT g.rolname AS granted
+         FROM pg_catalog.pg_auth_members m
+         JOIN pg_catalog.pg_roles mem ON mem.oid = m.member
+         JOIN pg_catalog.pg_roles g ON g.oid = m.roleid
+        WHERE mem.rolname = current_user
+        ORDER BY 1`,
+    );
+    expect(r.rows).toEqual([]);
+  });
+
+  it(`${PROBE_ROLE} is NOLOGIN with no privileged attributes`, async () => {
+    const r = await auth.query(
+      `SELECT rolcanlogin, rolsuper, rolbypassrls, rolcreatedb, rolcreaterole
+         FROM pg_catalog.pg_roles WHERE rolname = $1`,
+      [PROBE_ROLE],
+    );
+    expect(r.rows).toEqual([
+      { rolcanlogin: false, rolsuper: false, rolbypassrls: false, rolcreatedb: false, rolcreaterole: false },
+    ]);
+  });
+
+  // ADR-015 5. tur eki MINOR-6 kural 1: migration rolü (DATABASE_URL_DIRECT kullanıcısı; yalnızca
+  // ad okunur, o rolle bağlanılmaz) için admin/inherit yok, en az bir satırda set; başka üyede set/inherit yok.
+  it(`${PROBE_ROLE} membership: migration role has SET only (no ADMIN, no INHERIT); no other member has SET/INHERIT`, async () => {
+    const migrator = decodeURIComponent(new URL(env.databaseUrlDirect).username);
+    const r = await auth.query<{ member: string; admin_option: boolean; inherit_option: boolean; set_option: boolean }>(
+      `SELECT mem.rolname AS member, m.admin_option, m.inherit_option, m.set_option
+         FROM pg_catalog.pg_auth_members m
+         JOIN pg_catalog.pg_roles mem ON mem.oid = m.member
+         JOIN pg_catalog.pg_roles g ON g.oid = m.roleid
+        WHERE g.rolname = $1
+        ORDER BY 1`,
+      [PROBE_ROLE],
+    );
+    const own = r.rows.filter((row) => row.member === migrator);
+    const others = r.rows.filter((row) => row.member !== migrator);
+    expect(own.length).toBeGreaterThanOrEqual(1);
+    expect(own.every((row) => row.admin_option === false)).toBe(true);
+    expect(own.every((row) => row.inherit_option === false)).toBe(true);
+    expect(own.some((row) => row.set_option === true)).toBe(true);
+    expect(others.filter((row) => row.set_option || row.inherit_option)).toEqual([]);
+    expect(others.map((row) => row.member)).not.toContain(APP_ROLE);
+    expect(others.map((row) => row.member)).not.toContain(AUTH_ROLE);
+  });
+});
+
 // PgBouncer yönetim konsolu yalnızca compose hedefinde vardır (Neon pooler'ı sağlayıcı yönetir,
 // Q-02 / T-005d). Bu blok neon hedefinde KAYDEDİLMEZ (atlanmış test olarak da görünmez); compose
 // hedefinde yönetim URL'si yoksa test atlanmaz, düşer.
@@ -103,6 +178,11 @@ if (env.target === "compose") {
     it(`DATABASE_URL goes through PgBouncer (pool for ${APP_ROLE} exists)`, async () => {
       const r = await admin.query<{ database: string; user: string }>("SHOW POOLS");
       expect(r.rows.map((row) => row.user)).toContain(APP_ROLE);
+    });
+
+    it(`AUTH_DATABASE_URL goes through PgBouncer (pool for ${AUTH_ROLE} exists)`, async () => {
+      const r = await admin.query<{ database: string; user: string }>("SHOW POOLS");
+      expect(r.rows.map((row) => row.user)).toContain(AUTH_ROLE);
     });
   });
 }
