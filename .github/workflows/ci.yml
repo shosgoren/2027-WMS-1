@@ -137,12 +137,19 @@ jobs:
         with:
           node-version-file: package.json
           cache: pnpm
-      # Audit muafiyetleri YALNIZCA bu dosyada (A-36) yaşar. pnpm/npm audit yapılandırması
-      # (pnpm-workspace.yaml `auditConfig`/`audit*`, herhangi bir package.json `pnpm.auditConfig`/
-      # `pnpm.audit*`, .npmrc `audit*`) advisory'yi JSON'dan önce düşürüp filtreyi atlatabilir
-      # (security-reviewer bulgusu) → repoda (git'te izlenen tüm dosyalar) bulunursa kırmızı.
-      # install'dan önce koşar.
-      - name: Audit config guard
+      # Audit muafiyetleri YALNIZCA bu dosyada (A-36) yaşar. Repodaki pnpm/npm audit yapılandırması
+      # advisory'yi JSON'dan önce düşürüp filtreyi atlatabilir (security-reviewer bulguları).
+      # Savunma katmanları:
+      #   1) "Audit config guard (manifests)" — install'dan ÖNCE: package.json'lar JSON olarak
+      #      ayrıştırılır, `pnpm.audit*` → kırmızı (pnpm `config get` kök package.json'daki
+      #      pnpm.auditConfig'i göstermez ama audit onu uygular — yerelde doğrulandı); package.yaml /
+      #      package.json5 manifestleri → kırmızı; .npmrc / pnpm-workspace.yaml'da `audit*` anahtarı
+      #      → kırmızı (yalnızca ek savunma: düz metin eşleşmesi, YAML akış/merge/kaçış/? biçimlerini
+      #      kaçırabilir — asıl kontrol 3. katman).
+      #   2) install `--ignore-scripts`: yaşam döngüsü betikleri (postinstall vb.) çalışmaz.
+      #   3) "Audit integrity" — audit'ten HEMEN ÖNCE: çalışma ağacı temiz (`git status --porcelain`
+      #      boş); pnpm'in kendi çözümlediği `auditConfig` boş; registry = https://registry.npmjs.org/.
+      - name: Audit config guard (manifests)
         run: |
           node --input-type=module - <<'EOF'
           import { execFileSync } from "node:child_process";
@@ -156,6 +163,8 @@ jobs:
             if (name === "pnpm-workspace.yaml" || name === "pnpm-workspace.yml" || name === ".npmrc") {
               const m = readFileSync(f, "utf8").match(auditKey);
               if (m) hits.push(`${f}: ${m[0].trim()}`);
+            } else if (name === "package.yaml" || name === "package.json5") {
+              hits.push(`${f}: package.yaml/package.json5 manifesti kabul edilmez (yalnızca package.json)`);
             } else if (name === "package.json") {
               let pkg;
               try {
@@ -177,7 +186,7 @@ jobs:
           }
           console.log(`audit config guard: OK (${files.length} izlenen dosya tarandı)`);
           EOF
-      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --frozen-lockfile --ignore-scripts
       # Eşik (A-öneri, T-003): high ve critical → kırmızı. Tüm çalışma alanı, prod + dev bağımlılıkları.
       # `pnpm audit --ignore` KULLANILMAZ: pnpm 10.28'de bu bayrak denetim yapmadan 0 döner
       # (security-reviewer bulgusu). Bunun yerine tek `pnpm audit --json` koşusu aşağıdaki
@@ -201,6 +210,27 @@ jobs:
             exit 1
           fi
           echo "audit exception A-36 geçerli (bitiş $expires, bugün $today)"
+      - name: Audit integrity
+        run: |
+          fail=0
+          dirty=$(git status --porcelain --untracked-files=all)
+          if [ -n "$dirty" ]; then
+            echo "::error::çalışma ağacı temiz değil (install sonrası değişen/eklenen dosya):"
+            printf '%s\n' "$dirty"
+            fail=1
+          fi
+          audit_cfg=$(pnpm config get auditConfig --json)
+          if [ -n "$audit_cfg" ] && [ "$audit_cfg" != "undefined" ]; then
+            echo "::error::audit config not allowed; exceptions live only in ci.yml A-36 (pnpm config auditConfig = $audit_cfg)"
+            fail=1
+          fi
+          registry=$(pnpm config get registry)
+          if [ "$registry" != "https://registry.npmjs.org/" ]; then
+            echo "::error::registry beklenen https://registry.npmjs.org/, gelen $registry"
+            fail=1
+          fi
+          if [ "$fail" -ne 0 ]; then exit 1; fi
+          echo "audit integrity: OK (ağaç temiz · auditConfig yok · registry npmjs)"
       - name: pnpm audit (high, critical)
         run: |
           set +e
