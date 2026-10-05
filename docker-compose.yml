@@ -6,8 +6,8 @@ name: ${COMPOSE_PROJECT_NAME:-etkin-wms}
 
 services:
   postgres:
-    # Ana sürüm Q-05'e bağlı: Neon'da desteklenen en yeni ana sürüm (18). T-005d doğrular.
-    image: postgres:18.6-trixie
+    # Ana sürüm = Neon projesinin sürümü (PG 17, Q-05 supervisor kararı 2026-10-05). T-005d doğrular.
+    image: postgres:17.11-trixie
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER .env içinde tanımlı olmalı}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD .env içinde tanımlı olmalı}
@@ -16,8 +16,8 @@ services:
     ports:
       - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
-      # PostgreSQL 18+ imajında veri dizini /var/lib/postgresql/<ana sürüm>/docker altındadır.
-      - postgres-data:/var/lib/postgresql
+      # PostgreSQL 17 imajında PGDATA ve VOLUME = /var/lib/postgresql/data (18+ imajında farklıdır).
+      - postgres-data:/var/lib/postgresql/data
       - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       # TCP üzerinden: init sırasındaki geçici sunucu yalnızca unix soketini dinler.
