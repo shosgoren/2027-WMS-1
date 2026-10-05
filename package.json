@@ -15,7 +15,9 @@
     "check:ac-ratchet": "node scripts/guards/cli.mjs ac-ratchet",
     "check:protected": "node scripts/guards/cli.mjs protected",
     "check:assertions": "node scripts/guards/cli.mjs assertions",
-    "check:pilot": "node scripts/guards/cli.mjs pilot"
+    "check:pilot": "node scripts/guards/cli.mjs pilot",
+    "check:all": "node scripts/guards/cli.mjs all",
+    "prepare": "git config core.hooksPath .githooks"
   },
   "devDependencies": {
     "@types/node": "24.19.1",
