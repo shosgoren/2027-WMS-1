@@ -7,6 +7,9 @@ import {
   branchNameFor,
   buildSummary,
   cell,
+  computeTestTimeoutMs,
+  measureLatency,
+  LATENCY_PROBE,
   createAppRole,
   createAppRoleSql,
   createLineFilter,
@@ -20,7 +23,10 @@ import {
   parseAppRoleCheck,
   parseOwnerCheck,
   parsePsqlSqlstate,
+  parsePsqlTimings,
   parseVitestReport,
+  percentile,
+  pickAc05Durations,
   pgUrl,
   pickAc05,
   readSpikeEnv,
@@ -601,5 +607,75 @@ describe("buildSummary / renderSummaryMd", () => {
     expectClean(md);
     expectClean(json);
     expect(r.leaks(md)).toEqual([]);
+  });
+});
+
+describe("gecikme ölçümü yardımcıları (T-005d zaman aşımı tanısı)", () => {
+  it("percentile: en yakın sıra; boş → null", () => {
+    expect(percentile([], 50)).toBeNull();
+    expect(percentile([5, 1, 3, 2, 4], 50)).toBe(3);
+    expect(percentile([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 95)).toBe(10);
+    expect(percentile([7], 95)).toBe(7);
+  });
+
+  it("parsePsqlTimings: yalnızca 'Time: x ms' satırları", () => {
+    expect(parsePsqlTimings("Time: 0.352 ms\n1\nTime: 12 ms\nnoise Time: 9 ms\nTime: 1.5 ms (00:00.002)\n")).toEqual([0.352, 12, 1.5]);
+    expect(parsePsqlTimings("")).toEqual([]);
+  });
+
+  it("pickAc05Durations: başarısız/zaman aşımı dahil süre; hata metni ve başka testler yok", () => {
+    const out = pickAc05Durations({
+      testResults: [
+        {
+          assertionResults: [
+            { fullName: "AC-05 pool=1 @AC-05 pool=1: 2 tenant × 50 eşzamanlı withTenant — x", status: "failed", duration: 30001.2, failureMessages: ["secret-host"] },
+            { fullName: "AC-28 something", status: "passed", duration: 5 },
+          ],
+        },
+      ],
+    });
+    expect(out).toEqual([{ test: "pool=1 2 tenant × 50 eşzamanlı withTenant — x", status: "failed", durationMs: 30001 }]);
+    expect(JSON.stringify(out)).not.toContain("secret-host");
+  });
+});
+
+describe("computeTestTimeoutMs (ölçülen RTT ile orantılı bütçe)", () => {
+  it("ölçüm yok/hatalı → 30000 (fail-closed), ölçülemedi yazılır", () => {
+    for (const l of [undefined, null, { error: "x" }, { roundTripMs: { p95: null } }, { roundTripMs: { p95: 0 } }]) {
+      const r = computeTestTimeoutMs(l);
+      expect(r.ms).toBe(30000);
+      expect(r.measured).toBe(false);
+      expect(r.formula).toContain("ölçülemedi");
+    }
+  });
+  it("RTT 100 ms → 180000; RTT 1000 ms → 600000 üst sınır; düşük RTT → 30000 taban", () => {
+    expect(computeTestTimeoutMs({ roundTripMs: { p95: 100 } }).ms).toBe(180000);
+    expect(computeTestTimeoutMs({ roundTripMs: { p95: 1000 } }).ms).toBe(600000);
+    expect(computeTestTimeoutMs({ roundTripMs: { p95: 1 } }).ms).toBe(30000);
+    expect(computeTestTimeoutMs({ roundTripMs: { p95: 100 } }).formula).toContain("3 × 600 × RTT_p95_ms");
+  });
+});
+
+describe("computeTestTimeoutMs hookMs ve measureLatency sınırları", () => {
+  it("hookMs: ölçüm yok → 60000; RTT 100 → 180000; RTT 1000 → 600000", () => {
+    expect(computeTestTimeoutMs(null).hookMs).toBe(60000);
+    expect(computeTestTimeoutMs({ roundTripMs: { p95: 1 } }).hookMs).toBe(60000);
+    expect(computeTestTimeoutMs({ roundTripMs: { p95: 100 } }).hookMs).toBe(180000);
+    expect(computeTestTimeoutMs({ roundTripMs: { p95: 1000 } }).hookMs).toBe(600000);
+  });
+
+  it("süre sınırı aşılmışsa psql çalıştırılmadan 'süre sınırı aşıldı' (→ ölçülemedi)", () => {
+    let t = 0;
+    const now = () => (t++ === 0 ? 0 : LATENCY_PROBE.budgetMs + 1);
+    const r = measureLatency({ host: "h", user: "u", password: "p", database: "d" }, createRedactor(), now);
+    expect(r.error).toBe("ölçüm süre sınırı aşıldı");
+    expect(computeTestTimeoutMs(r).ms).toBe(30000);
+    expect(computeTestTimeoutMs(r).measured).toBe(false);
+  });
+
+  it("Time satırı sayısı beklenenle eşleşmiyorsa ölçüm geçersiz sayılır (sabitler 30 ve 120)", () => {
+    expect(LATENCY_PROBE.roundTrips).toBe(30);
+    expect(LATENCY_PROBE.transactions * LATENCY_PROBE.stmtsPerTx).toBe(120);
+    expect(computeTestTimeoutMs({ error: "ölçüm geçersiz: 29 Time satırı, beklenen 30" }).measured).toBe(false);
   });
 });
