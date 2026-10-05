@@ -3,7 +3,7 @@
 **Faz:** 0 — Kararlar & iskelet
 **Aktif görev:** — (kod kartları ortam engeli yüzünden bekliyor, bkz. Engeller)
 **Son tamamlanan:** T-006 PILOT.md (varsayımsal ambalaj profili, A-11…A-35); ürün adı "Etkin WMS" (Q-08); T-009a K2 = ayrı kimlik yok (ADR-012)
-**Sonraki adım:** (Default ortamındaki yeni oturum) `int/faz0-plan` dalını çek, npm erişimini doğrula, T-002a (devops) ile başla; `int/faz0-iskelet` dalını `int/faz0-plan` üzerine aç. Kullanıcı bulut ortamının ağ erişimini Trusted yapacak (E-01; ortam seçici → ayar simgesi → Network access; mevcut oturuma ~1 dk'da yansır). Açılınca T-002a başlar. **Çalışma biçimi (2026-10-05, kullanıcı sürekli başında değil):** iş birleştirme beklemeden üst üste binen `int/*` dallarında ilerler; kullanıcı PR'ları faz kapısında toplu inceler/birleştirir; sorular tek mesajda toplanır.
+**Sonraki adım:** (Default ortamındaki yeni oturum) `int/faz0-plan` dalını çek, npm erişimini doğrula, T-002a (devops) ile başla; `int/faz0-iskelet` dalını `int/faz0-plan` üzerine aç. **Çalışma biçimi (2026-10-05, kullanıcı sürekli başında değil):** iş birleştirme beklemeden üst üste binen `int/*` dallarında ilerler; kullanıcı PR'ları faz kapısında toplu inceler/birleştirir; sorular tek mesajda toplanır.
 
 ## Kararlar (özet; detay DECISIONS.md)
 ADR-001 Next.js + ayrı worker · ADR-002 İngilizce kod/DB, Türkçe UI · ADR-003 Drizzle · ADR-004 Neon (teknik alanlar T-005) · ADR-005 Postgres kuyruğu · ADR-006 S3 uyumlu · ADR-007 AB bölgesi + hukukçu onayı · ADR-008 4S'e ertelendi · ADR-009 sert tahsis · ADR-010 keystroke · ADR-011 taşıma birimi modeli Faz 2 · ADR-012 ayrı GitHub kimliği (henüz yok)
