@@ -20,7 +20,10 @@ import {
   parseAppRoleCheck,
   parseOwnerCheck,
   parsePsqlSqlstate,
+  parsePsqlTimings,
   parseVitestReport,
+  percentile,
+  pickAc05Durations,
   pgUrl,
   pickAc05,
   readSpikeEnv,
@@ -601,5 +604,34 @@ describe("buildSummary / renderSummaryMd", () => {
     expectClean(md);
     expectClean(json);
     expect(r.leaks(md)).toEqual([]);
+  });
+});
+
+describe("gecikme ölçümü yardımcıları (T-005d zaman aşımı tanısı)", () => {
+  it("percentile: en yakın sıra; boş → null", () => {
+    expect(percentile([], 50)).toBeNull();
+    expect(percentile([5, 1, 3, 2, 4], 50)).toBe(3);
+    expect(percentile([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 95)).toBe(10);
+    expect(percentile([7], 95)).toBe(7);
+  });
+
+  it("parsePsqlTimings: yalnızca 'Time: x ms' satırları", () => {
+    expect(parsePsqlTimings("Time: 0.352 ms\n1\nTime: 12 ms\nnoise Time: 9 ms\nTime: 1.5 ms (00:00.002)\n")).toEqual([0.352, 12, 1.5]);
+    expect(parsePsqlTimings("")).toEqual([]);
+  });
+
+  it("pickAc05Durations: başarısız/zaman aşımı dahil süre; hata metni ve başka testler yok", () => {
+    const out = pickAc05Durations({
+      testResults: [
+        {
+          assertionResults: [
+            { fullName: "AC-05 pool=1 @AC-05 pool=1: 2 tenant × 50 eşzamanlı withTenant — x", status: "failed", duration: 30001.2, failureMessages: ["secret-host"] },
+            { fullName: "AC-28 something", status: "passed", duration: 5 },
+          ],
+        },
+      ],
+    });
+    expect(out).toEqual([{ test: "pool=1 2 tenant × 50 eşzamanlı withTenant — x", status: "failed", durationMs: 30001 }]);
+    expect(JSON.stringify(out)).not.toContain("secret-host");
   });
 });
