@@ -387,6 +387,71 @@ describe(`migrations (target=${env.target})`, () => {
     }
   });
 
+  it("a deviating session baseline at connect time (database-level search_path / read-only / replication role) is refused", async () => {
+    for (const [tag, setting] of [
+      ["search_path", "search_path = pg_catalog"],
+      ["read-only", "default_transaction_read_only = on"],
+      ["replication-role", "session_replication_role = replica"],
+    ] as const) {
+      const url = await freshDatabase();
+      const db = new URL(url).pathname.slice(1);
+      await withClient(env.databaseUrlDirect, (c) => c.query(`ALTER DATABASE ${db} SET ${setting}`));
+      await expect(migrateUp({ url, dir: baseDir() }), tag).rejects.toMatchObject({ code: "MIGRATION_SESSION_STATE" });
+      await expect(migrateUp({ url, dir: baseDir() }), tag).rejects.toThrow(/\[başlangıç\]/);
+    }
+  });
+
+  it("post-run audit: role-level settings, attribute changes and memberships of wms_app are rejected and rolled back", async () => {
+    // Veritabanına özgü rol ayarı: veritabanı silinince ayar da gider (kümeyi kirletmez).
+    const url = await freshDatabase();
+    const db = new URL(url).pathname.slice(1);
+    await withClient(env.databaseUrlDirect, (c) => c.query(`ALTER ROLE ${APP_ROLE} IN DATABASE ${db} SET work_mem = '8MB'`));
+    await expect(migrateUp({ url, dir: baseDir() })).rejects.toMatchObject({ code: "MIGRATION_APP_OWNERSHIP" });
+    expect(await withClient(url, (c) => c.query("SELECT to_regclass('wms_meta.schema_migrations') AS r"))).toMatchObject({ rows: [{ r: null }] });
+
+    // Rol DDL'i transactional: ihlal eden migration geri alınınca küme durumu değişmez.
+    for (const [tag, body] of [
+      ["createdb", `ALTER ROLE ${APP_ROLE} CREATEDB;`],
+      ["membership", `GRANT pg_monitor TO ${APP_ROLE};`],
+    ] as const) {
+      const fresh = await freshDatabase();
+      const dir = copyMigrations();
+      writeFileSync(path.join(dir, "0002_role.up.sql"), `${body}\n`);
+      writeFileSync(path.join(dir, "0002_role.down.sql"), "SELECT 1;\n");
+      await expect(migrateUp({ url: fresh, dir }), tag).rejects.toMatchObject({ code: "MIGRATION_APP_OWNERSHIP" });
+      expect(await ledger(fresh), tag).toEqual(["0001"]);
+    }
+    const attrs = await withClient(env.databaseUrlDirect, (c) =>
+      c.query<{ rolcreatedb: boolean; n: string }>(
+        `SELECT rolcreatedb, (SELECT count(*) FROM pg_auth_members m WHERE m.member = r.oid)::text AS n FROM pg_roles r WHERE rolname = $1`,
+        [APP_ROLE],
+      ),
+    );
+    expect(attrs.rows[0]).toEqual({ rolcreatedb: false, n: "0" });
+  });
+
+  it("the ownership audit also runs on the down path: a down that leaves wms_app owning an object is rejected", async () => {
+    const url = await freshDatabase();
+    const dir = copyMigrations();
+    writeFileSync(path.join(dir, "0002_own.up.sql"), "SELECT 1;\n");
+    writeFileSync(path.join(dir, "0002_own.down.sql"), `CREATE TABLE public.t_own (id integer);\nALTER TABLE public.t_own OWNER TO ${APP_ROLE};\n`);
+    expect((await migrateUp({ url, dir })).applied).toEqual(["0001", "0002"]);
+    await expect(migrateDown({ url, dir, to: "0001", wmsEnv: "ci" })).rejects.toMatchObject({ code: "MIGRATION_APP_OWNERSHIP" });
+    expect(await ledger(url)).toEqual(["0001", "0002"]);
+    expect((await catalogShape(url)).relations).toEqual([]);
+  });
+
+  it("refuses the parser-differential URLs from the CLI without connecting (no password in output)", async () => {
+    const lines: string[] = [];
+    const io = { log: (x: string) => lines.push(x), logError: (x: string) => lines.push(x) };
+    for (const url of ["postgres://u:pw-diff-secret@pooler-host:6432,a@direct:5432/db", "postgres://u:pw-diff-secret@direct:5432#,pooler:6432/db"]) {
+      expect(await main(["up"], { DATABASE_URL_DIRECT: url }, io)).toBe(1);
+    }
+    const text = lines.join("\n");
+    expect(text).toContain("MIGRATION_POOLER_URL");
+    expect(text).not.toContain("pw-diff-secret");
+  });
+
   it("a rollback whose down changes session state is rejected and rolled back", async () => {
     const url = await freshDatabase();
     const dir = copyMigrations();

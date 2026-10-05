@@ -164,54 +164,133 @@ describe("redact", () => {
   });
 });
 
-describe("parseTarget", () => {
-  it("parses a multi-host URL that new URL() rejects, and falls back to PGPORT / default 5432", () => {
-    const t = parseTarget("postgresql://u:p@h1:5433,h2/db", { PGPORT: "6543" });
-    expect(t?.hosts).toEqual([
-      { host: "h1", port: "5433" },
-      { host: "h2", port: "6543" },
-    ]);
-    expect(t?.user).toBe("u");
-    expect(t?.db).toBe("db");
-    expect(parseTarget("postgresql://u@h/db", {})?.hosts).toEqual([{ host: "h", port: "5432" }]);
-  });
-
-  it("is undefined for garbage, a bad scheme, a missing host or a non-numeric port", () => {
-    for (const bad of ["not a url", "mysql://u@h/db", "postgresql://u@/db", "postgresql://u@h:abc/db", "postgresql://u@[::bad/db"]) {
-      expect(parseTarget(bad, {}), bad).toBeUndefined();
+describe("parseTarget (driver-resolved, strict pre-checks)", () => {
+  it("parses a multi-host URL with the driver's values; PGPORT fills the missing port", () => {
+    vi.stubEnv("PGPORT", "6543");
+    try {
+      const t = parseTarget("postgresql://u:p@h1:5433,h2/db");
+      expect(t?.hosts).toEqual([
+        { host: "h1", port: "5433" },
+        { host: "h2", port: "5433" },
+      ]);
+      expect(t?.user).toBe("u");
+      expect(t?.db).toBe("db");
+      expect(parseTarget("postgresql://u@h/db")?.hosts).toEqual([{ host: "h", port: "6543" }]);
+    } finally {
+      vi.unstubAllEnvs();
     }
-    expect(parseTarget("postgresql://u@h/db", { PGPORT: "x" })).toBeUndefined();
+    vi.stubEnv("PGPORT", "");
+    try {
+      expect(parseTarget("postgresql://u@h/db")?.hosts).toEqual([{ host: "h", port: "5432" }]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
-  it("treats localhost, 127.0.0.1 and ::1 as the same host and flags host/port query overrides", () => {
-    const hosts = ["postgresql://u@localhost/d", "postgresql://u@127.0.0.1/d", "postgresql://u@[::1]/d"].map((u) => parseTarget(u, {})?.hosts);
+  it("follows the driver's env fallback order for user and database (PGUSERNAME || PGUSER)", () => {
+    vi.stubEnv("PGUSERNAME", "first_user");
+    vi.stubEnv("PGUSER", "second_user");
+    vi.stubEnv("PGDATABASE", "envdb");
+    try {
+      const t = parseTarget("postgresql://h/");
+      expect(t?.user).toBe("first_user");
+      expect(t?.db).toBe("envdb");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    vi.stubEnv("PGUSERNAME", "");
+    vi.stubEnv("PGUSER", "second_user");
+    try {
+      expect(parseTarget("postgresql://h/d")?.user).toBe("second_user");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("is undefined for garbage, a bad scheme, a missing host, a bad port, IPv6 (the driver mangles it) and encoded hosts", () => {
+    for (const bad of [
+      "not a url",
+      "mysql://u@h/db",
+      "postgresql://u@/db",
+      "postgresql://u@h:abc/db",
+      "postgresql://u@[::bad/db",
+      "postgresql://u@[::1]:5432/db",
+      "postgresql://u@[::1]/db",
+      "postgresql://u@h%2Ftmp/db",
+      "postgresql://u@h:0/db",
+      "postgresql://u@h:70000/db",
+    ]) {
+      expect(parseTarget(bad), bad).toBeUndefined();
+    }
+  });
+
+  it("rejects the two parser-differential URLs (driver reads from the FIRST @; # is part of the host list)", () => {
+    expect(parseTarget("postgres://u@pooler-host:6432,a@direct:5432/db")).toBeUndefined();
+    expect(parseTarget("postgres://u@direct:5432#,pooler:6432/db")).toBeUndefined();
+  });
+
+  it("rejects extra @ in the authority and any # anywhere, including variants", () => {
+    for (const bad of [
+      "postgres://u:p@w@direct:5432/db",
+      "postgres://u@a@b/db",
+      "postgres://u@direct:5432/db#frag",
+      "postgres://u@direct/db?sslmode=require#x",
+      "postgres://u@direct:5432#/db",
+      "postgres://u@direct:5432,pooler:6432#/db",
+      "postgres://u@direct:5432?x=1#,pooler:6432",
+    ]) {
+      expect(parseTarget(bad), bad).toBeUndefined();
+    }
+    // '@' sorgu/yol bölümünde (yetki bölümünde değil) serbest.
+    expect(parseTarget("postgres://u@direct:5432/db?application_name=a@b")?.hosts).toEqual([{ host: "direct", port: "5432" }]);
+  });
+
+  it("treats localhost and 127.0.0.1 as the same host and flags host/port query overrides", () => {
+    const hosts = ["postgresql://u@localhost/d", "postgresql://u@127.0.0.1/d"].map((u) => parseTarget(u)?.hosts);
     expect(new Set(hosts.map((h) => JSON.stringify(h))).size).toBe(1);
-    expect(parseTarget("postgresql://u@h/d?host=/tmp", {})?.hasHostOverride).toBe(true);
-    expect(parseTarget("postgresql://u@h/d?sslmode=require", {})?.hasHostOverride).toBe(false);
+    expect(parseTarget("postgresql://u@h/d?host=/tmp")?.hasHostOverride).toBe(true);
+    expect(parseTarget("postgresql://u@h/d?sslmode=require")?.hasHostOverride).toBe(false);
   });
 });
 
 describe("sameConnectionTarget", () => {
   it("compares host, port, user and database, not the raw string", () => {
-    const base = "postgresql://u:p@db.example:5432/w";
-    expect(sameConnectionTarget(base, "postgres://u:other@DB.example/w?sslmode=require", {})).toBe(true);
-    expect(sameConnectionTarget(base, "postgresql://u:p@db.example:5433/w", {})).toBe(false);
-    expect(sameConnectionTarget(base, "postgresql://v:p@db.example:5432/w", {})).toBe(false);
-    expect(sameConnectionTarget(base, "postgresql://u:p@db.example:5432/x", {})).toBe(false);
+    vi.stubEnv("PGPORT", "");
+    try {
+      const base = "postgresql://u:p@db.example:5432/w";
+      expect(sameConnectionTarget(base, "postgres://u:other@DB.example/w?sslmode=require")).toBe(true);
+      expect(sameConnectionTarget(base, "postgresql://u:p@db.example:5433/w")).toBe(false);
+      expect(sameConnectionTarget(base, "postgresql://v:p@db.example:5432/w")).toBe(false);
+      expect(sameConnectionTarget(base, "postgresql://u:p@db.example:5432/x")).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("treats localhost and 127.0.0.1 as equivalent and honours PGPORT when the port is omitted", () => {
-    expect(sameConnectionTarget("postgresql://u:p@localhost:5432/w", "postgresql://u:q@127.0.0.1/w", {})).toBe(true);
-    expect(sameConnectionTarget("postgresql://u:p@localhost/w", "postgresql://u:q@127.0.0.1:5433/w", { PGPORT: "5433" })).toBe(true);
-    expect(sameConnectionTarget("postgresql://u:p@localhost/w", "postgresql://u:q@127.0.0.1:5432/w", { PGPORT: "5433" })).toBe(false);
+    vi.stubEnv("PGPORT", "");
+    try {
+      expect(sameConnectionTarget("postgresql://u:p@localhost:5432/w", "postgresql://u:q@127.0.0.1/w")).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    vi.stubEnv("PGPORT", "5433");
+    try {
+      expect(sameConnectionTarget("postgresql://u:p@localhost/w", "postgresql://u:q@127.0.0.1:5433/w")).toBe(true);
+      expect(sameConnectionTarget("postgresql://u:p@localhost/w", "postgresql://u:q@127.0.0.1:5432/w")).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
-  it("fails closed: unparsable, host-override and overlapping multi-host inputs count as the same target", () => {
-    expect(sameConnectionTarget("garbage", "postgresql://u@h/d", {})).toBe(true);
-    expect(sameConnectionTarget("garbage", "garbage2", {})).toBe(true);
-    expect(sameConnectionTarget("postgresql://u@a/d?host=b", "postgresql://u@c/d", {})).toBe(true);
-    expect(sameConnectionTarget("postgresql://u@a,b/d", "postgresql://u@b/d", {})).toBe(true);
-    expect(sameConnectionTarget("postgresql://u@a,b/d", "postgresql://u@c/d", {})).toBe(false);
+  it("fails closed: unparsable, differential, host-override, IPv6 and overlapping multi-host inputs count as the same target", () => {
+    expect(sameConnectionTarget("garbage", "postgresql://u@h/d")).toBe(true);
+    expect(sameConnectionTarget("garbage", "garbage2")).toBe(true);
+    expect(sameConnectionTarget("postgresql://u@[::1]/d", "postgresql://u@localhost/d")).toBe(true);
+    expect(sameConnectionTarget("postgres://u@x:1,a@direct:5432/d", "postgresql://u@direct:5432/d")).toBe(true);
+    expect(sameConnectionTarget("postgresql://u@a/d?host=b", "postgresql://u@c/d")).toBe(true);
+    expect(sameConnectionTarget("postgresql://u@a,b/d", "postgresql://u@b/d")).toBe(true);
+    expect(sameConnectionTarget("postgresql://u@a,b/d", "postgresql://u@c/d")).toBe(false);
   });
 });
 
@@ -225,15 +304,20 @@ describe("pooler URLs are refused before any connection", () => {
     }
   });
 
-  it("fails closed on multi-host, unparsable and host-override URLs (MINOR 4)", async () => {
+  it("fails closed on multi-host, unparsable, IPv6, parser-differential and host-override URLs", async () => {
     for (const url of [
       "postgresql://m:p@h1:5432,h2:6432/w",
       "postgresql://m:p@h1,h2/w",
       "postgresql://m:p@[::bad/w",
+      "postgresql://m:p@[::1]/w",
       "postgresql://m:p@h:notaport/w",
       "postgresql://m:p@h/w?host=ep-x-pooler.example",
       "postgresql://m:p@h/w?port=6432",
       "mysql://m:p@h/w",
+      "postgres://u@pooler-host:6432,a@direct:5432/db",
+      "postgres://u@direct:5432#,pooler:6432/db",
+      "postgres://u@direct:5432/db#frag",
+      "postgres://u:p@w@direct:5432/db",
     ]) {
       await expect(migrateUp({ url }), url).rejects.toMatchObject({ code: "MIGRATION_POOLER_URL" });
     }

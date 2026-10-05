@@ -179,64 +179,60 @@ interface LedgerRow {
 }
 
 export interface ConnectionTarget {
-  /** Her host:port çifti (çok host'lu URL'de birden çok). Loopback adları tek biçime indirgenir. */
+  /** Sürücünün gerçekten bağlanacağı her host:port çifti. Loopback adları tek biçime indirgenir. */
   readonly hosts: readonly { host: string; port: string }[];
   readonly user: string;
   readonly db: string;
-  /** URL sorgusunda `host`/`hostaddr`/`port` var: hedef belirsiz (sürücü bunları öncelikli sayar). */
+  /** URL sorgusunda `host`/`hostaddr`/`port` var: hedef belirsiz. */
   readonly hasHostOverride: boolean;
 }
 
-const LOOPBACK_HOSTS: readonly string[] = ["localhost", "127.0.0.1", "::1", "0:0:0:0:0:0:0:1"];
-
-function decodeSafe(v: string): string {
-  try {
-    return decodeURIComponent(v);
-  } catch {
-    return v;
-  }
-}
+const LOOPBACK_HOSTS: readonly string[] = ["localhost", "127.0.0.1"];
+/** Sürücünün çözdüğü host yalnızca bu karakterlerden oluşabilir (IPv6 `[::1]` sürücüde `[` olarak bozulur → ret). */
+const HOST_NAME_RE = /^[a-z0-9._-]+$/;
 
 /**
- * Bağlantı URL'sini sürücüden bağımsız ayrıştırır (`new URL` çok host'lu `h1:5432,h2:5432` biçiminde
- * hata verir; ayrıştırılamayan = fail-closed çağıranda ret). Port yoksa `PGPORT`, kullanıcı/veritabanı
- * yoksa `PGUSER`/`PGDATABASE` (sürücüyle aynı geri düşüş). Ayrıştırılamazsa `undefined`.
+ * Bağlantı hedefi — SÜRÜCÜNÜN çözdüğü değerlerle (postgres.js 3.4.9 `options`; bağlantı açılmaz, kullanıcı/
+ * veritabanı/`PGHOST`/`PGPORT`/`PGUSER`/`PGUSERNAME` geri düşüşleri sürücüyle birebir aynı). Ayrıştırıcı
+ * farkını (sürücü yetkiyi İLK `@`'ten, `#`'i host'a dahil sayar) kapatmak için önce katı ön denetim:
+ * yetki bölümünde birden fazla `@` veya herhangi bir `#`, postgres(ql) dışı şema, sürücünün
+ * ayrıştıramadığı URL, host adı olmayan/IPv6/unix soket hedefi ya da geçersiz port → `undefined` (çağıran ret).
  */
-export function parseTarget(url: string, env: CliEnv = process.env): ConnectionTarget | undefined {
-  const m = /^postgres(?:ql)?:\/\/([^/?#]*)(?:\/([^?#]*))?(?:\?([^#]*))?(?:#.*)?$/i.exec(url.trim());
-  if (m === null) return undefined;
-  const authority = m[1] ?? "";
-  const at = authority.lastIndexOf("@");
-  const userinfo = at === -1 ? "" : authority.slice(0, at);
-  const hostPart = at === -1 ? authority : authority.slice(at + 1);
-  const defaultPort = env.PGPORT !== undefined && env.PGPORT !== "" ? env.PGPORT : "5432";
-  if (!/^\d{1,5}$/.test(defaultPort)) return undefined;
-  const hosts: { host: string; port: string }[] = [];
-  for (const raw of hostPart.split(",")) {
-    const hm = /^(?:\[([0-9a-f:.]+)\]|([^:[\]]*))(?::(\d*))?$/i.exec(raw);
-    if (hm === null) return undefined;
-    let host = decodeSafe((hm[1] ?? hm[2] ?? "").toLowerCase());
-    const port = hm[3] === undefined || hm[3] === "" ? defaultPort : hm[3];
-    if (host === "" || !/^\d{1,5}$/.test(port)) return undefined;
-    if (LOOPBACK_HOSTS.includes(host)) host = "loopback";
-    hosts.push({ host, port: String(Number(port)) });
+export function parseTarget(url: string): ConnectionTarget | undefined {
+  const trimmed = url.trim();
+  const m = /^postgres(?:ql)?:\/\/([^/?]*)(?:[/?]|$)/i.exec(trimmed);
+  if (m === null || trimmed.includes("#")) return undefined;
+  if (((m[1] ?? "").match(/@/g) ?? []).length > 1) return undefined;
+  let o: postgres.ParsedOptions;
+  try {
+    // Bağlantı kurulmaz (sürücü tembeldir); soket/zamanlayıcı oluşmaz.
+    o = postgres(trimmed).options;
+  } catch {
+    return undefined;
   }
-  const colon = userinfo.indexOf(":");
-  const userRaw = colon === -1 ? userinfo : userinfo.slice(0, colon);
-  const user = userRaw === "" ? (env.PGUSER ?? env.PGUSERNAME ?? "") : decodeSafe(userRaw);
-  const dbRaw = decodeSafe(m[2] ?? "");
-  const db = dbRaw === "" ? (env.PGDATABASE ?? user) : dbRaw;
-  const hasHostOverride = (m[3] ?? "").split("&").some((kv) => /^(host|hostaddr|port)(=|$)/i.test(kv));
-  return { hosts, user, db, hasHostOverride };
+  const sockPath: unknown = o.path;
+  if (sockPath !== false && sockPath !== undefined && sockPath !== "") return undefined;
+  if (o.host.length === 0 || o.host.length !== o.port.length) return undefined;
+  const hosts: { host: string; port: string }[] = [];
+  for (let i = 0; i < o.host.length; i++) {
+    let host = String(o.host[i]).toLowerCase();
+    const port = o.port[i] as number;
+    if (!HOST_NAME_RE.test(host) || !Number.isInteger(port) || port < 1 || port > 65535) return undefined;
+    if (LOOPBACK_HOSTS.includes(host)) host = "loopback";
+    hosts.push({ host, port: String(port) });
+  }
+  const query = trimmed.includes("?") ? trimmed.slice(trimmed.indexOf("?") + 1) : "";
+  const hasHostOverride = query.split("&").some((kv) => /^(host|hostaddr|port)(=|$)/i.test(kv));
+  return { hosts, user: String(o.user), db: String(o.database), hasHostOverride };
 }
 
 /**
  * İki URL aynı sunucu+kullanıcı+veritabanına işaret edebilir mi? Fail-closed: ayrıştırılamayan,
- * belirsiz (`?host=`) veya host listeleri kesişen çiftte `true` (ret). `localhost`/`127.0.0.1`/`::1` eşdeğer.
+ * belirsiz (`?host=`) veya host listeleri kesişen çiftte `true` (ret). `localhost`/`127.0.0.1` eşdeğer.
  */
-export function sameConnectionTarget(a: string, b: string, env: CliEnv = process.env): boolean {
-  const ta = parseTarget(a, env);
-  const tb = parseTarget(b, env);
+export function sameConnectionTarget(a: string, b: string): boolean {
+  const ta = parseTarget(a);
+  const tb = parseTarget(b);
   if (ta === undefined || tb === undefined || ta.hasHostOverride || tb.hasHostOverride) return true;
   if (ta.user !== tb.user || ta.db !== tb.db) return false;
   return ta.hosts.some((x) => tb.hosts.some((y) => x.host === y.host && x.port === y.port));
@@ -295,21 +291,29 @@ async function assertMigrationRole(sql: Sql): Promise<string> {
   return r.session_user;
 }
 
-function stateViolation(version: string, phase: string, what: string): MigrationError {
-  return new MigrationError(
-    "MIGRATION_SESSION_STATE",
-    `migration ${version} oturum durumunu değiştirdi (${what}) [${phase}]${
-      phase === "commit sonrası"
-        ? "; migration commit edildi ve defter yazıldı, koşu durduruldu, bağlantı atıldı: değişikliği gözden geçirin"
-        : "; geri alındı"
-    }`,
-  );
+type Phase = "başlangıç" | "transaction içi" | "commit sonrası";
+
+function stateViolation(version: string, phase: Phase, what: string): MigrationError {
+  const tail =
+    phase === "commit sonrası"
+      ? "migration commit edildi ve defter yazıldı, koşu durduruldu, bağlantı atıldı: değişikliği gözden geçirin"
+      : phase === "başlangıç"
+        ? "hiçbir şey uygulanmadı"
+        : "geri alındı";
+  return new MigrationError("MIGRATION_SESSION_STATE", `migration ${version} oturum durumu: ${what} [${phase}]; ${tail}`);
 }
+
+/** Oturum düzeyi ayarların MUTLAK beklenen değerleri (taban çizgisi yok: başlangıçtaki sapma da ret). */
+export const EXPECTED_SESSION_SETTINGS = {
+  search_path: '"$user", public',
+  replication_role: "origin",
+  read_only: "off",
+} as const;
 
 /**
  * Transaction İÇİNDE, defter yazımından ÖNCE (fail-closed; ihlalde transaction geri alınır): rol /
  * oturum kullanıcısı ve bilinen `app.*` ayarları. `SET LOCAL` ile maskelenmiş OTURUM düzeyi değer
- * burada görünmez; onu `assertSessionCleanAfterCommit` yakalar.
+ * burada görünmez; onu `assertSessionStateClean` yakalar.
  */
 async function assertSessionClean(tx: Tx, expectedUser: string, version: string): Promise<void> {
   const rows = await tx<{ cu: string; su: string; role: string; leaked: string[] }[]>`
@@ -320,7 +324,7 @@ async function assertSessionClean(tx: Tx, expectedUser: string, version: string)
                       WHERE coalesce(current_setting(n, true), '') <> ''), '{}') AS leaked`;
   const r = rows[0];
   if (r === undefined || r.cu !== expectedUser || r.su !== expectedUser || r.role !== "none" || r.leaked.length > 0) {
-    throw stateViolation(version, "transaction içi", "rol/oturum kullanıcısı veya app.* ayarı");
+    throw stateViolation(version, "transaction içi", "migration rol/oturum kullanıcısı veya app.* ayarını değiştirdi");
   }
 }
 
@@ -359,23 +363,23 @@ async function readSessionState(sql: Sql): Promise<SessionState> {
 }
 
 /**
- * Migration COMMIT edildikten sonra aynı bağlantıda: `set_config(...,false)` / `SET ROLE` gibi OTURUM
- * düzeyi değişiklikler `SET LOCAL` ile maskelense de burada görünür. `before` migration öncesi
- * temiz taban çizgisidir (search_path vb. için sabit varsayılan yok).
+ * Oturum durumu MUTLAK olarak temiz olmalı: başlangıçta (`phase="başlangıç"`, sapma = ret) ve migration
+ * COMMIT edildikten sonra aynı bağlantıda (`set_config(...,false)` / `SET ROLE` gibi oturum düzeyi
+ * değişiklikler `SET LOCAL` ile maskelense de burada görünür).
  */
-function assertSessionCleanAfterCommit(before: SessionState, after: SessionState, expectedUser: string, version: string): void {
+function assertSessionStateClean(state: SessionState, expectedUser: string, version: string, phase: Phase): void {
   const problems: string[] = [];
-  if (after.cu !== expectedUser || after.su !== expectedUser) problems.push("rol/oturum kullanıcısı");
-  if (after.role !== "none") problems.push("SET ROLE");
-  if (after.leaked.length > 0) problems.push("app.* ayarı");
-  if (after.search_path !== before.search_path) problems.push("search_path");
-  if (after.replication_role !== before.replication_role) problems.push("session_replication_role");
-  if (after.read_only !== before.read_only) problems.push("default_transaction_read_only");
-  if (after.temp_relations !== 0) problems.push("geçici tablo");
-  if (after.prepared !== 0) problems.push("PREPARE");
-  if (after.listening !== 0) problems.push("LISTEN");
-  if (after.advisory !== 0) problems.push("oturum advisory kilidi");
-  if (problems.length > 0) throw stateViolation(version, "commit sonrası", problems.join(", "));
+  if (state.cu !== expectedUser || state.su !== expectedUser) problems.push("rol/oturum kullanıcısı");
+  if (state.role !== "none") problems.push("SET ROLE");
+  if (state.leaked.length > 0) problems.push("app.* ayarı");
+  if (state.search_path !== EXPECTED_SESSION_SETTINGS.search_path) problems.push("search_path");
+  if (state.replication_role !== EXPECTED_SESSION_SETTINGS.replication_role) problems.push("session_replication_role");
+  if (state.read_only !== EXPECTED_SESSION_SETTINGS.read_only) problems.push("default_transaction_read_only");
+  if (state.temp_relations !== 0) problems.push("geçici tablo");
+  if (state.prepared !== 0) problems.push("PREPARE");
+  if (state.listening !== 0) problems.push("LISTEN");
+  if (state.advisory !== 0) problems.push("oturum advisory kilidi");
+  if (problems.length > 0) throw stateViolation(version, phase, problems.join(", "));
 }
 
 const OWNED_CATALOGS_SQL = `
@@ -417,11 +421,37 @@ const OWNED_CATALOGS_SQL = `
  * bu denetim kapatır ve gelecekteki her migration'ı da kapsar. İhlalde transaction geri alınır.
  */
 async function assertNoAppOwnership(tx: Tx, version: string): Promise<void> {
+  const problems: string[] = [];
   const rows = await tx.unsafe<{ cat: string }[]>(OWNED_CATALOGS_SQL, [OWNERSHIP_ROLE_NAMES as string[]]);
-  if (rows.length > 0) {
+  if (rows.length > 0) problems.push(`nesne sahibi: ${rows.map((x) => x.cat).join(", ")}`);
+
+  // Rol nitelikleri/üyelikler her migration sonrası yeniden denetlenir (migration bunları gevşetmiş olabilir).
+  const attrs = await tx<{ rolname: string; why: string }[]>`
+    SELECT r.rolname::text AS rolname,
+           concat_ws(',',
+             CASE WHEN r.rolsuper THEN 'SUPERUSER' END,
+             CASE WHEN r.rolbypassrls THEN 'BYPASSRLS' END,
+             CASE WHEN r.rolcreaterole THEN 'CREATEROLE' END,
+             CASE WHEN r.rolcreatedb THEN 'CREATEDB' END,
+             CASE WHEN r.rolreplication THEN 'REPLICATION' END,
+             CASE WHEN EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members m WHERE m.member = r.oid) THEN 'ROL ÜYELİĞİ' END) AS why
+      FROM pg_catalog.pg_roles r WHERE r.rolname = ANY (${OWNERSHIP_ROLE_NAMES as string[]}::text[])`;
+  for (const a of attrs) if (a.why !== "") problems.push(`${a.rolname}: ${a.why}`);
+
+  // Rol/veritabanı düzeyinde ayarlar (ALTER ROLE/DATABASE ... SET): uygulama rollerinde HİÇBİRİ olamaz;
+  // veritabanı/küme düzeyinde app.*, search_path ve role ayarı olamaz (her yeni bağlantıya sızar).
+  const settings = await tx<{ n: number }[]>`
+    SELECT count(*)::int AS n FROM pg_catalog.pg_db_role_setting s
+     WHERE s.setdatabase IN (0, (SELECT oid FROM pg_catalog.pg_database WHERE datname = current_database()))
+       AND (s.setrole IN (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = ANY (${APP_ROLE_NAMES as string[]}::text[]))
+            OR (s.setrole = 0
+                AND EXISTS (SELECT 1 FROM unnest(s.setconfig) c WHERE c LIKE 'app.%' OR c LIKE 'search\\_path=%' OR c LIKE 'role=%')))`;
+  if ((settings[0]?.n ?? 0) > 0) problems.push("pg_db_role_setting (rol/veritabanı düzeyi ayar)");
+
+  if (problems.length > 0) {
     throw new MigrationError(
       "MIGRATION_APP_OWNERSHIP",
-      `migration ${version} sonrası uygulama rolü (${OWNERSHIP_ROLE_NAMES.join("|")}) nesne sahibi: ${rows.map((x) => x.cat).join(", ")}; geri alındı (I-03)`,
+      `migration ${version} sonrası uygulama rolü/ayar denetimi başarısız (${OWNERSHIP_ROLE_NAMES.join("|")}): ${problems.join("; ")}; geri alındı (I-03)`,
     );
   }
 }
@@ -472,11 +502,10 @@ async function runOne<T>(
   const sql = connect(url);
   try {
     const expectedUser = await assertMigrationRole(sql);
-    const before = await readSessionState(sql);
-    assertSessionCleanAfterCommit(before, before, expectedUser, "(başlangıç)");
+    assertSessionStateClean(await readSessionState(sql), expectedUser, "(başlangıç)", "başlangıç");
     const result = await sql.begin((tx) => body(tx, expectedUser));
     if (result === undefined) return undefined;
-    assertSessionCleanAfterCommit(before, await readSessionState(sql), expectedUser, result.version);
+    assertSessionStateClean(await readSessionState(sql), expectedUser, result.version, "commit sonrası");
     return result.value;
   } finally {
     await sql.end();
@@ -534,6 +563,7 @@ export async function migrateDown(options: RunOptions & { readonly to: string })
       await tx`SELECT set_config('wms_meta.allow_destructive_down', ${allowDestructive ? "on" : "off"}, true)`;
       await tx.unsafe(target.down.toString("utf8"));
       await assertSessionClean(tx, expectedUser, target.version);
+      await assertNoAppOwnership(tx, target.version);
       await tx`DELETE FROM wms_meta.schema_migrations WHERE version = ${target.version}`;
       return { value: target.version, version: target.version };
     });

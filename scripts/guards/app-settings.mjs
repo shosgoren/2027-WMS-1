@@ -11,7 +11,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const NAME_RE = /(?:current_setting|set_config)\s*\(\s*'(app\.[^']*)'/gi;
 /** `SET [LOCAL|SESSION] app.x ...` */
-const SET_RE = /\bSET\s+(?:LOCAL\s+|SESSION\s+)?(app\.[A-Za-z0-9_.]+)\s*(?:=|TO\b)/gi;
+const SET_RE = /\bSET\s+(?:LOCAL\s+|SESSION\s+)?"?(app\.[A-Za-z0-9_.]+)"?\s*(?:=|TO\b)/gi;
+/** Parçalanmış ad: TS şablonunda `app.` + ifade, SQL'de `'app.' ||`. */
+const FRAGMENT_RE = /\bapp\.\$\{|'app\.'\s*\|\||"app\."\s*\+|'app\.'\s*\+/g;
 /** `current_setting(` / `set_config(` ardından dize sabiti OLMAYAN argüman (yalnızca SQL dosyalarında). */
 const DYNAMIC_RE = /(?:current_setting|set_config)\s*\(\s*(?!')[^)\s]/gi;
 
@@ -27,14 +29,25 @@ export function scanText(text, file, known, opts) {
   const out = [];
   /** @param {number} index */
   const lineOf = (index) => text.slice(0, index).split("\n").length;
-  for (const re of [NAME_RE, SET_RE]) {
-    re.lastIndex = 0;
-    for (let m = re.exec(text); m !== null; m = re.exec(text)) {
-      const name = /** @type {string} */ (m[1]);
-      if (!known.includes(name)) {
-        out.push({ file, line: lineOf(m.index), message: `"${name}" KNOWN_APP_SETTINGS listesinde yok (packages/db/src/migrate.ts)` });
+  // EXECUTE '...' sabitlerinde tek tırnak '' ile kaçışlıdır: kaçışı açılmış bir kopya da taranır.
+  const seen = new Set();
+  for (const variant of [text, text.replaceAll("''", "'")]) {
+    for (const re of [NAME_RE, SET_RE]) {
+      re.lastIndex = 0;
+      for (let m = re.exec(variant); m !== null; m = re.exec(variant)) {
+        const name = /** @type {string} */ (m[1]);
+        const line = variant.slice(0, m.index).split("\n").length;
+        const key = `${line}:${name}`;
+        if (!known.includes(name) && !seen.has(key)) {
+          seen.add(key);
+          out.push({ file, line, message: `"${name}" KNOWN_APP_SETTINGS listesinde yok (packages/db/src/migrate.ts)` });
+        }
       }
     }
+  }
+  FRAGMENT_RE.lastIndex = 0;
+  for (let m = FRAGMENT_RE.exec(text); m !== null; m = FRAGMENT_RE.exec(text)) {
+    out.push({ file, line: lineOf(m.index), message: "app.* adı parçalardan kuruluyor; sabit ad kullanılmalı (KNOWN_APP_SETTINGS denetlenemez)" });
   }
   if (opts.dynamic) {
     DYNAMIC_RE.lastIndex = 0;

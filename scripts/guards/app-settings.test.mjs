@@ -52,6 +52,32 @@ describe("scanText", () => {
   });
 });
 
+describe("scanText: quoting and fragment evasions (MINOR 2)", () => {
+  it("catches names inside EXECUTE string constants with doubled single quotes", () => {
+    const sql = fx(`EXECUTE 'SELECT ${CS}(''app.hidden'', true)';`, `EXECUTE 'SELECT ${SC}(''app.hidden2'', ''v'', true)';`);
+    const f = scanText(sql, "a.sql", KNOWN, { dynamic: false });
+    expect(f.map((x) => /"(app\.[a-z0-9]+)"/.exec(x.message)?.[1]).sort()).toEqual(["app.hidden", "app.hidden2"]);
+    expect(f.map((x) => x.line)).toEqual([2, 3]);
+  });
+
+  it("does not flag a known name inside an EXECUTE constant", () => {
+    expect(scanText(fx(`EXECUTE 'SELECT ${CS}(''${KNOWN_NAME}'', true)';`), "a.sql", KNOWN, { dynamic: false })).toEqual([]);
+  });
+
+  it("catches a double-quoted identifier in the SET statement", () => {
+    const f = scanText(fx(`${SET_LOCAL} "app.quoted" = 'x';`, `${SET_} "${KNOWN_NAME}" TO 'x';`), "a.sql", KNOWN, { dynamic: false });
+    expect(f).toHaveLength(1);
+    expect(f[0]?.message).toContain("app.quoted");
+  });
+
+  it("catches a name assembled from fragments: TS template literal and SQL concatenation", () => {
+    const ts = "const q = `SELECT x('app.${name}', true)`;\n";
+    expect(scanText(ts, "a.ts", KNOWN, { dynamic: false }).some((x) => x.message.includes("parçalardan"))).toBe(true);
+    const sql = fx(`SELECT ${CS}('app.' || suffix, true);`);
+    expect(scanText(sql, "a.sql", KNOWN, { dynamic: false }).some((x) => x.message.includes("parçalardan"))).toBe(true);
+  });
+});
+
 describe("scanRepo", () => {
   it("scans migrations/*.sql and src/*.ts but skips test files", () => {
     const root = mkdtempSync(path.join(tmpdir(), "app-settings-"));
