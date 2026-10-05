@@ -9,6 +9,7 @@
 // - Ortam doğrulaması tembeldir (ilk kullanımda): `next build` bu değişkenler olmadan geçer (G-07: eksikse
 //   çalışma anında açık hata, değer asla yazılmaz — G-09).
 import { createHash } from "node:crypto";
+import { isIP } from "node:net";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { APIError, createAuthMiddleware, getIP, getSessionFromCtx, isAPIError } from "better-auth/api";
 import { betterAuth } from "better-auth";
@@ -66,7 +67,7 @@ export interface AuthEnv {
   readonly databaseUrl: string;
   /** `wms_auth` (AUTH_DATABASE_URL): Better Auth tabloları. */
   readonly authDatabaseUrl: string;
-  /** `NODE_ENV === "production"`: istemci IP başlığı ve https zorunlu. */
+  /** `NODE_ENV=production` veya `WMS_ENV` staging/production: istemci IP başlığı ve https zorunlu. */
   readonly production: boolean;
   readonly socialEnabled: boolean;
   readonly requireEmailVerification: boolean;
@@ -116,9 +117,10 @@ export function readAuthEnv(env: EnvSource): AuthEnv {
   if (protocol !== "https:" && protocol !== "http:") {
     throw new AuthConfigError("BETTER_AUTH_URL must use http or https");
   }
-  const production = env.NODE_ENV === "production";
+  const production =
+    env.NODE_ENV === "production" || env.WMS_ENV === "staging" || env.WMS_ENV === "production";
   if (production && protocol !== "https:") {
-    throw new AuthConfigError("BETTER_AUTH_URL must use https when NODE_ENV=production");
+    throw new AuthConfigError("BETTER_AUTH_URL must use https in production or staging");
   }
   // ADR-014 §8: yalnızca uygulamanın kendi kökeni güvenilir; ortamdan ek köken kabul edilmez.
   if (nonEmpty(env, "BETTER_AUTH_TRUSTED_ORIGINS") !== undefined) {
@@ -127,8 +129,7 @@ export function readAuthEnv(env: EnvSource): AuthEnv {
   // Better Auth `isTest()` (core env-impl.mjs:36) NODE_ENV=test veya TEST (boş/"false" dışı) ile açılır;
   // üretim/staging'de bu sinyaller kabul edilmez (köken denetimi ayrıca açıkça zorlanır).
   const testSignal = env.NODE_ENV === "test" || (nonEmpty(env, "TEST") !== undefined && env.TEST !== "false");
-  const deployed = production || env.WMS_ENV === "staging" || env.WMS_ENV === "prod" || env.WMS_ENV === "production";
-  if (deployed && testSignal) {
+  if (production && testSignal) {
     throw new AuthConfigError("NODE_ENV=test / TEST is not allowed in production or staging");
   }
   if (dbUser(databaseUrl) === dbUser(authDatabaseUrl)) {
@@ -244,7 +245,7 @@ const EVENT_UA_MAX = 512;
 function sqlState(error: unknown): string {
   let e: unknown = error;
   for (let i = 0; i < 5 && typeof e === "object" && e !== null; i += 1) {
-    const code = (e as { code?: unknown }).code;
+    const code = (e as { sqlstate?: unknown }).sqlstate ?? (e as { code?: unknown }).code;
     if (typeof code === "string" && /^[0-9A-Z]{5}$/.test(code)) return code;
     e = (e as { cause?: unknown }).cause;
   }
@@ -263,6 +264,7 @@ export function maskLogText(text: string): string {
   return text
     .replace(/[^\s@]+@[^\s@]+/g, "[email]")
     .replace(/\b\d{1,3}(?:\.\d{1,3}){3}\b/g, "[ip]")
+    .replace(/(?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}/gi, "[ip]")
     .replace(/[A-Za-z0-9_\-+/=.$,]{24,}/g, "[redacted]")
     .slice(0, 300);
 }
@@ -288,7 +290,7 @@ function headersOf(source: Headerish): Headers | undefined {
  * `last_request`'i yeniler); kontrol + artırma tek atomik `INSERT … ON CONFLICT DO UPDATE … WHERE`.
  */
 function createRateLimitStorage(client: DbClient) {
-  const db = rawDb(client);
+  const db = maskedDb(rawDb(client));
   const PRUNE_PROBABILITY = 0.01;
   const PRUNE_AFTER_MS = 2 * 60 * 60 * 1000; // en uzun kural penceresinin (1 saat) iki katı
   return {
@@ -332,30 +334,95 @@ export function socialProvidersFor(
   return { google: { ...env.google }, microsoft: { ...env.microsoft } };
 }
 
-// better-call 1.4.0 router.mjs:93, işleyici `APIError` olmayan bir hata fırlatırsa (ör. DrizzleQueryError)
-// `console.error("# SERVER_ERROR: ", error)` yazar ve Better Auth `onAPIError.onError` bunu engellemez
-// (api/index.mjs:195-200 `undefined` döner). Hata mesajı sorgu parametrelerini (e-posta, özet) içerir →
-// bu tek, sabit önekli çağrı maskeli biçime çevrilir. Başka console.error çağrılarına dokunulmaz.
-let installedMask: typeof console.error | undefined;
+// Sızıntıyı KAYNAĞINDA kesme: drizzle-orm 0.45.3 her sorgu hatasını `DrizzleQueryError` (mesaj: "Failed query:
+// <sql>\nparams: <değerler>", errors.js:9-20; pg-core/session.js `queryWithCache` içinde) olarak sarar. Parametreler
+// e-posta/özet/UUID/IP taşır ve hata Better Auth'un birçok yoluna (router `console.error("# SERVER_ERROR")`
+// better-call router.mjs:93, adaptör fabrikası fallback join `console.error(error)` factory.mjs:392) girer. Bu
+// yüzden Better Auth'a verilen Drizzle istemcisi sarılır: sorgu hatası → `AuthStoreError` (sınıf + SQLSTATE,
+// cause/params YOK). Drizzle `logger` seçeneği yalnızca sorgu günlüğüdür, hata yolunu etkilemez.
+// Sarma noktası: PostgresJsSession'ın tx için yeni oturum üretmesi nedeniyle (postgres-js/session.js:108-139)
+// oturum katmanı değil, `db`/`tx` yüzeyi (builder zinciri + `then`/`catch`/`finally`) proxy'lenir.
 
-function installServerErrorMask(): void {
-  // Yalnızca console.error hâlâ BİZİM sarmalayıcımızsa atla (casus/başka sarmalayıcı değiştirmişse yeniden sar).
-  if (installedMask !== undefined && console.error === installedMask) return;
-  const previous = console.error.bind(console);
-  const wrapper = (...args: unknown[]): void => {
-    if (typeof args[0] === "string" && args[0].startsWith("# SERVER_ERROR")) {
-      previous(`[auth] server error (${describeError(args[1])})`);
-      return;
-    }
-    previous(...args);
-  };
-  installedMask = wrapper;
-  console.error = wrapper;
+/** Yalnızca sorgu/sürücü hatalarını dönüştürür; `APIError` gibi iş hataları aynen geçer (transaction geri alımı). */
+function isDriverError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return error.name === "PostgresError" || (typeof (error as { params?: unknown }).params !== "undefined" && "query" in error);
+}
+
+function toStoreError(error: unknown): unknown {
+  if (error instanceof AuthStoreError || !isDriverError(error)) return error;
+  return new AuthStoreError(`auth store failure (${describeError(error)})`, sqlState(error));
+}
+
+function isThenable(v: unknown): v is PromiseLike<unknown> {
+  return typeof v === "object" && v !== null && typeof (v as { then?: unknown }).then === "function";
+}
+
+function maskedPromise(target: PromiseLike<unknown>): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    target.then(resolve, (e: unknown) => {
+      reject(toStoreError(e));
+    });
+  });
+}
+
+function wrapThenable<T extends object>(target: T): T {
+  return new Proxy(target, {
+    get(t, prop) {
+      if (prop === "then") return (f?: never, r?: never) => maskedPromise(t as PromiseLike<unknown>).then(f, r);
+      if (prop === "catch") return (r?: never) => maskedPromise(t as PromiseLike<unknown>).catch(r);
+      if (prop === "finally") return (f?: never) => maskedPromise(t as PromiseLike<unknown>).finally(f);
+      const value: unknown = Reflect.get(t, prop, t);
+      if (typeof value !== "function" || prop === "constructor") return value;
+      return (...args: unknown[]): unknown => wrapResult((value as (...a: unknown[]) => unknown).apply(t, args), false);
+    },
+  });
+}
+
+function wrapResult(result: unknown, root: boolean): unknown {
+  if (isThenable(result)) return wrapThenable(result);
+  // Kök yüzeyde `db.select()` / `db.insert(t)` gibi thenable olmayan oluşturucular da sarılır.
+  if (root && typeof result === "object" && result !== null && !Array.isArray(result)) return wrapBuilder(result);
+  return result;
+}
+
+function wrapBuilder<T extends object>(target: T): T {
+  return new Proxy(target, {
+    get(t, prop) {
+      const value: unknown = Reflect.get(t, prop, t);
+      if (typeof value !== "function" || prop === "constructor") return value;
+      return (...args: unknown[]): unknown => wrapResult((value as (...a: unknown[]) => unknown).apply(t, args), false);
+    },
+  });
+}
+
+/** Better Auth ve bu paketin kendi sorguları için maskeleyen Drizzle yüzeyi. */
+function maskedDb<T extends object>(db: T): T {
+  return new Proxy(db, {
+    get(t, prop) {
+      const value: unknown = Reflect.get(t, prop, t);
+      if (typeof value !== "function" || prop === "constructor") return value;
+      if (prop === "transaction") {
+        return (callback: (tx: object) => unknown, ...rest: unknown[]): unknown =>
+          wrapResult(
+            (value as (...a: unknown[]) => unknown).call(t, (tx: object) => callback(maskedDb(tx)), ...rest),
+            false,
+          );
+      }
+      return (...args: unknown[]): unknown => wrapResult((value as (...a: unknown[]) => unknown).apply(t, args), true);
+    },
+  });
 }
 
 /** Hata sınıfı + SQLSTATE dışında bilgi taşımayan hata (Drizzle `params` sızıntısını önler). */
 export class AuthStoreError extends Error {
   override name = "AuthStoreError";
+  /** Yalnızca `describeError` çıktısı (sınıf + SQLSTATE) taşır; `cause` bilerek yok. */
+  readonly sqlstate: string;
+  constructor(message: string, sqlstate = "-") {
+    super(message);
+    this.sqlstate = sqlstate;
+  }
 }
 
 async function masked<T>(fn: () => Promise<T>): Promise<T> {
@@ -363,16 +430,15 @@ async function masked<T>(fn: () => Promise<T>): Promise<T> {
     return await fn();
   } catch (error) {
     if (error instanceof AuthError || error instanceof AuthConfigError) throw error;
-    throw new AuthStoreError(`auth store failure (${describeError(error)})`);
+    throw new AuthStoreError(`auth store failure (${describeError(error)})`, sqlState(error));
   }
 }
 
 /** Better Auth yapılandırmasını kurar ve dar yüzeyi döndürür. */
 export function createAuth(params: CreateAuthParams): AuthService {
   const { client, eventClient, env } = params;
-  installServerErrorMask();
   const baseOrigin = new URL(env.baseUrl).origin;
-  const authDb = rawDb(client);
+  const authDb = maskedDb(rawDb(client));
 
   async function emit(
     type: string,
@@ -395,8 +461,10 @@ export function createAuth(params: CreateAuthParams): AuthService {
       });
     } catch (error) {
       // Hata maskeli günlüğe (parametre/e-posta/IP yok). Varsayılan fail-closed: istek 500 olur.
-      logMasked("error", `security event write failed: ${type}`, error);
-      if (!failOpen) throw error;
+      // Kaynakta kes: yeniden fırlatılan hata parametresiz (cause/params yok).
+      const safe = toStoreError(error);
+      if (!failOpen) throw safe;
+      logMasked("error", `security event write failed: ${type}`, safe);
     }
   }
 
@@ -414,11 +482,10 @@ export function createAuth(params: CreateAuthParams): AuthService {
         logMasked(level === "error" ? "error" : level === "warn" ? "warn" : "info", String(message));
       },
     },
-    onAPIError: {
-      onError: (error) => {
-        logMasked("error", "auth api error", error);
-      },
-    },
+    // Router hataları (better-call router.mjs:81-90) `throw: true` ile handler sarmalayıcısına iletilir ve
+    // orada TEK yerde maskeli loglanır; better-call'ın `console.error("# SERVER_ERROR")` yolu hiç çalışmaz.
+    // `APIError`'lar (4xx) router'da yanıta çevrilir (router.mjs:84 `isAPIError`).
+    onAPIError: { throw: true },
     database: drizzleAdapter(authDb, {
       provider: "pg",
       schema,
@@ -498,7 +565,7 @@ export function createAuth(params: CreateAuthParams): AuthService {
         // MINOR-2: üretimde güvenilir istemci IP'si (Fly-Client-IP) yoksa istek reddedilir; yerelde
         // Better Auth ortak yerel kovayı kullanır (ilk seferde açık uyarı).
         // Başlık doğrudan okunur (Better Auth test/dev ortamında yerel adrese düşer; getIP bunu gizlerdi).
-        if (ctx.request !== undefined && (ctx.request.headers.get("fly-client-ip") ?? "").trim() === "") {
+        if (ctx.request !== undefined && isIP((ctx.request.headers.get("fly-client-ip") ?? "").trim()) === 0) {
           if (env.production) {
             throw new APIError("BAD_REQUEST", { message: "CLIENT_IP_REQUIRED", code: "CLIENT_IP_REQUIRED" });
           }

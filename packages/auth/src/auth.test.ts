@@ -94,8 +94,11 @@ describe("readAuthEnv", () => {
     const prod = { ...VALID, NODE_ENV: "production", BETTER_AUTH_URL: "https://wms.example" };
     expect(readAuthEnv(prod).production).toBe(true);
     expect(() => readAuthEnv({ ...prod, TEST: "1" })).toThrow(/NODE_ENV=test \/ TEST/);
-    expect(() => readAuthEnv({ ...VALID, WMS_ENV: "staging", TEST: "true" })).toThrow(/NODE_ENV=test \/ TEST/);
-    expect(() => readAuthEnv({ ...VALID, WMS_ENV: "staging", NODE_ENV: "test" })).toThrow(/NODE_ENV=test \/ TEST/);
+    const staging = { ...VALID, WMS_ENV: "staging", BETTER_AUTH_URL: "https://wms-staging.example" };
+    expect(readAuthEnv(staging).production).toBe(true);
+    expect(() => readAuthEnv({ ...staging, TEST: "true" })).toThrow(/NODE_ENV=test \/ TEST/);
+    expect(() => readAuthEnv({ ...staging, NODE_ENV: "test" })).toThrow(/NODE_ENV=test \/ TEST/);
+    expect(() => readAuthEnv({ ...VALID, WMS_ENV: "staging" })).toThrow(/https/);
     expect(() => readAuthEnv({ ...VALID, AUTH_DATABASE_URL: VALID.DATABASE_URL })).toThrow(/different database roles/);
   });
 
@@ -130,8 +133,8 @@ describe("sosyal sağlayıcılar (A-37)", () => {
 describe("maskeli günlükleme (G-09)", () => {
   it("sorgu/parametre izi, e-posta, IP ve uzun belirteçler maskelenir", () => {
     expect(maskLogText(`Failed query: select ... params: a@b.example,${rnd()}`)).toBe("database query failed");
-    const out = maskLogText(`user a@b.example from 203.0.113.9 token ${rnd()}`);
-    expect(out).not.toMatch(/@b\.example|203\.0\.113|[0-9a-f]{24}/);
+    const out = maskLogText(`user a@b.example from 203.0.113.9 and 2001:db8::7334 token ${rnd()}`);
+    expect(out).not.toMatch(/@b\.example|203\.0\.113|2001:db8|[0-9a-f]{24}/);
   });
 
   it("hata özeti yalnızca sınıf + SQLSTATE içerir", () => {

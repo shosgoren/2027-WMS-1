@@ -431,6 +431,43 @@ describe(`auth çekirdek (target=${env.target})`, () => {
     expect(body).not.toContain(email);
   });
 
+  it.each([["casus createAuth'tan ÖNCE kurulu"], ["casus createAuth'tan SONRA kurulu"]])(
+    "B1 gerçek yol (%s): adaptör sorgusu (users SELECT) başarısız → günlükte Failed query/params/UUID/e-posta/IP yok",
+    async (label) => {
+      const before = label.includes("ÖNCE");
+      const methods = ["log", "info", "warn", "error", "debug"] as const;
+      const install = () => methods.map((m) => vi.spyOn(console, m).mockImplementation(() => undefined));
+      let spies = before ? install() : [];
+      const own = createDbClient({ url: authUrl, poolMax: 1, prepare: DB_CLIENT_SETTINGS.prepare });
+      const svc = newService(own);
+      if (!before) spies = install();
+      const u = await mkUser();
+      const email = `LEAK-${randomBytes(6).toString("hex")}@example.invalid`;
+      const ip = "198.51.100.78";
+      await adm.query("REVOKE SELECT ON public.users FROM wms_auth");
+      let res: Response;
+      let text = "";
+      try {
+        res = await post2(svc, "/sign-in/email", { email, password: PASSWORD }, ip);
+        text = await res.text();
+        // getPrincipal yolu da parametresiz hata verir.
+        await expect(svc.getPrincipal(headersWith("better-auth.session_token=x.y"))).resolves.toBeNull();
+      } finally {
+        await adm.query("GRANT SELECT ON public.users TO wms_auth");
+      }
+      const printed = spies
+        .flatMap((spy) => spy.mock.calls.map((c) => c.map((a) => (a instanceof Error ? `${a.name} ${a.message} ${a.stack ?? ""} ${String(a.cause ?? "")}` : typeof a === "string" ? a : JSON.stringify(a))).join(" ")))
+        .join("\n");
+      spies.forEach((spy) => spy.mockRestore());
+      await own.close();
+      expect(res.status).toBe(500);
+      expect(printed).toContain("sqlstate=42501");
+      for (const secret of [email, email.toLowerCase(), ip, PASSWORD, u.id, "Failed query", "params", "INSERT INTO", "SELECT "]) expect(printed).not.toContain(secret);
+      expect(printed).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/);
+      expect(text).not.toContain(email);
+    },
+  );
+
   it("M2: olay yazımı başarısız olsa da /sign-out oturumu siler (fail-open yalnızca çıkış); hata günlükleri maskeli", async () => {
     const u = await mkUser();
     const ok = await signIn(u.email, nextIp()); // normal servisle oturum
