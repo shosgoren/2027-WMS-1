@@ -210,13 +210,16 @@ describe(`auth çekirdek (target=${env.target})`, () => {
   });
 
   it("yanlış parola × eşik → 429; hız sınırı anahtarları SHA-256 özeti (düz IP yok)", async () => {
+    // A-41: e-posta başına kilit (5) IP kovasından (10) önce dolacağından, IP eşiği aynı IP'den FARKLI
+    // e-postalarla (her deneme ayrı kullanıcı) sınanır.
     const u = await mkUser();
     const ip = nextIp();
     for (let i = 0; i < 10; i += 1) {
-      const { res } = await signIn(u.email, ip, WRONG_PASSWORD);
+      const victim = await mkUser();
+      const { res } = await signIn(victim.email, ip, WRONG_PASSWORD);
       expect(res.status).toBe(401);
     }
-    const blocked = await signIn(u.email, ip, WRONG_PASSWORD);
+    const blocked = await signIn((await mkUser()).email, ip, WRONG_PASSWORD);
     expect(blocked.res.status).toBe(429);
     // Doğru parola da aynı IP kovasında engellenir.
     expect((await signIn(u.email, ip)).res.status).toBe(429);
