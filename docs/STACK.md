@@ -27,6 +27,9 @@ Kaynak sözdizimi: `<dosya>#<json.yolu>` (package.json alanı) veya `docker-comp
 | node-postgres tipleri | @types/pg | 8.23.1 | package.json#devDependencies.@types/pg | |
 | Drizzle ORM | drizzle-orm | 0.45.3 | packages/db/package.json#dependencies.drizzle-orm | ADR-003 |
 | PostgreSQL sürücüsü (postgres.js) | postgres | 3.4.9 | packages/db/package.json#dependencies.postgres | ADR-003 |
+| Drizzle ORM (packages/auth, yalnızca `sql` etiketi) | drizzle-orm | 0.45.3 | packages/auth/package.json#dependencies.drizzle-orm | ADR-003 |
+| Better Auth (kimlik katmanı) | better-auth | 1.7.7 | packages/auth/package.json#dependencies.better-auth | ADR-014 |
+| Argon2id parola özeti | @node-rs/argon2 | 2.2.1 | packages/auth/package.json#dependencies.@node-rs/argon2 | ADR-014 |
 | PostgreSQL ana sürümü (Neon) | — | — Q-05 (kullanıcı beyanı 2026-10-05: 17; T-005d doğrular) | | ADR-004 |
 | Neon pooler türü/sürümü | — | — Q-02 | | ADR-004 |
 | Prepared statement ayarı | — | — Q-04 | | ADR-004 |
