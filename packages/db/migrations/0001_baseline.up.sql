@@ -16,6 +16,9 @@ BEGIN
   IF app.rolcreaterole OR app.rolcreatedb THEN
     RAISE EXCEPTION '0001_baseline: wms_app CREATEROLE veya CREATEDB olamaz (I-03)';
   END IF;
+  IF app.rolreplication THEN
+    RAISE EXCEPTION '0001_baseline: wms_app REPLICATION olamaz (I-03)';
+  END IF;
 
   SELECT count(*) INTO n FROM pg_catalog.pg_auth_members WHERE member = app.oid;
   IF n > 0 THEN
@@ -25,6 +28,10 @@ BEGIN
   SELECT (SELECT count(*) FROM pg_catalog.pg_class     WHERE relowner = app.oid)
        + (SELECT count(*) FROM pg_catalog.pg_namespace WHERE nspowner = app.oid)
        + (SELECT count(*) FROM pg_catalog.pg_proc      WHERE proowner = app.oid)
+       -- Kullanıcı tipleri: dizi tipleri ve tablo/görünüm satır tipleri (typrelid<>0; ilgili pg_class
+       -- zaten sayıldı) hariç.
+       + (SELECT count(*) FROM pg_catalog.pg_type      WHERE typowner = app.oid AND typrelid = 0 AND typcategory <> 'A')
+       + (SELECT count(*) FROM pg_catalog.pg_database  WHERE datdba = app.oid)
     INTO n;
   IF n > 0 THEN
     RAISE EXCEPTION '0001_baseline: wms_app hiçbir nesnenin sahibi olamaz (% nesne bulundu)', n;
@@ -57,6 +64,9 @@ BEGIN
   END IF;
   IF pg_catalog.has_schema_privilege('wms_app', 'public', 'CREATE') THEN
     RAISE EXCEPTION '0001_baseline: wms_app public şemasında CREATE yetkisi taşıyor';
+  END IF;
+  IF pg_catalog.has_database_privilege('wms_app', current_database(), 'CREATE') THEN
+    RAISE EXCEPTION '0001_baseline: wms_app veritabanında CREATE yetkisi taşıyor';
   END IF;
   IF pg_catalog.has_database_privilege('wms_app', current_database(), 'TEMP') THEN
     RAISE EXCEPTION '0001_baseline: wms_app veritabanında TEMP yetkisi taşıyor';
