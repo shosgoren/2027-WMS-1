@@ -47,19 +47,24 @@ export interface EnqueueResult {
   readonly jobId: string | null;
 }
 
-/** Handler'a verilen bağlam; `tenantId` enqueue anında transaction'dan türetilmiştir. */
-export type JobContext<T extends JobType = JobType> = {
+/**
+ * Handler'a verilen bağlam. Ham tenant kimliği YOKTUR: handler tenant verisine yalnızca `inTenant` ile erişir;
+ * bu, tenant bağlamını (`withSystemTenant`/`withMembership` ailesi, tenant ACTIVE denetimiyle) kurar. Platform
+ * işlerinde (`enqueuePlatform`) `inTenant` `FORBIDDEN` ile reddeder.
+ */
+export type JobContext<T extends JobType = JobType, Tx = unknown> = {
   [K in T]: {
     readonly jobId: string;
     readonly type: K;
-    /** Platform işlerinde (`enqueuePlatform`) null. */
-    readonly tenantId: string | null;
+    /** Tenant işi mi (yalnızca bilgi; kimlik sızdırmaz). */
+    readonly hasTenant: boolean;
     readonly actorUserId: string | null;
     readonly payload: JobPayload<K>;
+    inTenant<R>(fn: (tx: Tx) => Promise<R>): Promise<R>;
   };
 }[T];
 
-export type JobHandler<T extends JobType = JobType> = (ctx: JobContext<T>) => Promise<void>;
+export type JobHandler<T extends JobType = JobType, Tx = unknown> = (ctx: JobContext<T, Tx>) => Promise<void>;
 
 /**
  * Sağlayıcıdan bağımsız kuyruk arayüzü. `Tx` tenant transaction'ının tipidir (adaptör belirler;
@@ -71,7 +76,7 @@ export interface JobQueue<Tx = unknown> {
   /** Tenant'sız (platform) iş; kendi kısa transaction'ında yazılır. */
   enqueuePlatform(job: Job): Promise<EnqueueResult>;
   /** Tür için tüketici kaydeder; kayıtlı olmayan türde hata. */
-  work<T extends JobType>(type: T, handler: JobHandler<T>): Promise<void>;
+  work<T extends JobType>(type: T, handler: JobHandler<T, Tx>): Promise<void>;
   /** Yeni iş almayı durdurur, çalışan işleri (zaman aşımına kadar) bekler. */
   stop(): Promise<void>;
 }
@@ -81,11 +86,10 @@ export type QueueErrorCode = "FORBIDDEN" | "VALIDATION_FAILED";
 
 export class QueueError extends Error {
   override name = "QueueError";
-  constructor(
-    readonly code: QueueErrorCode,
-    message: string,
-  ) {
+  readonly code: QueueErrorCode;
+  constructor(code: QueueErrorCode, message: string) {
     super(message);
+    this.code = code;
   }
 }
 

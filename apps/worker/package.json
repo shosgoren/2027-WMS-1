@@ -9,6 +9,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {
+    "@wms/db": "workspace:*",
     "@wms/queue-adapter": "workspace:*",
     "@wms/shared": "workspace:*"
   }
