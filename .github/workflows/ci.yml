@@ -53,7 +53,6 @@ jobs:
         with:
           name: verify-artifacts
           path: .artifacts/
-          include-hidden-files: true
           if-no-files-found: warn
           retention-days: 14
 
@@ -86,7 +85,6 @@ jobs:
         with:
           name: infra-compose-logs
           path: .artifacts/infra/
-          include-hidden-files: true
           if-no-files-found: warn
           retention-days: 14
       - name: Compose down
@@ -134,14 +132,19 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       # Eşik (A-öneri, T-003): high ve critical → kırmızı. Tüm çalışma alanı, prod + dev bağımlılıkları.
+      # `pnpm audit --ignore` KULLANILMAZ: pnpm 10.28'de bu bayrak denetim yapmadan 0 döner
+      # (security-reviewer bulgusu). Bunun yerine tek `pnpm audit --json` koşusu aşağıdaki
+      # Node filtresinden geçer; JSON okunamazsa kırmızı.
       #
       # Audit istisnası A-36 (Supervisor kararı 2026-10-05) — BİTİŞ 2026-10-19 (dahil):
       #   GHSA-vfj7-8cjw-p6xm / CVE-2026-93687 (braces <=3.0.3, high, yamalı sürüm yok).
       #   Yalnızca dev zinciri: apps/web devDependency @next/eslint-plugin-next → fast-glob →
-      #   micromatch → braces; prod paketine girmez. Yalnızca bu tek advisory yoksayılır;
-      #   eşik değişmez, --prod / --ignore-unfixable kullanılmaz.
-      #   Bitiş geçince "A-36 expiry" adımı deps'i kırmızıya çevirir: istisna yenilenir
-      #   (yeni Supervisor kararı, korunan değişiklik) ya da kaldırılır.
+      #   micromatch → braces. Muafiyet YALNIZCA bu advisory için ve YALNIZCA tüm bulgu
+      #   yolları bu dev zincirindeyse geçerlidir; yol prod'a uzanırsa kırmızı.
+      #   Eşik değişmez; --prod / --ignore-unfixable kullanılmaz.
+      #   Bitiş geçince "A-36 expiry" adımı deps'i kırmızıya çevirir. Uzatma yeni bir Supervisor
+      #   kararıyla değil, KULLANICI kararıyla yapılır (I-17 / ADR-012 — bekçi gevşetme); aksi
+      #   hâlde istisna kaldırılır.
       - name: Audit exception A-36 expiry
         run: |
           expires=2026-10-19
@@ -151,36 +154,67 @@ jobs:
             exit 1
           fi
           echo "audit exception A-36 geçerli (bitiş $expires, bugün $today)"
-      # İstisna hâlâ gerekli mi? Advisory artık raporlanmıyorsa uyarı (istisna kaldırılmalı).
-      - name: Audit exception A-36 still needed?
+      - name: pnpm audit (high, critical)
         run: |
           set +e
           pnpm audit --json > "$RUNNER_TEMP/audit.json"
           set -e
-          node --input-type=module - "$RUNNER_TEMP/audit.json" <<'EOF'
+          node --input-type=module - "$RUNNER_TEMP/audit.json" apps/web/package.json <<'EOF'
           import { readFileSync } from "node:fs";
-          const report = JSON.parse(readFileSync(process.argv[2], "utf8"));
-          if (report.advisories === undefined) {
-            console.error("audit raporu okunamadı (advisories alanı yok)");
+          const [auditPath, webPkgPath] = process.argv.slice(2);
+          // Muafiyetler: advisory → kayıt + izin verilen tek dev zinciri öneki (pnpm yol biçimi).
+          const EXEMPT = {
+            "GHSA-vfj7-8cjw-p6xm": { record: "A-36", devDep: "@next/eslint-plugin-next", prefix: "apps__web>@next/eslint-plugin-next>" },
+          };
+          let report;
+          try {
+            report = JSON.parse(readFileSync(auditPath, "utf8"));
+          } catch (e) {
+            console.error(`audit: FAIL (audit JSON okunamadı: ${e.message})`);
             process.exit(1);
           }
-          const ids = Object.values(report.advisories).map((a) => a.github_advisory_id);
-          if (ids.includes("GHSA-vfj7-8cjw-p6xm")) {
-            console.log("A-36: GHSA-vfj7-8cjw-p6xm hâlâ raporlanıyor — istisna gerekli");
-          } else {
-            console.log("::warning::A-36: GHSA-vfj7-8cjw-p6xm artık raporlanmıyor — istisna gereksiz, ci.yml'den kaldırın");
+          if (report === null || typeof report.advisories !== "object" || report.advisories === null) {
+            console.error("audit: FAIL (audit JSON'da advisories alanı yok)");
+            process.exit(1);
           }
+          const webPkg = JSON.parse(readFileSync(webPkgPath, "utf8"));
+          const failures = [];
+          const exempted = [];
+          const seenExempt = new Set();
+          for (const a of Object.values(report.advisories)) {
+            if (a.severity !== "high" && a.severity !== "critical") continue;
+            const id = a.github_advisory_id;
+            const paths = (a.findings ?? []).flatMap((f) => f.paths ?? []);
+            const rule = EXEMPT[id];
+            if (rule !== undefined) {
+              seenExempt.add(id);
+              const devOnly =
+                webPkg.devDependencies?.[rule.devDep] !== undefined &&
+                webPkg.dependencies?.[rule.devDep] === undefined &&
+                webPkg.optionalDependencies?.[rule.devDep] === undefined;
+              const outside = paths.filter((p) => !p.startsWith(rule.prefix));
+              if (devOnly && paths.length > 0 && outside.length === 0) {
+                exempted.push(`${id} (${rule.record}, ${paths.length} yol, yalnızca dev zinciri)`);
+                continue;
+              }
+              failures.push(`${a.severity} ${id} ${a.module_name}: muafiyet ${rule.record} geçersiz — dev zinciri dışı yol: ${outside.join(", ") || (devOnly ? "bulgu yolu yok" : `${rule.devDep} devDependency değil`)}`);
+              continue;
+            }
+            failures.push(`${a.severity} ${id} ${a.module_name}: ${paths.join(", ")}`);
+          }
+          for (const id of Object.keys(EXEMPT)) {
+            if (!seenExempt.has(id)) {
+              console.log(`::warning::${EXEMPT[id].record}: ${id} artık raporlanmıyor — istisna gereksiz, ci.yml'den kaldırın`);
+            }
+          }
+          for (const line of exempted) console.log(`audit: muaf ${line}`);
+          if (failures.length > 0) {
+            console.error(`audit: FAIL (${failures.length} high/critical advisory)`);
+            for (const line of failures) console.error(`  ${line}`);
+            process.exit(1);
+          }
+          console.log(`audit: OK (muafiyet dışı high/critical yok; muaf: ${exempted.length})`);
           EOF
-      # Not: pnpm `--ignore` değeri pnpm-workspace.yaml'a (auditConfig) yazar; çalışma ağacı
-      # temiz kalsın diye dosya hemen geri alınır. Audit çıkış kodu korunur.
-      - name: pnpm audit (high, critical)
-        run: |
-          set +e
-          pnpm audit --audit-level high --ignore GHSA-vfj7-8cjw-p6xm
-          rc=$?
-          set -e
-          git checkout -- pnpm-workspace.yaml
-          exit "$rc"
       # Lisans: çalışma alanı paketlerinin DOĞRUDAN bağımlılıklarından biri GPL/AGPL ise kırmızı.
       # (LGPL bu kurala girmez.) Lisansı belirlenemeyen doğrudan bağımlılık da kırmızıdır.
       # Install başarısızsa bu adım da başarısız olur (0 doğrudan bağımlılık = FAIL); yanlış yeşil üretmez.
