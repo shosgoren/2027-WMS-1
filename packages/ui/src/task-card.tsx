@@ -27,11 +27,17 @@ const BASE =
   "flex min-h-12 min-w-0 w-full flex-col gap-3 rounded-card border-2 p-4 text-left shadow-card";
 const FOCUS = "focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus";
 
-/** Uygulama içi yol: `/` ile başlar, `//` ile başlamaz; `\`, şema ve kontrol karakteri içermez. */
+/**
+ * Uygulama içi yol: `/` ile başlar, `//` ile başlamaz; `\`, kontrol karakteri ve `.`/`..` yol
+ * parçası (kodlanmış `%2e` dahil) içermez — `/..//evil` tarayıcıda `//evil` yoluna çözülür ve
+ * ileride yolu `Location`'a yazan bir yönlendirmede açık yönlendirmeye dönüşebilir.
+ */
 export function isSafeInternalHref(href: string | undefined): href is `/${string}` {
   if (typeof href !== "string") return false;
   if (!href.startsWith("/") || href.startsWith("//")) return false;
-  return !/[\\\u0000-\u001f\u007f]/.test(href);
+  if (/[\\\u0000-\u001f\u007f]/.test(href)) return false;
+  const path = href.split(/[?#]/, 1)[0] ?? "";
+  return !path.split("/").some((seg) => /^(?:\.|%2e){1,2}$/i.test(seg));
 }
 
 /** Görev kartı. Kilitli ve "yakında" durumları `data-state` ve farklı ikon/metinle ayrışır. */

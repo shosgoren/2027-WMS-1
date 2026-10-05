@@ -101,13 +101,20 @@ describe("Banner / EmptyState / ActivityList", () => {
 });
 
 describe("TaskCard güvenli bağlantı (T-110b)", () => {
-  const unsafe = ["https://evil.example", "//evil", "javascript:alert(1)", "data:text/html,x", "/\\evil", "/a\nb", ""];
+  const unsafe = [
+    "https://evil.example", "//evil", "javascript:alert(1)", "data:text/html,x", "/\\evil", "/a\nb", "",
+    "/\t/evil", "/..//evil", "/.//evil", "/%2e%2e//evil", "/a/../b",
+  ];
   it.each(unsafe)("güvensiz href %j bağlantı üretmez", (href) => {
     // Çalışma anı savunması: tip kısıtını aşan değer kartı bağlantısız bırakır.
     const html = renderToStaticMarkup(<TaskCard icon={icon} title="K" href={href as `/${string}`} />);
     expect(html).not.toContain("<a");
     expect(html).not.toContain("href=");
     expect(html).toContain('data-state="active"');
+  });
+
+  it.each(["/files/a..b", "/x?next=../y", "/%2F%2Fevil"])("aynı origin'de kalan yol %j bağlantı olur", (href) => {
+    expect(renderToStaticMarkup(<TaskCard icon={icon} title="K" href={href as `/${string}`} />)).toContain("<a href=");
   });
 
   it("uygulama içi yol bağlantı olur", () => {
