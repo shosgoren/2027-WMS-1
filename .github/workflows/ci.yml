@@ -137,7 +137,7 @@ jobs:
         run: pnpm audit --audit-level high
       # Lisans: çalışma alanı paketlerinin DOĞRUDAN bağımlılıklarından biri GPL/AGPL ise kırmızı.
       # (LGPL bu kurala girmez.) Lisansı belirlenemeyen doğrudan bağımlılık da kırmızıdır.
-      # Önceki adım (install) başarısızsa bu adım da başarısız olur; yanlış yeşil üretmez.
+      # Install başarısızsa bu adım da başarısız olur (0 doğrudan bağımlılık = FAIL); yanlış yeşil üretmez.
       # audit kırmızı olsa da lisans sonucu ayrıca raporlanır (iş yine kırmızı kalır).
       - name: License check (direct deps, GPL/AGPL)
         if: ${{ !cancelled() }}
@@ -167,6 +167,10 @@ jobs:
                 else if (copyleft.test(license)) bad.push(`${project.name} → ${key}: ${license}`);
               }
             }
+          }
+          if (count === 0) {
+            console.error("licenses: FAIL (doğrudan bağımlılık bulunamadı — install eksik mi?)");
+            process.exit(1);
           }
           if (bad.length > 0) {
             console.error(`licenses: FAIL (${bad.length}/${count} doğrudan bağımlılık)`);
