@@ -23,6 +23,7 @@ import {
   isLockAlias,
   LockfileError,
   lockfileGuarded,
+  parseLockYaml,
   matchesGlob,
   poolerImages,
   staticRule,
@@ -564,6 +565,19 @@ describe("protected-paths: içerik kuralları", () => {
     ["yinelenen üst düzey blok", (l) => l.concat("\nsnapshots:\n  vitest@5.0.3: {}\n")],
     ["lockfileVersion 6", (l) => l.replace("lockfileVersion: '9.0'", "lockfileVersion: '6.0'")],
     ["çift tırnakta kaçış", (l) => l.replace("      chai: 6.3.0", '      chai: "6.3.0\\u0000"')],
+    // T-015: düğüm başındaki göstergeler ve belirsiz akış biçimleri yine fail-closed.
+    ["akışta çapa", (l) => l.replace("{integrity: sha512-CHAI}", "{integrity: &a sha512-CHAI}")],
+    ["akışta etiket", (l) => l.replace("{integrity: sha512-CHAI}", "{integrity: !!str sha512-CHAI}")],
+    ["akışta blok skaler göstergesi", (l) => l.replace("{integrity: sha512-CHAI}", "{integrity: >sha512-CHAI}")],
+    ["akış düz skalerinde &", (l) => l.replace("{integrity: sha512-CHAI}", "{integrity: sha512-CHAI&x}")],
+    ["akışta iç içe eşleme (a: b: c)", (l) => l.replace("{integrity: sha512-CHAI}", "{integrity: sha512-CHAI: evil}")],
+    ["akışta değersiz anahtar", (l) => l.replace("{integrity: sha512-CHAI}", "{integrity: }")],
+    ["akışta örtük anahtar (b:})", (l) => l.replace("{integrity: sha512-CHAI}", "{integrity: sha512-CHAI:}")],
+    ["akış dizisinde eşleme", (l) => l.replace("{integrity: sha512-CHAI}", "[integrity: sha512-CHAI]")],
+    ["akışta boş öğe", (l) => l.replace("{integrity: sha512-CHAI}", "{integrity: sha512-CHAI,, tarball: x}")],
+    ["akışta tırnaktan sonra metin", (l) => l.replace("{integrity: sha512-CHAI}", "{integrity: 'sha512-CHAI' evil}")],
+    ["akış düz skalerinde tırnak", (l) => l.replace("{integrity: sha512-CHAI}", "{integrity: sha512-'CHAI'}")],
+    ["akışta satır sonu yorumu", (l) => l.replace("{integrity: sha512-CHAI}", "{integrity: sha512-CHAI #x}")],
   ]))("T-008i M6 fail-closed: %s → ayrıştırılamaz, korunur", (_name, edit) => {
     const after = edit(LOCK);
     expect(after).not.toBe(LOCK);
@@ -571,6 +585,26 @@ describe("protected-paths: içerik kuralları", () => {
     const hits = contentRules("pnpm-lock.yaml", LOCK, after);
     expect(hits.map((h) => h.rule)).toEqual(["lockfile"]);
     expect(hits[0]?.reason).toContain("ayrıştırılamadı");
+  });
+
+  it("T-015: akış düz skalerinde `*`, `>`, `|`, `^`, `~`, boşluk (pnpm engines) ayrıştırılır; kapanış dışı → serbest", () => {
+    const engines = "  zod@4.0.0:\n    resolution: {integrity: sha512-ZZZ}\n";
+    expect(LOCK).toContain(engines);
+    const after = LOCK.replace(engines, `${engines}    engines: {node: 6.* || 8.* || >= 10.*}\n    cpu: [x64, arm64]\n`);
+    const tree = parseLockYaml(after);
+    const pkgs = tree.get("packages");
+    const zod = pkgs?.kind === "map" ? pkgs.entries.get("zod@4.0.0") : undefined;
+    const eng = zod?.kind === "map" ? zod.entries.get("engines") : undefined;
+    expect(eng).toEqual({ kind: "scalar", value: "{node: 6.* || 8.* || >= 10.*}" });
+    expect(lockfileGuarded(after)).toBe(lockfileGuarded(LOCK));
+    expect(contentRules("pnpm-lock.yaml", LOCK, after)).toEqual([]);
+    for (const v of ["{node: ^20.19.0 || ^22.13.0 || >=24}", "{node: ~1.2 || 3.x}", "{iojs: '>=1.0.0', node: '>=0.10.0'}", "{a: {b: c}, d: [e, f]}", "[a, ]", "{}"]) {
+      expect(() => parseLockYaml(`lockfileVersion: '9.0'\nk: ${v}\n`), v).not.toThrow();
+    }
+    // Kapanıştaki pakette aynı ekleme → korunan değişiklik (gevşeme yok).
+    const chai = "    resolution: {integrity: sha512-CHAI}\n";
+    const inClosure = LOCK.replace(chai, `${chai}    os: [linux]\n`);
+    expect(contentRules("pnpm-lock.yaml", LOCK, inClosure).map((h) => h.rule)).toEqual(["lockfile"]);
   });
 
   it("isLockAlias: takma ad biçimleri", () => {

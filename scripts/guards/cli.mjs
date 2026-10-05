@@ -53,6 +53,8 @@ export async function main(argv, opts = {}) {
     out.fail("NOT_IMPLEMENTED", NO_FILE, `check:${name} henüz yazılmadı (${path.relative(root, file)} yok)`);
     return out.finish();
   }
+  // `name` yukarıda sabit GUARDS listesine karşı doğrulandı; `guardsDir` yalnızca testlerde değişir.
+  // Bu `import(<ifade>)` eslint.config.mjs'teki tek dosyalık muafiyettir (GUARD_LOADER_FILE, T-015).
   /** @type {Partial<GuardModule>} */
   const mod = await import(pathToFileURL(file).href);
   if (typeof mod.run !== "function") {

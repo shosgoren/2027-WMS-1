@@ -55,17 +55,35 @@ const FORBIDDEN_MODULES = [
   {
     regex: "(?:^|\\/)packages\\/db\\/src(?:\\/|$)|(?:^|\\/)db\\/src\\/client",
     message: `packages/db kaynağına doğrudan yol yasaktır; paket girişi \`@wms/db\` kullanılır; ${MSG_DB}`,
+    // Yol biçimli: takma adlı çağrı denetiminde yalnızca göreli/mutlak belirteç olarak aranır (T-015).
+    pathLike: true,
   },
   {
     regex: "(?:^|\\/)node_modules(?:\\/|$)",
     message: `node_modules içine doğrudan yol (paket çözümünü atlatma) yasaktır; ${MSG_DB}`,
+    pathLike: true,
   },
 ];
 
-/** @param {typeof FORBIDDEN_MODULES} list */
+/**
+ * Yol biçimli girdinin "modül belirteci konumunda" biçimi: göreli (`./`, `../`), mutlak (`/`) veya
+ * `file:` ile başlayan dize. Çıplak `"packages/db/src/x.ts"` Node çözümlemesinde paket adıdır (atlatma
+ * değildir) ve sıradan dizelerle (glob, yol karşılaştırması) çakışır (T-015 yanlış pozitifi).
+ * @param {string} regex
+ */
+const asSpecifierPath = (regex) => `^(?=\\.\\.?\\/|\\/|file:).*(?:${regex})`;
+/** @param {Array<{ regex: string }>} list */
 const toSelectorRegex = (list) => `/${list.map(({ regex }) => `(?:${regex})`).join("|")}/i`;
 const FORBIDDEN_RE = toSelectorRegex(FORBIDDEN_MODULES);
-/** Sıradan dizeyle karışmayan (yol/kapsamlı ad) yasaklı belirteçler: her çağrıda aranır. */
+/**
+ * Herhangi bir çağrıda (takma adlı yükleyici) aranan küme: sıradan dizeyle karışmayan kapsamlı/alt
+ * yollu adlar olduğu gibi; yol biçimli girdiler yalnızca göreli/mutlak belirteç biçiminde.
+ * `require`/`import()`/`createRequire` konumunda ise tam küme (FORBIDDEN_RE) geçerlidir.
+ */
+const FORBIDDEN_ALIAS_CALL_RE = toSelectorRegex(
+  FORBIDDEN_MODULES.filter((m) => !m.ambiguous).map((m) => (m.pathLike ? { regex: asSpecifierPath(m.regex) } : m)),
+);
+/** Şablonun ilk parçası dışındaki parçalar (önünde ifade var): yol biçimli girdiler de tam aranır. */
 const FORBIDDEN_UNAMBIGUOUS_RE = toSelectorRegex(FORBIDDEN_MODULES.filter((m) => !m.ambiguous));
 const MSG_FORBIDDEN = `Ham DB istemcisi/sürücüsü yalnızca packages/db içindir (dinamik import/require dahil); ${MSG_DB}`;
 const MSG_NON_STATIC =
@@ -76,10 +94,19 @@ const MSG_NON_STATIC =
  * takma adlar (`const requireFromX = createRequire(…)`). `createRequire(taban)`ın kendisi hariç
  * (argümanı modül belirteci değil, taban yoldur).
  */
-const REQUIRE_CALL =
-  "CallExpression:matches([callee.name=/^(?!createrequire$).*require/i], [callee.property.name=/^(?!createrequire$).*require/i], [callee.callee.name='createRequire'], [callee.callee.property.name='createRequire'])";
+const REQUIRE_CALLEE =
+  ":matches([callee.name=/^(?!createrequire$).*require/i], [callee.property.name=/^(?!createrequire$).*require/i], [callee.callee.name='createRequire'], [callee.callee.property.name='createRequire'])";
+const REQUIRE_CALL = `CallExpression${REQUIRE_CALLEE}`;
+/** require benzeri olmayan çağrı (takma adlı yükleyici adayı; require konumu ayrıca, tam kümeyle denetlenir). */
+const OTHER_CALL = `CallExpression:not(${REQUIRE_CALLEE})`;
 /** Şablon dizesi ifade içeriyor ve `./` veya `../` ile başlamıyor (dinamik paket adı). */
 const DYNAMIC_BARE_TEMPLATE = "[expressions.length>0][quasis.0.value.raw=/^(?!\\.\\.?\\/)/]";
+
+/** `import(<değişken/ifade>)`; tek muafiyeti bekçi yükleyicisidir (aşağıda GUARD_LOADER_FILE). */
+const IMPORT_NON_STATIC = {
+  selector: "ImportExpression:not([source.type='Literal'], [source.type='TemplateLiteral'])",
+  message: MSG_NON_STATIC,
+};
 
 /** AC-28 / T-005g Yapılacak 1: dinamik biçimlerde aynı yasaklı küme. */
 const RAW_CLIENT_SYNTAX = [
@@ -89,20 +116,26 @@ const RAW_CLIENT_SYNTAX = [
   // require("…"), module.require("…"), createRequire(…)("…"), require adlı takma adlar: tüm küme.
   { selector: `${REQUIRE_CALL}[arguments.0.type='Literal'][arguments.0.value=${FORBIDDEN_RE}]`, message: MSG_FORBIDDEN },
   { selector: `${REQUIRE_CALL} > TemplateLiteral:first-child > TemplateElement[value.raw=${FORBIDDEN_RE}]`, message: MSG_FORBIDDEN },
-  // Herhangi bir çağrının ilk argümanı yol/kapsamlı yasaklı belirteç (takma adlı yükleyici,
-  // ör. `const r = createRequire(…); r("drizzle-orm/postgres-js")`).
+  // Herhangi bir çağrının ilk argümanı kapsamlı/alt yollu yasaklı belirteç veya göreli/mutlak yasaklı
+  // yol (takma adlı yükleyici, ör. `const r = createRequire(…); r("drizzle-orm/postgres-js")`,
+  // `r("../../packages/db/src/client.ts")`). T-015: çıplak yol dizesi (`matchesGlob("packages/db/src/x.ts", …)`)
+  // modül belirteci değildir → burada aranmaz; require/import konumunda yukarıdaki tam küme geçerli.
   {
-    selector: `CallExpression[arguments.0.type='Literal'][arguments.0.value=${FORBIDDEN_UNAMBIGUOUS_RE}]`,
+    selector: `${OTHER_CALL}[arguments.0.type='Literal'][arguments.0.value=${FORBIDDEN_ALIAS_CALL_RE}]`,
     message: MSG_FORBIDDEN,
   },
   {
-    selector: `CallExpression > TemplateLiteral:first-child > TemplateElement[value.raw=${FORBIDDEN_UNAMBIGUOUS_RE}]`,
+    selector: `${OTHER_CALL} > TemplateLiteral:first-child > TemplateElement:first-child[value.raw=${FORBIDDEN_ALIAS_CALL_RE}]`,
+    message: MSG_FORBIDDEN,
+  },
+  {
+    selector: `${OTHER_CALL} > TemplateLiteral:first-child > TemplateElement:not(:first-child)[value.raw=${FORBIDDEN_UNAMBIGUOUS_RE}]`,
     message: MSG_FORBIDDEN,
   },
   // import x = require("…") (TypeScript)
   { selector: `TSExternalModuleReference > Literal[value=${FORBIDDEN_RE}]`, message: MSG_FORBIDDEN },
   // Statik olmayan belirteçler (değişken, birleştirme, dinamik paket adlı şablon).
-  { selector: "ImportExpression:not([source.type='Literal'], [source.type='TemplateLiteral'])", message: MSG_NON_STATIC },
+  IMPORT_NON_STATIC,
   { selector: `ImportExpression > TemplateLiteral.source${DYNAMIC_BARE_TEMPLATE}`, message: MSG_NON_STATIC },
   {
     selector: `${REQUIRE_CALL}:not([arguments.0.type='Literal'], [arguments.0.type='TemplateLiteral'])`,
@@ -123,6 +156,9 @@ const TENANT_SETTING_SYNTAX = [
   { selector: `TemplateElement[value.raw=${TENANT_SETTING_RE}]`, message: MSG_TENANT },
   { selector: `TemplateLiteral[quasis.0.value.raw=${SQL_SET_RESET_RE}]`, message: MSG_TENANT },
 ];
+
+/** `import(<ifade>)` muafiyetinin tek dosyası (T-015). */
+const GUARD_LOADER_FILE = "scripts/guards/cli.mjs";
 
 export default defineConfig(
   globalIgnores([
@@ -167,6 +203,22 @@ export default defineConfig(
         { patterns: FORBIDDEN_MODULES.map(({ regex, message }) => ({ regex, message })) },
       ],
       "no-restricted-syntax": ["error", ...RAW_CLIENT_SYNTAX, ...TENANT_SETTING_SYNTAX],
+    },
+  },
+  {
+    // T-015: bekçi giriş noktası `scripts/guards/<ad>.mjs` modülünü `import(pathToFileURL(file).href)`
+    // ile yükler; `<ad>` `isGuardName` ile sabit `GUARDS` listesine karşı doğrulanır ve testler
+    // (`scope.test.mjs`) `guardsDir` ile geçici dizinden sahte modül yükler — statik harita bunu
+    // karşılayamaz. Muafiyet YALNIZCA bu dosya ve YALNIZCA `import(<ifade>)` seçicisi içindir: aynı
+    // dosyada yasaklı küme (statik/dinamik/require), statik olmayan `require` ve tenant ayarı
+    // denetimleri aynen geçerlidir (ac-28-lint.test.ts bunu doğrular).
+    files: [GUARD_LOADER_FILE],
+    rules: {
+      "no-restricted-syntax": [
+        "error",
+        ...RAW_CLIENT_SYNTAX.filter((s) => s !== IMPORT_NON_STATIC),
+        ...TENANT_SETTING_SYNTAX,
+      ],
     },
   },
   {
