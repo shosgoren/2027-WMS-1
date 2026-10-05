@@ -1,0 +1,174 @@
+# Etkin WMS — CI hattı (T-003). KORUNAN DOSYA (docs/spec/14-reliability-ops.md, PROTOCOL §3b):
+# değişiklik ayrı küçük PR + security-reviewer + `APPROVED-BY: supervisor (ADR-012 rev.)` ister.
+#
+# İş adları (verify, infra, secrets, deps) SABİTTİR: T-009 bunları branch protection'da zorunlu
+# durum kontrolü olarak kullanır. Ad değişikliği korunan değişikliktir.
+#
+# Bu iş akışı hiçbir repo sırrı kullanmaz (Neon koşusu T-005d'de, ayrı iş akışında).
+# Üçüncü taraf action'lar tam commit SHA ile sabitlenir; etiket yorumdadır.
+# Henüz kartı tamamlanmamış adımlar (check:all → T-008, test:ac → T-007, test:int → T-005a,
+# migration ileri/geri → ilk migration kartı, Playwright → Faz 1) burada YOKTUR; her biri kendi
+# kartında eklenir. Yer tutucu/boş yeşil adım eklenmez (G-07).
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - "int/**"
+      # Birleştirilmeyecek negatif kanıt dalları (T-003 kabul ölçütü). PR'a dönüşmedikleri için
+      # pull_request tetiklemez; workflow_dispatch ise iş akışının varsayılan dalda olmasını ister.
+      - "ci-probe/**"
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # pnpm sürümü package.json "packageManager" alanından okunur.
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      # Node sürümü package.json "engines.node" alanından okunur.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: package.json
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm verify
+      - name: Upload .artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: verify-artifacts
+          path: .artifacts/
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14
+
+  infra:
+    name: infra
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: package.json
+      # infra:smoke yalnızca Node yerleşik modüllerini ve docker compose'u kullanır; pnpm install gerekmez.
+      # .env.example yalnızca yerel yer tutucu değerler içerir (sır değildir).
+      - run: cp .env.example .env
+      - run: docker compose up -d --wait --wait-timeout 300
+      - run: pnpm infra:smoke
+      - name: Collect compose logs
+        if: failure()
+        run: |
+          mkdir -p .artifacts/infra
+          docker compose ps -a > .artifacts/infra/compose-ps.txt 2>&1 || true
+          docker compose logs --no-color --timestamps > .artifacts/infra/compose-logs.txt 2>&1 || true
+      - name: Upload compose logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: infra-compose-logs
+          path: .artifacts/infra/
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Compose down
+        if: always()
+        run: docker compose down -v --remove-orphans
+
+  secrets:
+    name: secrets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      # gitleaks (MIT), resmî sürüm ikilisi; SHA-256 sürümün checksums.txt dosyasından.
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # Tüm geçmiş taranır: sır yalnızca son commit'te değil, geçmişte de aranır.
+          fetch-depth: 0
+      - name: Install gitleaks
+        run: |
+          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${tarball}"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" version
+      # Bulgu → çıkış 1 → iş kırmızı. --redact: bulunan değer loga basılmaz (G-09).
+      - name: gitleaks (git history)
+        run: '"$RUNNER_TEMP/gitleaks" git --redact --no-banner --exit-code 1 .'
+
+  deps:
+    name: deps
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: package.json
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Eşik (A-öneri, T-003): high ve critical → kırmızı. Tüm çalışma alanı, prod + dev bağımlılıkları.
+      - name: pnpm audit (high, critical)
+        run: pnpm audit --audit-level high
+      # Lisans: çalışma alanı paketlerinin DOĞRUDAN bağımlılıklarından biri GPL/AGPL ise kırmızı.
+      # (LGPL bu kurala girmez.) Lisansı belirlenemeyen doğrudan bağımlılık da kırmızıdır.
+      - name: License check (direct deps, GPL/AGPL)
+        run: |
+          pnpm ls -r --depth 0 --json > "$RUNNER_TEMP/direct.json"
+          pnpm licenses list -r --json > "$RUNNER_TEMP/licenses.json"
+          node --input-type=module - "$RUNNER_TEMP/direct.json" "$RUNNER_TEMP/licenses.json" <<'EOF'
+          import { readFileSync } from "node:fs";
+          const [directPath, licensesPath] = process.argv.slice(2);
+          const projects = JSON.parse(readFileSync(directPath, "utf8"));
+          const byLicense = JSON.parse(readFileSync(licensesPath, "utf8"));
+          const licenseOf = new Map();
+          for (const [license, pkgs] of Object.entries(byLicense)) {
+            for (const p of pkgs) for (const v of p.versions) licenseOf.set(`${p.name}@${v}`, license);
+          }
+          const copyleft = /(^|[^L])A?GPL/;
+          const bad = [];
+          let count = 0;
+          for (const project of projects) {
+            for (const field of ["dependencies", "devDependencies", "optionalDependencies"]) {
+              for (const [name, info] of Object.entries(project[field] ?? {})) {
+                if (info.version.startsWith("link:") || info.version.startsWith("workspace:")) continue;
+                count += 1;
+                const key = `${name}@${info.version}`;
+                const license = licenseOf.get(key);
+                if (license === undefined) bad.push(`${project.name} → ${key}: lisans belirlenemedi`);
+                else if (copyleft.test(license)) bad.push(`${project.name} → ${key}: ${license}`);
+              }
+            }
+          }
+          if (bad.length > 0) {
+            console.error(`licenses: FAIL (${bad.length}/${count} doğrudan bağımlılık)`);
+            for (const line of bad) console.error(`  ${line}`);
+            process.exit(1);
+          }
+          console.log(`licenses: OK (${count} doğrudan bağımlılık, GPL/AGPL yok)`);
+          EOF
