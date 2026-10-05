@@ -16,6 +16,16 @@
 //     argümanı olarak tekrar ediyor (`expect(x).toBe(x)`); `assert` için tüm argümanlar sabit
 //     (`assert(true)`, `assert.ok(1, "m")`) veya ilk iki argüman aynı (`assert.equal(x, x)`).
 //     `expect(true).toBe(gercek)` sabit değildir (ters yazılmış ama gerçek kontrol).
+//   - Etkisiz assertion (T-008j; sayılmaz, sabit bulgusu da değildir — testte başka assertion yoksa
+//     NO_ASSERTION, dosya sayısı düşerse ratchet yakalar): `ineffectiveReason`
+//       · erişilemeyen kod: sabit koşullu dalın ölü kolu (`if (false) {…}`, `if (1) {} else {…}`,
+//         `while (0) {…}`, `false && expect(…)…`, `c ? … : …` sabit koşulla) ve aynı blokta koşulsuz
+//         `return`/`throw` sonrası deyimler (hoist edilen işlev bildirimi hariç);
+//       · yutulan assertion: `try` bloğunda, `catch` bloğu üst düzeyde `throw` etmiyorsa
+//         (`try { expect(…) } catch {}`); `try … finally` (catch yok) etkilidir;
+//       · await edilmemiş asenkron matcher: `.resolves`/`.rejects` zinciri veya `expect.poll`
+//         doğrudan `await` edilmiyor ya da `return` edilmiyorsa (`Promise.all([...])` içi de sayılmaz).
+//     Yerel yardımcı işlev çağrısı da aynı kuralla süzülür (`try { yardimci() } catch {}`).
 //   - Dosya assertion sayısı = `@AC` dosyasındaki tüm sabit olmayan assertion'lar (yardımcı
 //     işlevlerdekiler dahil).
 //   - Her AC testi en az bir sabit olmayan assertion içermeli; test gövdesinden çağrılan aynı
@@ -229,6 +239,118 @@ export function classifyAssertion(call, sf) {
 }
 
 /**
+ * Değeri derleme zamanında belli doğruluk (`true`/`false`); belli değilse `null`.
+ * @param {ts.Expression} expr
+ * @returns {boolean | null}
+ */
+export function constantTruthiness(expr) {
+  const e = unwrap(expr);
+  switch (e.kind) {
+    case ts.SyntaxKind.TrueKeyword:
+      return true;
+    case ts.SyntaxKind.FalseKeyword:
+    case ts.SyntaxKind.NullKeyword:
+      return false;
+    default:
+      break;
+  }
+  if (ts.isNumericLiteral(e)) return Number(e.text) !== 0;
+  if (ts.isBigIntLiteral(e)) return e.text !== "0n";
+  if (ts.isStringLiteralLike(e)) return e.text !== "";
+  if (ts.isIdentifier(e)) return e.text === "undefined" || e.text === "NaN" ? false : null;
+  if (ts.isVoidExpression(e)) return false;
+  if (ts.isPrefixUnaryExpression(e) && e.operator === ts.SyntaxKind.ExclamationToken) {
+    const v = constantTruthiness(e.operand);
+    return v === null ? null : !v;
+  }
+  if (ts.isArrayLiteralExpression(e) || ts.isObjectLiteralExpression(e) || ts.isArrowFunction(e) || ts.isFunctionExpression(e)) return true;
+  return null;
+}
+
+/**
+ * Deyim akışı koşulsuz sonlandırıyor mu (`return`, `throw`).
+ * @param {ts.Statement} st
+ * @returns {boolean}
+ */
+function terminates(st) {
+  return ts.isReturnStatement(st) || ts.isThrowStatement(st);
+}
+
+/**
+ * Asenkron matcher zinciri mi (`.resolves`/`.rejects` veya `expect.poll`).
+ * @param {ts.CallExpression} call
+ * @returns {boolean}
+ */
+function isAsyncMatcher(call) {
+  /** @type {ts.Expression} */
+  let e = unwrap(call.expression);
+  while (ts.isPropertyAccessExpression(e)) {
+    if (e !== unwrap(call.expression) && (e.name.text === "resolves" || e.name.text === "rejects")) return true;
+    e = unwrap(e.expression);
+  }
+  if (!ts.isCallExpression(e)) return false;
+  const ec = unwrap(e.expression);
+  return ts.isPropertyAccessExpression(ec) && ec.name.text === "poll" && ts.isIdentifier(unwrap(ec.expression)) && /** @type {ts.Identifier} */ (unwrap(ec.expression)).text === "expect";
+}
+
+/**
+ * Çağrı ifadesi `await` ya da `return` ediliyor mu (parantez/tip dönüşümü üzerinden).
+ * @param {ts.Node} node
+ * @returns {boolean}
+ */
+function awaitedOrReturned(node) {
+  let n = node;
+  let p = n.parent;
+  while (p !== undefined && (ts.isParenthesizedExpression(p) || ts.isAsExpression(p) || ts.isNonNullExpression(p) || ts.isSatisfiesExpression(p) || ts.isTypeAssertionExpression(p))) {
+    n = p;
+    p = p.parent;
+  }
+  if (p === undefined) return false;
+  if (ts.isAwaitExpression(p) || ts.isReturnStatement(p)) return true;
+  return ts.isArrowFunction(p) && p.body === n;
+}
+
+/**
+ * Assertion (veya yerel yardımcı) çağrısı etkisiz mi; ise nedeni (T-008j). Atalar dosya köküne
+ * kadar taranır (işlev sınırında durulmaz: ölü koldaki geri çağırım da ölüdür).
+ * @param {ts.CallExpression} call
+ * @returns {string | null}
+ */
+export function ineffectiveReason(call) {
+  if (isAsyncMatcher(call) && !awaitedOrReturned(call)) return "await edilmemiş .resolves/.rejects/expect.poll";
+  /** @type {ts.Node} */
+  let child = call;
+  let p = call.parent;
+  while (p !== undefined) {
+    if (ts.isIfStatement(p) && child !== p.expression) {
+      const v = constantTruthiness(p.expression);
+      if ((v === false && child === p.thenStatement) || (v === true && child === p.elseStatement)) return "erişilemeyen kod (sabit koşullu dal)";
+    } else if ((ts.isWhileStatement(p) || ts.isForStatement(p)) && child === p.statement) {
+      const cond = ts.isWhileStatement(p) ? p.expression : p.condition;
+      if (cond !== undefined && constantTruthiness(cond) === false) return "erişilemeyen kod (sabit yanlış döngü koşulu)";
+    } else if (ts.isConditionalExpression(p) && child !== p.condition) {
+      const v = constantTruthiness(p.condition);
+      if ((v === false && child === p.whenTrue) || (v === true && child === p.whenFalse)) return "erişilemeyen kod (sabit koşullu ifade)";
+    } else if (ts.isBinaryExpression(p) && child === p.right) {
+      const op = p.operatorToken.kind;
+      const v = constantTruthiness(p.left);
+      if ((op === ts.SyntaxKind.AmpersandAmpersandToken && v === false) || ((op === ts.SyntaxKind.BarBarToken || op === ts.SyntaxKind.QuestionQuestionToken) && v === true)) {
+        return "erişilemeyen kod (kısa devre)";
+      }
+    } else if ((ts.isBlock(p) || ts.isSourceFile(p) || ts.isCaseClause(p) || ts.isDefaultClause(p) || ts.isModuleBlock(p)) && !ts.isFunctionDeclaration(child)) {
+      const stmts = p.statements;
+      const idx = stmts.indexOf(/** @type {ts.Statement} */ (child));
+      if (idx > 0 && stmts.slice(0, idx).some((st) => terminates(st))) return "erişilemeyen kod (return/throw sonrası)";
+    } else if (ts.isTryStatement(p) && child === p.tryBlock && p.catchClause !== undefined) {
+      if (!p.catchClause.block.statements.some((st) => ts.isThrowStatement(st))) return "yutulan assertion (try içinde, catch yeniden fırlatmıyor)";
+    }
+    child = p;
+    p = p.parent;
+  }
+  return null;
+}
+
+/**
  * Bir test dosyasını tarar.
  * @param {string} text
  * @param {string} file depo köküne göre yol
@@ -268,7 +390,7 @@ export function scanSource(text, file) {
       const c = classifyAssertion(n, sf);
       if (c !== null) {
         if (c.constant) constants.push({ line: lineOf(n), message: c.reason });
-        else assertions++;
+        else if (ineffectiveReason(n) === null) assertions++;
       }
     }
     ts.forEachChild(n, collectAsserts);
@@ -292,12 +414,12 @@ export function scanSource(text, file) {
       if (found) return;
       if (ts.isCallExpression(n)) {
         const c = classifyAssertion(n, sf);
-        if (c !== null && !c.constant) {
+        if (c !== null && !c.constant && ineffectiveReason(n) === null) {
           found = true;
           return;
         }
         const callee = unwrap(n.expression);
-        if (ts.isIdentifier(callee) && !seen.has(callee.text)) {
+        if (ts.isIdentifier(callee) && !seen.has(callee.text) && ineffectiveReason(n) === null) {
           const bodies = fns.get(callee.text);
           if (bodies !== undefined) {
             const next = new Set(seen).add(callee.text);

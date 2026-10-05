@@ -6,6 +6,12 @@
 // olarak raporlanır. Kırmızısı yalnızca kayıt geçerliyse (kayıtlı, `origin/main`'de birebir,
 // süresi içinde, ≤14 gün, kapısı değerlendirilen fazın AC'si değil) kapıyı kırmaz → AC durumu
 // `QUARANTINED_FAIL` (engelleyici değil); aksi hâlde normal FAIL.
+// Rapor bütünlüğü (T-008j): vitest kendi süreç grubunda (`detached`) koşar; çıkınca grup SIGKILL ile
+// sonlandırılır, JSON raporu ANCAK bundan sonra okunur (test kodunun arka planda bıraktığı süreç
+// raporu sonradan yeniden yazamaz). Rapordaki sayılar vitest'in kendi özet satırıyla (`Tests …`,
+// default reporter, stdout) karşılaştırılır; uyuşmazlık veya özet yoksa koşu güvenilmez → FAIL.
+// Sınır: süreç grubundan kaçan (`setsid`/çift fork) süreç bu yolla durdurulamaz; o düzey yalıtım
+// ayrı iş/konteyner ister (guards.yml `test-ac` işi PR ağacının dışına, `$RUNNER_TEMP`'e yazar).
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -147,6 +153,84 @@ export function parseVitestReport(json, root) {
 }
 
 /**
+ * @typedef {{ total: number, failed: number, passed: number, expectedFail: number, skipped: number, todo: number }} VitestSummary
+ */
+
+/** ANSI renk/biçim kaçışları (GitHub Actions'ta vitest renkli basar). */
+const ANSI_RE = /\u001b\[[0-9;]*[A-Za-z]/g;
+
+/**
+ * Vitest default reporter'ın son `Tests` özet satırı (vitest 5 `getStateString`:
+ * `N failed | N passed | N expected fail | N skipped | N todo (toplam)` veya `no tests`).
+ * Bulunamaz veya tanınmayan parça içerirse `null` (fail-closed).
+ * @param {string} stdout
+ * @returns {VitestSummary | null}
+ */
+export function parseVitestSummary(stdout) {
+  const lines = stdout.replace(ANSI_RE, "").split(/\r?\n/);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = /^\s*Tests\s+(.+?)\s*$/.exec(lines[i] ?? "");
+    if (m === null) continue;
+    const body = m[1] ?? "";
+    /** @type {VitestSummary} */
+    const out = { total: 0, failed: 0, passed: 0, expectedFail: 0, skipped: 0, todo: 0 };
+    if (body === "no tests") return out;
+    const t = /^(.+) \((\d+)\)$/.exec(body);
+    if (t === null) return null;
+    out.total = Number(t[2]);
+    /** @type {Record<string, keyof VitestSummary>} */
+    const keys = { failed: "failed", passed: "passed", "expected fail": "expectedFail", skipped: "skipped", todo: "todo" };
+    for (const part of (t[1] ?? "").split(" | ")) {
+      const pm = /^(\d+) (failed|passed|expected fail|skipped|todo)$/.exec(part.trim());
+      const key = pm === null ? undefined : keys[pm[2] ?? ""];
+      if (pm === null || key === undefined) return null;
+      out[key] = Number(pm[1]);
+    }
+    return out;
+  }
+  return null;
+}
+
+/**
+ * JSON rapor sonuçları vitest özet satırıyla uyuşuyor mu; uyuşmuyorsa açıklama.
+ * Eşleme (vitest 5): JSON `failed` = özet failed; JSON `passed` = özet passed + expected fail;
+ * toplam = özet toplamı.
+ * @param {TestOutcome[]} outcomes
+ * @param {VitestSummary | null} summary
+ * @returns {string | null}
+ */
+export function summaryMismatch(outcomes, summary) {
+  if (summary === null) return "vitest özet satırı (Tests …) bulunamadı veya çözümlenemedi";
+  const failed = outcomes.filter((o) => o.status === "failed").length;
+  const passed = outcomes.filter((o) => o.status === "passed").length;
+  if (outcomes.length === summary.total && failed === summary.failed && passed === summary.passed + summary.expectedFail) return null;
+  return `JSON raporu (toplam ${outcomes.length}, geçen ${passed}, başarısız ${failed}) vitest özetiyle (toplam ${summary.total}, geçen ${summary.passed + summary.expectedFail}, başarısız ${summary.failed}) uyuşmuyor`;
+}
+
+/**
+ * Vitest'i kendi süreç grubunda koşturur; çıkınca grubu (geride kalan torunlar dahil) SIGKILL ile
+ * sonlandırır. Grup zaten boşsa (ESRCH) sorun değildir.
+ * @param {string} bin
+ * @param {string[]} args
+ * @param {{ cwd: string, env: NodeJS.ProcessEnv }} opts
+ * @returns {import("node:child_process").SpawnSyncReturns<string>}
+ */
+export function spawnIsolated(bin, args, opts) {
+  // `detached` (setsid) spawnSync'te de uygulanır; @types/node yalnızca SpawnOptions'ta tanımlar.
+  /** @type {import("node:child_process").SpawnSyncOptionsWithStringEncoding & { detached: boolean }} */
+  const options = { cwd: opts.cwd, env: opts.env, encoding: "utf8", maxBuffer: 256 * 1024 * 1024, detached: true };
+  const r = spawnSync(bin, args, options);
+  if (typeof r.pid === "number" && r.pid > 0) {
+    try {
+      process.kill(-r.pid, "SIGKILL");
+    } catch (e) {
+      if (/** @type {NodeJS.ErrnoException} */ (e).code !== "ESRCH") throw e;
+    }
+  }
+  return r;
+}
+
+/**
  * Bir test türü için koşturma. Vitest dosya listesi + `-t` ad filtresiyle koşar, JSON raporunu okur.
  * @param {{ root: string, kind: TestKind, files: string[], ids: string[], artifactDir: string, name: string, vitestBin: string, env?: NodeJS.ProcessEnv }} opts
  * @returns {RunOutcome}
@@ -177,11 +261,12 @@ export function runKind({ root, kind, files, ids, artifactDir, name, vitestBin, 
     root,
     "--reporter=json",
     `--outputFile.json=${jsonFile}`,
+    "--reporter=default",
     "-t",
     namePattern(ids),
     ...files,
   ];
-  const r = spawnSync(vitestBin, args, { cwd: root, encoding: "utf8", env: env ?? process.env, maxBuffer: 256 * 1024 * 1024 });
+  const r = spawnIsolated(vitestBin, args, { cwd: root, env: env ?? process.env });
   const spawnError = r.error ? `\n[spawn hatası] ${r.error.message}` : "";
   writeFileSync(logFile, `$ ${[vitestBin, ...args].join(" ")}\n[çıkış ${r.status}]\n--- stdout ---\n${r.stdout ?? ""}\n--- stderr ---\n${r.stderr ?? ""}${spawnError}\n`);
   const relLog = path.relative(root, logFile).split(path.sep).join("/");
@@ -194,6 +279,10 @@ export function runKind({ root, kind, files, ids, artifactDir, name, vitestBin, 
   const outcomes = parseVitestReport(json, root);
   if (!outcomes) {
     return { kind, ok: false, exitCode: r.status, files, error: `vitest JSON raporu okunamadı (çıkış ${r.status}), bkz. ${relLog}`, outcomes: [], log: relLog };
+  }
+  const mismatch = summaryMismatch(outcomes, parseVitestSummary(r.stdout ?? ""));
+  if (mismatch !== null) {
+    return { kind, ok: false, exitCode: r.status, files, error: `REPORT_MISMATCH: ${mismatch}, bkz. ${relLog}`, outcomes: [], log: relLog };
   }
   // Çıkış ≠ 0 ama raporda başarısız test yoksa (yakalanmamış hata, yükleme hatası) tüm koşu güvenilmez.
   const explained = outcomes.some((o) => o.status === "failed");

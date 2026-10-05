@@ -1,11 +1,13 @@
 // T-008b `check:tests` testleri. Örnek test kodu yalnızca dize olarak tutulur (AST'de çağrı
 // değildir); uçtan uca senaryolar `lib/testkit.mjs` ile geçici depoda koşar.
-import { readFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { parseVitestSummary, runKind, summaryMismatch } from "../test-ac/run.mjs";
 import { main } from "./cli.mjs";
 import { scanSource as acScan } from "./lib/assertion-count.mjs";
-import { daysBetween, parseRegistry, quarantineTags } from "./lib/quarantine.mjs";
+import { CODES, daysBetween, entryDateFindings, evaluateSite, parseRegistry, quarantineTags } from "./lib/quarantine.mjs";
 import { createRepo } from "./lib/testkit.mjs";
 import { isTestFile, quarantineSites, scanSource } from "./tests.mjs";
 
@@ -493,4 +495,170 @@ describe("pnpm check:tests — karantina kaydı (uçtan uca, T-008e)", () => {
     expect(await main(["tests"], { root: r.dir, log: (l) => lines.push(l) })).toBe(1);
     expect(lines.join("\n")).toContain("FAIL QUARANTINE_NOT_APPROVED src/a.test.ts:2 — Q-01: origin/main:tests/QUARANTINE.md yok");
   });
+});
+
+// T-008j madde 3 (bekciler-2 incelemesi MINOR): ileri tarihli "eklendiği tarih" 14 gün sınırını
+// ötelemesin diye `eklendi ≤ bugün (UTC)` zorunlu → aksi QUARANTINE_FUTURE_DATE.
+describe("karantina: eklendiği tarih ≤ bugün (T-008j madde 3)", () => {
+  const H = "| Q | Test adı | Dosya | Neden | Sahip kart | Eklendiği tarih | Bitiş tarihi |\n|---|---|---|---|---|---|---|\n";
+  /** @param {number} n */
+  const day = (n) => new Date(Date.now() + n * 86_400_000).toISOString().slice(0, 10);
+  /**
+   * @param {string} added
+   * @param {string} end
+   */
+  const entry = (added, end) => ({ id: "Q-01", test: "t", file: "src/a.test.ts", reason: "n", card: "T-100", added, end, line: 3 });
+
+  it("saldırı: eklendi = yarın → QUARANTINE_FUTURE_DATE (bitiş 14 gün içinde olsa da)", () => {
+    const f = entryDateFindings(entry("2026-10-06", "2026-10-19"), "2026-10-05");
+    expect(f.map((x) => x.code)).toEqual([CODES.FUTURE_DATE]);
+    expect(f[0]?.message).toContain("2026-10-06 bugünden (2026-10-05 UTC) ileri");
+    expect(CODES.FUTURE_DATE).toBe("QUARANTINE_FUTURE_DATE");
+  });
+
+  it("saldırı: uzak gelecek tarihli kayıt test:ac yargıcında da (withDates) geçersiz", () => {
+    const e = entry("2027-01-01", "2027-01-14");
+    const registry = { entries: new Map([["Q-01", e]]), errors: [] };
+    const state = { registry, main: registry, mainRef: "origin/main", mainError: null, today: "2026-10-05" };
+    const f = evaluateSite({ file: "src/a.test.ts", title: `a ${QT} Q-01`, acIds: [] }, state, { gateAcs: new Set(), withDates: true });
+    expect(f.map((x) => x.code)).toEqual([CODES.FUTURE_DATE]);
+  });
+
+  it("yanlış pozitif yok: eklendi = bugün veya geçmiş → bulgu yok", () => {
+    expect(entryDateFindings(entry("2026-10-05", "2026-10-19"), "2026-10-05")).toEqual([]);
+    expect(entryDateFindings(entry("2026-10-01", "2026-10-15"), "2026-10-05")).toEqual([]);
+  });
+
+  it("CLI: kayıt satırında eklendi = yarın → check:tests FAIL; bugün → OK", async () => {
+    for (const [added, code] of /** @type {Array<[string, number]>} */ ([
+      [day(1), 1],
+      [day(0), 0],
+    ])) {
+      const r = createRepo({ prefix: "guards-tests-qf-" });
+      cleanups.push(() => r.cleanup());
+      r.writeAll({ "tests/QUARANTINE.md": `${H}| Q-01 | t | src/a.test.ts | n | T-100 | ${added} | ${day(13)} |\n`, "src/a.test.ts": IMPORT + `it("a", () => { expect(1).toBe(1); });\n` });
+      /** @type {string[]} */
+      const lines = [];
+      expect(await main(["tests"], { root: r.dir, log: (l) => lines.push(l) }), added).toBe(code);
+      const out = lines.join("\n");
+      if (code === 1) expect(out).toContain(`FAIL QUARANTINE_FUTURE_DATE tests/QUARANTINE.md:3 — Q-01: eklendiği tarih ${added}`);
+      else expect(out).not.toContain("QUARANTINE_FUTURE_DATE");
+    }
+  });
+});
+
+// T-008j madde 7 (bekciler-2 incelemesi MINOR): test:ac koşturucusu (`scripts/test-ac/run.mjs`)
+// vitest bittikten sonra süreç grubunu sonlandırır ve JSON rapor sayılarını vitest özet satırıyla
+// karşılaştırır. Bu dosyada çünkü kart test listesi `scripts/test-ac/test-ac.test.mjs`'i içermez.
+describe("test:ac rapor bütünlüğü (T-008j madde 7)", () => {
+  const REPO_ROOT = path.resolve(import.meta.dirname, "../..");
+  const CHILD_ENV = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("VITEST") && k !== "NODE_OPTIONS"));
+  const ESC = String.fromCharCode(27);
+
+  /** @param {Record<string, string>} files */
+  function fixture(files) {
+    const root = mkdtempSync(path.join(os.tmpdir(), "test-ac-integrity-"));
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }));
+    symlinkSync(path.join(REPO_ROOT, "node_modules"), path.join(root, "node_modules"), "dir");
+    for (const [rel, content] of Object.entries(files)) writeFileSync(path.join(root, rel), content);
+    const artifactDir = path.join(root, "out");
+    mkdirSync(artifactDir);
+    return { root, artifactDir };
+  }
+
+  /**
+   * Sahte vitest: JSON raporu (`passed` sayısı) yazar ve verilen özet satırını basar.
+   * @param {string} dir
+   * @param {{ passed: number, failed: number, summary: string | null }} spec
+   */
+  function fakeVitest(dir, spec) {
+    const bin = path.join(dir, "fake-vitest.mjs");
+    const results = [
+      ...Array.from({ length: spec.passed }, (_, i) => ({ fullName: `@AC-1 p${i}`, status: "passed", failureMessages: [] })),
+      ...Array.from({ length: spec.failed }, (_, i) => ({ fullName: `@AC-1 f${i}`, status: "failed", failureMessages: ["x"] })),
+    ];
+    const report = JSON.stringify({ testResults: [{ name: path.join(dir, "a.test.mjs"), assertionResults: results }] });
+    writeFileSync(
+      bin,
+      `#!/usr/bin/env node\nimport { writeFileSync } from "node:fs";\nconst a = process.argv.find((x) => x.startsWith("--outputFile.json="));\nwriteFileSync(a.slice("--outputFile.json=".length), ${JSON.stringify(report)});\n${spec.summary === null ? "" : `console.log(${JSON.stringify(spec.summary)});\n`}process.exit(${spec.failed > 0 ? 1 : 0});\n`,
+    );
+    chmodSync(bin, 0o755);
+    return bin;
+  }
+
+  /** @param {{ root: string, artifactDir: string }} fx @param {string} vitestBin */
+  const run = (fx, vitestBin) => {
+    return runKind({ root: fx.root, kind: "unit", files: ["a.test.mjs"], ids: ["AC-1"], artifactDir: fx.artifactDir, name: "t", vitestBin, env: CHILD_ENV });
+  };
+
+  it("parseVitestSummary: vitest 5 biçimleri, ANSI renkli satır, son satır geçerlidir; tanınmayan → null", () => {
+    expect(parseVitestSummary(" Test Files  1 passed (1)\n      Tests  8 passed | 18 skipped (26)\n")).toEqual({ total: 26, failed: 0, passed: 8, expectedFail: 0, skipped: 18, todo: 0 });
+    expect(parseVitestSummary(`${ESC}[2m      Tests ${ESC}[22m ${ESC}[1m${ESC}[31m1 failed${ESC}[39m${ESC}[22m${ESC}[2m | ${ESC}[22m${ESC}[1m${ESC}[32m2 passed${ESC}[39m${ESC}[22m${ESC}[90m (3)${ESC}[39m\n`)).toEqual({ total: 3, failed: 1, passed: 2, expectedFail: 0, skipped: 0, todo: 0 });
+    expect(parseVitestSummary("      Tests  1 expected fail | 1 todo (2)")).toEqual({ total: 2, failed: 0, passed: 0, expectedFail: 1, skipped: 0, todo: 1 });
+    expect(parseVitestSummary("      Tests  no tests")).toEqual({ total: 0, failed: 0, passed: 0, expectedFail: 0, skipped: 0, todo: 0 });
+    // Test kodunun önce bastığı sahte satır, vitest'in sonraki gerçek özetini geçemez.
+    expect(parseVitestSummary("      Tests  9 passed (9)\n...\n      Tests  1 failed (1)\n")?.failed).toBe(1);
+    expect(parseVitestSummary("      Tests  1 passed | 2 bogus (3)")).toBeNull();
+    expect(parseVitestSummary("özet yok")).toBeNull();
+  });
+
+  it("summaryMismatch: sayılar uyuşursa null; geçen/başarısız/toplam farkı veya özet yoksa açıklama", () => {
+    const o = (/** @type {string} */ status) => ({ file: "a.test.mjs", fullName: "@AC-1 x", status });
+    const outcomes = [o("passed"), o("failed"), o("skipped")];
+    expect(summaryMismatch(outcomes, { total: 3, failed: 1, passed: 1, expectedFail: 0, skipped: 1, todo: 0 })).toBeNull();
+    expect(summaryMismatch(outcomes, { total: 3, failed: 0, passed: 2, expectedFail: 0, skipped: 1, todo: 0 })).toContain("uyuşmuyor");
+    expect(summaryMismatch(outcomes, { total: 4, failed: 1, passed: 1, expectedFail: 0, skipped: 2, todo: 0 })).toContain("toplam 3");
+    expect(summaryMismatch(outcomes, null)).toContain("bulunamadı");
+  });
+
+  it("saldırı: JSON raporu 'geçti' der ama vitest özeti başarısız der → REPORT_MISMATCH, koşu güvenilmez", () => {
+    const fx = fixture({});
+    const r = run(fx, fakeVitest(fx.root, { passed: 1, failed: 0, summary: "      Tests  1 failed (1)" }));
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("REPORT_MISMATCH");
+    expect(r.outcomes).toEqual([]);
+  });
+
+  it("saldırı: özet satırı yok (rapor tek kaynak olamaz) → REPORT_MISMATCH", () => {
+    const fx = fixture({});
+    const r = run(fx, fakeVitest(fx.root, { passed: 1, failed: 0, summary: null }));
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("özet satırı");
+  });
+
+  it("yanlış pozitif yok: rapor ve özet uyuşursa (geçen ve başarısız) koşu güvenilir", () => {
+    const fx = fixture({});
+    const ok = run(fx, fakeVitest(fx.root, { passed: 2, failed: 0, summary: "      Tests  2 passed (2)" }));
+    expect(ok.ok).toBe(true);
+    expect(ok.outcomes.map((x) => x.status)).toEqual(["passed", "passed"]);
+    const red = run(fx, fakeVitest(fx.root, { passed: 1, failed: 1, summary: "      Tests  1 failed | 1 passed (2)" }));
+    expect(red.ok).toBe(true);
+    expect(red.outcomes.map((x) => x.status)).toEqual(["passed", "failed"]);
+  });
+
+  it(
+    "saldırı: testin arka planda bıraktığı süreç vitest bittikten sonra yazamaz (süreç grubu sonlandırılır); gerçek vitest ile uyuşan rapor güvenilir",
+    async () => {
+      const marker = "late-write.txt";
+      const fx = fixture({
+        "a.test.mjs": [
+          `import { spawn } from "node:child_process";`,
+          `import { expect, it } from "vitest";`,
+          `it(${JSON.stringify("@" + "AC-1 arka plan")}, () => {`,
+          `  const code = ${JSON.stringify(`setTimeout(() => require("node:fs").writeFileSync(${JSON.stringify(marker)}, "x"), 1500);`)};`,
+          `  spawn(process.execPath, ["-e", code], { cwd: process.cwd(), stdio: "ignore" }).unref();`,
+          `  expect(process.cwd()).toBeTruthy();`,
+          `});`,
+          ``,
+        ].join("\n"),
+      });
+      const r = run(fx, path.join(REPO_ROOT, "node_modules/.bin/vitest"));
+      expect(r.error).toBeNull();
+      expect(r.ok).toBe(true);
+      expect(r.outcomes.map((x) => x.status)).toEqual(["passed"]);
+      await new Promise((res) => setTimeout(res, 2500));
+      expect(existsSync(path.join(fx.root, marker))).toBe(false);
+    },
+    60_000,
+  );
 });
