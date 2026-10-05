@@ -1,0 +1,408 @@
+# Etkin WMS — CI hattı (T-003). KORUNAN DOSYA (docs/spec/14-reliability-ops.md, PROTOCOL §3b):
+# değişiklik ayrı küçük PR + security-reviewer + `APPROVED-BY: supervisor (ADR-012 rev.)` ister.
+#
+# İş adları (verify, infra, secrets, deps) SABİTTİR: T-009 bunları branch protection'da zorunlu
+# durum kontrolü olarak kullanır. Ad değişikliği korunan değişikliktir.
+#
+# Bu iş akışı hiçbir repo sırrı kullanmaz (Neon koşusu T-005d'de, ayrı iş akışında).
+# Üçüncü taraf action'lar tam commit SHA ile sabitlenir; etiket yorumdadır.
+# Henüz kartı tamamlanmamış adımlar (check:all → T-008, test:ac → T-007, test:int → T-005a,
+# migration ileri/geri → ilk migration kartı, Playwright → Faz 1) burada YOKTUR; her biri kendi
+# kartında eklenir. Yer tutucu/boş yeşil adım eklenmez (G-07).
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - "int/**"
+      # Birleştirilmeyecek negatif kanıt dalları (T-003 kabul ölçütü; Supervisor 2026-10-05 kalmasını
+      # onayladı). PR'a dönüşmedikleri için pull_request tetiklemez; workflow_dispatch ise iş akışının
+      # varsayılan dalda olmasını ister. Bekçi/CI değişikliklerinin kırmızı kanıtı da buradan alınır.
+      - "ci-probe/**"
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# .pnpmfile.cjs / pnpmfile / globalPnpmfile kodu hiçbir işte yüklenmez (install, audit, verify):
+# `--ignore-scripts` pnpmfile'ı durdurmaz; pnpmfile audit çıktısını değiştirebilir veya
+# $GITHUB_ENV'e yazabilir (security-reviewer bulgusu). pnpm bu ortam değişkenini
+# `ignore-pnpmfile` ayarı olarak okur (yerelde fixture ile doğrulandı).
+env:
+  npm_config_ignore_pnpmfile: "true"
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # pnpm sürümü package.json "packageManager" alanından okunur.
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      # Node sürümü package.json "engines.node" alanından okunur.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: package.json
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm verify
+      # upload-artifact gizli (.ile başlayan) yolları varsayılan olarak atlar; include-hidden-files
+      # açmak yerine .artifacts/ gizli olmayan bir geçici dizine kopyalanır.
+      - name: Stage .artifacts
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/verify-artifacts"
+          if [ -d .artifacts ]; then cp -R .artifacts/. "$RUNNER_TEMP/verify-artifacts/"; fi
+      - name: Upload .artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: verify-artifacts
+          path: ${{ runner.temp }}/verify-artifacts/
+          if-no-files-found: warn
+          retention-days: 14
+
+  infra:
+    name: infra
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: package.json
+      # infra:smoke yalnızca Node yerleşik modüllerini ve docker compose'u kullanır; pnpm install gerekmez.
+      # .env.example yalnızca yerel yer tutucu değerler içerir (sır değildir).
+      - run: cp .env.example .env
+      - run: docker compose up -d --wait --wait-timeout 300
+      - run: pnpm infra:smoke
+      - name: Collect compose logs
+        if: failure()
+        run: |
+          mkdir -p "$RUNNER_TEMP/infra-logs"
+          docker compose ps -a > "$RUNNER_TEMP/infra-logs/compose-ps.txt" 2>&1 || true
+          docker compose logs --no-color --timestamps > "$RUNNER_TEMP/infra-logs/compose-logs.txt" 2>&1 || true
+      - name: Upload compose logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: infra-compose-logs
+          path: ${{ runner.temp }}/infra-logs/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Compose down
+        if: always()
+        run: docker compose down -v --remove-orphans
+
+  secrets:
+    name: secrets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      # gitleaks (MIT), resmî sürüm ikilisi; SHA-256 sürümün checksums.txt dosyasından.
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # Tüm geçmiş taranır: sır yalnızca son commit'te değil, geçmişte de aranır.
+          fetch-depth: 0
+      - name: Install gitleaks
+        run: |
+          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${tarball}"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" version
+      # Bulgu → çıkış 1 → iş kırmızı. --redact: bulunan değer loga basılmaz (G-09).
+      - name: gitleaks (git history)
+        run: '"$RUNNER_TEMP/gitleaks" git --redact --no-banner --exit-code 1 .'
+
+  deps:
+    name: deps
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Bu işte pnpm, manifest koruması geçene kadar HİÇ çalıştırılmaz: `configDependencies`
+      # pnpm'in her komutunda (config get, store path dahil) başlangıçta indirilir (yerelde
+      # doğrulandı). Bu yüzden setup-node'da `cache: pnpm` yok (o, `pnpm store path` çağırır)
+      # ve pnpm/action-setup korumadan SONRA gelir.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: package.json
+          package-manager-cache: false
+      # Audit muafiyetleri YALNIZCA bu dosyada (A-36) yaşar. Repodaki pnpm/npm yapılandırması
+      # advisory'yi JSON'dan önce düşürebilir veya kod yükleyebilir (security-reviewer bulguları).
+      # Savunma katmanları:
+      #   0) Workflow düzeyi `npm_config_ignore_pnpmfile=true`: .pnpmfile.cjs / pnpmfile /
+      #      globalPnpmfile kodu install'da ve audit'te yüklenmez (yerelde fixture ile doğrulandı).
+      #   1) "Audit config guard (manifests)" — pnpm'den ÖNCE, Python + PyYAML ile (yoksa kırmızı;
+      #      PyYAML merge key `<<`, `?` anahtarı, kaçışlı anahtar ve akış biçimini pnpm gibi çözer;
+      #      yq satır içi merge'ü atlıyor — yerelde doğrulandı). Kırmızı:
+      #      - izlenen .pnpmfile.cjs / .pnpmfile.mjs, package.yaml / package.json5;
+      #      - pnpm-workspace.yaml: audit*, configDependencies, pnpmfile, globalPnpmfile,
+      #        ignorePnpmfile, *registry* anahtarları; ayrıştırılamayan YAML;
+      #      - package.json (JSON): pnpm.audit*, pnpm.configDependencies, configDependencies,
+      #        pnpm.*pnpmfile*; ayrıştırılamayan JSON (pnpm `config get` kök package.json'daki
+      #        pnpm.auditConfig'i göstermez ama audit onu uygular — yerelde doğrulandı);
+      #      - .npmrc: audit*, *pnpmfile*, config-dependencies, *registry* anahtarları.
+      #      `overrides` / `pnpm.overrides` / `resolutions` kırmızı DEĞİLDİR (meşru yama aracıdır ve
+      #      audit gerçek lockfile'ı denetler); toplanır ve audit adımında advisory taşıyan veya A-36
+      #      paketini (braces) hedefliyorsa ::warning:: verilir — muafiyet gerekçesini değiştirebilir.
+      #   2) install `--ignore-scripts`: yaşam döngüsü betikleri (postinstall vb.) çalışmaz.
+      #   3) "Audit integrity" — audit'ten HEMEN ÖNCE: çalışma ağacı temiz; pnpm'in çözümlediği
+      #      auditConfig / configDependencies / pnpmfile / globalPnpmfile boş; registry npmjs.
+      - name: Audit config guard (manifests)
+        run: |
+          python3 - "$RUNNER_TEMP/overrides.json" <<'EOF'
+          import json, os, re, subprocess, sys
+          try:
+              import yaml
+          except ImportError:
+              print("::error::PyYAML bulunamadı — manifest koruması koşamıyor (kapalı başarısızlık)")
+              sys.exit(1)
+          out_path = sys.argv[1]
+          files = [f for f in subprocess.run(["git", "ls-files", "-z"], check=True, capture_output=True).stdout.decode().split("\0") if f]
+          hits, overrides = [], []
+          def bad_key(k):
+              k = str(k).lower().replace("-", "").replace("_", "")
+              return k.startswith("audit") or "pnpmfile" in k or k == "configdependencies" or "registry" in k
+          for f in files:
+              name = os.path.basename(f)
+              if name in (".pnpmfile.cjs", ".pnpmfile.mjs"):
+                  hits.append(f"{f}: pnpmfile kabul edilmez")
+              elif name in ("package.yaml", "package.json5"):
+                  hits.append(f"{f}: yalnızca package.json manifesti kabul edilir")
+              elif name in ("pnpm-workspace.yaml", "pnpm-workspace.yml"):
+                  try:
+                      data = yaml.safe_load(open(f, encoding="utf-8")) or {}
+                  except Exception as e:
+                      hits.append(f"{f}: YAML ayrıştırılamadı ({e.__class__.__name__})"); continue
+                  if not isinstance(data, dict):
+                      hits.append(f"{f}: kök bir eşleme değil"); continue
+                  for k, v in data.items():
+                      if bad_key(k): hits.append(f"{f}: {k}")
+                      if str(k) == "overrides" and isinstance(v, dict):
+                          overrides += [{"source": f, "key": str(ok), "value": str(ov)} for ok, ov in v.items()]
+              elif name == "package.json":
+                  try:
+                      pkg = json.load(open(f, encoding="utf-8"))
+                  except Exception as e:
+                      hits.append(f"{f}: JSON ayrıştırılamadı ({e.__class__.__name__})"); continue
+                  if not isinstance(pkg, dict):
+                      hits.append(f"{f}: kök bir nesne değil"); continue
+                  if "configDependencies" in pkg: hits.append(f"{f}: configDependencies")
+                  pnpm = pkg.get("pnpm") or {}
+                  if isinstance(pnpm, dict):
+                      for k, v in pnpm.items():
+                          if bad_key(k): hits.append(f"{f}: pnpm.{k}")
+                          if k == "overrides" and isinstance(v, dict):
+                              overrides += [{"source": f"{f} pnpm.overrides", "key": str(ok), "value": str(ov)} for ok, ov in v.items()]
+                  for field in ("resolutions",):
+                      if isinstance(pkg.get(field), dict):
+                          overrides += [{"source": f"{f} {field}", "key": str(ok), "value": str(ov)} for ok, ov in pkg[field].items()]
+              elif name == ".npmrc":
+                  for line in open(f, encoding="utf-8"):
+                      m = re.match(r"\s*([^#;=\s][^=]*?)\s*=", line)
+                      if m and bad_key(m.group(1).strip().strip("'\"").split(":")[-1]):
+                          hits.append(f"{f}: {m.group(1).strip()}")
+          json.dump(overrides, open(out_path, "w"))
+          if hits:
+              print("::error::audit config not allowed; exceptions live only in ci.yml A-36")
+              for h in hits: print(f"  {h}")
+              sys.exit(1)
+          print(f"audit config guard: OK ({len(files)} izlenen dosya; overrides: {len(overrides)})")
+          EOF
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      # Eşik (A-öneri, T-003): high ve critical → kırmızı. Tüm çalışma alanı, prod + dev bağımlılıkları.
+      # `pnpm audit --ignore` KULLANILMAZ: pnpm 10.28'de bu bayrak denetim yapmadan 0 döner
+      # (security-reviewer bulgusu). Bunun yerine tek `pnpm audit --json` koşusu aşağıdaki
+      # Node filtresinden geçer; JSON okunamazsa kırmızı.
+      #
+      # Audit istisnası A-36 (Supervisor kararı 2026-10-05) — BİTİŞ 2026-10-19 (dahil):
+      #   GHSA-vfj7-8cjw-p6xm / CVE-2026-93687 (braces <=3.0.3, high, yamalı sürüm yok).
+      #   Yalnızca dev zinciri: apps/web devDependency @next/eslint-plugin-next → fast-glob →
+      #   micromatch → braces. Muafiyet YALNIZCA bu advisory için ve YALNIZCA tüm bulgu
+      #   yolları bu dev zincirindeyse geçerlidir; yol prod'a uzanırsa kırmızı.
+      #   Eşik değişmez; --prod / --ignore-unfixable kullanılmaz.
+      #   Bitiş geçince "A-36 expiry" adımı deps'i kırmızıya çevirir. Uzatma yeni bir Supervisor
+      #   kararıyla değil, KULLANICI kararıyla yapılır (I-17 / ADR-012 — bekçi gevşetme); aksi
+      #   hâlde istisna kaldırılır.
+      - name: Audit exception A-36 expiry
+        run: |
+          expires=2026-10-19
+          today=$(date -u +%F)
+          if [[ "$today" > "$expires" ]]; then
+            echo "::error::audit exception A-36 expired (bitiş $expires, bugün $today) — GHSA-vfj7-8cjw-p6xm"
+            exit 1
+          fi
+          echo "audit exception A-36 geçerli (bitiş $expires, bugün $today)"
+      - name: Audit integrity
+        run: |
+          fail=0
+          dirty=$(git status --porcelain --untracked-files=all)
+          if [ -n "$dirty" ]; then
+            echo "::error::çalışma ağacı temiz değil (install sonrası değişen/eklenen dosya):"
+            printf '%s\n' "$dirty"
+            fail=1
+          fi
+          audit_cfg=$(pnpm config get auditConfig --json)
+          if [ -n "$audit_cfg" ] && [ "$audit_cfg" != "undefined" ]; then
+            echo "::error::audit config not allowed; exceptions live only in ci.yml A-36 (pnpm config auditConfig = $audit_cfg)"
+            fail=1
+          fi
+          for key in pnpmfile globalPnpmfile; do
+            val=$(pnpm config get "$key")
+            if [ -n "$val" ] && [ "$val" != "undefined" ]; then
+              echo "::error::pnpm config $key boş olmalı, gelen: $val"
+              fail=1
+            fi
+          done
+          config_deps=$(pnpm config get configDependencies --json)
+          if [ -n "$config_deps" ] && [ "$config_deps" != "undefined" ]; then
+            echo "::error::configDependencies kabul edilmez (pnpm config = $config_deps)"
+            fail=1
+          fi
+          registry=$(pnpm config get registry)
+          if [ "$registry" != "https://registry.npmjs.org/" ]; then
+            echo "::error::registry beklenen https://registry.npmjs.org/, gelen $registry"
+            fail=1
+          fi
+          if [ "$fail" -ne 0 ]; then exit 1; fi
+          echo "audit integrity: OK (ağaç temiz · auditConfig/configDependencies/pnpmfile yok · registry npmjs)"
+      - name: pnpm audit (high, critical)
+        run: |
+          set +e
+          pnpm audit --json > "$RUNNER_TEMP/audit.json"
+          set -e
+          node --input-type=module - "$RUNNER_TEMP/audit.json" apps/web/package.json "$RUNNER_TEMP/overrides.json" <<'EOF'
+          import { readFileSync } from "node:fs";
+          const [auditPath, webPkgPath, overridesPath] = process.argv.slice(2);
+          // Muafiyetler: advisory → kayıt + izin verilen tek dev zinciri öneki (pnpm yol biçimi).
+          const EXEMPT = {
+            "GHSA-vfj7-8cjw-p6xm": { record: "A-36", devDep: "@next/eslint-plugin-next", prefix: "apps__web>@next/eslint-plugin-next>" },
+          };
+          let report;
+          try {
+            report = JSON.parse(readFileSync(auditPath, "utf8"));
+          } catch (e) {
+            console.error(`audit: FAIL (audit JSON okunamadı: ${e.message})`);
+            process.exit(1);
+          }
+          if (report === null || typeof report.advisories !== "object" || report.advisories === null) {
+            console.error("audit: FAIL (audit JSON'da advisories alanı yok)");
+            process.exit(1);
+          }
+          const webPkg = JSON.parse(readFileSync(webPkgPath, "utf8"));
+          const failures = [];
+          const exempted = [];
+          const seenExempt = new Set();
+          for (const a of Object.values(report.advisories)) {
+            if (a.severity !== "high" && a.severity !== "critical") continue;
+            const id = a.github_advisory_id;
+            const paths = (a.findings ?? []).flatMap((f) => f.paths ?? []);
+            const rule = EXEMPT[id];
+            if (rule !== undefined) {
+              seenExempt.add(id);
+              const devOnly =
+                webPkg.devDependencies?.[rule.devDep] !== undefined &&
+                webPkg.dependencies?.[rule.devDep] === undefined &&
+                webPkg.optionalDependencies?.[rule.devDep] === undefined;
+              const outside = paths.filter((p) => !p.startsWith(rule.prefix));
+              if (devOnly && paths.length > 0 && outside.length === 0) {
+                exempted.push(`${id} (${rule.record}, ${paths.length} yol, yalnızca dev zinciri)`);
+                continue;
+              }
+              failures.push(`${a.severity} ${id} ${a.module_name}: muafiyet ${rule.record} geçersiz — dev zinciri dışı yol: ${outside.join(", ") || (devOnly ? "bulgu yolu yok" : `${rule.devDep} devDependency değil`)}`);
+              continue;
+            }
+            failures.push(`${a.severity} ${id} ${a.module_name}: ${paths.join(", ")}`);
+          }
+          // overrides kırmızı değil (bkz. manifest koruması yorumu); advisory taşıyan paketi veya
+          // A-36 paketini (braces) hedefliyorsa incelensin diye uyarı.
+          const overrides = JSON.parse(readFileSync(overridesPath, "utf8"));
+          const watched = new Set(["braces", ...Object.values(report.advisories).map((a) => a.module_name)]);
+          const overrideName = (key) => {
+            const last = key.split(">").pop().trim();
+            const at = last.indexOf("@", 1);
+            return at === -1 ? last : last.slice(0, at);
+          };
+          for (const o of overrides) {
+            if (watched.has(overrideName(o.key))) {
+              console.log(`::warning::override advisory/A-36 paketini hedefliyor: ${o.source}: "${o.key}" → "${o.value}" — muafiyet gerekçesini gözden geçirin`);
+            }
+          }
+          for (const id of Object.keys(EXEMPT)) {
+            if (!seenExempt.has(id)) {
+              console.log(`::warning::${EXEMPT[id].record}: ${id} artık raporlanmıyor — istisna gereksiz, ci.yml'den kaldırın`);
+            }
+          }
+          for (const line of exempted) console.log(`audit: muaf ${line}`);
+          if (failures.length > 0) {
+            console.error(`audit: FAIL (${failures.length} high/critical advisory)`);
+            for (const line of failures) console.error(`  ${line}`);
+            process.exit(1);
+          }
+          console.log(`audit: OK (muafiyet dışı high/critical yok; muaf: ${exempted.length})`);
+          EOF
+      # Lisans: çalışma alanı paketlerinin DOĞRUDAN bağımlılıklarından biri GPL/AGPL ise kırmızı.
+      # (LGPL bu kurala girmez.) Lisansı belirlenemeyen doğrudan bağımlılık da kırmızıdır.
+      # Install başarısızsa bu adım da başarısız olur (0 doğrudan bağımlılık = FAIL); yanlış yeşil üretmez.
+      # audit kırmızı olsa da lisans sonucu ayrıca raporlanır (iş yine kırmızı kalır).
+      - name: License check (direct deps, GPL/AGPL)
+        if: ${{ !cancelled() }}
+        run: |
+          pnpm ls -r --depth 0 --json > "$RUNNER_TEMP/direct.json"
+          pnpm licenses list -r --json > "$RUNNER_TEMP/licenses.json"
+          node --input-type=module - "$RUNNER_TEMP/direct.json" "$RUNNER_TEMP/licenses.json" <<'EOF'
+          import { readFileSync } from "node:fs";
+          const [directPath, licensesPath] = process.argv.slice(2);
+          const projects = JSON.parse(readFileSync(directPath, "utf8"));
+          const byLicense = JSON.parse(readFileSync(licensesPath, "utf8"));
+          const licenseOf = new Map();
+          for (const [license, pkgs] of Object.entries(byLicense)) {
+            for (const p of pkgs) for (const v of p.versions) licenseOf.set(`${p.name}@${v}`, license);
+          }
+          const copyleft = /(^|[^L])A?GPL/;
+          const bad = [];
+          let count = 0;
+          for (const project of projects) {
+            for (const field of ["dependencies", "devDependencies", "optionalDependencies"]) {
+              for (const [name, info] of Object.entries(project[field] ?? {})) {
+                if (info.version.startsWith("link:") || info.version.startsWith("workspace:")) continue;
+                count += 1;
+                const key = `${name}@${info.version}`;
+                const license = licenseOf.get(key);
+                if (license === undefined) bad.push(`${project.name} → ${key}: lisans belirlenemedi`);
+                else if (copyleft.test(license)) bad.push(`${project.name} → ${key}: ${license}`);
+              }
+            }
+          }
+          if (count === 0) {
+            console.error("licenses: FAIL (doğrudan bağımlılık bulunamadı — install eksik mi?)");
+            process.exit(1);
+          }
+          if (bad.length > 0) {
+            console.error(`licenses: FAIL (${bad.length}/${count} doğrudan bağımlılık)`);
+            for (const line of bad) console.error(`  ${line}`);
+            process.exit(1);
+          }
+          console.log(`licenses: OK (${count} doğrudan bağımlılık, GPL/AGPL yok)`);
+          EOF
