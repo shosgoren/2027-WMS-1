@@ -31,7 +31,8 @@ Kaynak sözdizimi: `<dosya>#<json.yolu>` (package.json alanı) veya `docker-comp
 | Kuyruk kütüphanesi | — | — pg-boss seçildi (ADR-005 eki 2026-10-05); sürüm ilk kuyruk kartında kilitlenir (aday 12.36.0) | | ADR-005 |
 | Tailwind CSS | tailwindcss | 4.3.3 | apps/web/package.json#dependencies.tailwindcss | T-109 |
 | Tailwind PostCSS eklentisi | @tailwindcss/postcss | 4.3.3 | apps/web/package.json#dependencies.@tailwindcss/postcss | T-109 |
-| Shadcn/Radix, Lucide | — | — ilk kullanan kart | | |
+| Shadcn/Radix | — | — ilk kullanan kart | | |
+| Lucide | lucide-react | 1.52.0 | packages/ui/package.json#dependencies.lucide-react | T-110 |
 | TanStack Query / Virtual | @tanstack/* | — ilk kullanan kart | | |
 | next-intl | next-intl | 4.14.9 | apps/web/package.json#dependencies.next-intl | T-109, ADR-002 |
 | Zod | zod | — ilk kullanan kart | | |
@@ -50,7 +51,7 @@ Sürüm notları (kaynak: kurulu `package.json`/`pnpm-lock.yaml`, 2026-10-05):
 | DB | Neon PostgreSQL + transaction pooler; teknik alanlar T-005 ile doldurulur | ADR-004 (kabul) |
 | Kuyruk | Postgres kuyruğu (Faz 0–4); kütüphane pg-boss (ADR-005 eki) | ADR-005 (kabul) |
 | Dosya | S3 uyumlu özel bucket; yerelde MinIO; prod sağlayıcısı ADR-007 | ADR-006 (kabul) |
-| Web arayüzü | TypeScript strict, Tailwind, Shadcn/Radix, Lucide | — (ilk kullanan kart) |
+| Web arayüzü | TypeScript strict, Tailwind, Shadcn/Radix, Lucide (lucide-react 1.52.0, T-110) | — (Shadcn/Radix: ilk kullanan kart) |
 | Durum/veri | TanStack Query, TanStack Virtual, Zustand (gerektiğinde) | — |
 | Validasyon / i18n | Zod / next-intl | — |
 | Test | Vitest, Testcontainers, Playwright, k6, fast-check | — |
