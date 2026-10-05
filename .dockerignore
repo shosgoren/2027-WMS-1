@@ -1,15 +1,17 @@
 # Docker derleme bağlamı (T-010). Yerel derleme çıktıları, bağımlılıklar, sırlar ve
 # belgeler imaja/bağlama girmez; imaj bağımlılıkları kilit dosyasından yeniden kurar.
+# Desenler her dizin derinliğinde (`**/`) eşleşir: alt paketlerdeki .env/.git de dışarıda.
 **/node_modules
 **/.next
 **/dist
+**/.git
+**/.env
+**/.env.*
+!**/.env.example
+**/*.log
 .artifacts
-.git
 .github
 .githooks
-.env
-.env.*
-**/*.log
 .claude
 CLAUDE.md
 docs
