@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -22,6 +23,8 @@ import {
   readSpikeEnv,
   renderSummaryMd,
   scanDirForLeaks,
+  scramSha256Keys,
+  scramSha256Verifier,
 } from "./neon-spike.mjs";
 
 // Sentetik değerler (gerçek sır değildir; G-09).
@@ -69,6 +72,21 @@ describe("createRedactor", () => {
     expect(r.leaks("postgres://a:b@somehost/db")).toEqual(["credential-url"]);
     expect(r.leaks("host ep-brave-moon-777777.c-2.aws.neon.tech")).toContain("neon-endpoint");
     expect(r.leaks("[test:int] target=neon app=ep***.c-2.eu-central-1.aws.neon.tech wms_app")).toEqual([]);
+  });
+
+  it("IPv4 ve IPv6 adresleri maskelenir; saat damgası ve sürüm dizeleri bozulmaz", () => {
+    const r = createRedactor();
+    const msg =
+      'psql: error: connection to server at "x" (3.125.57.42), port 5432 failed; also (2a05:d014:1f8:c501:94c0:e3ac:5d7e:1a2b) ' +
+      "and [fe80::1] and ::1 at 18:28:08 server_version 17.5";
+    const out = r.redact(msg);
+    expect(out).not.toContain("3.125.57.42");
+    expect(out).not.toContain("2a05:d014");
+    expect(out).not.toContain("fe80::1");
+    expect(out).not.toMatch(/::1\b/);
+    expect(out).toContain("(<ip>), port 5432");
+    expect(out).toContain("18:28:08");
+    expect(out).toContain("17.5");
   });
 
   it("çok kısa değerler kümeye eklenmez (anlamsız eşleşme olmasın)", () => {
@@ -205,10 +223,46 @@ describe("extractConnection / pgUrl / createAppRoleSql", () => {
     expect(u.hostname).toBe(HOST);
   });
 
-  it("wms_app SQL'i kartın özniteliklerini taşır; hex olmayan parola reddedilir", () => {
+  it("wms_app SQL'i kartın özniteliklerini taşır, DÜZ PAROLA değil SCRAM özeti gönderir; hex olmayan parola reddedilir", () => {
     const sql = createAppRoleSql(APP_PW);
+    expect(sql).not.toContain(APP_PW);
+    expect(sql).toMatch(/PASSWORD 'SCRAM-SHA-256\$4096:[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+';/);
     for (const kw of ["LOGIN", "NOSUPERUSER", "NOBYPASSRLS", "NOCREATEDB", "NOCREATEROLE", "NOREPLICATION"]) expect(sql).toContain(kw);
     expect(() => createAppRoleSql("x'; DROP ROLE y; --")).toThrow();
+  });
+});
+
+describe("SCRAM-SHA-256 (RFC 5802 / RFC 7677)", () => {
+  // RFC 7677 §3 test vektörü: kullanıcı "user", parola "pencil".
+  const SALT = Buffer.from("W22ZaJ0SNY7soEsUEjb6gQ==", "base64");
+  const AUTH_MESSAGE =
+    "n=user,r=rOprNGfwEbeRWgbNEkqO," +
+    "r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096," +
+    "c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0";
+  const CLIENT_PROOF = "dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ=";
+  const SERVER_SIGNATURE = "6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=";
+
+  it("ServerKey RFC 7677 ServerSignature'ını, StoredKey ClientProof'unu üretir", () => {
+    const { clientKey, storedKey, serverKey } = scramSha256Keys("pencil", SALT, 4096);
+    expect(createHmac("sha256", serverKey).update(AUTH_MESSAGE).digest("base64")).toBe(SERVER_SIGNATURE);
+    const clientSignature = createHmac("sha256", storedKey).update(AUTH_MESSAGE).digest();
+    const proof = Buffer.from(clientKey.map((b, i) => b ^ (clientSignature[i] ?? 0)));
+    expect(proof.toString("base64")).toBe(CLIENT_PROOF);
+  });
+
+  it("PostgreSQL rolpassword biçimi: SCRAM-SHA-256$<iter>:<tuz>$<StoredKey>:<ServerKey>", () => {
+    const v = scramSha256Verifier("pencil", { salt: SALT, iterations: 4096 });
+    const { storedKey, serverKey } = scramSha256Keys("pencil", SALT, 4096);
+    expect(v).toBe(`SCRAM-SHA-256$4096:W22ZaJ0SNY7soEsUEjb6gQ==$${storedKey.toString("base64")}:${serverKey.toString("base64")}`);
+    expect(v).not.toContain("pencil");
+  });
+
+  it("tuz verilmezse her çağrıda rastgele (16 bayt); ASCII dışı parola reddedilir", () => {
+    const a = scramSha256Verifier("pencil");
+    const b = scramSha256Verifier("pencil");
+    expect(a).not.toBe(b);
+    expect(Buffer.from(a.split("$")[1]?.split(":")[1] ?? "", "base64")).toHaveLength(16);
+    expect(() => scramSha256Verifier("şifre")).toThrow(/ASCII/);
   });
 });
 
@@ -260,8 +314,19 @@ describe("createNeonApi", () => {
     expect(JSON.parse(f.calls[0]?.body ?? "{}")).toEqual({ branch: { name: "spike-1" }, endpoints: [{ type: "read_write" }] });
   });
 
-  it("silme: işlemler 'finished' olana dek yoklanır", async () => {
+  it("silme: önce dalın bekleyen işlemleri beklenir, sonra silinir ve silme işlemleri 'finished' olana dek yoklanır", async () => {
     const f = fakeFetch([
+      {
+        status: 200,
+        body: {
+          operations: [
+            { id: "opA", branch_id: "br-x", action: "start_compute", status: "running" },
+            { id: "opB", branch_id: "br-other", action: "start_compute", status: "running" },
+            { id: "opC", branch_id: "br-x", action: "create_branch", status: "finished" },
+          ],
+        },
+      },
+      { status: 200, body: { operation: { status: "finished" } } },
       { status: 200, body: { operations: [{ id: "op1", action: "delete_timeline", status: "running" }] } },
       { status: 200, body: { operation: { status: "running" } } },
       { status: 200, body: { operation: { status: "finished" } } },
@@ -269,6 +334,8 @@ describe("createNeonApi", () => {
     const api = createNeonApi({ ...base, redactor: createRedactor(), fetchImpl: f.impl });
     await api.deleteBranch("br-x");
     expect(f.calls.map((c) => `${c.method} ${c.url.replace(/^.*\/projects\/[^/]+/, "")}`)).toEqual([
+      "GET /operations",
+      "GET /operations/opA",
       "DELETE /branches/br-x",
       "GET /operations/op1",
       "GET /operations/op1",
@@ -279,7 +346,10 @@ describe("createNeonApi", () => {
     const r = createRedactor();
     r.add("napi_secretvalue123");
     r.add(HOST);
-    const f = fakeFetch([{ status: 200, body: { operations: [{ id: "op1", action: "delete_timeline", status: "failed" }] } }]);
+    const f = fakeFetch([
+      { status: 200, body: { operations: [] } },
+      { status: 200, body: { operations: [{ id: "op1", action: "delete_timeline", status: "failed" }] } },
+    ]);
     await expect(createNeonApi({ ...base, redactor: r, fetchImpl: f.impl }).deleteBranch("br-x")).rejects.toThrow(/durumu failed/);
     const g = fakeFetch([{ status: 401, body: { message: `bad key napi_secretvalue123 for ${HOST}` } }]);
     let msg = "";

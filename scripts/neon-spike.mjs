@@ -19,6 +19,7 @@
 //   GET    /projects/{project_id}/connection_uri?branch_id&database_name&role_name&pooled=false → uri
 //   GET    /projects/{project_id}                     → project.region_id, project.pg_version
 //   GET    /projects/{project_id}/branches            → branches[]
+//   GET    /projects/{project_id}/operations          → operations[] (branch_id, status; silmeden önce bekleme)
 //   DELETE /projects/{project_id}/branches/{branch_id} → operations[]
 //
 // SQL adımları (rol oluşturma, sürüm, pooler kanıtı) `psql` (libpq) ile yapılır: `scripts/**`
@@ -32,7 +33,7 @@
 // dahil). `.artifacts/t-005d/` (koşu kopyaları dahil) yazıldıktan sonra taranır; eşleşme → kırmızı.
 // Özet yalnızca `.artifacts/t-005d/summary.{json,md}`; iş akışı yalnızca bu iki dosyayı yükler.
 import { spawn, spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, createHmac, pbkdf2Sync, randomBytes } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -65,6 +66,14 @@ const CREDENTIAL_URL_RE = /postgres(?:ql)?:\/\/[^\s/@:"'`<>]+:[^\s@"'`<>]+@[^\s"
 const ANY_PG_URL_RE = /postgres(?:ql)?:\/\/[^\s"'`<>]+/gi;
 /** Neon uç nokta kimliği / host'u (ör. ep-cool-darkness-123456[-pooler].c-2.<bölge>.aws.neon.tech). */
 const NEON_ENDPOINT_RE = /\bep-[a-z0-9]+(?:-[a-z0-9]+){1,4}(?:\.[a-z0-9-]+)*/gi;
+/** IPv4 adresi (psql/sürücü bağlantı hatalarında sunucu adresi görünür; özete düşmesin). */
+const IPV4_RE = /\b(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b/g;
+/**
+ * IPv6 adresi: tam (8 grup) veya `::` sıkıştırmalı (en az bir hex grup). Saat damgaları
+ * (`18:28:08`) `::` içermediği ve 8 grup olmadığı için eşleşmez.
+ */
+const IPV6_RE =
+  /\b(?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4}\b|\b[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6}::(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6}\b)?|::[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6}\b/gi;
 /** Maskeleyiciye eklenecek gizli değerin asgari uzunluğu (daha kısa değer anlamsız eşleşir). */
 export const MIN_SECRET_LENGTH = 4;
 
@@ -80,7 +89,7 @@ export const MIN_SECRET_LENGTH = 4;
 /**
  * Gizli değer kümesi + genel desenler. `redact` önce bilinen değerleri (uzun olan önce; ham ve
  * URL kodlu biçim) `***` yapar, sonra kalan postgres URL'lerini `<url>`, Neon uç nokta
- * kimliklerini `<neon-endpoint>` yapar. `leaks` HAM metinde bulunan sızıntı TÜRLERİNİ döndürür
+ * kimliklerini `<neon-endpoint>`, IPv4/IPv6 adreslerini `<ip>` yapar. `leaks` HAM metinde bulunan sızıntı TÜRLERİNİ döndürür
  * (değerleri asla).
  * @returns {Redactor}
  */
@@ -98,7 +107,11 @@ export function createRedactor() {
     redact(text) {
       let out = text;
       for (const s of ordered) out = out.split(s).join("***");
-      return out.replace(ANY_PG_URL_RE, "<url>").replace(NEON_ENDPOINT_RE, "<neon-endpoint>");
+      return out
+        .replace(ANY_PG_URL_RE, "<url>")
+        .replace(NEON_ENDPOINT_RE, "<neon-endpoint>")
+        .replace(IPV4_RE, "<ip>")
+        .replace(IPV6_RE, "<ip>");
     },
     leaks(text) {
       /** @type {string[]} */
@@ -365,8 +378,28 @@ export function createNeonApi(opts) {
       const r = await request("branch/list", "GET", "/branches");
       return Array.isArray(r?.branches) ? r.branches : [];
     },
-    /** @param {string} branchId */
+    /**
+     * Dalın bekleyen (terminal olmayan) işlemleri: `GET /projects/{id}/operations` (ilk sayfa,
+     * en yeni işlemler) → `branch_id` eşleşen ve durumu terminal olmayanlar.
+     * @param {string} branchId
+     * @returns {Promise<NeonOperation[]>}
+     */
+    async pendingOperations(branchId) {
+      const r = await request("operation/list", "GET", "/operations");
+      const ops = Array.isArray(r?.operations) ? r.operations : [];
+      return ops.filter(
+        (/** @type {any} */ op) =>
+          op?.branch_id === branchId && typeof op?.id === "string" && !TERMINAL_OK.has(op?.status) && !TERMINAL_FAIL.has(op?.status),
+      );
+    },
+    /**
+     * Önce dalın bekleyen işlemleri (üst sınır `pollTimeoutMs`) beklenir, sonra silinir ve silme
+     * işlemleri tamamlanana dek yoklanır.
+     * @param {string} branchId
+     */
     async deleteBranch(branchId) {
+      const pending = await this.pendingOperations(branchId);
+      await waitOperations("branch/pending", pending);
       const r = await request("branch/delete", "DELETE", `/branches/${encodeURIComponent(branchId)}`);
       await waitOperations("branch/delete", Array.isArray(r?.operations) ? r.operations : []);
     },
@@ -495,13 +528,52 @@ export function runPsql(t, sql, redactor) {
   return { ok: true, stdout: (r.stdout ?? "").trim(), sqlstate: null, error: null };
 }
 
+/** PostgreSQL'in varsayılan SCRAM yineleme sayısı (`scram_iterations`, PG 16+ varsayılanı 4096). */
+export const SCRAM_ITERATIONS = 4096;
+
 /**
- * `wms_app` oluşturma SQL'i (compose 01-roles.sh ile aynı öznitelikler). Parola yalnızca [0-9a-f].
+ * RFC 5802 / RFC 7677 SCRAM-SHA-256 anahtarları:
+ *   SaltedPassword = PBKDF2-HMAC-SHA-256(parola, tuz, yineleme, 32)
+ *   ClientKey = HMAC(SaltedPassword, "Client Key"); StoredKey = SHA-256(ClientKey)
+ *   ServerKey = HMAC(SaltedPassword, "Server Key")
+ * Parola yalnızca yazdırılabilir ASCII kabul edilir: bu kümede SASLprep (RFC 4013) özdeşliktir.
  * @param {string} password
+ * @param {Buffer} salt
+ * @param {number} iterations
  */
-export function createAppRoleSql(password) {
+export function scramSha256Keys(password, salt, iterations) {
+  if (!/^[\x21-\x7e]+$/.test(password)) throw new Error("SCRAM: password must be printable ASCII (SASLprep identity)");
+  const salted = pbkdf2Sync(Buffer.from(password, "utf8"), salt, iterations, 32, "sha256");
+  const clientKey = createHmac("sha256", salted).update("Client Key").digest();
+  const storedKey = createHash("sha256").update(clientKey).digest();
+  const serverKey = createHmac("sha256", salted).update("Server Key").digest();
+  return { clientKey, storedKey, serverKey };
+}
+
+/**
+ * PostgreSQL `pg_authid.rolpassword` SCRAM biçimi (RFC 5803; PG belgesi §pg_authid):
+ * `SCRAM-SHA-256$<yineleme>:<tuz>$<StoredKey>:<ServerKey>` (tuz ve anahtarlar Base64).
+ * `CREATE ROLE ... PASSWORD '<bu dize>'` sunucuya düz parola yerine özet gönderir.
+ * @param {string} password
+ * @param {{ salt?: Buffer, iterations?: number }} [opts]
+ */
+export function scramSha256Verifier(password, opts = {}) {
+  const salt = opts.salt ?? randomBytes(16);
+  const iterations = opts.iterations ?? SCRAM_ITERATIONS;
+  const { storedKey, serverKey } = scramSha256Keys(password, salt, iterations);
+  return `SCRAM-SHA-256$${iterations}:${salt.toString("base64")}$${storedKey.toString("base64")}:${serverKey.toString("base64")}`;
+}
+
+/**
+ * `wms_app` oluşturma SQL'i (compose 01-roles.sh ile aynı öznitelikler). Parola yalnızca [0-9a-f];
+ * sunucuya DÜZ PAROLA GİTMEZ, istemcide üretilen SCRAM-SHA-256 özeti gider.
+ * @param {string} password
+ * @param {{ salt?: Buffer, iterations?: number }} [opts]
+ */
+export function createAppRoleSql(password, opts = {}) {
   if (!/^[0-9a-f]{32,}$/.test(password)) throw new Error("app role password must be hex");
-  return `CREATE ROLE ${APP_ROLE} LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD '${password}';\n`;
+  const verifier = scramSha256Verifier(password, opts);
+  return `CREATE ROLE ${APP_ROLE} LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD '${verifier}';\n`;
 }
 
 export const APP_ROLE_CHECK_SQL = `SELECT r.rolcanlogin, r.rolsuper, r.rolbypassrls, r.rolcreatedb, r.rolcreaterole, r.rolreplication,

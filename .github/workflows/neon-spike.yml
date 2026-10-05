@@ -4,12 +4,14 @@
 # üretim ayarı; tanı: INT_DB_PREPARE ters), ADR-004 alanlarını ölçer ve dalı siler.
 #
 # Tetikleyici: YALNIZCA workflow_dispatch. İş akışı önce `main`'e birleşir, sonra Supervisor GitHub
-# API ile tetikler. Dispatch herhangi bir dal seçilerek başlatılabildiği için iş
-# `if: github.ref == 'refs/heads/main'` ile yalnızca `main` üzerinde koşar (deploy-staging.yml ile aynı
-# bilinen risk: özel repoda ücretsiz planda environment dal kuralı yok; main'e yazabilen güvenilen taraf).
+# API ile tetikler. `if: github.ref == 'refs/heads/main'` YALNIZCA EK SAVUNMADIR, sır sınırı DEĞİLDİR:
+# repo sırları environment'a bağlı değildir (özel repoda ücretsiz planda environment dal kuralı yok);
+# repoya yazabilen herkes herhangi bir dala sırrı okuyan bir iş akışı ekleyip koşturabilir. Bu yüzden
+# NEON_API_KEY yalnızca bu Neon projesiyle sınırlı (proje kapsamlı) bir anahtar olmalıdır (U-07);
+# hesap/org kapsamlı anahtar kullanılmaz.
 #
-# Sır kapsamı (G-09): NEON_API_KEY (repo sırrı) ve NEON_PROJECT_ID (repo değişkeni) YALNIZCA
-# "Spike" ve "Cleanup" adımlarının env'indedir; `environment` yok. Checkout kimlik bilgisi saklamaz.
+# Sır kapsamı (G-09): NEON_API_KEY (repo sırrı, proje kapsamlı — U-07) ve NEON_PROJECT_ID (repo
+# değişkeni) bu iş akışında YALNIZCA "Spike" ve "Cleanup" adımlarının env'indedir; `environment` yok. Checkout kimlik bilgisi saklamaz.
 # Betik her gizli değeri (anahtar, proje/dal/uç nokta kimliği, host'lar, sahip rol, parolalar, URL'ler)
 # `::add-mask::` ile maskeler; test çıktısı ayrıca satır satır maskelenir, ham çıktıda gizli değer
 # görülürse koşu kırmızıdır. Yalnızca `.artifacts/t-005d/summary.{json,md}` yüklenir.
