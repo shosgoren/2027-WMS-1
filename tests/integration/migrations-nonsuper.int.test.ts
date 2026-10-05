@@ -73,6 +73,13 @@ function copyMigrations(upTo: string): string {
   return dir;
 }
 
+/** 0001..0003 kopyası (önbellekli): sonraki migration'lar (0004+) bu testlerin beklentilerini değiştirmesin. */
+let thru3Dir: string | undefined;
+function thru3(): string {
+  thru3Dir ??= copyMigrations("0003");
+  return thru3Dir;
+}
+
 /** Altyapı adımı eşdeğeri: probe üyeliklerini sıfırlar ve verilen GRANT'ları uygular (süper kullanıcıyla). */
 async function setProbeMemberships(...grants: string[]): Promise<void> {
   await asSuper(async (c) => {
@@ -208,11 +215,11 @@ describe("migrations — süper kullanıcı olmayan migrator (ikinci Testcontain
     await setProbeMemberships(STANDARD_GRANT);
     const u = await freshDatabase();
 
-    const up1 = await migrateUp({ url: u });
+    const up1 = await migrateUp({ url: u, dir: thru3() });
     expect(up1.applied).toEqual(["0001", "0002", "0003"]);
     expectCatalog(await catalog(u));
 
-    const down = await migrateDown({ url: u, to: "0000", wmsEnv: "ci" });
+    const down = await migrateDown({ url: u, dir: thru3(), to: "0000", wmsEnv: "ci" });
     expect(down.reverted).toEqual(["0003", "0002", "0001"]);
     // Geri sonrası yalnızca public ve defter şeması kalır; wms_probe kaldırılmış (ADR-015 §8, m3).
     expect((await catalog(u).catch(() => undefined))?.schemas ?? ["public", "wms_meta"]).toEqual(["public", "wms_meta"]);
@@ -223,13 +230,13 @@ describe("migrations — süper kullanıcı olmayan migrator (ikinci Testcontain
       expect(f.rows).toEqual([]);
     });
 
-    const up2 = await migrateUp({ url: u });
+    const up2 = await migrateUp({ url: u, dir: thru3() });
     expect(up2.applied).toEqual(["0001", "0002", "0003"]);
     expectCatalog(await catalog(u));
 
     // Yalnızca 0003: geri → ileri.
-    expect((await migrateDown({ url: u, to: "0002", wmsEnv: "ci" })).reverted).toEqual(["0003"]);
-    expect((await migrateUp({ url: u })).applied).toEqual(["0003"]);
+    expect((await migrateDown({ url: u, dir: thru3(), to: "0002", wmsEnv: "ci" })).reverted).toEqual(["0003"]);
+    expect((await migrateUp({ url: u, dir: thru3() })).applied).toEqual(["0003"]);
     expectCatalog(await catalog(u));
   });
 
@@ -238,7 +245,7 @@ describe("migrations — süper kullanıcı olmayan migrator (ikinci Testcontain
   it("BLOKER-1: dolu tenants ile staging geri alma RAISE eder, veri ve FORCE RLS korunur; ci bayrağıyla geri alma çalışır", async () => {
     await setProbeMemberships(STANDARD_GRANT);
     const u = await freshDatabase();
-    expect((await migrateUp({ url: u })).applied).toEqual(["0001", "0002", "0003"]);
+    expect((await migrateUp({ url: u, dir: thru3() })).applied).toEqual(["0001", "0002", "0003"]);
 
     const tenantId = randomUUID();
     await withClient(u, async (c) => {
@@ -258,7 +265,7 @@ describe("migrations — süper kullanıcı olmayan migrator (ikinci Testcontain
       expect(blind.rows[0]?.n, "bağlamsız FORCE RLS sahibi satır görmemeli").toBe("0");
     });
 
-    await expect(migrateDown({ url: u, to: "0002", wmsEnv: "staging" })).rejects.toThrow(/0003_tenancy down:.*satır var/);
+    await expect(migrateDown({ url: u, dir: thru3(), to: "0002", wmsEnv: "staging" })).rejects.toThrow(/0003_tenancy down:.*satır var/);
 
     await withClient(u, async (c) => {
       // Geri alma transaction'ı iptal oldu: 0003 duruyor, FORCE RLS geri geldi, satırlar yerinde.
@@ -281,15 +288,15 @@ describe("migrations — süper kullanıcı olmayan migrator (ikinci Testcontain
     });
 
     // Bayraklı ortam (ci): aynı dolu veritabanında geri alma çalışır.
-    expect((await migrateDown({ url: u, to: "0002", wmsEnv: "ci" })).reverted).toEqual(["0003"]);
-    expect((await migrateUp({ url: u })).applied).toEqual(["0003"]);
+    expect((await migrateDown({ url: u, dir: thru3(), to: "0002", wmsEnv: "ci" })).reverted).toEqual(["0003"]);
+    expect((await migrateUp({ url: u, dir: thru3() })).applied).toEqual(["0003"]);
     expectCatalog(await catalog(u));
   });
 
   it("migration rolü dışında yalnızca ADMIN seçenekli üye (probe'u oluşturan altyapı rolü) kabul edilir", async () => {
     await setProbeMemberships(STANDARD_GRANT, `GRANT ${PROBE} TO ${INFRA} WITH ADMIN TRUE, SET FALSE, INHERIT FALSE`);
     const u = await freshDatabase();
-    expect((await migrateUp({ url: u })).applied).toEqual(["0001", "0002", "0003"]);
+    expect((await migrateUp({ url: u, dir: thru3() })).applied).toEqual(["0001", "0002", "0003"]);
     expectCatalog(await catalog(u));
   });
 
@@ -300,7 +307,7 @@ describe("migrations — süper kullanıcı olmayan migrator (ikinci Testcontain
     const early = copyMigrations("0002");
     expect((await migrateUp({ url: u, dir: early })).applied).toEqual(["0001", "0002"]);
     await setProbeMemberships(...grants);
-    await expect(migrateUp({ url: u })).rejects.toThrow(message);
+    await expect(migrateUp({ url: u, dir: thru3() })).rejects.toThrow(message);
     // Hiçbir şey uygulanmadı: wms_probe şeması ve tablolar yok.
     await withClient(u, async (c) => {
       const r = await c.query<{ n: string }>(`SELECT nspname AS n FROM pg_namespace WHERE nspname = 'wms_probe'`);
