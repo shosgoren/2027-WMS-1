@@ -10,8 +10,14 @@
 //                 GITHUB_REPOSITORY gerekir).
 //   --local       yerel kanca: API'ye gitmez, korunan değişiklik için yalnızca uyarır
 //                 (WARN PROTECTED_CHANGE_NEEDS_APPROVAL, çıkış 0).
-//   --base <ref>  karşılaştırma tabanı (varsayılan: PR'da `origin/<base.ref>`, push'ta `HEAD^1`,
-//                 diğerinde kartın `→ int/…` hedefi veya `origin/main`).
+//   --base <ref>  yalnızca `--local`'da karşılaştırma tabanı. Diğer kiplerde YOK SAYILIR (T-008h M3:
+//                 `--base HEAD` boş fark → sahte OK). Taban: PR'da API'deki `base.ref`
+//                 (`origin/<base.ref>`; API yoksa olaydaki GITHUB_BASE_REF yalnızca "korunan değişiklik
+//                 yok" kararı için), push'ta `HEAD^1`, bağlamsızda kartın `→ int/…` hedefi / `origin/main`.
+// Değişiklik kümesi (T-008h M2): `--local` dışında yalnızca `merge-base..HEAD` commit'leri ve
+// içerik HEAD commit'inden okunur; çalışma ağacı (commit'li değişikliği geri alan düzenleme dahil)
+// sayılmaz. `--local`'da commit'ler + indeks + çalışma ağacı + izlenmeyen dosyalar.
+// Onay satırı PR head SHA'sına bağlıdır (`APPROVED-BY: … @ <sha>`; tutmazsa APPROVAL_STALE).
 // Karttaki `protected: true` beyandır; hiçbir koşulu karşılamaz (okunmaz bile).
 import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
@@ -194,19 +200,23 @@ export async function checkProtected(ctx) {
     let known = null;
     /** @type {string} */
     let target;
-    if (args.base !== null) target = args.base;
+    if (!args.local && args.base !== null) out.detail("baseIgnored", args.base);
+    if (args.local) target = args.base ?? defaultTarget(root);
     else if (ci.kind === "pr") {
-      const baseRef = env["GITHUB_BASE_REF"];
-      if (args.pr === null && baseRef !== undefined && baseRef !== "") target = `origin/${baseRef}`;
-      else {
-        try {
-          known = await client().getPull(ci.number);
-        } catch (e) {
-          if (!(e instanceof GitHubError)) throw e;
+      try {
+        known = await client().getPull(ci.number);
+        target = `origin/${known.baseRef}`;
+      } catch (e) {
+        if (!(e instanceof GitHubError)) throw e;
+        // API yoksa olaydaki taban yalnızca "korunan değişiklik yok" kararına yeter; korunan
+        // değişiklik varsa `findPull` yine API'ye gider ve UNVERIFIABLE olur.
+        const baseRef = args.pr === null ? env["GITHUB_BASE_REF"] : undefined;
+        if (baseRef === undefined || baseRef === "") {
           out.fail(REASONS.UNVERIFIABLE, NO_FILE, `PR tabanı GitHub API'den okunamadı: ${e.message}`);
           return;
         }
-        target = `origin/${known.baseRef}`;
+        out.detail("apiError", e.message);
+        target = `origin/${baseRef}`;
       }
     } else if (ci.kind === "push") target = "HEAD^1";
     else target = defaultTarget(root);
@@ -214,8 +224,9 @@ export async function checkProtected(ctx) {
     const base = mergeBase(root, target);
     out.detail("target", target);
     out.detail("mergeBase", base);
-    const changes = changedFiles(root, base);
-    const hits = classifyChanges(changes, { before: (f) => fileAtRef(root, base, f), after: worktreeReader(root) });
+    const changes = changedFiles(root, base, { includeWorktree: args.local });
+    const after = args.local ? worktreeReader(root) : (/** @type {string} */ f) => fileAtRef(root, "HEAD", f);
+    const hits = classifyChanges(changes, { before: (f) => fileAtRef(root, base, f), after });
     out.detail("protected", hits);
     if (hits.length === 0) return;
 
@@ -238,7 +249,7 @@ export async function checkProtected(ctx) {
       failAll(out, hits, REASONS.UNVERIFIABLE, found.error);
       return;
     }
-    const result = evaluateApproval(found.pull.body);
+    const result = evaluateApproval(found.pull.body, found.pull.headSha);
     out.detail("approval", {
       pr: found.pull.number,
       headSha: found.pull.headSha,

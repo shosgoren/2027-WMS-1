@@ -78,6 +78,82 @@ describe("scanSource — yasak biçimler", () => {
   });
 });
 
+/** T-008h m6: security-reviewer'ın denediği atlatmalar — [ad, tam kaynak, beklenen kodlar]. */
+const EVASIONS = /** @type {Array<[string, string, string[]]>} */ ([
+  ["takma ad: import { it as t } + t.skip", `import { it as t } from "vitest";\nt.skip("a", () => {});`, ["SKIP@2"]],
+  ["takma ad: import { describe as d } + d.only", `import { describe as d } from "vitest";\nd.only("x", () => {});`, ["ONLY@2"]],
+  ["takma ad: playwright test as base + base.fixme", `import { test as base } from "@playwright/test";\nbase.fixme("a", async () => {});`, ["SKIP@2"]],
+  ["varsayılan içe aktarım: node:test", `import t from "node:test";\nt.todo("sonra");`, ["TODO@2"]],
+  ["ad alanı: import * as v + v.it.skip", `import * as v from "vitest";\nv.it.skip("a", () => {});`, ["SKIP@2"]],
+  ["ad alanı: v.xit", `import * as v from "vitest";\nv.xit("a", () => {});`, ["SKIP@2"]],
+  ["takma ad: xit as later", `import { xit as later } from "vitest";\nlater("a", () => {});`, ["SKIP@2"]],
+  [
+    "test.extend() sonucu: myTest.skip",
+    `import { test } from "vitest";\nconst myTest = test.extend({ db: async ({}, use) => use(1) });\nmyTest.skip("a", () => {});`,
+    ["SKIP@3"],
+  ],
+  [
+    "playwright base.extend + export + .only",
+    `import { test as base } from "@playwright/test";\nexport const test = base.extend({});\ntest.describe.only("d", () => {});`,
+    ["ONLY@3"],
+  ],
+  [
+    "zincirleme türetme: const c = it.concurrent; c.skip",
+    `import { it as t } from "vitest";\nconst c = t.concurrent;\nc.skip("a", async () => {});`,
+    ["SKIP@3"],
+  ],
+  ["yapı bozma: const { skip } = it", `import { it } from "vitest";\nconst { skip } = it;\nskip("a", () => {});`, ["SKIP@2", "SKIP@3"]],
+  ["yapı bozma: const { only: o } = test", `import { test } from "vitest";\nconst { only: o } = test;\no("a", () => {});`, ["ONLY@2"]],
+  ["yapı bozma: takma ad kökten", `import { it as t } from "vitest";\nconst { skipIf } = t;\nskipIf(true)("a", () => {});`, ["CONDITIONAL_SKIP@2"]],
+  [
+    "yapı bozma: ad alanından kök + .only",
+    `import * as v from "vitest";\nconst { it: q } = v;\nq.only("a", () => {});`,
+    ["ONLY@3"],
+  ],
+  [
+    "ayrı bayrak: const s = !!process.env.X; if (s) return",
+    `import { it, expect } from "vitest";\nconst s = !!process.env.X;\nit("a", () => {\n  if (s) return;\n  expect(1).toBe(1);\n});`,
+    ["CONDITIONAL_SKIP@4"],
+  ],
+  [
+    "ayrı bayrak: dolaylı türetme (const a = process.env.X; const b = a === '1')",
+    `import { it, expect } from "vitest";\nconst a = process.env.X;\nconst b = a === "1";\nit("a", () => {\n  if (!b) { return; }\n  expect(1).toBe(1);\n});`,
+    ["CONDITIONAL_SKIP@5"],
+  ],
+  [
+    "ayrı bayrak: yapı bozma ile ortam (const { HAS_DB: d } = process.env)",
+    `import { describe, it } from "vitest";\nconst { HAS_DB: d } = process.env;\ndescribe("x", () => {\n  if (!d) return;\n  it("a", () => {});\n});`,
+    ["CONDITIONAL_SKIP@4"],
+  ],
+  [
+    "ayrı bayrak + takma ad birlikte",
+    `import { test as t } from "vitest";\nconst skipIt = Boolean(process.env.SKIP);\nt("a", () => {\n  if (skipIt) return;\n});`,
+    ["CONDITIONAL_SKIP@4"],
+  ],
+]);
+
+describe("scanSource — atlatma denemeleri (T-008h m6)", () => {
+  it.each(EVASIONS)("m6 saldırısı: %s → FAIL", (_name, src, expected) => {
+    expect(codes(src)).toEqual(expected);
+  });
+
+  it("alakasız modülden aynı adlı içe aktarım / ortamdan türemeyen bayrak → OK", () => {
+    const src = [
+      `import { it, expect } from "vitest";`,
+      `import { skip as skipList } from "./list.mjs";`,
+      `const n = [1].length > 0;`,
+      `it("a", () => {`,
+      `  const xs = skipList([1, 2], 1);`,
+      `  if (n) { expect(xs).toEqual([2]); }`,
+      `  if (xs.length === 0) return;`,
+      `});`,
+      `const cfg = { s: true };`,
+      `it("b", () => { if (cfg.s) return; });`,
+    ].join("\n");
+    expect(codes(src)).toEqual([]);
+  });
+});
+
 describe("scanSource — yanlış alarm yok", () => {
   it("yorumdaki it.skip ve dizedeki \"only\" → OK", () => {
     const src =

@@ -1,13 +1,29 @@
-// Onay kuralı (T-008c; ADR-012 rev., PROTOCOL §Onay kaynağı, I-17). Saf işlev: PR açıklaması
-// metni → onay kararı. Korunan değişiklikte PR açıklamasında şunların ikisi birden bulunmalı:
-//   (a) tam satır:  APPROVED-BY: supervisor (ADR-012 rev.)
+// Onay kuralı (T-008c, T-008h; ADR-012 rev., PROTOCOL §Onay kaynağı, I-17). Saf işlev: PR
+// açıklaması metni + PR head SHA'sı → onay kararı. Korunan değişiklikte PR açıklamasında şunların
+// ikisi birden bulunmalı:
+//   (a) tam satır:  APPROVED-BY: supervisor (ADR-012 rev.) @ <40 hex PR head SHA>
+//       SHA head'e eşit değilse APPROVAL_STALE (onay son push'tan önce yazılmış; M4)
 //   (b) rapor özeti: security-reviewer: BLOCKER: <n> · MAJOR: <n> · MINOR: <n>   ve n(BLOCKER) == 0
 // Karttaki `protected: true` (veya açıklamada geçmesi) hiçbir koşulu karşılamaz.
-// Kod bloğu (``` / ~~~) ve HTML yorumu (<!-- -->) içindeki satırlar sayılmaz: şablon/alıntı
-// metni onay yerine geçmez. Satır başı/sonu boşlukları yok sayılır; başka hiçbir gevşetme yok.
+// Görünmeyen veya alıntı olan metin sayılmaz (m1, CommonMark): çitli kod bloğu (kapanış: aynı
+// karakter, ≥ uzunluk, bilgi dizesi yok, ≤3 boşluk girinti), 4 boşluk/sekme girintili kod
+// (paragraf devamı değilse), HTML yorumu ve <pre>/<code>/<textarea>/<script>/<style> içeriği.
+// Kapanmayan blok sonrasını yutar (fail-closed). Satır başı/sonu boşlukları yok sayılır.
 
-/** Onay satırı (birebir). */
+/** Onay satırının sabit kısmı; tam satır `${APPROVAL_LINE} @ <sha>` (`approvalLine`). */
 export const APPROVAL_LINE = "APPROVED-BY: supervisor (ADR-012 rev.)";
+
+/** Tam onay satırı (40 küçük harf hex SHA). */
+const APPROVAL_RE = /^APPROVED-BY: supervisor \(ADR-012 rev\.\) @ ([0-9a-f]{40})$/;
+
+/**
+ * Belirli bir head SHA'sı için onay satırı.
+ * @param {string} sha
+ * @returns {string}
+ */
+export function approvalLine(sha) {
+  return `${APPROVAL_LINE} @ ${sha}`;
+}
 
 /**
  * Rapor özeti satırı. Ayraç `·` (U+00B7); `|`, `,`, `;` de kabul. Satır sonunda rapor bağlantısı
@@ -22,6 +38,7 @@ export const REASONS = Object.freeze({
   SECURITY_MISSING: "SECURITY_REPORT_MISSING",
   SECURITY_BLOCKER: "SECURITY_BLOCKER",
   UNVERIFIABLE: "APPROVAL_UNVERIFIABLE",
+  STALE: "APPROVAL_STALE",
 });
 
 /**
@@ -35,48 +52,100 @@ export const REASONS = Object.freeze({
  * }} ApprovalResult
  */
 
+/** İçeriği görünmeyen/alıntı sayılan HTML öğeleri. */
+const RAW_TAGS = "pre|code|textarea|script|style";
+const HIDDEN_OPEN_RE = new RegExp(`<!--|<(${RAW_TAGS})(?=[\\s>/])`, "i");
+
 /**
- * Kod bloğu ve HTML yorumu dışındaki satırlar (kırpılmış).
+ * Sekmeleri 4'lük duraklara açarak baştaki boşluk genişliği.
+ * @param {string} line
+ * @returns {number}
+ */
+function indentWidth(line) {
+  let w = 0;
+  for (const ch of line) {
+    if (ch === " ") w++;
+    else if (ch === "\t") w += 4 - (w % 4);
+    else break;
+  }
+  return w;
+}
+
+/** Kap öneki (`>` alıntı, liste imleri) + çit açılışı. */
+const FENCE_OPEN_RE = /^(?<pre>(?:[ \t]*(?:>|[-*+](?=[ \t])|\d{1,9}[.)](?=[ \t])))*)(?<sp>[ \t]*)(?<f>`{3,}|~{3,})(?<info>.*)$/;
+const FENCE_CLOSE_RE = /^(?<lead>[ \t>]*)(?<f>`{3,}|~{3,})[ \t]*$/;
+
+/**
+ * Kod bloğu, girintili kod, HTML yorumu ve ham HTML öğeleri dışındaki satırlar (kırpılmış).
  * @param {string} body
  * @returns {string[]}
  */
 export function effectiveLines(body) {
   /** @type {string[]} */
   const out = [];
-  /** @type {string | null} */
+  /** @type {{ ch: string, len: number, maxLead: number } | null} */
   let fence = null;
-  let inComment = false;
+  /** @type {RegExp | null} açık gizli bölgenin bitişi */
+  let hiddenEnd = null;
+  let prevParagraph = false;
   for (const raw of body.split(/\r\n|\r|\n/)) {
     let line = raw;
     if (fence !== null) {
-      if (line.trim().startsWith(fence)) fence = null;
+      const c = FENCE_CLOSE_RE.exec(line);
+      const f = c?.groups?.["f"] ?? "";
+      if (c !== null && f[0] === fence.ch && f.length >= fence.len && indentWidth((c.groups?.["lead"] ?? "").replace(/>/g, " ")) <= fence.maxLead) {
+        fence = null;
+      }
       continue;
     }
-    if (inComment) {
-      const end = line.indexOf("-->");
-      if (end === -1) continue;
-      inComment = false;
-      line = line.slice(end + 3);
-    }
-    // Satır içi yorumları çıkar; kapanmayan yorum sonraki satırlara taşar.
+    // Gizli bölgeler (yorum, ham HTML öğeleri); kapanmayan bölge sonraki satırlara taşar.
+    const startedHidden = hiddenEnd !== null;
+    let kept = "";
     for (;;) {
-      const start = line.indexOf("<!--");
-      if (start === -1) break;
-      const end = line.indexOf("-->", start + 4);
-      if (end === -1) {
-        line = line.slice(0, start);
-        inComment = true;
+      if (hiddenEnd !== null) {
+        const m = hiddenEnd.exec(line);
+        if (m === null) {
+          line = "";
+          break;
+        }
+        line = line.slice(m.index + m[0].length);
+        hiddenEnd = null;
+      }
+      const o = HIDDEN_OPEN_RE.exec(line);
+      if (o === null) {
+        kept += line;
         break;
       }
-      line = line.slice(0, start) + line.slice(end + 3);
+      kept += line.slice(0, o.index);
+      line = line.slice(o.index + o[0].length);
+      hiddenEnd = o[1] === undefined ? /-->/ : new RegExp(`</${o[1]}\\s*>`, "i");
     }
+    if (startedHidden && hiddenEnd !== null && kept.trim() === "") continue; // tümü gizli bölgenin içinde
+    line = kept;
     const t = line.trim();
-    const f = /^(`{3,}|~{3,})/.exec(t);
-    if (f !== null) {
-      fence = /** @type {string} */ (f[1]);
+    if (t === "") {
+      // Boş satır veya tümü gizli satır (HTML bloğu) paragrafı bitirir.
+      prevParagraph = false;
+      out.push("");
       continue;
     }
+    const w = indentWidth(line);
+    if (w >= 4 && !prevParagraph) continue; // girintili kod bloğu
+    const fo = FENCE_OPEN_RE.exec(line);
+    if (fo !== null) {
+      const pre = fo.groups?.["pre"] ?? "";
+      const sp = indentWidth(fo.groups?.["sp"] ?? "");
+      const f = fo.groups?.["f"] ?? "";
+      const info = fo.groups?.["info"] ?? "";
+      const topLevel = pre === "";
+      if ((!topLevel || sp <= 3) && !(f[0] === "`" && info.includes("`"))) {
+        fence = { ch: f[0] ?? "`", len: f.length, maxLead: topLevel ? 3 : indentWidth(pre.replace(/[^\t]/g, " ")) + sp + 3 };
+        prevParagraph = false;
+        continue;
+      }
+    }
     out.push(t);
+    prevParagraph = !/^#{1,6}(?:[ \t]|$)/.test(t);
   }
   return out;
 }
@@ -84,11 +153,14 @@ export function effectiveLines(body) {
 /**
  * PR açıklamasını onay kuralına göre değerlendirir.
  * @param {string | null | undefined} body PR açıklaması (`null` = boş açıklama)
+ * @param {string} headSha PR'ın head SHA'sı (API'den); onay satırı buna bağlı olmalı
  * @returns {ApprovalResult}
  */
-export function evaluateApproval(body) {
+export function evaluateApproval(body, headSha) {
   const lines = effectiveLines(body ?? "");
-  const approved = lines.includes(APPROVAL_LINE);
+  const head = headSha.toLowerCase();
+  const shas = lines.map((l) => APPROVAL_RE.exec(l)?.[1]).filter((x) => x !== undefined);
+  const approved = shas.includes(head);
   /** @type {SecuritySummary[]} */
   const security = [];
   for (const l of lines) {
@@ -98,8 +170,13 @@ export function evaluateApproval(body) {
   }
   /** @type {ApprovalProblem[]} */
   const problems = [];
-  if (!approved) {
-    problems.push({ code: REASONS.NO_APPROVAL, message: `PR açıklamasında tam satır "${APPROVAL_LINE}" yok` });
+  if (!approved && shas.length > 0) {
+    problems.push({
+      code: REASONS.STALE,
+      message: `onay satırındaki SHA (${shas.map((x) => x.slice(0, 12)).join(", ")}) PR head SHA'sı (${head.slice(0, 12)}) değil; son push'tan sonra güncellenmeli`,
+    });
+  } else if (!approved) {
+    problems.push({ code: REASONS.NO_APPROVAL, message: `PR açıklamasında tam satır "${approvalLine("<40 hex PR head SHA>")}" yok` });
   }
   if (security.length === 0) {
     problems.push({

@@ -4,13 +4,15 @@
 // Üç tür kural:
 //   1. Yol kuralı      — eşleşen yolda her değişiklik (ekleme, değişiklik, silme, ad değişikliği) korunur.
 //   2. Taban kuralı    — dosya tabanda vardıysa korunur (birleşmiş migration'lar; yeni migration serbest).
-//   3. İçerik kuralı   — yalnızca belirli alan/satır değişirse korunur (sürüm alanları, auditConfig/overrides/configDependencies,
-//                        pooler imajı, AC tabanı düşüşü, ADR'nin "kabul"e geçmesi).
+//   3. İçerik kuralı   — yalnızca belirli alan/satır değişirse korunur (tüm `package.json`'larda `scripts`,
+//                        `pnpm`, paket yöneticisi anahtarları ve korunan paketlerin sürümleri; `pnpm-lock.yaml`'da
+//                        korunan paketlerin girdileri/`resolution`'ları ve tarball/git çözümlemeleri; pooler imajı,
+//                        AC tabanı düşüşü, ADR'nin "kabul"e geçmesi).
 // Belirsizlikte (ayrıştırılamayan dosya) korunan sayılır (fail-closed).
+// Glob eşlemesi nokta ile başlayan adları da kapsar (`dot: true` eşdeğeri; T-008h M7): Node'un
+// `path.matchesGlob`'u `**`/`*` ile `.x` adlarını eşlemediği için kendi (yalnızca `*`, `**`) eşleyicimiz var.
 // Repoda henüz olmayan yollar (`packages/db/…`, `scripts/check-docs.mjs`, `.githooks/`, `tests/…`)
 // desen olarak durur (G-05); dosya oluştuğu anda kural işler.
-import path from "node:path";
-
 /**
  * @typedef {import("./lib/git.mjs").Change} Change
  * @typedef {{ path: string, rule: string, reason: string }} ProtectedHit
@@ -48,14 +50,40 @@ export const PROTECTED_GLOBS = Object.freeze([
   // pnpm kancaları (kurulumda kod çalıştırır; T-003 security-reviewer MAJOR)
   ".pnpmfile.*",
   "**/.pnpmfile.*",
+  // Paket yöneticisi yapılandırması, dosyanın tamamı (T-008h B1/M5/M6): node-options/nodeOptions,
+  // script-shell, registry, ignore-scripts, enable-pre-post-scripts, catalog*, patchedDependencies,
+  // onlyBuiltDependencies, packageExtensions … her anahtar.
+  ".npmrc",
+  "**/.npmrc",
+  "pnpm-workspace.yaml",
+  "**/pnpm-workspace.yaml",
+  // Bağımlılık yamaları (patchedDependencies hedefleri; T-008h M6)
+  "patches/**",
+  "**/patches/**",
+  "**/*.patch",
+  // AC faz değişikliği (pilot koşulları; T-008h m8)
+  "docs/PILOT.md",
 ]);
 
 /**
- * Paket yöneticisi güvenlik yapılandırması (T-003 security-reviewer MAJOR): `pnpm-workspace.yaml`,
- * `.npmrc` ve tüm `package.json`'larda bu anahtarların değişmesi korunur. `resolutions` pnpm'de
- * `overrides` eşdeğeridir; `pnpmfile` ayarı `.pnpmfile.*` yol kuralını başka dosyaya yönlendirebilir.
+ * Tüm `package.json`'larda üst düzeyde değişmesi korunan anahtarlar (T-003 security-reviewer MAJOR,
+ * T-008h B1/B2/M6). `scripts` ve `pnpm` alanlarının **tamamı** (yaşam döngüsü, pre/post betikleri,
+ * `pnpm.patchedDependencies`/`onlyBuiltDependencies`/`packageExtensions` …); `resolutions` pnpm'de
+ * `overrides` eşdeğeri; `pnpmfile` `.pnpmfile.*` yol kuralını başka dosyaya yönlendirebilir;
+ * `packageManager`/`devEngines` araç zincirini, `dependenciesMeta` kurulum davranışını değiştirir.
  */
-export const PM_CONFIG_KEYS = Object.freeze(["auditConfig", "overrides", "resolutions", "configDependencies", "pnpmfile"]);
+export const PM_CONFIG_KEYS = Object.freeze([
+  "scripts",
+  "pnpm",
+  "auditConfig",
+  "overrides",
+  "resolutions",
+  "configDependencies",
+  "pnpmfile",
+  "packageManager",
+  "devEngines",
+  "dependenciesMeta",
+]);
 
 /** Taban kuralı: tabanda var olan (birleşmiş) migration dosyaları. Yeni migration korunmaz. */
 export const MIGRATION_GLOBS = Object.freeze(["**/migrations/**", "**/drizzle/**"]);
@@ -63,9 +91,7 @@ export const MIGRATION_GLOBS = Object.freeze(["**/migrations/**", "**/drizzle/**
 export const AC_BASELINE = "tests/.ac-baseline.json";
 export const DECISIONS = "docs/DECISIONS.md";
 export const ADR_GLOB = "docs/adr/ADR-*.md";
-export const ROOT_PACKAGE = "package.json";
-export const WORKSPACE_YAML = "pnpm-workspace.yaml";
-export const NPMRC_GLOBS = Object.freeze([".npmrc", "**/.npmrc"]);
+export const LOCKFILE_GLOBS = Object.freeze(["pnpm-lock.yaml", "**/pnpm-lock.yaml"]);
 export const PACKAGE_JSON_GLOBS = Object.freeze(["package.json", "**/package.json"]);
 export const COMPOSE_GLOBS = Object.freeze([
   "docker-compose.yml",
@@ -78,7 +104,7 @@ export const COMPOSE_GLOBS = Object.freeze([
   "**/compose.yaml",
 ]);
 
-/** Kök `package.json`'da sürüm alanı korunan ORM / sürücü paketleri (ADR-003, ADR-004). */
+/** Tüm `package.json`'larda sürüm alanı korunan ORM / sürücü / pooler paketleri (ADR-003, ADR-004). */
 export const DB_PACKAGES = Object.freeze([
   "drizzle-orm",
   "drizzle-kit",
@@ -91,14 +117,65 @@ export const DB_PACKAGES = Object.freeze([
   "@prisma/client",
 ]);
 
+/** Sürüm alanı korunan bekçi araçları (T-008h M5): sürüm değişimi = bekçi davranışı değişimi. */
+export const GUARD_TOOL_PACKAGES = Object.freeze(["typescript", "vitest", "eslint", "typescript-eslint"]);
+/** Aynı araçların kapsamlı paketleri (`@vitest/runner`, `@typescript-eslint/parser` …). */
+const GUARD_TOOL_SCOPES = Object.freeze(["@vitest/", "@typescript-eslint/"]);
+
+/**
+ * Sürümü/kilit girdisi korunan paket mi.
+ * @param {string} name
+ * @returns {boolean}
+ */
+export function isGuardedPackage(name) {
+  return DB_PACKAGES.includes(name) || GUARD_TOOL_PACKAGES.includes(name) || GUARD_TOOL_SCOPES.some((s) => name.startsWith(s));
+}
+
 /** Sürüm taşıyan `package.json` bölümleri (`overrides`/`resolutions` tüm dosyalarda `PM_CONFIG_KEYS` ile). */
 const VERSION_SECTIONS = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"];
 
+/** @type {Map<string, RegExp>} */
+const globCache = new Map();
+
 /**
- * Kök `package.json`'da bekçi/doğrulama giriş noktaları: betik gövdesini değiştirmek bekçiyi
- * atlatmanın en kısa yoludur (`"check:protected": "true"`). PROTOCOL §3b "bekçi betikleri".
+ * Glob → düzenli ifade. Yalnızca `*` (bölüm içi, `/` hariç her şey — nokta ile başlayan adlar dahil),
+ * `**` (tam bölüm: sıfır veya daha çok dizin) ve düz karakterler. Başka glob sözdizimi hata
+ * (sessizce yanlış eşleme yerine).
+ * @param {string} glob
+ * @returns {RegExp}
  */
-const GUARD_SCRIPT_RE = /^(?:verify|check:.+|test:ac)$/;
+export function globToRegExp(glob) {
+  const cached = globCache.get(glob);
+  if (cached !== undefined) return cached;
+  if (/[?[\]{}!\\]/.test(glob)) throw new Error(`desteklenmeyen glob sözdizimi: ${glob}`);
+  const parts = glob.split("/");
+  let re = "";
+  parts.forEach((part, i) => {
+    const last = i === parts.length - 1;
+    if (part === "**") {
+      re += last ? ".*" : "(?:[^/]+/)*";
+      return;
+    }
+    if (part.includes("**")) throw new Error(`"**" yalnızca tam bölüm olabilir: ${glob}`);
+    re += part
+      .split("*")
+      .map((x) => x.replace(/[.+^$()|]/g, "\\$&"))
+      .join("[^/]*");
+    if (!last) re += "/";
+  });
+  const out = new RegExp(`^${re}$`);
+  globCache.set(glob, out);
+  return out;
+}
+
+/**
+ * @param {string} file
+ * @param {string} glob
+ * @returns {boolean}
+ */
+export function matchesGlob(file, glob) {
+  return globToRegExp(glob).test(file);
+}
 
 /**
  * @param {string} file
@@ -106,7 +183,7 @@ const GUARD_SCRIPT_RE = /^(?:verify|check:.+|test:ac)$/;
  * @returns {boolean}
  */
 export function matchesAny(file, globs) {
-  return globs.some((g) => path.posix.matchesGlob(file, g));
+  return globs.some((g) => matchesGlob(file, g));
 }
 
 /**
@@ -115,7 +192,7 @@ export function matchesAny(file, globs) {
  * @returns {string | null}
  */
 export function staticRule(file) {
-  for (const g of PROTECTED_GLOBS) if (path.posix.matchesGlob(file, g)) return g;
+  for (const g of PROTECTED_GLOBS) if (matchesGlob(file, g)) return g;
   return null;
 }
 
@@ -232,96 +309,100 @@ function obj(v) {
 }
 
 /**
- * Kök `package.json`'da korunan alanların değişmesi: ORM/sürücü sürüm alanları ve bekçi betikleri.
+ * Her `package.json`'da korunan alanlar: `PM_CONFIG_KEYS` (üst düzey, `scripts` ve `pnpm` dahil
+ * tamamı) ve korunan paketlerin (`isGuardedPackage`) sürüm alanları.
  * @param {Record<string, unknown> | null} b
  * @param {Record<string, unknown> | null} a
  * @returns {string[]}
  */
-function rootPackageChanges(b, a) {
+function packageChanges(b, a) {
   /** @type {string[]} */
   const out = [];
+  for (const k of PM_CONFIG_KEYS) {
+    if (JSON.stringify(b?.[k]) === JSON.stringify(a?.[k])) continue;
+    const bo = obj(b?.[k]);
+    const ao = obj(a?.[k]);
+    const keys = [...new Set([...Object.keys(bo), ...Object.keys(ao)])].filter((x) => JSON.stringify(bo[x]) !== JSON.stringify(ao[x]));
+    if (keys.length === 0) out.push(k);
+    else for (const x of keys.sort()) out.push(`${k}.${x}`);
+  }
   for (const s of VERSION_SECTIONS) {
     const bs = obj(b?.[s]);
     const as = obj(a?.[s]);
     for (const k of new Set([...Object.keys(bs), ...Object.keys(as)])) {
-      if (DB_PACKAGES.includes(k) && JSON.stringify(bs[k]) !== JSON.stringify(as[k])) out.push(`${s}.${k}`);
+      if (isGuardedPackage(k) && JSON.stringify(bs[k]) !== JSON.stringify(as[k])) out.push(`${s}.${k}`);
     }
   }
-  const bScripts = obj(b?.["scripts"]);
-  const aScripts = obj(a?.["scripts"]);
-  for (const k of new Set([...Object.keys(bScripts), ...Object.keys(aScripts)])) {
-    if (GUARD_SCRIPT_RE.test(k) && bScripts[k] !== aScripts[k]) out.push(`scripts.${k}`);
-  }
   return out;
 }
 
 /**
- * Her `package.json`'da paket yöneticisi yapılandırması (`PM_CONFIG_KEYS`): üst düzey ve `pnpm.` altında.
- * @param {Record<string, unknown> | null} b
- * @param {Record<string, unknown> | null} a
- * @returns {string[]}
+ * `pnpm-lock.yaml` girdi anahtarından paket adı (`'@scope/a@1.0.0(peer@2)'` → `@scope/a`).
+ * @param {string} key
+ * @returns {string}
  */
-function pmConfigChanges(b, a) {
-  /** @type {string[]} */
-  const out = [];
-  for (const k of PM_CONFIG_KEYS) {
-    if (JSON.stringify(b?.[k]) !== JSON.stringify(a?.[k])) out.push(k);
-    if (JSON.stringify(obj(b?.["pnpm"])[k]) !== JSON.stringify(obj(a?.["pnpm"])[k])) out.push(`pnpm.${k}`);
-  }
-  return out;
+function lockKeyName(key) {
+  const k = key.replace(/^['"]|['"]$/g, "");
+  const at = k.indexOf("@", 1);
+  return at === -1 ? k : k.slice(0, at);
 }
 
-/** Alt dize, büyük/küçük harf duyarsız (`globalPnpmfile`, `global-pnpmfile` dahil); fazla eşleşme korunur. */
-const PM_KEY_RE = new RegExp(PM_CONFIG_KEYS.join("|"), "i");
+/** `pnpm-lock.yaml`'da metin olarak karşılaştırılan üst düzey bloklar. */
+const LOCK_TOP_BLOCKS = new Set(["lockfileVersion", "settings", "overrides", "patchedDependencies", "pnpmfileChecksum", "packageExtensionsChecksum", "catalogs"]);
 
 /**
- * YAML'da `PM_CONFIG_KEYS` anahtarlarından biri geçen satır(lar) ve onların daha girintili alt
- * blokları. Ayrıştırıcı yok (bağımlılık eklenmez); metin düzeyinde, yorumlar dahil karşılaştırılır.
+ * `pnpm-lock.yaml`'ın korunan özeti (T-008h M6), YAML ayrıştırıcısı olmadan satır düzeyinde:
+ *   - üst düzey `LOCK_TOP_BLOCKS` blokları (ayarlar, overrides, patchedDependencies, sağlama toplamları);
+ *   - `packages:` bölümünde korunan paketlerin (`isGuardedPackage`) anahtar satırı (sürüm dahil) +
+ *     `resolution` (çok satırlıysa devamı dahil);
+ *   - herhangi bir paketin `integrity` dışı çözümlemesi (`tarball`, `commit`/`repo`, `directory`, `path`).
  * @param {string | null} text
  * @returns {string}
  */
-export function yamlConfigBlock(text) {
+export function lockfileGuarded(text) {
   if (text === null) return "";
   const lines = text.split(/\r?\n/);
   /** @type {string[]} */
   const out = [];
+  let top = "";
+  let entry = "";
+  let entryGuarded = false;
   for (let i = 0; i < lines.length; i++) {
-    const l = lines[i] ?? "";
-    if (!PM_KEY_RE.test(l)) continue;
-    const indent = /^\s*/.exec(l)?.[0].length ?? 0;
-    out.push(l.trimEnd());
-    for (let j = i + 1; j < lines.length; j++) {
-      const n = lines[j] ?? "";
-      if (n.trim() === "") continue;
-      if ((/^\s*/.exec(n)?.[0].length ?? 0) <= indent) break;
-      out.push(n.trimEnd());
-      i = j;
+    const l = (lines[i] ?? "").trimEnd();
+    if (l.trim() === "" || l.trim().startsWith("#")) continue;
+    const indent = /^ */.exec(l)?.[0].length ?? 0;
+    if (indent === 0) {
+      top = /^['"]?([^'":]+)/.exec(l)?.[1] ?? l;
+      entry = "";
+      if (LOCK_TOP_BLOCKS.has(top)) out.push(l);
+      continue;
+    }
+    if (LOCK_TOP_BLOCKS.has(top)) {
+      out.push(l);
+      continue;
+    }
+    if (top !== "packages") continue;
+    if (indent === 2) {
+      entry = l.trim().replace(/:\s*(?:\{\})?$/, "");
+      entryGuarded = isGuardedPackage(lockKeyName(entry));
+      if (entryGuarded) out.push(l);
+      continue;
+    }
+    if (indent === 4 && /^resolution\s*:/.test(l.trim())) {
+      /** @type {string[]} */
+      const block = [l.trim()];
+      for (let j = i + 1; j < lines.length; j++) {
+        const n = (lines[j] ?? "").trimEnd();
+        if (n.trim() !== "" && (/^ */.exec(n)?.[0].length ?? 0) <= 4) break;
+        if (n.trim() !== "") block.push(n.trim());
+        i = j;
+      }
+      const res = block.join(" ");
+      const nonIntegrity = /\b(?:tarball|commit|repo|directory|path|type)\s*:/.test(res);
+      if (entryGuarded || nonIntegrity) out.push(`${entry} ${res}`);
     }
   }
   return out.join("\n");
-}
-
-/**
- * `.npmrc`'de anahtarı audit / pnpmfile / override / resolution / config-dependencies içeren
- * ayarlar (yorumlar hariç), sıralı.
- * @param {string | null} text
- * @returns {string}
- */
-export function npmrcConfigLines(text) {
-  if (text === null) return "";
-  return text
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(
-      (l) =>
-        l !== "" &&
-        !l.startsWith("#") &&
-        !l.startsWith(";") &&
-        /audit|pnpmfile|override|resolution|config-?dependencies/i.test(l.split("=")[0] ?? ""),
-    )
-    .map((l) => l.replace(/\s*=\s*/, "="))
-    .sort()
-    .join("\n");
 }
 
 /**
@@ -383,7 +464,7 @@ export function contentRules(file, before, after) {
     const next = [...acceptedDecisionIds(after)].filter((id) => !prev.has(id));
     if (next.length > 0) hits.push({ path: file, rule: "adr-accepted", reason: `durumu "kabul"e geçen: ${next.join(", ")}` });
   }
-  if (path.posix.matchesGlob(file, ADR_GLOB) && adrAccepted(after) && !adrAccepted(before)) {
+  if (matchesGlob(file, ADR_GLOB) && adrAccepted(after) && !adrAccepted(before)) {
     hits.push({ path: file, rule: "adr-accepted", reason: 'ADR durumu "kabul"e geçti' });
   }
   if (matchesAny(file, PACKAGE_JSON_GLOBS)) {
@@ -392,15 +473,12 @@ export function contentRules(file, before, after) {
     if (!b.ok || !a.ok) {
       hits.push({ path: file, rule: "package-json", reason: "package.json ayrıştırılamadı (korunan alanlar denetlenemedi)" });
     } else {
-      const fields = [...pmConfigChanges(b.value, a.value), ...(file === ROOT_PACKAGE ? rootPackageChanges(b.value, a.value) : [])];
+      const fields = packageChanges(b.value, a.value);
       if (fields.length > 0) hits.push({ path: file, rule: "package-json", reason: `korunan alan değişti: ${fields.join(", ")}` });
     }
   }
-  if (file === WORKSPACE_YAML && yamlConfigBlock(before) !== yamlConfigBlock(after)) {
-    hits.push({ path: file, rule: "pm-config", reason: `paket yöneticisi yapılandırması değişti (${PM_CONFIG_KEYS.join("/")})` });
-  }
-  if (matchesAny(file, NPMRC_GLOBS) && npmrcConfigLines(before) !== npmrcConfigLines(after)) {
-    hits.push({ path: file, rule: "pm-config", reason: "audit/pnpmfile/override ayarı değişti" });
+  if (matchesAny(file, LOCKFILE_GLOBS) && lockfileGuarded(before) !== lockfileGuarded(after)) {
+    hits.push({ path: file, rule: "lockfile", reason: "korunan paket girdisi/resolution, tarball/git çözümlemesi veya kilit ayarı değişti" });
   }
   if (matchesAny(file, COMPOSE_GLOBS) && poolerImages(before) !== poolerImages(after)) {
     hits.push({ path: file, rule: "pooler-image", reason: "pooler imaj etiketi değişti" });
