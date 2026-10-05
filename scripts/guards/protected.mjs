@@ -168,7 +168,7 @@ function protectedBetween(root, from, to) {
  * @returns {string}
  */
 function treeEntry(root, rev, file) {
-  const out = git(root, ["ls-tree", "-z", rev, "--", file]);
+  const out = git(root, ["--literal-pathspecs", "ls-tree", "-z", rev, "--", file]);
   for (const rec of out.split("\0")) {
     const tab = rec.indexOf("\t");
     if (tab < 0 || rec.slice(tab + 1) !== file) continue;
@@ -179,6 +179,10 @@ function treeEntry(root, rev, file) {
 }
 
 /**
+ * Not: taban dalı rapordan sonra değişirse (ör. taban sonradan geri alınırsa) koşu yeniden
+ * tetiklenmez; Supervisor birleştirmeden hemen önce guards'ı yeniden koşturur (PROTOCOL).
+ * Git yol argümanları `--literal-pathspecs` ile verilir (`:`, `*`, `?`, `[` sihirli sayılmaz).
+ *
  * Güvenlik raporu SHA'sının tazelik denetimi (T-008i MINOR 8; T-008k madde 8). `null` = taze.
  * `target` verilirse (PR tabanı: `origin/<base>` veya push'ta `HEAD^1`) karar metin farkıyla değil
  * AĞAÇ GİRDİSİ karşılaştırmasıyla verilir. Aday yollar: PR'ın korunan değişiklikleri
@@ -217,7 +221,15 @@ export function securityFreshness(root, head, target) {
       const between = protectedBetween(root, sha, head).map((h) => h.path);
       const changed = [...new Set([...ownAtSha, ...ownAtHead, ...between])].filter((f) => {
         const h = treeEntry(root, head, f);
-        return h !== treeEntry(root, sha, f) && h !== treeEntry(root, target, f);
+        const r = treeEntry(root, sha, f);
+        const b = treeEntry(root, target, f);
+        // Fail-closed: aday yol (bir uçta değiştiği biliniyor) hiçbir uçta okunamadıysa doğrulanamadı = bayat.
+        if (h === "" && r === "" && b === "") return true;
+        if (h === r) return false;
+        // head == taban yalnızca rapor anında PR bu yolu DEĞİŞTİRMEDİYSE (rapor == merge-base) taze;
+        // PR'ın incelenen değişikliği sonradan tabana geri döndürüldüyse bayat (MINOR-1).
+        if (h === b) return r !== treeEntry(root, mbSha, f);
+        return true;
       });
       if (changed.length > 0) return `rapordan sonra korunan değişiklik: ${changed.join(", ")}`;
       return null;
@@ -400,6 +412,7 @@ export async function checkProtected(ctx) {
     const result = evaluateApproval(found.pull.body, found.pull.headSha, {
       securityFresh: securityFreshness(root, found.pull.headSha.toLowerCase(), target),
     });
+    out.detail("freshnessNote", "taban dalı değişirse koşu yeniden tetiklenmez; Supervisor birleştirmeden hemen önce guards'ı yeniden koşturur");
     out.detail("approval", {
       pr: found.pull.number,
       headSha: found.pull.headSha,

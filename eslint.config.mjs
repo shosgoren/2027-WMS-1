@@ -465,6 +465,9 @@ export default defineConfig(
     // dosyada yasaklı küme (statik/dinamik/require), statik olmayan `require` ve tenant ayarı
     // denetimleri aynen geçerlidir (ac-28-lint.test.ts bunu doğrular).
     files: [GUARD_LOADER_FILE],
+    // Satır içi yapılandırma/devre dışı bırakma yorumları cli.mjs'te etkisizdir (yüklenen muafiyeti
+    // `eslint-disable` ile genişletmek mümkün değil; yorum varsa ESLint uyarı verir).
+    linterOptions: { noInlineConfig: true },
     rules: {
       "no-restricted-syntax": [
         "error",

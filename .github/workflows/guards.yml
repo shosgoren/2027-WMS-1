@@ -21,6 +21,8 @@
 #     Yeni bekçi korunan dosyadır; onu tanıtan PR tabandan koşan check:protected onayından geçer ve
 #     ilk birleşmeden sonra tabandan koşar. Güven kökü (scope, tests, protected) tabanda yoksa FAIL.
 #     `check-pilot` tabanda `pilot.mjs` yoksa aynı kuralla atlanır.
+#   - Taban dalı rapordan/koşudan sonra değişirse (ör. sonradan geri alınırsa) koşu yeniden
+#     tetiklenmez; Supervisor birleştirmeden hemen önce guards'ı yeniden koşturur.
 #   - Yalnızca yerleşik GITHUB_TOKEN (G-09), yalnızca `check-all`'ın bekçi adımında (check:protected
 #     PR açıklamasını API'den okur). İzinler en dar: contents: read, pull-requests: read.
 # Commit öncesi kanca (`.githooks/pre-commit`) atlanabilir (`--no-verify`); zorlama buradadır.

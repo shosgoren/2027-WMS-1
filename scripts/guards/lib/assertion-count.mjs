@@ -353,11 +353,10 @@ function neverMutated(scope, name) {
         const m = memberName(p);
         if (m !== null && READ_ONLY_MEMBERS.has(m)) {
           benign = true;
-          if (m === "length") {
-            const pp = p.parent;
-            if (pp !== undefined && ts.isBinaryExpression(pp) && pp.left === p && pp.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && pp.operatorToken.kind <= ts.SyntaxKind.LastAssignment) benign = false;
-            if (pp !== undefined && (ts.isPrefixUnaryExpression(pp) || ts.isPostfixUnaryExpression(pp)) && (pp.operator === ts.SyntaxKind.PlusPlusToken || pp.operator === ts.SyntaxKind.MinusMinusToken)) benign = false;
-          }
+          // Salt okunur üyeye (yalnızca `length` değil) atama / ++ / -- bir mutasyondur.
+          const pp = p.parent;
+          if (pp !== undefined && ts.isBinaryExpression(pp) && pp.left === p && pp.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && pp.operatorToken.kind <= ts.SyntaxKind.LastAssignment) benign = false;
+          if (pp !== undefined && (ts.isPrefixUnaryExpression(pp) || ts.isPostfixUnaryExpression(pp)) && (pp.operator === ts.SyntaxKind.PlusPlusToken || pp.operator === ts.SyntaxKind.MinusMinusToken)) benign = false;
         }
       }
       if (!benign) ok = false;
@@ -537,7 +536,11 @@ function isFunctionUse(id) {
  * @returns {boolean}
  */
 function functionUsed(nameNode) {
-  return identifiersNamed(nameNode, nameNode.text).some((id) => id !== nameNode && isFunctionUse(id));
+  // İşlevin kendi gövdesindeki özyinelemeli çağrı kullanım sayılmaz (T-008k MINOR-3).
+  const decl = nameNode.parent;
+  const fn = decl !== undefined && ts.isVariableDeclaration(decl) && decl.initializer !== undefined ? decl.initializer : decl;
+  const inOwnBody = (/** @type {ts.Node} */ id) => fn !== undefined && (ts.isFunctionLike(fn) || ts.isClassLike(fn)) && id.pos >= fn.pos && id.end <= fn.end;
+  return identifiersNamed(nameNode, nameNode.text).some((id) => id !== nameNode && !inOwnBody(id) && isFunctionUse(id));
 }
 
 /**

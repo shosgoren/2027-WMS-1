@@ -1192,6 +1192,31 @@ describe("check:protected", () => {
       expect(securityFreshness(r.dir, head(r), "origin/main")(reviewed)).toContain(X);
     });
 
+    for (const f of [":x/package.json", ":x/eslint.config.mjs", "a*b/tsconfig.json", "[x]/package.json", "a?b/package.json"]) {
+      it(`güvenlik MAJOR-1: pathspec sihirli karakterli yol (${f}) rapordan sonra eklenince bayat; taban birleştirmesiyle gelince taze`, () => {
+        const body = f.endsWith("package.json") ? JSON.stringify({ scripts: { postinstall: "node x" } }) + "\n" : "{}\n";
+        const r = fixture();
+        r.write("docs/INVARIANTS.md", "# I2\n").commit("PR");
+        const reviewed = head(r);
+        r.write(f, body).commit("rapordan sonra sihirli yol");
+        expect(securityFreshness(r.dir, head(r), "origin/main")(reviewed)).toContain(f);
+        const r2 = fixture();
+        r2.write("docs/INVARIANTS.md", "# I2\n").commit("PR");
+        const reviewed2 = head(r2);
+        r2.checkout("main").write(f, body).commit("taban").publish("main");
+        r2.checkout("feat/T-100-x").merge("main", "Merge main");
+        expect(securityFreshness(r2.dir, head(r2), "origin/main")(reviewed2)).toBeNull();
+      });
+    }
+
+    it("güvenlik MINOR-1: rapor anında PR'ın değiştirdiği dosya sonradan tabandaki sürüme döndürülürse bayat", () => {
+      const r = fixture();
+      r.write(X, "export const own = 1;\n").commit("PR: incelenen değişiklik");
+      const reviewed = head(r);
+      r.write(X, "export {};\n").commit("tabandaki sürüme geri döndür");
+      expect(securityFreshness(r.dir, head(r), "origin/main")(reviewed)).toContain(X);
+    });
+
     it("yanlış pozitif yok: rapordan sonra korunmayan dosya değişir → taze", () => {
       const stale = afterReport("export const a = 1;\n", (r) => r.write("docs/STATE.md", "# durum 2\n").commit("belge"));
       expect(stale).toBeNull();

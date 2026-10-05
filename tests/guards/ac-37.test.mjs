@@ -404,6 +404,8 @@ const INEFFECTIVE = [
   ["hesaplanmış üye globalThis[\"setTimeout\"]", `globalThis["setTimeout"](() => {\n  ${ASSERT}\n}, 10);`],
   ["hesaplanmış üye boş dizi [\"forEach\"]", `[]["forEach"](() => {\n  ${ASSERT}\n});`],
   ["hesaplanmış üye await'siz [\"then\"]", `Promise.resolve()["then"](() => {\n  ${ASSERT}\n});`],
+  ["yalnızca kendi gövdesinde özyinelemeli çağrılan işlev", `function inner(n) {\n  ${ASSERT}\n  if (n > 0) inner(n - 1);\n}`],
+  ["yalnızca kendi gövdesinde özyinelemeli çağrılan ok işlevi", `const inner = (n) => {\n  ${ASSERT}\n  if (n > 0) inner(n - 1);\n};`],
   ["const boş dizi yalnızca okunuyor", `const xs = [];\nvoid xs.length;\nfor (const x of xs) {\n  ${ASSERT}\n  void x;\n}`],
 ];
 
@@ -438,6 +440,8 @@ const EFFECTIVE = [
   ["const dizi takma adla doldurulur", `const xs = [];\nconst ys = xs;\nys.push(1);\nfor (const x of xs) {\n  ${ASSERT}\n  void x;\n}`],
   ["Array.from([1]) for-of", `for (const x of Array.from([1])) {\n  ${ASSERT}\n  void x;\n}`],
   ["boş dizi concat([1]) forEach", `[].concat([1]).forEach(() => {\n  ${ASSERT}\n});`],
+  ["özyinelemeli işlev dışarıdan da çağrılıyor", `function inner(n) {\n  ${ASSERT}\n  if (n > 0) inner(n - 1);\n}\ninner(1);`],
+  ["const dizi hesaplanmış length += sonrası for-of", `const xs = [];\nxs["length"] += 2;\nfor (const x of xs) {\n  ${ASSERT}\n  void x;\n}`],
   ["hesaplanmış üye zamanlayıcıyı bekleyip sonra assertion", `await new Promise((resolve) => globalThis["setTimeout"](resolve, 1));\n${ASSERT}`],
 ];
 

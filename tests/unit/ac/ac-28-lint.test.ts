@@ -374,6 +374,25 @@ describe("AC-28 lint (T-015): yanlış pozitif ve bekçi yükleyicisi muafiyeti"
   );
 
   it.each([
+    ["eslint-disable-next-line", 'export async function load(x: string): Promise<unknown> {\n  // eslint-disable-next-line no-restricted-syntax -- muafiyet denemesi\n  return import(x);\n}\n'],
+    ["eslint-disable bloğu", 'export async function load(x: string): Promise<unknown> {\n  /* eslint-disable no-restricted-syntax */\n  return import(x);\n}\n'],
+  ])(
+    "@AC-28 T-008k scripts/guards/cli.mjs: satır içi %s yorumu etkisiz → import(x) hâlâ error",
+    async (_name, code) => {
+      const result = await lint(code, GUARD_LOADER_PATH);
+      const hits = result.messages.filter((m) => m.ruleId === SYNTAX_RULE_ID && m.severity === 2);
+      expect(hits).toHaveLength(1);
+    },
+    60_000,
+  );
+
+  it("@AC-28 T-008k: eslint-disable yorumu cli.mjs dışında çalışmaya devam eder (kod tabanı kırılmaz)", async () => {
+    const code = 'export async function load(x: string): Promise<unknown> {\n  // eslint-disable-next-line no-restricted-syntax -- test\n  return import(x);\n}\n';
+    const result = await lint(code, path.join(REPO_ROOT, "scripts/guards/__ac28_probe__.mjs"));
+    expect(result.messages.filter((m) => m.ruleId === SYNTAX_RULE_ID)).toHaveLength(0);
+  }, 60_000);
+
+  it.each([
     ['import("@wms/db/internal")', 'export async function leak(): Promise<unknown> {\n  return import("@wms/db/internal");\n}\n', SYNTAX_RULE_ID],
     ["require(değişken)", "declare const require: (id: string) => unknown;\n\nexport const f = (n: string) => require(n);\n", SYNTAX_RULE_ID],
     ['createRequire(…)("pg")', 'import { createRequire } from "node:module";\n\nexport const pg = createRequire(import.meta.url)("pg");\n', SYNTAX_RULE_ID],
