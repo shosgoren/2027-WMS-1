@@ -572,8 +572,71 @@ export function scramSha256Verifier(password, opts = {}) {
  */
 export function createAppRoleSql(password, opts = {}) {
   if (!/^[0-9a-f]{32,}$/.test(password)) throw new Error("app role password must be hex");
-  const verifier = scramSha256Verifier(password, opts);
-  return `CREATE ROLE ${APP_ROLE} LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD '${verifier}';\n`;
+  return appRoleSql(scramSha256Verifier(password, opts));
+}
+
+/**
+ * `CREATE ROLE wms_app ... PASSWORD '<değer>'`. Değer yalnızca SCRAM özeti ya da hex parola
+ * karakterlerinden oluşur (tırnak/kaçış yok).
+ * @param {string} passwordValue
+ */
+function appRoleSql(passwordValue) {
+  if (!/^[A-Za-z0-9+/=$:-]+$/.test(passwordValue)) throw new Error("app role password value has unexpected characters");
+  return `CREATE ROLE ${APP_ROLE} LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD '${passwordValue}';\n`;
+}
+
+/**
+ * Parolanın sunucu tarafında reddedildiğini gösteren SQLSTATE'ler: 22023 invalid_parameter_value
+ * (PostgreSQL `check_password_hook` / passwordcheck'in kullandığı kod), 28P01 invalid_password.
+ */
+export const PASSWORD_REJECT_SQLSTATES = new Set(["22023", "28P01"]);
+
+/**
+ * Rol oluşturma hatası parolanın (ör. önceden özetlenmiş SCRAM değerinin) reddi mi? Yalnızca
+ * sunucunun SQLSTATE'li ERROR'u sayılır; bağlantı hatası (SQLSTATE yok) asla.
+ * @param {PsqlResult} r
+ */
+export function isPasswordRejection(r) {
+  if (r.ok || r.sqlstate === null) return false;
+  if (/connection to server/i.test(r.error ?? "")) return false;
+  return PASSWORD_REJECT_SQLSTATES.has(r.sqlstate) || /password/i.test(r.error ?? "");
+}
+
+/**
+ * @typedef {{ path: "scram" | "plaintext", ok: boolean, sqlstate: string | null, error: string | null }} RoleAttempt
+ * @typedef {{ ok: boolean, path: "scram" | "plaintext-retry", attempts: RoleAttempt[] }} RoleCreation
+ */
+
+/**
+ * `wms_app`'i oluşturur. Önce istemcide üretilen SCRAM-SHA-256 özeti gönderilir (sunucuya düz
+ * parola gitmez). Neon özetlenmiş parolayı REDDEDERSE (`isPasswordRejection`) bir kez 192 bit
+ * rastgele DÜZ parolayla yeniden denenir — Supervisor kararı (2026-10-05). Gerekçe/kabul edilen
+ * risk: parola koşu başına rastgeledir, yalnızca bu koşunun GEÇİCİ dalındaki role aittir, dal (ve
+ * rol) koşu sonunda silinir; bağlantı TLS + tam sertifika doğrulamalıdır (verify-full); değer
+ * maskelenir. Neon'un parola entropi denetimi düz parolayı görmek isteyebilir (Neon belgesi: SQL
+ * ile oluşturulan rolde ≥60 bit). Başka nedenli hata (yetki, bağlantı, çakışan rol…) → yeniden
+ * deneme YOK (BLOCKED).
+ * @param {{
+ *   direct: PsqlTarget, password: string, redactor: Redactor, mask: (v: string) => void,
+ *   run?: (t: PsqlTarget, sql: string, r: Redactor) => PsqlResult, salt?: Buffer,
+ * }} o
+ * @returns {RoleCreation}
+ */
+export function createAppRole(o) {
+  if (!/^[0-9a-f]{48,}$/.test(o.password)) throw new Error("app role password must be ≥192-bit hex");
+  const run = o.run ?? runPsql;
+  const verifier = scramSha256Verifier(o.password, o.salt ? { salt: o.salt } : {});
+  // StoredKey/ServerKey çevrimdışı saldırıya/sunucu taklidine yarar: özet de gizli değer sayılır.
+  o.mask(verifier);
+  /** @type {RoleAttempt[]} */
+  const attempts = [];
+  const first = run(o.direct, appRoleSql(verifier), o.redactor);
+  attempts.push({ path: "scram", ok: first.ok, sqlstate: first.sqlstate, error: first.error });
+  if (first.ok) return { ok: true, path: "scram", attempts };
+  if (!isPasswordRejection(first)) return { ok: false, path: "scram", attempts };
+  const second = run(o.direct, appRoleSql(o.password), o.redactor);
+  attempts.push({ path: "plaintext", ok: second.ok, sqlstate: second.sqlstate, error: second.error });
+  return { ok: second.ok, path: "plaintext-retry", attempts };
 }
 
 export const APP_ROLE_CHECK_SQL = `SELECT r.rolcanlogin, r.rolsuper, r.rolbypassrls, r.rolcreatedb, r.rolcreaterole, r.rolreplication,
@@ -769,6 +832,16 @@ function runView(r) {
   };
 }
 
+/**
+ * Markdown tablo hücresi: nesne → JSON; `|` kaçışlanır, satır sonları boşluk olur (çok satırlı
+ * psql hata metni tabloyu bozmasın).
+ * @param {unknown} v
+ */
+export function cell(v) {
+  const s = typeof v === "string" ? v : JSON.stringify(v);
+  return String(s).replace(/\r?\n/g, " ").replace(/\|/g, "\\|");
+}
+
 /** @param {Tally | null | undefined} t */
 const tl = (t) => (t ? `${t.status} (${t.passed}/${t.total})` : "-");
 
@@ -815,7 +888,7 @@ export function renderSummaryMd(s) {
     `| Sürücü ve sürümü | ${a.driver.name} ${a.driver.version} (kurulu) | Q-03 |`,
     `| Drizzle sürümü | drizzle-orm ${a.drizzle.version} (kurulu) | Q-03 |`,
     `| Prepared statement | üretim prepare=${String(pp.production)}; kapı: ${ppRun(pp.gateRun)}; tanı: ${ppRun(pp.diagnosticRun)}; pooler: ${pp.poolerSetting} | Q-04 |`,
-    `| Doğrudan bağlantı yöntemi | ${dc.method}; wms_app: ${typeof dc.roleCreated === "string" ? dc.roleCreated : JSON.stringify(dc.roleCreated)}; sahip rol: ${typeof dc.owner === "string" ? dc.owner : JSON.stringify(dc.owner)}; migration rolüyle çalışma: ${dc.migrationRoleWorks} (kaynak: ${dc.source}) | Q-06 |`,
+    `| Doğrudan bağlantı yöntemi | ${dc.method}; wms_app: ${cell(dc.roleCreated)}; sahip rol: ${cell(dc.owner)}; migration rolüyle çalışma: ${dc.migrationRoleWorks} (kaynak: ${dc.source}) | Q-06 |`,
     `| Koşu tarihi ve sonucu | ${a.run.date} · ${a.run.result} · \`${a.run.artifact}\` | — |`,
     ``,
     `## Koşular`,
@@ -1047,16 +1120,20 @@ export async function main(o = {}) {
     const sv = runPsql(direct, "SHOW server_version;\n", redactor);
     data.serverVersionDirect = sv.ok ? sv.stdout : `hata (SQLSTATE ${sv.sqlstate ?? "?"})`;
 
-    const create = runPsql(direct, createAppRoleSql(appPassword), redactor);
-    if (!create.ok) {
-      data.appRole = `oluşturulamadı (SQLSTATE ${create.sqlstate ?? "?"}): ${create.error}`;
-      data.blocked = "Q-06: wms_app sahip rolüyle doğrudan bağlantıda oluşturulamadı";
+    const creation = createAppRole({ direct, password: appPassword, redactor, mask: (v) => maskSecret(redactor, v, { env }) });
+    data.appRole = { created: creation.ok, path: creation.path, attempts: creation.attempts, check: "çalıştırılmadı" };
+    if (!creation.ok) {
+      const last = creation.attempts[creation.attempts.length - 1];
+      data.blocked = `Q-06: wms_app sahip rolüyle doğrudan bağlantıda oluşturulamadı (yol ${creation.path}, SQLSTATE ${last?.sqlstate ?? "yok"})`;
       say(`[spike:neon] BLOCKED ${data.blocked}`);
       return 1;
     }
+    say(`[spike:neon] wms_app oluşturuldu (yol: ${creation.path})`);
     const check = runPsql(direct, APP_ROLE_CHECK_SQL, redactor);
-    const parsed = check.ok ? parseAppRoleCheck(check.stdout) : { ok: false, detail: `hata (SQLSTATE ${check.sqlstate ?? "?"})` };
-    data.appRole = parsed;
+    const parsed = check.ok
+      ? parseAppRoleCheck(check.stdout)
+      : { ok: false, detail: `hata (SQLSTATE ${check.sqlstate ?? "?"}): ${check.error}` };
+    data.appRole.check = parsed;
     if (!parsed.ok) {
       data.blocked = "Q-06: wms_app öznitelikleri/üyelikleri beklenenden farklı";
       say(`[spike:neon] BLOCKED ${data.blocked}`);
@@ -1116,6 +1193,13 @@ export async function main(o = {}) {
       say("[spike:neon] FAIL maskelenmemiş gizli değer konsolda veya .artifacts/t-005d/ altında görüldü");
     }
     say(`[spike:neon] özet: ${written.summary.result} · .artifacts/t-005d/summary.md`);
+    // Tanı log'dan okunabilsin (artefakt indirilemeyebilir): YALNIZCA sızıntı denetimi geçtiyse,
+    // maskelenmiş özet (yeniden maskelenerek) iş log'una basılır.
+    if (written.ok) {
+      log("::group::summary.md");
+      for (const line of written.md.split("\n")) say(line);
+      log("::endgroup::");
+    }
     if (!written.ok || data.cleanup !== "silindi") process.exitCode = 1;
   }
 }
