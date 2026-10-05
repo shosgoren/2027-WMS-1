@@ -8,7 +8,8 @@
 //                          hatayla düşülür; hiçbir test atlanmaz.
 //
 // Güvenlik (G-09): URL'ler, kullanıcı/parola log'a veya hata mesajına yazılmaz; yalnızca
-// `maskHost` çıktısı kullanılır. Uygulama testleri uygulama rolü için yalnızca DATABASE_URL'i
+// `maskHost` çıktısı kullanılır. Artefakta/konsola yazılan hata metni (ve hata zinciri) tek
+// yardımcıdan geçer: `redactErrorChain` (T-005g). Uygulama testleri uygulama rolü için yalnızca DATABASE_URL'i
 // kullanır; DATABASE_URL_DIRECT yalnızca migration/kurulum fikstürleri içindir (RLS bypass yolu).
 
 export const INT_TARGETS = ["compose", "neon"] as const;
@@ -132,9 +133,19 @@ export function maskHost(url: string): string {
   return u.port === "" ? masked : `${masked}:${u.port}`;
 }
 
+/** `decodeURIComponent` bozuk kaçışta hata atar; o durumda ham değer kullanılır. */
+function decoded(v: string): string {
+  try {
+    return decodeURIComponent(v);
+  } catch {
+    return v;
+  }
+}
+
 /**
- * Hata mesajından URL'nin hassas parçalarını (tam URL, parola, kullanıcı adı dışındaki host)
- * çıkarır; host yerine maskeli host yazılır. Sürücü hataları (ör. ENOTFOUND <host>) için.
+ * Hata mesajından URL'nin hassas parçalarını (tam URL, parola, kullanıcı adı, host) çıkarır;
+ * parola ve kullanıcı adı `***`, host maskeli host olur. Sürücü hataları (ör. ENOTFOUND <host>,
+ * `password authentication failed for user "<kullanıcı>"`) için.
  */
 export function redactUrl(message: string, url: string): string {
   let out = message.split(url).join("<url>");
@@ -144,8 +155,41 @@ export function redactUrl(message: string, url: string): string {
   } catch {
     return out;
   }
-  const secrets = [u.password, decodeURIComponent(u.password)].filter((s) => s.length > 0);
+  // Uzun olan önce: kısa bir parça, uzun olanın içinde kalıp onu yarım bırakmasın.
+  const secrets = [u.password, decoded(u.password), u.username, decoded(u.username)]
+    .filter((s) => s.length > 0)
+    .sort((a, b) => b.length - a.length);
   for (const s of secrets) out = out.split(s).join("***");
   if (u.hostname !== "") out = out.split(u.hostname).join(maskHost(`postgres://${u.hostname}`));
   return out;
+}
+
+/** Bilinmeyen (ör. sürücünün yeniden kurduğu) bağlantı URL'leri: şema + kimlik/host bölümü. */
+const ANY_PG_URL_RE = /postgres(?:ql)?:\/\/[^\s"'`<>]+/gi;
+
+/** Hata zincirinde izlenen azami `cause` derinliği ve çıktı uzunluğu. */
+export const ERROR_CHAIN_MAX_DEPTH = 5;
+export const ERROR_CHAIN_MAX_LENGTH = 500;
+
+/**
+ * Int testlerinde artefakta/konsola yazılan hata metni için TEK maskeleme yardımcısı (T-005g):
+ * `cause` zincirini (en çok 5 halka) `a <- b <- c` olarak birleştirir; verilen her URL için
+ * `redactUrl` uygular (tam URL, kullanıcı, parola, host), ardından kalan her postgres URL'sini
+ * `<url>` yapar ve 500 karakterle sınırlar. Maskeleme kesmeden ÖNCE yapılır (yarım sır kalmaz).
+ */
+export function redactErrorChain(e: unknown, urls: readonly string[]): string {
+  const parts: string[] = [];
+  let cur: unknown = e;
+  for (let depth = 0; depth < ERROR_CHAIN_MAX_DEPTH && cur !== null && cur !== undefined; depth++) {
+    parts.push(cur instanceof Error ? cur.message : String(cur));
+    cur = cur instanceof Error ? (cur as { cause?: unknown }).cause : undefined;
+  }
+  let out = parts.join(" <- ");
+  for (const url of urls) out = redactUrl(out, url);
+  return out.replace(ANY_PG_URL_RE, "<url>").slice(0, ERROR_CHAIN_MAX_LENGTH);
+}
+
+/** Bir `IntEnv`'in maskelenecek URL'leri (uygulama + doğrudan). */
+export function secretUrls(env: Pick<IntEnv, "databaseUrl" | "databaseUrlDirect">): readonly string[] {
+  return [env.databaseUrl, env.databaseUrlDirect];
 }

@@ -8,7 +8,9 @@ import {
   parsePrepare,
   parseTarget,
   readIntEnv,
+  redactErrorChain,
   redactUrl,
+  secretUrls,
 } from "./env.ts";
 
 // Sentetik değerler (G-09): gerçek host/parola değildir.
@@ -142,5 +144,56 @@ describe("maskHost / redactUrl", () => {
     const out = redactUrl(msg, APP_URL);
     expectNoSecrets(out);
     expect(out).toContain("ENOTFOUND ep***.eu-central-1.aws.neon.tech");
+  });
+});
+
+describe("redactUrl — kullanıcı adı (T-005g)", () => {
+  it("masks the username (raw and percent-decoded) as well as the password", () => {
+    const url = "postgresql://wms%2Bapp_user:s3cr3t-app-pw@db.internal.example.test:5432/wms";
+    const msg =
+      'password authentication failed for user "wms+app_user" (wms%2Bapp_user@db.internal.example.test) pw=s3cr3t-app-pw';
+    const out = redactUrl(msg, url);
+    expect(out).not.toContain("wms+app_user");
+    expect(out).not.toContain("wms%2Bapp_user");
+    expect(out).not.toContain("s3cr3t-app-pw");
+    expect(out).not.toContain("db.internal.example.test");
+    expect(out).toContain('for user "***"');
+    expect(out).toContain("db***.internal.example.test");
+  });
+
+  it("masks the app-role username from the synthetic Neon URL", () => {
+    const out = redactUrl('role "wms_app" failed at ep-cool-name-123456-pooler.eu-central-1.aws.neon.tech', APP_URL);
+    expect(out).not.toContain("wms_app");
+    expectNoSecrets(out);
+    expect(out).toBe('role "***" failed at ep***.eu-central-1.aws.neon.tech');
+  });
+});
+
+describe("redactErrorChain (T-005g)", () => {
+  it("joins the cause chain and removes URL, user, password and host of every given URL", () => {
+    const root = new Error(`connect ECONNREFUSED ep-cool-name-123456.eu-central-1.aws.neon.tech user=wms_migrator`);
+    const mid = new Error(`pool failed for ${DIRECT_URL}`, { cause: root });
+    const top = new Error("Failed query: select 1 (app wms_app / s3cr3t-app-pw)", { cause: mid });
+    const out = redactErrorChain(top, secretUrls({ databaseUrl: APP_URL, databaseUrlDirect: DIRECT_URL }));
+    expect(out.split(" <- ")).toHaveLength(3);
+    expectNoSecrets(out);
+    for (const s of ["wms_app", "wms_migrator"]) expect(out).not.toContain(s);
+    expect(out).toContain("Failed query: select 1");
+    expect(out).toContain("ECONNREFUSED ep***.eu-central-1.aws.neon.tech");
+  });
+
+  it("replaces unknown postgres URLs and handles non-Error values", () => {
+    const out = redactErrorChain(new Error("retry postgres://other:pw-x@10.0.0.9:6432/db failed"), []);
+    expect(out).toBe("retry <url> failed");
+    expect(redactErrorChain("plain string", [APP_URL])).toBe("plain string");
+    expect(redactErrorChain(undefined, [APP_URL])).toBe("");
+  });
+
+  it("masks before truncating to 500 characters (no partial secret at the cut)", () => {
+    const long = `${"x".repeat(495)}${APP_URL}`;
+    const out = redactErrorChain(new Error(long), [APP_URL]);
+    expect(out.length).toBeLessThanOrEqual(500);
+    expect(out).not.toContain("postgresql:/");
+    expect(out).not.toContain("s3cr");
   });
 });

@@ -7,7 +7,8 @@
 // Hedefe göre DALLANMAZ: aynı dosya `pnpm test:int` (compose: PgBouncer transaction mode) ve
 // `pnpm test:int:neon` (Neon pooler) altında değişmeden koşar. Uygulama rolü bağlantısı yalnızca
 // DATABASE_URL (pooler) üzerinden; DATABASE_URL_DIRECT yalnızca sonda fikstürünün kurulumu için.
-// Tohum veri sentetiktir (G-09); URL/parola loglanmaz, yalnızca maskeli host.
+// Tohum veri sentetiktir (G-09); URL/kullanıcı/parola loglanmaz, yalnızca maskeli host; hata
+// zinciri `redactErrorChain` (harness/env.ts) ile maskelenir.
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -23,7 +24,7 @@ import {
   type DbClient,
   type TenantContext,
 } from "../../../packages/db/src/client.ts";
-import { maskHost, readIntEnv } from "../harness/env.ts";
+import { maskHost, readIntEnv, redactErrorChain, secretUrls } from "../harness/env.ts";
 import { PROBE_SEED, PROBE_TABLE, PROBE_TENANT_A, PROBE_TENANT_B, applyProbe, dropProbe } from "../fixtures/rls-probe.ts";
 
 const CALLS_PER_TENANT = 50;
@@ -62,16 +63,6 @@ function sqlstateOf(e: unknown): string | null {
     cur = (cur as { cause?: unknown }).cause;
   }
   return null;
-}
-
-function messageChain(e: unknown): string {
-  const parts: string[] = [];
-  let cur: unknown = e;
-  for (let depth = 0; depth < 5 && cur !== null && cur !== undefined; depth++) {
-    parts.push(cur instanceof Error ? cur.message : String(cur));
-    cur = cur instanceof Error ? (cur as { cause?: unknown }).cause : undefined;
-  }
-  return parts.join(" <- ").slice(0, 500);
 }
 
 function isPreparedError(e: CapturedError): boolean {
@@ -181,7 +172,8 @@ for (const poolMax of POOL_SIZES) {
             }
             completed++;
           } catch (e) {
-            errors.push({ call, tenant, sqlstate: sqlstateOf(e), message: messageChain(e) });
+            // Artefakta/konsola giden hata zinciri tek maskeleme yardımcısından geçer (T-005g, G-09).
+            errors.push({ call, tenant, sqlstate: sqlstateOf(e), message: redactErrorChain(e, secretUrls(env)) });
           }
         }),
       );
