@@ -137,6 +137,46 @@ jobs:
         with:
           node-version-file: package.json
           cache: pnpm
+      # Audit muafiyetleri YALNIZCA bu dosyada (A-36) yaşar. pnpm/npm audit yapılandırması
+      # (pnpm-workspace.yaml `auditConfig`/`audit*`, herhangi bir package.json `pnpm.auditConfig`/
+      # `pnpm.audit*`, .npmrc `audit*`) advisory'yi JSON'dan önce düşürüp filtreyi atlatabilir
+      # (security-reviewer bulgusu) → repoda (git'te izlenen tüm dosyalar) bulunursa kırmızı.
+      # install'dan önce koşar.
+      - name: Audit config guard
+        run: |
+          node --input-type=module - <<'EOF'
+          import { execFileSync } from "node:child_process";
+          import { readFileSync } from "node:fs";
+          const files = execFileSync("git", ["ls-files", "-z"], { encoding: "utf8" }).split("\0").filter(Boolean);
+          const base = (f) => f.slice(f.lastIndexOf("/") + 1);
+          const hits = [];
+          const auditKey = /^\s*["']?audit[A-Za-z_-]*["']?\s*[:=]/im;
+          for (const f of files) {
+            const name = base(f);
+            if (name === "pnpm-workspace.yaml" || name === "pnpm-workspace.yml" || name === ".npmrc") {
+              const m = readFileSync(f, "utf8").match(auditKey);
+              if (m) hits.push(`${f}: ${m[0].trim()}`);
+            } else if (name === "package.json") {
+              let pkg;
+              try {
+                pkg = JSON.parse(readFileSync(f, "utf8"));
+              } catch (e) {
+                hits.push(`${f}: JSON okunamadı (${e.message})`);
+                continue;
+              }
+              const pnpmField = pkg?.pnpm ?? {};
+              for (const key of Object.keys(pnpmField)) {
+                if (/^audit/i.test(key)) hits.push(`${f}: pnpm.${key}`);
+              }
+            }
+          }
+          if (hits.length > 0) {
+            console.error("::error::audit config not allowed; exceptions live only in ci.yml A-36");
+            for (const h of hits) console.error(`  ${h}`);
+            process.exit(1);
+          }
+          console.log(`audit config guard: OK (${files.length} izlenen dosya tarandı)`);
+          EOF
       - run: pnpm install --frozen-lockfile
       # Eşik (A-öneri, T-003): high ve critical → kırmızı. Tüm çalışma alanı, prod + dev bağımlılıkları.
       # `pnpm audit --ignore` KULLANILMAZ: pnpm 10.28'de bu bayrak denetim yapmadan 0 döner
