@@ -28,7 +28,7 @@ Kaynak sözdizimi: `<dosya>#<json.yolu>` (package.json alanı) veya `docker-comp
 | PostgreSQL ana sürümü (Neon) | — | — Q-05 (kullanıcı beyanı 2026-10-05: 17; T-005d doğrular) | | ADR-004 |
 | Neon pooler türü/sürümü | — | — Q-02 | | ADR-004 |
 | Prepared statement ayarı | — | — Q-04 | | ADR-004 |
-| Kuyruk kütüphanesi | — | — ADR-005 eki (seçilmedi; adaylar pg-boss, graphile-worker) | | ADR-005 |
+| Kuyruk kütüphanesi | — | — pg-boss seçildi (ADR-005 eki 2026-10-05); sürüm ilk kuyruk kartında kilitlenir (aday 12.36.0) | | ADR-005 |
 | Tailwind CSS | tailwindcss | — ilk kullanan kart | | |
 | Shadcn/Radix, Lucide | — | — ilk kullanan kart | | |
 | TanStack Query / Virtual | @tanstack/* | — ilk kullanan kart | | |
@@ -47,7 +47,7 @@ Sürüm notları (kaynak: kurulu `package.json`/`pnpm-lock.yaml`, 2026-10-05):
 | Uygulama mimarisi | Next.js App Router monolit + ayrı kalıcı worker, pnpm monorepo, ortak `packages/domain` | ADR-001 (kabul) |
 | ORM | Drizzle; sürücü ve prepared statement ayarı T-005 sonucuna bağlı (Q-03, Q-04) | ADR-003 (kabul) |
 | DB | Neon PostgreSQL + transaction pooler; teknik alanlar T-005 ile doldurulur | ADR-004 (kabul) |
-| Kuyruk | Postgres kuyruğu (Faz 0–4); kütüphane seçilmedi (pg-boss / graphile-worker → ADR-005 eki) | ADR-005 (kabul) |
+| Kuyruk | Postgres kuyruğu (Faz 0–4); kütüphane pg-boss (ADR-005 eki) | ADR-005 (kabul) |
 | Dosya | S3 uyumlu özel bucket; yerelde MinIO; prod sağlayıcısı ADR-007 | ADR-006 (kabul) |
 | Web arayüzü | TypeScript strict, Tailwind, Shadcn/Radix, Lucide | — (ilk kullanan kart) |
 | Durum/veri | TanStack Query, TanStack Virtual, Zustand (gerektiğinde) | — |
