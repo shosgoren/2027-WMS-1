@@ -9,7 +9,13 @@
   "scripts": {
     "verify": "node scripts/verify.mjs",
     "infra:smoke": "node scripts/compose-smoke.mjs",
-    "test:ac": "node scripts/test-ac/cli.mjs"
+    "test:ac": "node scripts/test-ac/cli.mjs",
+    "check:scope": "node scripts/guards/cli.mjs scope",
+    "check:tests": "node scripts/guards/cli.mjs tests",
+    "check:ac-ratchet": "node scripts/guards/cli.mjs ac-ratchet",
+    "check:protected": "node scripts/guards/cli.mjs protected",
+    "check:assertions": "node scripts/guards/cli.mjs assertions",
+    "check:pilot": "node scripts/guards/cli.mjs pilot"
   },
   "devDependencies": {
     "@types/node": "24.19.1",
