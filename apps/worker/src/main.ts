@@ -19,3 +19,4 @@ const lifecycle = createLifecycle({
 
 lifecycle.installProcessHandlers(process);
 lifecycle.start();
+export const t003LintProbe = 1 as any; // T-003 negatif kanıt: tek satır lint hatası (birleştirilmez)
