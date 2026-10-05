@@ -1,8 +1,8 @@
 # STATE (≤80 satır — her görev sonunda Supervisor günceller)
 
-**Oturum kilidi:** session_01C59FRaUynaDdhNGZoRbKsY · 2026-10-05T20:15Z (zamanlanmış oturum: kilit 3 saatten yeniyse ve başka oturumunsa hiçbir şey yapmadan çık; değilse kendi kimliğinle yenile, her push'ta zamanı güncelle)
+**Oturum kilidi:** session_01C59FRaUynaDdhNGZoRbKsY · 2026-10-05T20:35Z (zamanlanmış oturum: kilit 3 saatten yeniyse ve başka oturumunsa hiçbir şey yapmadan çık; değilse kendi kimliğinle yenile, her push'ta zamanı güncelle)
 **Faz:** 0 — Kararlar & iskelet
-**Aktif görev:** T-008k bekçi sıkılaştırma (#26 → `int/faz0-kapanis`) ∥ T-005d Neon rol düzeltmesi (#27 → `main`) ∥ Faz 1 plan 3. tur MINOR'ları (architect, `int/faz1-plan`) ∥ T-109 (#25 → `int/faz1-ui-temel`, CI kuyrukta) ∥ T-110 ui kit (T-109 üstüne). STATE'in güncel kopyası: `int/faz0-kapanis`.
+**Aktif görev:** #29 Faz 1 planı → `main` (ADR-014/015/016 kabul, güvenlik @8335c6b 0·0·6; CI bekleniyor) ∥ T-101 (`feat/T-101-migrate` → `int/faz1-sema`) ∥ T-008k bekçi sıkılaştırma (#26 → `int/faz0-kapanis`, BLOCKER düzeltmesi) ∥ T-005d Neon rol düzeltmesi (#27 → `main`) ∥ Faz 1 plan 3. tur MINOR'ları (architect, `int/faz1-plan`) ∥ T-109 (#25 → `int/faz1-ui-temel`, CI kuyrukta) ∥ T-110 ui kit (T-109 üstüne). STATE'in güncel kopyası: `int/faz0-kapanis`.
 **Son tamamlanan:** #20 `int/faz0-bekciler-2` → `main` (T-008d/e/f/g; bekçiler CI'da taban daldan) · #19 pooler · #13 Fly staging
 **Sonraki adım:** Faz 1 planı güvenlik 3. tur @b400466 BLOCKER 0 · MAJOR 0 · MINOR 8 → MINOR'lar kartlara → ADR-014/015/016 kabul PR'ı (korunan). #25/#26/#27 CI yeşilse birleştir. T-005d (Neon Actions koşusu; iş akışı main'e girince dispatch) → T-005e/f; T-008j; T-004b; T-009b canlı AC-43; sonra Faz 0 kapısı (`pnpm test:ac --phase 0` + check:pilot + JOURNAL kapı raporu) → Faz 1 kart seti (architect).
 
@@ -31,6 +31,11 @@ ADR-001 Next.js + ayrı worker · 002 İngilizce kod/DB, Türkçe UI · 003 Driz
 - [x] T-008d/e/f/g (#20). Açık MINOR'lar → T-008j
 - [~] T-009a — kimlik/CODEOWNERS kısmı iptal (ADR-012 rev.); kalan: kullanıcı isterse `main` branch protection · T-009b AC-43/44'ün yeni tanımına göre
 - [x] T-010 Fly staging (#11, #12, #13 main'de; ilk dağıtım yeşil). Takipler: `not found` desenini daralt, taban imaj güncelleme süreci, PR CI'da docker build
+
+## Faz 1 plan takipleri (security-reviewer @8335c6b MINOR; ilgili kart başlamadan küçük docs PR'ı)
+- m1 dolaylı ADMIN: `pg_has_role(current_user,'wms_identity_probe','MEMBER WITH ADMIN OPTION')=false` (T-103/T-105 öncesi) · m2 T-108 yerel/CI'da beklenmeyen ADMIN satırı FAIL · m3 demo bekçi işlevi `search_path` + `proowner`/`prosecdef` assertion · m4 ADR-016 açık risk (reset-password tx paylaşmaz) için Q kaydı + karar (T-117b öncesi) · m5 T-105:26, T-101b:18, ADR-015:29 artıkları
+- T-110 #28 MINOR: href yalnızca uygulama içi yol, Esc yükleniyorken, STACK lucide satırı, odak/48px T-131
+- T-101 Faz 0 kapısından önce başlatıldı (Supervisor kararı: zaman kullanımı); birleştirme kapıdan sonra
 
 ## Engeller
 - U-06 kapandı (2026-10-05): kullanıcı `FLY_API_TOKEN`'ı uygulama kapsamlı deploy token'la değiştirdi; doğrulama dispatch koşusu yeşil https://github.com/shosgoren/2027-WMS-1/actions/runs/37356910665. Eski org token'ın iptali kullanıcıya hatırlatıldı.
