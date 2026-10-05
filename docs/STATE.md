@@ -2,7 +2,7 @@
 
 **Oturum kilidi:** session_01C59FRaUynaDdhNGZoRbKsY · 2026-10-05T16:30Z (zamanlanmış oturum: kilit 3 saatten yeniyse ve başka oturumunsa hiçbir şey yapmadan çık; değilse kendi kimliğinle yenile, her push'ta zamanı güncelle)
 **Faz:** 0 — Kararlar & iskelet
-**Aktif görev:** T-002a (devops) → `feat/T-002a-workspace-verify` → `int/faz0-iskelet`
+**Aktif görev:** T-002b (worktree ../wt-T-002b) ∥ T-002d (../wt-T-002d) → `int/faz0-iskelet` (STATE'in güncel kopyası bu dalda)
 **Son tamamlanan:** ADR-012 rev. (kullanıcı PR incelemez; Supervisor birleştirir; ADR-001…012 kabul) · ADR-013 barındırma (Fly.io fra + Tigris, dağıtım GitHub Actions'tan)
 **Sonraki adım:** T-002a → T-002b/c/d → `int/faz0-iskelet`'i `main`'e PR + birleştirme kapısı → T-003 CI. Neon/Fly sırları gelince T-005d/e ve dağıtım kartları.
 
@@ -19,7 +19,7 @@ ADR-001 Next.js + ayrı worker · 002 İngilizce kod/DB, Türkçe UI · 003 Driz
 
 ## Kuyruk (bağımlılık sırası; kartlar docs/tasks/)
 - [x] T-001 / T-001b Faz 0 kararları → ADR'ler
-- [ ] T-002a Kök pnpm çalışma alanı + `pnpm verify` → `int/faz0-iskelet`
+- [x] T-002a `pnpm verify` (4245f13, int/faz0-iskelet'te). Bulgular → T-004: TS 6.0.3'te kal (typescript-eslint <6.1); Node 24 LTS, 26 LTS 2026-10-28 → geçiş değerlendir; CI Node 24 sabitle; eslint/vitest config tsc dışında; `@eslint/js` yok
 - [ ] T-002b Web iskeleti · T-002c Worker iskeleti (seri, lock dosyası) · T-002d docker compose (T-002a sonrası paralel)
 - [ ] T-003 CI hattı → `int/faz0-ci` (iskelet birleşince)
 - [ ] T-004 STACK sürüm kilidi + MAP → `int/faz0-docs` (iskelet birleşince)
