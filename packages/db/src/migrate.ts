@@ -11,6 +11,10 @@ import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import postgres from "postgres";
+import { parseTarget, sameConnectionTarget } from "./connection-target.ts";
+
+// Geriye dönük uyum: yardımcı yan etkisiz `connection-target.ts` modülündedir (index.ts migrate.ts'i içe aktarmaz).
+export { sameConnectionTarget };
 
 export const MIGRATIONS_DIR = fileURLToPath(new URL("../migrations", import.meta.url));
 
@@ -172,36 +176,6 @@ interface LedgerRow {
   version: string;
   name: string;
   checksum_sha256: string;
-}
-
-/** Bağlantı hedefi (host+port+kullanıcı+veritabanı); ayrıştırılamazsa `undefined`. */
-function parseTarget(url: string): { host: string; port: string; user: string; db: string } | undefined {
-  try {
-    const u = new URL(url);
-    const dec = (v: string): string => {
-      try {
-        return decodeURIComponent(v);
-      } catch {
-        return v;
-      }
-    };
-    return {
-      host: u.hostname.toLowerCase(),
-      port: u.port === "" ? "5432" : u.port,
-      user: dec(u.username),
-      db: dec(u.pathname.replace(/^\//, "")),
-    };
-  } catch {
-    return undefined;
-  }
-}
-
-/** İki URL aynı host+port+kullanıcı+veritabanına mı işaret ediyor? Ayrıştırılamayan çiftte ham eşitlik. */
-export function sameConnectionTarget(a: string, b: string): boolean {
-  const ta = parseTarget(a);
-  const tb = parseTarget(b);
-  if (ta === undefined || tb === undefined) return a === b;
-  return ta.host === tb.host && ta.port === tb.port && ta.user === tb.user && ta.db === tb.db;
 }
 
 /** Pooler'sız doğrudan bağlantı zorunlu: Neon `-pooler` host'u veya yerel PgBouncer 6432 → ret. */
