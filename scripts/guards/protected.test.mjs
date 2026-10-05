@@ -19,10 +19,15 @@ import {
   baselineLowered,
   classifyChanges,
   contentRules,
+  FlowMap,
+  FlowSeq,
+  flowSeq,
   globToRegExp,
   isLockAlias,
   LockfileError,
   lockfileGuarded,
+  parseFlow,
+  parseLockYaml,
   matchesGlob,
   poolerImages,
   staticRule,
@@ -564,6 +569,19 @@ describe("protected-paths: içerik kuralları", () => {
     ["yinelenen üst düzey blok", (l) => l.concat("\nsnapshots:\n  vitest@5.0.3: {}\n")],
     ["lockfileVersion 6", (l) => l.replace("lockfileVersion: '9.0'", "lockfileVersion: '6.0'")],
     ["çift tırnakta kaçış", (l) => l.replace("      chai: 6.3.0", '      chai: "6.3.0\\u0000"')],
+    // T-015: düğüm başındaki göstergeler ve belirsiz akış biçimleri yine fail-closed.
+    ["akışta çapa", (l) => l.replace("{integrity: sha512-CHAI}", "{integrity: &a sha512-CHAI}")],
+    ["akışta etiket", (l) => l.replace("{integrity: sha512-CHAI}", "{integrity: !!str sha512-CHAI}")],
+    ["akışta blok skaler göstergesi", (l) => l.replace("{integrity: sha512-CHAI}", "{integrity: >sha512-CHAI}")],
+    ["akış düz skalerinde &", (l) => l.replace("{integrity: sha512-CHAI}", "{integrity: sha512-CHAI&x}")],
+    ["akışta iç içe eşleme (a: b: c)", (l) => l.replace("{integrity: sha512-CHAI}", "{integrity: sha512-CHAI: evil}")],
+    ["akışta değersiz anahtar", (l) => l.replace("{integrity: sha512-CHAI}", "{integrity: }")],
+    ["akışta örtük anahtar (b:})", (l) => l.replace("{integrity: sha512-CHAI}", "{integrity: sha512-CHAI:}")],
+    ["akış dizisinde eşleme", (l) => l.replace("{integrity: sha512-CHAI}", "[integrity: sha512-CHAI]")],
+    ["akışta boş öğe", (l) => l.replace("{integrity: sha512-CHAI}", "{integrity: sha512-CHAI,, tarball: x}")],
+    ["akışta tırnaktan sonra metin", (l) => l.replace("{integrity: sha512-CHAI}", "{integrity: 'sha512-CHAI' evil}")],
+    ["akış düz skalerinde tırnak", (l) => l.replace("{integrity: sha512-CHAI}", "{integrity: sha512-'CHAI'}")],
+    ["akışta satır sonu yorumu", (l) => l.replace("{integrity: sha512-CHAI}", "{integrity: sha512-CHAI #x}")],
   ]))("T-008i M6 fail-closed: %s → ayrıştırılamaz, korunur", (_name, edit) => {
     const after = edit(LOCK);
     expect(after).not.toBe(LOCK);
@@ -571,6 +589,85 @@ describe("protected-paths: içerik kuralları", () => {
     const hits = contentRules("pnpm-lock.yaml", LOCK, after);
     expect(hits.map((h) => h.rule)).toEqual(["lockfile"]);
     expect(hits[0]?.reason).toContain("ayrıştırılamadı");
+  });
+
+  it("T-015: akış düz skalerinde `*`, `>`, `|`, `^`, `~`, boşluk (pnpm engines) ayrıştırılır; kapanış dışı → serbest", () => {
+    const engines = "  zod@4.0.0:\n    resolution: {integrity: sha512-ZZZ}\n";
+    expect(LOCK).toContain(engines);
+    const after = LOCK.replace(engines, `${engines}    engines: {node: 6.* || 8.* || >= 10.*}\n    cpu: [x64, arm64]\n`);
+    const tree = parseLockYaml(after);
+    const pkgs = tree.get("packages");
+    const zod = pkgs?.kind === "map" ? pkgs.entries.get("zod@4.0.0") : undefined;
+    const eng = zod?.kind === "map" ? zod.entries.get("engines") : undefined;
+    expect(eng).toEqual({ kind: "scalar", value: "{node: 6.* || 8.* || >= 10.*}" });
+    expect(lockfileGuarded(after)).toBe(lockfileGuarded(LOCK));
+    expect(contentRules("pnpm-lock.yaml", LOCK, after)).toEqual([]);
+    for (const v of ["{node: ^20.19.0 || ^22.13.0 || >=24}", "{node: ~1.2 || 3.x}", "{iojs: '>=1.0.0', node: '>=0.10.0'}", "{a: {b: c}, d: [e, f]}", "[a, ]", "{}"]) {
+      expect(() => parseLockYaml(`lockfileVersion: '9.0'\nk: ${v}\n`), v).not.toThrow();
+    }
+    // Kapanıştaki pakette aynı ekleme → korunan değişiklik (gevşeme yok).
+    const chai = "    resolution: {integrity: sha512-CHAI}\n";
+    const inClosure = LOCK.replace(chai, `${chai}    os: [linux]\n`);
+    expect(contentRules("pnpm-lock.yaml", LOCK, inClosure).map((h) => h.rule)).toEqual(["lockfile"]);
+  });
+
+  // T-016 (security-reviewer int/faz0-pooler @ 1e92a8a MAJOR): `resolution` ham metin regex'iyle
+  // değerlendiriliyordu; tırnaklı anahtar (`"tarball":`) `\btarball\s*:` desenine uymadığı için kapanış
+  // dışı pakete tarball çözümlemesi bekçiden gizlenebiliyordu. Artık anahtar–değer çiftleri ayrıştırılır.
+  const ZOD_RES = "{integrity: sha512-ZZZ}";
+  it.each(/** @type {Array<[string, string]>} */ ([
+    ["çift tırnaklı \"tarball\" (saldırının kendisi)", '{integrity: sha512-ZZZ, "tarball": https://e/x.tgz}'],
+    ["tek tırnaklı 'tarball'", "{integrity: sha512-ZZZ, 'tarball': https://e/x.tgz}"],
+    ["tırnaklı tarball önce", "{'tarball': https://e/x.tgz, integrity: sha512-ZZZ}"],
+    ["kaçışlı tek tırnak anahtar ('tar''ball')", "{integrity: sha512-ZZZ, 'tar''ball': https://e/x.tgz}"],
+    ["tırnaklı directory", '{integrity: sha512-ZZZ, "directory": ../evil}'],
+    ["tırnaklı git (repo/commit/type)", `{integrity: sha512-ZZZ, "repo": https://e/z.git, 'commit': abc, "type": git}`],
+    ["tırnaklı path", "{integrity: sha512-ZZZ, 'path': /tmp/x}"],
+    ["bilinmeyen anahtar", "{integrity: sha512-ZZZ, mirror: https://e/x.tgz}"],
+    ["değersiz anahtar", "{integrity: sha512-ZZZ, tarball}"],
+    ["integrity değeri eşleme", "{integrity: {tarball: https://e/x.tgz}}"],
+    ["integrity yok (boş eşleme)", "{}"],
+    ["eşleme değil (dizi)", "[integrity, tarball]"],
+    ["blok biçim + tırnaklı anahtar", '\n      integrity: sha512-ZZZ\n      "tarball": https://e/x.tgz'],
+    ["blok biçim + akış değerli integrity", "\n      integrity: {tarball: https://e/x.tgz}"],
+  ]))("T-016 MAJOR: kapanış dışı pakete integrity dışı resolution (%s) → korunur", (_name, res) => {
+    const after = LOCK.replace(`    resolution: ${ZOD_RES}`, `    resolution:${res.startsWith("\n") ? "" : " "}${res}`);
+    expect(after).not.toBe(LOCK);
+    expect(lockfileGuarded(after)).toMatch(/^resolution zod@4\.0\.0 /m);
+    const hits = contentRules("pnpm-lock.yaml", LOCK, after);
+    expect(hits.map((h) => h.rule)).toEqual(["lockfile"]);
+    expect(hits[0]?.reason).not.toContain("ayrıştırılamadı");
+  });
+
+  it.each(/** @type {Array<[string, string]>} */ ([
+    ["çift tırnakta ters bölü kaçışlı anahtar", '{integrity: sha512-ZZZ, "tar\\u0062all": https://e/x.tgz}'],
+    ["çift tırnakta \\x kaçışı", '{integrity: sha512-ZZZ, "tar\\x62all": https://e/x.tgz}'],
+    ["normalize edilince yinelenen anahtar", "{integrity: sha512-ZZZ, 'integrity': sha512-EVIL}"],
+    ["koleksiyon anahtarı", "{integrity: sha512-ZZZ, [tarball]: https://e/x.tgz}"],
+  ]))("T-016 MAJOR fail-closed: %s → ayrıştırılamaz, korunur", (_name, res) => {
+    const after = LOCK.replace(`resolution: ${ZOD_RES}`, `resolution: ${res}`);
+    expect(after).not.toBe(LOCK);
+    expect(() => lockfileGuarded(after)).toThrow(LockfileError);
+    const hits = contentRules("pnpm-lock.yaml", LOCK, after);
+    expect(hits.map((h) => h.rule)).toEqual(["lockfile"]);
+    expect(hits[0]?.reason).toContain("ayrıştırılamadı");
+  });
+
+  it("T-016 yanlış pozitif yok: integrity-yalnız resolution (tırnaklı anahtar / blok biçim) kapanış dışında serbest", () => {
+    for (const res of ['{"integrity": sha512-ZZ2}', "{'integrity': 'sha512-ZZ2'}", "{ integrity: sha512-ZZ2 }", "\n      integrity: sha512-ZZ2", "\n      'integrity': sha512-ZZ2"]) {
+      const after = LOCK.replace(`    resolution: ${ZOD_RES}`, `    resolution:${res.startsWith("\n") ? "" : " "}${res}`);
+      expect(after, res).not.toBe(LOCK);
+      expect(lockfileGuarded(after), res).not.toMatch(/^resolution /m);
+      expect(contentRules("pnpm-lock.yaml", LOCK, after), res).toEqual([]);
+    }
+    // Ayrıştırılmış yapı: anahtarlar tırnaktan arındırılır, `''` kaçışı açılır, iç içe yapı korunur.
+    /** @param {Array<[string, import("./protected-paths.mjs").FlowValue]>} e */
+    const fm = (e) => new FlowMap(e);
+    const parsed = parseFlow(`{a: 'b''c', "d": [e, {f: g}], h}`, 1);
+    expect(parsed).toEqual(fm([["a", "b'c"], ["d", flowSeq(["e", fm([["f", "g"]])])], ["h", null]]));
+    expect(parsed instanceof FlowMap && parsed.get("d")).toBeInstanceOf(FlowSeq);
+    expect(parseFlow("{node: 6.* || 8.* || >= 10.*}", 1)).toEqual(fm([["node", "6.* || 8.* || >= 10.*"]]));
+    expect(parseFlow("[a, ]", 1)).toEqual(flowSeq(["a"]));
   });
 
   it("isLockAlias: takma ad biçimleri", () => {

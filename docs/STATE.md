@@ -32,7 +32,8 @@ ADR-001 Next.js + ayrı worker · 002 İngilizce kod/DB, Türkçe UI · 003 Driz
 - [~] T-009a — kimlik/CODEOWNERS kısmı iptal (ADR-012 rev.); kalan: kullanıcı isterse `main` branch protection · T-009b AC-43/44'ün yeni tanımına göre
 - [ ] Yeni kart (architect yazacak): T-010 Fly dağıtım hattı (staging otomatik, prod etiketle; `FLY_API_TOKEN`)
 
-## Engeller / kullanıcı eylemi bekleyenler (2026-10-05 tek mesajla istendi)
+## Engeller
+- U-05 Branch protection: kullanıcı 2026-10-05 denedi; GitHub uyarısı — özel repoda ücretsiz planda kurallar **uygulanmıyor** (Team/Enterprise gerekir). Karar: açılmaz; Supervisor birleştirmeden önce CI durumunu GitHub API'den okur (ADR-012 md.6). / kullanıcı eylemi bekleyenler (2026-10-05 tek mesajla istendi)
 - U-01 Neon: kullanıcı 2026-10-05 tamamladığını bildirdi (proje etkin-wms, AWS Frankfurt, PG 17; `NEON_API_KEY` sırrı + `NEON_PROJECT_ID` değişkeni). Doğrulama T-005d ilk Actions koşusunda → T-005d
 - U-02 Fly.io: hesap + kart + `FLY_API_TOKEN` sırrı → T-010
 - U-03 (isteğe bağlı) Resend `RESEND_API_KEY` (+ alan adı) → Faz 1 e-posta; yoksa bağlantı ekranda gösterilir

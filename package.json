@@ -9,6 +9,8 @@
   "scripts": {
     "verify": "node scripts/verify.mjs",
     "infra:smoke": "node scripts/compose-smoke.mjs",
+    "test:int": "vitest run -c vitest.int.config.ts",
+    "test:int:neon": "WMS_INT_TARGET=neon vitest run -c vitest.int.config.ts",
     "test:ac": "node scripts/test-ac/cli.mjs",
     "check:scope": "node scripts/guards/cli.mjs scope",
     "check:tests": "node scripts/guards/cli.mjs tests",
@@ -19,7 +21,10 @@
   },
   "devDependencies": {
     "@types/node": "24.19.1",
+    "@types/pg": "8.23.1",
     "eslint": "10.12.0",
+    "pg": "8.23.1",
+    "testcontainers": "12.2.0",
     "typescript": "6.0.3",
     "typescript-eslint": "8.71.0",
     "vitest": "5.0.3"
