@@ -667,7 +667,7 @@ describe(`withNewTenant (target=${env.target})`, () => {
     const slug = `t103-idem-${randomBytes(4).toString("hex")}`;
     const first = await newTenant(user, slug, req);
     createdTenants.push(first.m.tenantId);
-    const again = await newTenant(user, `${slug}-farkli`, req);
+    const again = await newTenant(user, slug, req);
     expect(again.m).toEqual({ tenantId: first.m.tenantId, membershipId: first.m.membershipId, userId: user, created: false });
     expect(again.g).toEqual({ tenant: first.m.tenantId, user: "", reason: "" });
     expect(again.tenants).toEqual([first.m.tenantId]);
@@ -677,6 +677,35 @@ describe(`withNewTenant (target=${env.target})`, () => {
     createdTenants.push(sameReqOtherUser.m.tenantId);
     expect(sameReqOtherUser.m.created).toBe(true);
     expect(sameReqOtherUser.m.tenantId).not.toBe(first.m.tenantId);
+  });
+
+  it("D: aynı istek kimliği başka slug veya ad ile tekrarlanırsa IDEMPOTENCY_MISMATCH; fn çalışmaz", async () => {
+    const user = await admin((c) => mkUser(c));
+    const req = randomUUID();
+    const slug = `t103-mm-${randomBytes(4).toString("hex")}`;
+    const first = await newTenant(user, slug, req);
+    createdTenants.push(first.m.tenantId);
+    for (const [s2, n2] of [[`${slug}-x`, "Yeni"], [slug, "Başka ad"]] as const) {
+      let ran = false;
+      const err = await caught(withNewTenant(app, { userId: user, slug: s2, name: n2, creationRequestId: req }, async () => { ran = true; }));
+      expect((err as MembershipError).code, `${s2}/${n2}`).toBe("IDEMPOTENCY_MISMATCH");
+      expect(ran).toBe(false);
+    }
+  });
+
+  it("C: tekrar yolunda tenant SUSPENDED/CLOSING → TENANT_SUSPENDED/TENANT_CLOSING; fn çalışmaz", async () => {
+    const user = await admin((c) => mkUser(c));
+    const req = randomUUID();
+    const slug = `t103-st-${randomBytes(4).toString("hex")}`;
+    const first = await newTenant(user, slug, req);
+    createdTenants.push(first.m.tenantId);
+    for (const [status, code] of [["SUSPENDED", "TENANT_SUSPENDED"], ["CLOSING", "TENANT_CLOSING"]] as const) {
+      await admin((c) => c.query("UPDATE public.tenants SET status = $2 WHERE id = $1", [first.m.tenantId, status]));
+      let ran = false;
+      const err = await caught(withNewTenant(app, { userId: user, slug, name: "Yeni", creationRequestId: req }, async () => { ran = true; }));
+      expect((err as MembershipError).code).toBe(code);
+      expect(ran).toBe(false);
+    }
   });
 
   it("MINOR-7: aynı isteğin iki eşzamanlı çağrısı tek tenant üretir (biri created=true, diğeri false)", async () => {
@@ -802,6 +831,14 @@ describe(`tenants / üyelik tabloları: wms_app yetkileri ve RLS (target=${env.t
     // MINOR-6: satır kilidi için yalnızca id sütununda UPDATE; rol anahtarı/üyelik değiştirilemez.
     await expectDenied(appRaw, "UPDATE public.membership_roles SET role_key = 'READ_ONLY' WHERE membership_id = $1", [m1], ctx(t1));
     await expectDenied(appRaw, "UPDATE public.membership_roles SET membership_id = $2 WHERE membership_id = $1", [m1, m1], ctx(t1));
+    // A: UPDATE (id) yetkisi gerçek id değişikliğine dönüşemez (tetikleyici); id'yi aynı bırakan güncelleme serbest.
+    const idChange = await attempt(appRaw, "UPDATE public.membership_roles SET id = gen_random_uuid() WHERE membership_id = $1", [m2], ctx(t2));
+    expect(idChange.ok).toBe(false);
+    if (!idChange.ok) {
+      expect(idChange.code).toBe(INSUFFICIENT_PRIVILEGE);
+      expect(idChange.message).toMatch(/membership_roles_id_immutable/);
+    }
+    await expectOk(appRaw, "UPDATE public.membership_roles SET id = id WHERE membership_id = $1", [m2], ctx(t2));
     // Rol silme (rol değişimi) serbest.
     await expectOk(appRaw, "DELETE FROM public.membership_roles WHERE membership_id = $1", [m1], ctx(t1));
   });
@@ -1195,6 +1232,22 @@ describe(`wms_probe.consume_admin_reset_grant (wms_auth; target=${env.target})`,
     const r = await authRaw.query<{ r: string }>("SELECT wms_probe.consume_admin_reset_grant($1::uuid) AS r", [s.verification]);
     await authRaw.query("COMMIT");
     expect(r.rows[0]?.r).toBe("invalid");
+    expect((await grantCount(s.verification))?.g).toBe("0");
+  });
+
+  it("B: kilit beklerken grant'in user_id'si değişirse (kilit yanlış kullanıcıda) → 'invalid', grant silinir", async () => {
+    const s = await resetScenario();
+    const otherUser = await admin((c) => mkUser(c));
+    const mover = await openClient(env.databaseUrlDirect);
+    await mover.query("BEGIN");
+    const pidRow = await mover.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+    await mover.query("UPDATE public.admin_reset_grants SET user_id = $2 WHERE verification_id = $1", [s.verification, otherUser]);
+    await authRaw.query("BEGIN");
+    const consuming = authRaw.query<{ r: string }>("SELECT wms_probe.consume_admin_reset_grant($1::uuid) AS r", [s.verification]);
+    await waitUntilBlockedBy(Number(pidRow.rows[0]?.pid));
+    await mover.query("COMMIT");
+    expect((await consuming).rows[0]?.r).toBe("invalid");
+    await authRaw.query("COMMIT");
     expect((await grantCount(s.verification))?.g).toBe("0");
   });
 

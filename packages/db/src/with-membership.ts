@@ -7,7 +7,8 @@
 // satırı UPDATE) bu transaction bitene kadar bekler; tersi sırada yazma güncel durumu görür. Kilit sırası sabittir
 // (tenants → tenant_memberships → membership_roles): deadlock yok.
 //
-// m1: `withMembership` YALNIZCA `app.current_tenant_id` kurar; `app.current_user_id` yalnızca `withUser`'da;
+// m1: `withMembership` YALNIZCA `app.current_tenant_id` kurar; `app.current_user_id` `withUser`'da ve `withNewTenant`'ın
+// idempotent mevcut-tenant araması sırasında (tenant bağlamı boşken, kısa süreli; bulununca temizlenir) kurulur;
 // `app.system_reason` yalnızca `withSystemTenant`'te. Hepsi `set_config(..., true)` + aynı `tx` (I-02); `SET` ve
 // string birleştirme yok, değerler parametredir. Geçersiz UUID/gerekçe veritabanına sorgu gönderilmeden reddedilir.
 //
@@ -18,7 +19,7 @@ import { isUuid, rawDb, type DbClient, type TenantTx } from "./client.ts";
 import type { RoleKey } from "./schema/tenancy.ts";
 
 /** 15 §Hata kodları: üyelik/tenant reddi. */
-export type MembershipErrorCode = "FORBIDDEN" | "TENANT_SUSPENDED" | "TENANT_CLOSING" | "SLUG_TAKEN";
+export type MembershipErrorCode = "FORBIDDEN" | "TENANT_SUSPENDED" | "TENANT_CLOSING" | "SLUG_TAKEN" | "IDEMPOTENCY_MISMATCH";
 
 export class MembershipError extends Error {
   override name = "MembershipError";
@@ -213,20 +214,29 @@ export async function withNewTenant<T>(
     const findExisting = async (): Promise<{ tenantId: string; membershipId: string } | undefined> => {
       await tx.execute(sql`SELECT set_config('app.current_tenant_id', '', true)`);
       await tx.execute(sql`SELECT set_config('app.current_user_id', ${userId}, true)`);
-      const found = await tx.execute<{ id: string }>(
-        sql`SELECT id FROM public.tenants
+      const found = await tx.execute<{ id: string; slug: string; name: string }>(
+        sql`SELECT id, slug, name FROM public.tenants
              WHERE created_by_user_id = ${userId}::uuid AND creation_request_id = ${creationRequestId}::uuid`,
       );
       const existingId = found[0]?.id;
       await tx.execute(sql`SELECT set_config('app.current_user_id', '', true)`);
       if (existingId === undefined) return undefined;
+      // D: aynı istek kimliği başka slug/ad ile tekrarlanmış → sessizce eski tenant dönmez.
+      if (found[0]?.slug !== slug || found[0]?.name !== name) {
+        throw new MembershipError("IDEMPOTENCY_MISMATCH", "creation request was already used with different parameters");
+      }
       await tx.execute(sql`SELECT set_config('app.current_tenant_id', ${existingId}, true)`);
       const owner = await tx.execute<{ id: string }>(
         sql`SELECT id FROM public.tenant_memberships
              WHERE tenant_id = ${existingId}::uuid AND user_id = ${userId}::uuid AND is_owner`,
       );
       const membershipId = owner[0]?.id;
-      return membershipId === undefined ? undefined : { tenantId: existingId, membershipId };
+      if (membershipId === undefined) return undefined;
+      // C: tekrar yolunda da withMembership ile aynı tenant durumu denetimi (fn çalışmaz).
+      const status = await lockTenantRow(tx, existingId);
+      if (status === undefined) return undefined;
+      rejectInactiveTenant(status);
+      return { tenantId: existingId, membershipId };
     };
 
     const existing = await findExisting();

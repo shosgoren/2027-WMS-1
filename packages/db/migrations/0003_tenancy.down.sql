@@ -35,6 +35,7 @@ END
 $guard$;
 
 -- Tetikleyiciler (tablo sahibi = migration rolü).
+DROP TRIGGER membership_roles_id_immutable ON public.membership_roles;
 DROP TRIGGER admin_reset_grants_guard_issuer ON public.admin_reset_grants;
 DROP TRIGGER tenant_memberships_admin_reset_cleanup ON public.tenant_memberships;
 DROP TRIGGER tenant_memberships_system_reason_guard ON public.tenant_memberships;
@@ -50,6 +51,7 @@ RESET ROLE;
 
 DROP FUNCTION public.tenancy_guard_system_reason();
 DROP FUNCTION public.admin_reset_grants_guard_issuer();
+DROP FUNCTION public.membership_roles_id_immutable();
 
 -- tenants okuma politikası tenant_memberships'e bağımlıdır (alt sorgu): tablolardan önce kaldırılır.
 DROP POLICY tenants_select_own_memberships ON public.tenants;

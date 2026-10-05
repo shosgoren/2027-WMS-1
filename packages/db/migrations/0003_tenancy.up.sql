@@ -293,6 +293,7 @@ GRANT INSERT (tenant_id, id, membership_id, role_key) ON public.membership_roles
 -- sütunda UPDATE ister (DELETE yetmez — doğrulandı). Yalnızca sahte-anahtar sütunu id: role_key/membership_id/tenant_id
 -- DEĞİŞTİRİLEMEZ (rol değişimi sil + ekle ile yapılır). id hiçbir FK'nin hedefi değildir.
 GRANT UPDATE (id) ON public.membership_roles TO wms_app;
+-- (id'nin gerçekten değişmemesi 5. bölümdeki membership_roles_id_immutable tetikleyicisiyle zorlanır.)
 
 GRANT SELECT ON public.invitations TO wms_app;
 GRANT INSERT (tenant_id, id, email_normalized, role_key, token_hash, delivered_via, expires_at,
@@ -356,6 +357,26 @@ CREATE TRIGGER membership_roles_system_reason_guard
 -- ENABLE ALWAYS: session_replication_role = replica ile atlatılamaz (sahibin DISABLE TRIGGER yapabilmesi bilinen sınır).
 ALTER TABLE public.tenant_memberships ENABLE ALWAYS TRIGGER tenant_memberships_system_reason_guard;
 ALTER TABLE public.membership_roles   ENABLE ALWAYS TRIGGER membership_roles_system_reason_guard;
+
+-- membership_roles.id değişmezliği: wms_app'e yalnızca satır kilidi için verilen UPDATE (id) yetkisi gerçek bir id
+-- değişikliğine dönüşemez. SECURITY DEFINER değil, ENABLE ALWAYS.
+CREATE FUNCTION public.membership_roles_id_immutable() RETURNS trigger
+  LANGUAGE plpgsql
+  SET search_path = pg_catalog, pg_temp
+AS $fn$
+BEGIN
+  IF NEW.id IS DISTINCT FROM OLD.id THEN
+    RAISE EXCEPTION 'membership_roles_id_immutable: membership_roles.id değiştirilemez'
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  RETURN NEW;
+END
+$fn$;
+REVOKE ALL ON FUNCTION public.membership_roles_id_immutable() FROM PUBLIC;
+CREATE TRIGGER membership_roles_id_immutable
+  BEFORE UPDATE ON public.membership_roles
+  FOR EACH ROW EXECUTE FUNCTION public.membership_roles_id_immutable();
+ALTER TABLE public.membership_roles ENABLE ALWAYS TRIGGER membership_roles_id_immutable;
 
 -- admin_reset_grants INSERT bekçisi (MINOR-2): grant, çağıranın tenant bağlamında ve o tenant'ın ACTIVE üyeliği adına
 -- yazılabilir. SECURITY DEFINER DEĞİL: üyelik sorgusu çağıranın RLS'i altında çalışır (yalnızca kendi tenant'ı görünür),
@@ -463,6 +484,11 @@ BEGIN
   DELETE FROM public.admin_reset_grants a WHERE a.verification_id = $1 RETURNING a.* INTO g;
   IF NOT FOUND THEN
     RETURN 'absent';   -- eşzamanlı çağrı veya üyelik tetikleyicisi önce tükettiyse
+  END IF;
+  -- Kilitlenen users satırı silinen grant'in kullanıcısı olmalı (user_id kilit öncesi okundu; bekleme sırasında satır
+  -- değiştiyse kilit yanlış kullanıcıdadır) -> fail-closed.
+  IF g.user_id IS DISTINCT FROM target THEN
+    RETURN 'invalid';
   END IF;
   IF NOT locked THEN
     RETURN 'invalid';

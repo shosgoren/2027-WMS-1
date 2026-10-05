@@ -257,7 +257,7 @@ describe("withUser / withSystemTenant / withNewTenant — set_config biçimi", (
   it("withNewTenant: aynı (kullanıcı, istek) için mevcut tenant döner (created=false); hiçbir INSERT yok", async () => {
     const client = newClient();
     const { queries } = fakeTx(client, (q) => {
-      if (q.includes("FROM public.tenants")) return [{ id: TENANT }];
+      if (q.includes("FROM public.tenants")) return [{ id: TENANT, slug: "acme", name: "Acme", status: "ACTIVE" }];
       if (q.includes("FROM public.tenant_memberships")) return [{ id: MEMBERSHIP }];
       return [];
     });
