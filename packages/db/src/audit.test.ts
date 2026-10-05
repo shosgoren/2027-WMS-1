@@ -318,6 +318,38 @@ describe("genel anahtar:değer deseni ve JSON dizeleri", () => {
     });
   });
 
+  it("yinelenen JSON anahtarı: temiz sayılan ağaçta bile ham dize taranır (fail-closed)", () => {
+    for (const v of [
+      '{"msg":"Bearer abcdef0123456789","msg":"ok"}',
+      '{"password":"hunter2","password":"[REDACTED]"}',
+      '{"a":"postgres://u:pw@h/db","a":1}',
+      '[{"x":"token=hunter2secret","x":0}]',
+    ]) {
+      expect(maskChangeSummary({ v }).value, v).toEqual({ v: REDACTED });
+    }
+    const clean = '{"a":1,"b":2}';
+    expect(maskChangeSummary({ v: clean }).value).toEqual({ v: clean });
+  });
+
+  it("ek boşluk/ayraç/kaçış biçimleri: U+200B/202F/205F, U+2236/FE55, \\t \\n, &quot;, %3D %3A", () => {
+    for (const v of [
+      "password\u200b: 1-sentinel",
+      "password\u202f: 1-sentinel",
+      "password\u205f= 1-sentinel",
+      "password\u2236 1-sentinel",
+      "password\ufe55 1-sentinel",
+      "{\\\"password\\\"\\t:\\t\\\"x-sentinel\\\"}",
+      "oops password\\n: 1-sentinel",
+      "&quot;password&quot;: &quot;x-sentinel&quot;",
+      "&quot;password&quot;&#34;: x-sentinel",
+      "a=1&password%3Dhunter2-sentinel",
+      "%22password%22%3A%22hunter2-sentinel%22",
+      "x-api-key%3a abcdef-sentinel",
+    ]) {
+      expect(maskChangeSummary({ m: v }).value, v).toEqual({ m: REDACTED });
+    }
+  });
+
   it("JSON dize ayrıştırma bütçesi aşılırsa dize maskelenir, kayıt reddedilmez", () => {
     const deep = "[".repeat(24) + "]".repeat(24);
     expect(deep).toHaveLength(48);

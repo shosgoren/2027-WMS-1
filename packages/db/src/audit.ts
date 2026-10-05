@@ -138,13 +138,13 @@ function isNameChar(c: string): boolean {
 function isSpaceChar(c: string): boolean {
   return (
     c === " " || c === "\t" || c === "\n" || c === "\r" || c === "\u00a0" || c === "\u3000" || c === "\u2028" ||
-    c === "\u2029" || c === "\ufeff" || (c >= "\u2000" && c <= "\u200a")
+    c === "\u2029" || c === "\ufeff" || c === "\u202f" || c === "\u205f" || (c >= "\u2000" && c <= "\u200b")
   );
 }
 
 /** Ad/değer ayracı: `:`, `=`, tam genişlikli `：` (U+FF1A) ve `＝` (U+FF1D). */
 function isSeparator(c: string): boolean {
-  return c === ":" || c === "=" || c === "\uff1a" || c === "\uff1d";
+  return c === ":" || c === "=" || c === "\uff1a" || c === "\uff1d" || c === "\u2236" || c === "\ufe55";
 }
 
 /** `\uXXXX` kaçışlarını çözer (ayrıştırılamayan dizelerde ad koşusu `\u0070assword` gibi gizlenemesin). */
@@ -168,11 +168,29 @@ function hasSensitiveKeyedPair(v: string): boolean {
       continue;
     }
     if (runStart >= 0) {
+      const run = v.slice(runStart, i);
+      // Yüzde kodlu ayraç (`password%3Dx`, `%22password%22%3A…`): ayraçtan önceki ad duyarlı mı.
+      const enc = run.search(/%3[adAD]/);
+      if (enc > 0 && isSensitiveParamName(run.slice(0, enc))) return true;
+      // Ad ile ayraç arasında boşluk, tırnak, kaçış dizileri (`\"`, `\t`, `\n`) ve HTML tırnak varlıkları atlanır.
       let j = i;
-      while (j < n && v[j] === "\\") j++;
-      if (v[j] === '"' || v[j] === "'") j++;
-      while (j < n && isSpaceChar(v[j] as string)) j++;
-      if (j < n && isSeparator(v[j] as string) && isSensitiveParamName(v.slice(runStart, i))) return true;
+      while (j < n) {
+        const d = v[j] as string;
+        if (isSpaceChar(d) || d === '"' || d === "'") {
+          j++;
+        } else if (d === "\\" && j + 1 < n && '\\"\'/tnrfv'.includes(v[j + 1] as string)) {
+          j += 2;
+        } else if (d === "\\") {
+          j++;
+        } else if (d === "&") {
+          const ent = ["&quot;", "&#34;", "&#x22;", "&apos;", "&#39;", "&#x27;"].find((e) => v.startsWith(e, j));
+          if (ent === undefined) break;
+          j += ent.length;
+        } else {
+          break;
+        }
+      }
+      if (j < n && isSeparator(v[j] as string) && isSensitiveParamName(run)) return true;
       runStart = -1;
     }
   }
@@ -278,7 +296,9 @@ function maskString(v: string, b: Budget): string {
       ok = false;
     }
     if (ok) {
-      if (jsonStringHasSecret(v, parsed)) {
+      // JSON.parse yinelenen anahtarda yalnızca sonuncuyu tutar: temiz sayılan ağaçta bile HAM dizeye dize kuralları
+      // (anahtar:değer, Bearer, userinfo URL, JWT …) ayrıca uygulanır; eşleşirse tüm dize maskelenir (fail-closed).
+      if (jsonStringHasSecret(v, parsed) || looksSensitiveValue(v)) {
         spend(b, REDACTED.length + 2);
         return REDACTED;
       }
