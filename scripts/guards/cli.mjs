@@ -3,10 +3,15 @@
 // `<ad>` → `scripts/guards/<ad>.mjs` modülünün `run(ctx)` işlevi. Modül dosyası henüz yoksa
 // `FAIL NOT_IMPLEMENTED` + çıkış 1 (sahte OK yok, G-07). Böylece T-008b–f yalnızca kendi
 // modül dosyasını ekler; kök `package.json`'a ve bu dosyaya dokunmaz.
+// `all` (T-008g): beş bekçiyi + belge denetimini sırayla koşar (`all.mjs`).
+// `--root <dizin>` (T-008g; ADR-012 rev. önyükleme): denetlenen depo kökü. Verilmezse bu betiğin
+// bulunduğu depo. CI tabanın bekçisini PR dizinine karşı koşturur:
+// `node base/scripts/guards/cli.mjs all --root pr/` (PR'ın betikleri/yapılandırması yüklenmez).
 // Çıkış: 0 = OK, 1 = FAIL, 2 = kullanım hatası.
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { runAll } from "./all.mjs";
 import { createReporter, NO_FILE, UsageError } from "./lib/output.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -15,7 +20,7 @@ const REPO_ROOT = path.resolve(HERE, "../..");
 /** PROTOCOL §3b bekçileri + `pilot` (T-008f). */
 export const GUARDS = /** @type {const} */ (["scope", "tests", "ac-ratchet", "protected", "assertions", "pilot"]);
 
-const USAGE = `kullanım: node scripts/guards/cli.mjs <${GUARDS.join("|")}> [argümanlar]`;
+const USAGE = `kullanım: node scripts/guards/cli.mjs <all|${GUARDS.join("|")}> [--root <dizin>] [argümanlar]`;
 
 /**
  * @typedef {import("./lib/output.mjs").Reporter} Reporter
@@ -32,16 +37,65 @@ export function isGuardName(name) {
 }
 
 /**
- * @param {string[]} argv `<ad> [argümanlar]`
+ * `--root <dizin>` / `--root=<dizin>` argümanını ayıklar (konumdan bağımsız; bekçinin kendi
+ * argümanlarına geçmez). Dizin yoksa veya birden fazla verildiyse `UsageError`.
+ * @param {string[]} argv
+ * @param {string} [cwd]
+ * @returns {{ root: string | null, rest: string[] }}
+ */
+export function extractRoot(argv, cwd = process.cwd()) {
+  /** @type {string | null} */
+  let root = null;
+  /** @type {string[]} */
+  const rest = [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i] ?? "";
+    const m = /^--root(?:=(.*))?$/.exec(a);
+    if (m === null) {
+      rest.push(a);
+      continue;
+    }
+    const v = m[1] ?? argv[++i];
+    if (v === undefined || v === "") throw new UsageError("--root bir dizin ister");
+    if (root !== null) throw new UsageError("--root birden fazla verildi");
+    const abs = path.resolve(cwd, v);
+    if (!existsSync(abs) || !statSync(abs).isDirectory()) throw new UsageError(`--root dizini yok: ${v}`);
+    root = abs;
+  }
+  return { root, rest };
+}
+
+/**
+ * @param {string[]} argv `<ad> [--root <dizin>] [argümanlar]`
  * @param {{ root?: string, guardsDir?: string, log?: (line: string) => void }} [opts]
  * @returns {Promise<number>} çıkış kodu
  */
 export async function main(argv, opts = {}) {
-  const root = opts.root ?? REPO_ROOT;
   const guardsDir = opts.guardsDir ?? HERE;
   const log = opts.log ?? ((l) => console.log(l));
-  const [name, ...rest] = argv;
+  /** @type {{ root: string | null, rest: string[] }} */
+  let parsed;
+  try {
+    parsed = extractRoot(argv);
+  } catch (e) {
+    if (!(e instanceof UsageError)) throw e;
+    log(`check HATA: ${e.message}`);
+    log(USAGE);
+    return 2;
+  }
+  const root = parsed.root ?? opts.root ?? REPO_ROOT;
+  const [name, ...rest] = parsed.rest;
 
+  if (name === "all") {
+    try {
+      return await runAll({ root, argv: rest, log, runGuard: (g, args) => main([g, ...args], { root, guardsDir, log }) });
+    } catch (e) {
+      if (!(e instanceof UsageError)) throw e;
+      log(`check:all HATA: ${e.message}`);
+      log(USAGE);
+      return 2;
+    }
+  }
   if (name === undefined || !isGuardName(name)) {
     log(`check HATA: bilinmeyen bekçi "${name ?? ""}"`);
     log(USAGE);

@@ -1,0 +1,328 @@
+# Etkin WMS — mekanik bekçiler (T-008g; PROTOCOL §3b, ADR-012 rev., AC-37). KORUNAN DOSYA:
+# değişiklik `APPROVED-BY: supervisor (ADR-012 rev.) @ <PR head SHA>` + security-reviewer özeti ister.
+#
+# İş adları (check-all, test-ac, check-pilot) SABİTTİR: T-009b zorunlu durum kontrolü olarak bunları
+# seçer. Ad değişikliği korunan değişikliktir. T-003'ün `ci.yml`'i ayrıdır ve buna dokunulmaz.
+#
+# Güven modeli (ADR-012 rev. önyükleme; bekciler-1 incelemesi M1/m3):
+#   - Bekçiler PR'ın değil TABANIN kodundan koşar: taban `base/`, PR head'i `pr/` dizinine ayrı
+#     checkout edilir; `node base/scripts/guards/cli.mjs all --root pr` doğrudan çağrılır
+#     (`pnpm check:*` değil — PR'ın `.npmrc`'si, betikleri, `package.json`'ı devreye girmez).
+#   - `check-all`'da PR dizininde HİÇBİR install/betik çalışmaz; yalnızca tabanın lockfile'ı
+#     `--ignore-scripts` ile kurulur (bekçiler `typescript` derleyici API'sini kullanır).
+#   - `test-ac` PR kodunu (testleri) çalıştırmak zorundadır: ayrı ve SONRAKİ iş (`needs: check-all`),
+#     PR dizininde install `--ignore-scripts`; koşturucu tabandan, rapor `$RUNNER_TEMP/test-ac`'ta
+#     (PR ağacının dışında; PR'ın commit'lediği dosya raporun yerine geçemez). Bu işte token yok.
+#   - Önyükleme istisnası: taban `main` VE main'de `scripts/guards/cli.mjs` yoksa iş "bootstrap"
+#     yazar ve geçer. Başka her durumda tabanda bekçi yoksa FAIL.
+#   - Geçiş kipi ("legacy"): tabanda `cli.mjs` var ama `all.mjs` (bu kart) yok → tabanın bekçileri
+#     tek tek, tabanın kendi `main(argv, { root })` işleviyle PR dizinine karşı koşar (yine tabanın
+#     kodu; gevşetme değil). `main`'e `all.mjs` girdikten sonra kullanılmaz; kaldırılması takip işidir.
+#   - Yalnızca yerleşik GITHUB_TOKEN (G-09), yalnızca `check-all`'ın bekçi adımında (check:protected
+#     PR açıklamasını API'den okur). İzinler en dar: contents: read, pull-requests: read.
+# Commit öncesi kanca (`.githooks/pre-commit`) atlanabilir (`--no-verify`); zorlama buradadır.
+name: guards
+
+on:
+  pull_request:
+    # `edited`: PR gövdesi düzenlenince onay satırları yeniden değerlendirilir (check:protected).
+    types: [opened, synchronize, reopened, edited]
+    branches:
+      - main
+      - "int/**"
+  push:
+    branches:
+      - main
+      - "int/**"
+
+concurrency:
+  group: guards-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+# .pnpmfile.cjs / pnpmfile / globalPnpmfile kodu hiçbir install'da yüklenmez (ci.yml ile aynı gerekçe).
+env:
+  npm_config_ignore_pnpmfile: "true"
+
+jobs:
+  check-all:
+    name: check-all
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      base_ref: ${{ steps.ctx.outputs.base_ref }}
+      head_sha: ${{ steps.ctx.outputs.head_sha }}
+      mode: ${{ steps.mode.outputs.mode }}
+    steps:
+      # Bağlam: olay değerleri yalnızca ortam değişkeniyle okunur (betiğe ${{ }} gömülmez).
+      # PR: taban = base.ref, denetlenen = head.sha, dal adı = head_ref.
+      # push: taban = push'tan önceki uç (`before`; yeni dalda main), denetlenen = github.sha.
+      - name: Resolve context
+        id: ctx
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE_REF: ${{ github.base_ref }}
+          PR_HEAD_REF: ${{ github.head_ref }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_REF: ${{ github.ref_name }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          zero=0000000000000000000000000000000000000000
+          if [ "$EVENT" = "pull_request" ]; then
+            base_ref="$PR_BASE_REF"; base_name="$PR_BASE_REF"; branch="$PR_HEAD_REF"; head="$PR_HEAD_SHA"
+          else
+            branch="$PUSH_REF"; head="$PUSH_SHA"
+            if [ -n "$PUSH_BEFORE" ] && [ "$PUSH_BEFORE" != "$zero" ]; then
+              base_ref="$PUSH_BEFORE"; base_name="$PUSH_REF"
+            else
+              base_ref="main"; base_name="main"
+            fi
+          fi
+          git check-ref-format --branch "$branch" > /dev/null || { echo "::error::geçersiz dal adı"; exit 1; }
+          git check-ref-format --branch "$base_name" > /dev/null || { echo "::error::geçersiz taban adı"; exit 1; }
+          [[ "$head" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::head SHA geçersiz"; exit 1; }
+          [[ "$base_ref" =~ ^[0-9a-f]{40}$ ]] || git check-ref-format --branch "$base_ref" > /dev/null
+          {
+            echo "base_ref=$base_ref"
+            echo "base_name=$base_name"
+            echo "branch=$branch"
+            echo "head_sha=$head"
+          } >> "$GITHUB_OUTPUT"
+          echo "taban: $base_name ($base_ref) · denetlenen: $branch @ $head"
+      - name: Checkout base (trusted guards)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.ctx.outputs.base_ref }}
+          path: base
+          persist-credentials: false
+      # Tam geçmiş: merge-base, origin/main (karantina kaydı), push kipinde HEAD^2 / ağaç eşitliği ve
+      # güvenlik raporu SHA'sının atalık denetimi yerel geçmiş ister.
+      - name: Checkout PR head (inspected, never executed)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.ctx.outputs.head_sha }}
+          path: pr
+          fetch-depth: 0
+          persist-credentials: false
+      # check:scope kartı dal adından bulur; ayrık HEAD'e doğrulanmış dal adı verilir.
+      - name: Name PR branch
+        env:
+          BRANCH: ${{ steps.ctx.outputs.branch }}
+        run: git -C pr switch --quiet --force-create "$BRANCH"
+      - name: Guard mode
+        id: mode
+        env:
+          BASE_NAME: ${{ steps.ctx.outputs.base_name }}
+        run: |
+          set -euo pipefail
+          if [ -f base/scripts/guards/all.mjs ]; then mode=current
+          elif [ -f base/scripts/guards/cli.mjs ]; then mode=legacy
+          elif [ "$BASE_NAME" = "main" ]; then mode=bootstrap
+          else
+            echo "::error::taban ($BASE_NAME) bekçi içermiyor (scripts/guards/cli.mjs yok); önyükleme istisnası yalnızca main tabanında"
+            exit 1
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "bekçi kipi: $mode"
+      - name: Bootstrap
+        if: steps.mode.outputs.mode == 'bootstrap'
+        run: echo "::notice::bootstrap — main'de scripts/guards/cli.mjs yok (ADR-012 rev. önyükleme istisnası); bekçiler koşmadı"
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        if: steps.mode.outputs.mode != 'bootstrap'
+        with:
+          package_json_file: base/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: steps.mode.outputs.mode != 'bootstrap'
+        with:
+          node-version-file: base/package.json
+          package-manager-cache: false
+      - name: Install base (lockfile, no scripts)
+        if: steps.mode.outputs.mode != 'bootstrap'
+        working-directory: base
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: check:all (base guards → pr/)
+        if: steps.mode.outputs.mode == 'current'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node base/scripts/guards/cli.mjs all --root pr
+      - name: check:all (legacy base guards → pr/)
+        if: steps.mode.outputs.mode == 'legacy'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          echo "::warning::taban bekçisinde all.mjs yok (geçiş kipi): tabanın bekçileri tek tek koşuyor"
+          node --input-type=module - <<'EOF'
+          import { existsSync, readFileSync } from "node:fs";
+          import path from "node:path";
+          import { pathToFileURL } from "node:url";
+          const base = path.resolve("base");
+          const root = path.resolve("pr");
+          const { main } = await import(pathToFileURL(path.join(base, "scripts/guards/cli.mjs")).href);
+          const steps = [];
+          for (const g of ["scope", "tests", "ac-ratchet", "protected", "assertions"]) {
+            steps.push([g, (await main([g], { root })) === 0]);
+          }
+          const docsFile = path.join(base, "scripts/check-docs.mjs");
+          if (existsSync(docsFile)) {
+            const { checkStack, checkMap, summaryLine } = await import(pathToFileURL(docsFile).href);
+            const read = (rel) => { try { return readFileSync(path.join(root, rel), "utf8"); } catch { return null; } };
+            const stackMd = read("docs/STACK.md");
+            const mapMd = read("docs/MAP.md");
+            const stack = stackMd === null ? { ok: false, count: 0, failures: ["stack: docs/STACK.md okunamadı"] } : checkStack(stackMd, read);
+            const map = mapMd === null ? { ok: false, count: 0, failures: ["map: docs/MAP.md okunamadı"] } : checkMap(mapMd, (rel) => existsSync(path.join(root, rel)));
+            for (const f of [...stack.failures, ...map.failures]) console.log(f);
+            console.log(summaryLine(stack, map));
+            steps.push(["docs", stack.ok && map.ok]);
+          }
+          console.log(`check:all (geçiş) → ${steps.map(([n, ok]) => `${n} ${ok ? "OK" : "FAIL"}`).join(" | ")}`);
+          process.exitCode = steps.every(([, ok]) => ok) ? 0 : 1;
+          EOF
+      # upload-artifact gizli yolları atlar; .artifacts gizli olmayan geçici dizine kopyalanır.
+      - name: Stage guard artifacts
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/guards-artifacts"
+          if [ -d pr/.artifacts/guards ]; then cp -R pr/.artifacts/guards/. "$RUNNER_TEMP/guards-artifacts/"; fi
+      - name: Upload guard artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: guards-check-all
+          path: ${{ runner.temp }}/guards-artifacts/
+          if-no-files-found: warn
+          retention-days: 14
+
+  test-ac:
+    name: test-ac
+    needs: check-all
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Bootstrap
+        if: needs.check-all.outputs.mode == 'bootstrap'
+        run: echo "::notice::bootstrap — main'de bekçi/koşturucu yok (ADR-012 rev. önyükleme istisnası); test:ac koşmadı"
+      - name: Checkout base (trusted runner)
+        if: needs.check-all.outputs.mode != 'bootstrap'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.check-all.outputs.base_ref }}
+          path: base
+          persist-credentials: false
+      # Tam geçmiş: karantina kaydının `origin/main`'deki birebir karşılığı okunur.
+      - name: Checkout PR head
+        if: needs.check-all.outputs.mode != 'bootstrap'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.check-all.outputs.head_sha }}
+          path: pr
+          fetch-depth: 0
+          persist-credentials: false
+      # pnpm ve Node sürümü tabandan (PR'ın packageManager alanı araç seçmez).
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        if: needs.check-all.outputs.mode != 'bootstrap'
+        with:
+          package_json_file: base/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: needs.check-all.outputs.mode != 'bootstrap'
+        with:
+          node-version-file: base/package.json
+          package-manager-cache: false
+      - name: Install PR (lockfile, no scripts)
+        if: needs.check-all.outputs.mode != 'bootstrap'
+        working-directory: pr
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: test:ac --ci (base runner → pr/)
+        if: needs.check-all.outputs.mode == 'current'
+        run: node base/scripts/test-ac/cli.mjs --ci --root pr --out "$RUNNER_TEMP/test-ac"
+      - name: test:ac --ci (legacy base runner → pr/)
+        if: needs.check-all.outputs.mode == 'legacy'
+        run: |
+          echo "::warning::taban koşturucusunda --root/--out ve çalışma anı atlama denetimi yok (geçiş kipi)"
+          node --input-type=module - <<'EOF'
+          import path from "node:path";
+          import { pathToFileURL } from "node:url";
+          const root = path.resolve("pr");
+          const { main } = await import(pathToFileURL(path.resolve("base/scripts/test-ac/cli.mjs")).href);
+          process.exitCode = main(["--ci"], { root, vitestBin: path.join(root, "node_modules/.bin/vitest") });
+          EOF
+          mkdir -p "$RUNNER_TEMP/test-ac"
+          if [ -d pr/.artifacts/test-ac ]; then cp -R pr/.artifacts/test-ac/. "$RUNNER_TEMP/test-ac/"; fi
+      - name: Upload test-ac report
+        if: always() && needs.check-all.outputs.mode != 'bootstrap'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: guards-test-ac
+          path: ${{ runner.temp }}/test-ac/
+          if-no-files-found: warn
+          retention-days: 14
+
+  # check:pilot check:all'a girmez (T-006 kullanıcı eylemi beklerken her PR'ı kilitlemesin); ayrı iş.
+  # Yalnızca Node yerleşik modülleri; install gerekmez. Bağlam check-all ile aynı kuralla çözülür.
+  check-pilot:
+    name: check-pilot
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Resolve context
+        id: ctx
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE_REF: ${{ github.base_ref }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_REF: ${{ github.ref_name }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          zero=0000000000000000000000000000000000000000
+          if [ "$EVENT" = "pull_request" ]; then
+            base_ref="$PR_BASE_REF"; base_name="$PR_BASE_REF"; head="$PR_HEAD_SHA"
+          else
+            head="$PUSH_SHA"
+            if [ -n "$PUSH_BEFORE" ] && [ "$PUSH_BEFORE" != "$zero" ]; then
+              base_ref="$PUSH_BEFORE"; base_name="$PUSH_REF"
+            else
+              base_ref="main"; base_name="main"
+            fi
+          fi
+          git check-ref-format --branch "$base_name" > /dev/null || { echo "::error::geçersiz taban adı"; exit 1; }
+          [[ "$head" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::head SHA geçersiz"; exit 1; }
+          [[ "$base_ref" =~ ^[0-9a-f]{40}$ ]] || git check-ref-format --branch "$base_ref" > /dev/null
+          { echo "base_ref=$base_ref"; echo "base_name=$base_name"; echo "head_sha=$head"; } >> "$GITHUB_OUTPUT"
+      - name: Checkout base (trusted guards)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.ctx.outputs.base_ref }}
+          path: base
+          persist-credentials: false
+      - name: Checkout PR head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.ctx.outputs.head_sha }}
+          path: pr
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: base/package.json
+          package-manager-cache: false
+      - name: check:pilot (base guard → pr/)
+        env:
+          BASE_NAME: ${{ steps.ctx.outputs.base_name }}
+        run: |
+          set -euo pipefail
+          if [ -f base/scripts/guards/all.mjs ]; then
+            node base/scripts/guards/cli.mjs pilot --root pr
+          elif [ -f base/scripts/guards/cli.mjs ]; then
+            echo "::warning::taban bekçisinde --root yok (geçiş kipi)"
+            node --input-type=module -e 'import path from "node:path"; import { pathToFileURL } from "node:url"; const { main } = await import(pathToFileURL(path.resolve("base/scripts/guards/cli.mjs")).href); process.exitCode = await main(["pilot"], { root: path.resolve("pr") });'
+          elif [ "$BASE_NAME" = "main" ]; then
+            echo "::notice::bootstrap — main'de bekçi yok; check:pilot koşmadı"
+          else
+            echo "::error::taban ($BASE_NAME) bekçi içermiyor"
+            exit 1
+          fi
