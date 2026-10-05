@@ -10,7 +10,7 @@ Durum: `var` = yol repoda mevcut; `planlı: <kart>` = henüz yok, ilgili kart a�
 | packages/shared/ | planlı: ilk kullanan kart | Zod şemaları, hata kodları, tipler, i18n anahtar tipleri, `JobQueue` arayüzü |
 | packages/queue-adapter/ | planlı: ADR-005 eki | Kuyruk sağlayıcı kütüphanesinin tek import noktası |
 | packages/ui/ | planlı: ilk kullanan kart | Shadcn tabanlı ortak bileşenler, dynamic-form, scanner, virtualized |
-| tests/integration/ | planlı: T-005a | Testcontainers PostgreSQL entegrasyon testleri (`pnpm test:int`) |
+| tests/integration/ | var | Testcontainers PostgreSQL entegrasyon testleri (`pnpm test:int`) |
 | tests/e2e/ | planlı: ilk kullanan kart | Playwright uçtan uca testler |
 | tests/load/ | planlı: ilk kullanan kart | k6 yük testleri |
 | infra/ | var | Yerel/CI altyapı yapılandırması |
