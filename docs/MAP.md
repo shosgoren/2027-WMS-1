@@ -7,8 +7,8 @@ Durum: `var` = yol repoda mevcut; `planlı: <kart>` = henüz yok, ilgili kart a�
 | apps/worker/ | var | Kalıcı worker süreci (yaşam döngüsü); kuyruk ADR-005 (Postgres kuyruğu), henüz iş yok |
 | packages/db/ | var | Drizzle istemcisi, `withTenant`, şema, migration, RLS testleri |
 | packages/domain/ | planlı: ilk kullanan kart | İş kuralları ve stok komutları (G-01): identity, inventory, receipts, orders, warehouse, counts, metadata, billing, integrations, reporting |
-| packages/shared/ | planlı: ilk kullanan kart | Zod şemaları, hata kodları, tipler, i18n anahtar tipleri, `JobQueue` arayüzü |
-| packages/queue-adapter/ | planlı: ADR-005 eki | Kuyruk sağlayıcı kütüphanesinin tek import noktası |
+| packages/shared/ | var | Zod şemaları, hata kodları, tipler, i18n anahtar tipleri, `JobQueue` arayüzü (şimdilik yalnızca `queue.ts`) |
+| packages/queue-adapter/ | var | Kuyruk sağlayıcı kütüphanesinin tek import noktası |
 | packages/ui/ | planlı: ilk kullanan kart | Shadcn tabanlı ortak bileşenler, dynamic-form, scanner, virtualized |
 | tests/integration/ | var | Testcontainers PostgreSQL entegrasyon testleri (`pnpm test:int`) |
 | tests/e2e/ | planlı: ilk kullanan kart | Playwright uçtan uca testler |

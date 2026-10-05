@@ -1,0 +1,15 @@
+{
+  "name": "@wms/shared",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./queue": "./src/queue.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
+  },
+  "dependencies": {
+    "zod": "4.6.5"
+  }
+}

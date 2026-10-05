@@ -2,7 +2,7 @@
 // sürücü ayarları yalnızca `@wms/db/internal` alt yolundadır (lint ile korunur).
 export { createDbClient } from "./client.ts";
 export type { TenantContext } from "./client.ts";
-export { withTenant } from "./with-tenant.ts";
+export { currentTenantId, withTenant } from "./with-tenant.ts";
 export { MembershipError, lockOwners, withMembership, withNewTenant, withSystemTenant, withUser } from "./with-membership.ts";
 export type {
   Membership,

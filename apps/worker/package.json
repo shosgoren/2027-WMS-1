@@ -7,5 +7,9 @@
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/main.js",
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
+  },
+  "dependencies": {
+    "@wms/queue-adapter": "workspace:*",
+    "@wms/shared": "workspace:*"
   }
 }

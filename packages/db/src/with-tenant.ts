@@ -30,3 +30,15 @@ export async function withTenant<T>(ctx: TenantContext, fn: (tx: TenantTx) => Pr
     return fn(tx);
   });
 }
+
+/**
+ * `tx` içinde kurulmuş tenant bağlamını (transaction-local ayar) okur; kurulmamış/UUID değilse `undefined`.
+ * Yalnızca okur — bağlamı kuran tek yol `withTenant` ve `withMembership` ailesidir. Kuyruk bağdaştırıcısı
+ * tenant kimliğini çağıran parametresinden değil buradan türetir (ADR-016 §12).
+ */
+export async function currentTenantId(tx: TenantTx): Promise<string | undefined> {
+  const result: unknown = await tx.execute(sql`SELECT nullif(current_setting('app.current_tenant_id', true), '') AS tenant_id`);
+  const rows: unknown = Array.isArray(result) ? result : (result as { rows?: unknown } | null)?.rows;
+  const value = Array.isArray(rows) ? (rows[0] as { tenant_id?: unknown } | undefined)?.tenant_id : undefined;
+  return isUuid(value) ? value : undefined;
+}
