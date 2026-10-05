@@ -266,7 +266,7 @@ describe(`tenancy schema (T-103, target=${env.target})`, () => {
     expect(byName.get("tenant_memberships_status_chk")).toMatch(/ACTIVE.*REMOVED/s);
     expect(byName.get("invitations_token_hash_chk")).toContain("[0-9a-f]{64}");
     // MINOR-8: slug bicimi ve 'demo' yalnizca is_demo iken.
-    expect(byName.get("tenants_slug_chk")).toContain("[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])?");
+    expect(byName.get("tenants_slug_chk")).toContain("[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?");
     expect(byName.get("tenants_slug_chk")).toMatch(/demo.*is_demo/s);
   });
 

@@ -693,7 +693,7 @@ describe(`withNewTenant (target=${env.target})`, () => {
 
   it("MINOR-8: demo / hatalı biçimli slug → sorgusuz ret (FORBIDDEN); tenant satırı oluşmaz", async () => {
     const user = await admin((c) => mkUser(c));
-    for (const slug of ["demo", "Demo", "-x1", "x1-", "a_b", "ab"]) {
+    for (const slug of ["demo", "Demo", "-x1", "x1-", "a_b"]) {
       const err = await caught(newTenant(user, slug, randomUUID()));
       expect((err as MembershipError).code, slug).toBe("FORBIDDEN");
     }
@@ -711,16 +711,16 @@ describe(`tenants_slug_chk (MINOR-8; target=${env.target})`, () => {
   const ins = (slug: string, isDemo: boolean) =>
     attempt(adm, "INSERT INTO public.tenants (id, slug, name, is_demo) VALUES ($1, $2, 'x', $3)", [randomUUID(), slug, isDemo]);
 
-  it("geçersiz biçimler CHECK ihlali: büyük harf, uç tire, alt çizgi, boşluk, 2 ve 64 karakter, boş", async () => {
-    for (const slug of ["Abc", "-abc", "abc-", "a_b", "a b", "ab", "a".repeat(64), "", "ünal"]) {
+  it("geçersiz biçimler CHECK ihlali: büyük harf, uç tire, alt çizgi, boşluk, 64 karakter, boş", async () => {
+    for (const slug of ["Abc", "-abc", "abc-", "a_b", "a b", "a".repeat(64), "", "ünal"]) {
       const r = await ins(slug, false);
       expect(r.ok, `slug ${JSON.stringify(slug)} reddedilmeli`).toBe(false);
       if (!r.ok) expect(r.code, r.message).toBe(CHECK_VIOLATION);
     }
   });
 
-  it("geçerli biçimler kabul: 1, 3 ve 63 karakter, içeride tire", async () => {
-    for (const slug of ["a", "abc", "a-b", "a1-b2-c3", `a${"b".repeat(61)}c`]) {
+  it("geçerli biçimler kabul: 1, 2, 3 ve 63 karakter, içeride tire", async () => {
+    for (const slug of ["a", "ab", "abc", "a-b", "a1-b2-c3", `a${"b".repeat(61)}c`]) {
       const r = await ins(slug, false);
       expect(r.ok, `slug ${slug}: ${r.ok ? "" : r.message}`).toBe(true);
     }

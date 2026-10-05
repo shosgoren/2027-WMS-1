@@ -168,7 +168,7 @@ export interface NewTenantOwner {
 }
 
 /** `tenants_slug_chk` ile aynı biçim (veritabanı da zorlar); `demo` yalnızca demo tenant'a ayrılmıştır. */
-const SLUG_FORMAT = /^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])?$/;
+const SLUG_FORMAT = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
 /** Sürücü hata zincirinde (`cause`) belirli bir kısıtın benzersizlik ihlalini arar. */
 function isUniqueViolation(e: unknown, constraint: string): boolean {

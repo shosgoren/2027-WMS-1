@@ -108,7 +108,6 @@ describe("withMembership — girdi doğrulaması (sorgusuz ret)", () => {
       { ...ok, slug: "-acme" },
       { ...ok, slug: "acme-" },
       { ...ok, slug: "ac_me" },
-      { ...ok, slug: "ab" },
       { ...ok, slug: "a".repeat(64) },
       { ...ok, name: "  " },
     ]) {

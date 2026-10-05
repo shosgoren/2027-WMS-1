@@ -112,9 +112,9 @@ CREATE TABLE public.tenants (
   CONSTRAINT tenants_slug_key UNIQUE (slug),
   CONSTRAINT tenants_creator_request_key UNIQUE (created_by_user_id, creation_request_id),
   CONSTRAINT tenants_status_chk CHECK (status IN ('ACTIVE', 'SUSPENDED', 'CLOSING')),
-  -- Biçim: küçük harf/rakam/tire, uçlarda tire yok, 1 veya 3-63 karakter. 'demo' yalnızca demo tenant'a ayrılmıştır
+  -- Biçim: küçük harf/rakam/tire, uçlarda tire yok, 1-63 karakter. 'demo' yalnızca demo tenant'a ayrılmıştır
   -- (wms_app is_demo yazamaz; demo tenant'ı migration/operasyon rolü kurar). Ayrılmış kelime listesi T-121'dedir.
-  CONSTRAINT tenants_slug_chk CHECK (slug ~ '^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])?$' AND (slug <> 'demo' OR is_demo)),
+  CONSTRAINT tenants_slug_chk CHECK (slug ~ '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$' AND (slug <> 'demo' OR is_demo)),
   CONSTRAINT tenants_name_chk CHECK (name <> ''),
   -- Onboarding idempotency çifti birlikte dolu ya da birlikte boş (demo tenant'ı migration/operasyon rolü kurar).
   CONSTRAINT tenants_creator_pair_chk CHECK ((created_by_user_id IS NULL) = (creation_request_id IS NULL)),
