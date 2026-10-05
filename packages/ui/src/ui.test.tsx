@@ -1,0 +1,100 @@
+import { describe, expect, it } from "vitest";
+import { renderToStaticMarkup } from "react-dom/server";
+import { ActivityList, Banner, Button, ConfirmDialog, EmptyState, TaskCard, TextField } from "./index.ts";
+
+const icon = <span>i</span>;
+
+describe("TaskCard", () => {
+  it("kilitli kart bağlantı değildir, aria-disabled taşır ve gerekçeyi okutur", () => {
+    const html = renderToStaticMarkup(
+      <TaskCard icon={icon} title="Depodan mal çıkacak" href="/cikis" locked={{ reason: "Bu iş için yetkin yok." }} />,
+    );
+    expect(html).not.toContain("<a");
+    expect(html).not.toContain("href=");
+    expect(html).toContain('aria-disabled="true"');
+    expect(html).toContain('data-state="locked"');
+    expect(html).toContain("Bu iş için yetkin yok.");
+  });
+
+  it("'yakında' kartı kilitliden farklı durum ve metin taşır, bağlantı değildir", () => {
+    const locked = renderToStaticMarkup(
+      <TaskCard icon={icon} title="X" href="/x" locked={{ reason: "Yetki yok" }} />,
+    );
+    const soon = renderToStaticMarkup(
+      <TaskCard icon={icon} title="X" href="/x" soon={{ label: "Yakında" }} description="Açıklama" />,
+    );
+    expect(soon).toContain('data-state="soon"');
+    expect(soon).not.toContain('data-state="locked"');
+    expect(soon).toContain("Yakında");
+    expect(soon).not.toContain("Yetki yok");
+    expect(soon).not.toContain("<a");
+    expect(locked).not.toContain("Yakında");
+    expect(soon).not.toBe(locked);
+  });
+
+  it("etkin kart href ile bağlantıdır; ≥48 px (min-h-12) sınıfı vardır", () => {
+    const html = renderToStaticMarkup(<TaskCard icon={icon} title="Mal geldi" href="/giris" />);
+    expect(html).toContain('<a href="/giris"');
+    expect(html).toContain("min-h-12");
+    expect(html).toContain('data-state="active"');
+  });
+});
+
+describe("ConfirmDialog", () => {
+  const noop = () => {};
+  it("kapalıyken onay düğmesini render etmez", () => {
+    const html = renderToStaticMarkup(
+      <ConfirmDialog open={false} title="T" description="D" confirmLabel="Sil" cancelLabel="Vazgeç" onConfirm={noop} onCancel={noop} />,
+    );
+    expect(html).toBe("");
+    expect(html).not.toContain("Sil");
+  });
+
+  it("açıkken başlık, etki açıklaması ve düğmeleri ARIA ile verir", () => {
+    const html = renderToStaticMarkup(
+      <ConfirmDialog open title="Silinsin mi?" description="Etki metni" confirmLabel="Sil" cancelLabel="Vazgeç" onConfirm={noop} onCancel={noop} />,
+    );
+    expect(html).toContain("<dialog");
+    expect(html).toContain("aria-labelledby");
+    expect(html).toContain("aria-describedby");
+    expect(html).toContain("Sil");
+    expect(html).toContain("Vazgeç");
+  });
+});
+
+describe("TextField / Button", () => {
+  it("hata mesajı neden + sonraki eylem verir ve aria-describedby ile bağlanır", () => {
+    const html = renderToStaticMarkup(
+      <TextField label="Miktar" error={{ reason: "Miktar sıfır olamaz.", action: "1 veya daha büyük gir." }} />,
+    );
+    expect(html).toContain("Miktar sıfır olamaz. 1 veya daha büyük gir.");
+    expect(html).toContain('aria-invalid="true"');
+    expect(html).toMatch(/aria-describedby="([^"]+)"/);
+    const id = /aria-describedby="([^"]+)"/.exec(html)?.[1] ?? "";
+    expect(html).toContain(`id="${id}"`);
+  });
+
+  it("yükleniyor düğmesi devre dışı ve aria-busy", () => {
+    const html = renderToStaticMarkup(<Button loading>Kaydet</Button>);
+    expect(html).toContain("disabled");
+    expect(html).toContain('aria-busy="true"');
+    expect(html).toContain("min-h-12");
+  });
+});
+
+describe("Banner / EmptyState / ActivityList", () => {
+  it("hata bandı alert, bilgi bandı status rolü alır", () => {
+    expect(renderToStaticMarkup(<Banner kind="error">Hata</Banner>)).toContain('role="alert"');
+    expect(renderToStaticMarkup(<Banner kind="info">Demo ortamı</Banner>)).toContain('role="status"');
+  });
+
+  it("boş durum başlık ve eylemi gösterir; etkinlik listesi saat + metin satırı üretir", () => {
+    expect(renderToStaticMarkup(<EmptyState title="Kayıt yok" action={<Button>Ekle</Button>} />)).toContain("Ekle");
+    const html = renderToStaticMarkup(
+      <ActivityList title="Bugün yaptıkların" emptyText="Yok" items={[{ id: "1", time: "09:42", text: "4 koli girdi." }]} />,
+    );
+    expect(html).toContain("09:42");
+    expect(html).toContain("4 koli girdi.");
+    expect(renderToStaticMarkup(<ActivityList title="B" emptyText="Henüz yok" items={[]} />)).toContain("Henüz yok");
+  });
+});
