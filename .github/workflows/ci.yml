@@ -1,5 +1,5 @@
 # Etkin WMS — CI hattı (T-003). KORUNAN DOSYA (docs/spec/14-reliability-ops.md, PROTOCOL §3b):
-# değişiklik ayrı küçük PR + security-reviewer + `APPROVED-BY: supervisor (ADR-012 rev.)` ister.
+# değişiklik ayrı küçük PR + security-reviewer + `APPROVED-BY: supervisor (ADR-012 rev.) @ <PR head SHA>` ister.
 #
 # İş adları (verify, infra, secrets, deps) SABİTTİR: T-009 bunları branch protection'da zorunlu
 # durum kontrolü olarak kullanır. Ad değişikliği korunan değişikliktir.
