@@ -7,6 +7,7 @@ import {
   branchNameFor,
   buildSummary,
   cell,
+  computeTestTimeoutMs,
   createAppRole,
   createAppRoleSql,
   createLineFilter,
@@ -633,5 +634,22 @@ describe("gecikme ölçümü yardımcıları (T-005d zaman aşımı tanısı)", 
     });
     expect(out).toEqual([{ test: "pool=1 2 tenant × 50 eşzamanlı withTenant — x", status: "failed", durationMs: 30001 }]);
     expect(JSON.stringify(out)).not.toContain("secret-host");
+  });
+});
+
+describe("computeTestTimeoutMs (ölçülen RTT ile orantılı bütçe)", () => {
+  it("ölçüm yok/hatalı → 30000 (fail-closed), ölçülemedi yazılır", () => {
+    for (const l of [undefined, null, { error: "x" }, { roundTripMs: { p95: null } }, { roundTripMs: { p95: 0 } }]) {
+      const r = computeTestTimeoutMs(l);
+      expect(r.ms).toBe(30000);
+      expect(r.measured).toBe(false);
+      expect(r.formula).toContain("ölçülemedi");
+    }
+  });
+  it("RTT 100 ms → 180000; RTT 1000 ms → 600000 üst sınır; düşük RTT → 30000 taban", () => {
+    expect(computeTestTimeoutMs({ roundTripMs: { p95: 100 } }).ms).toBe(180000);
+    expect(computeTestTimeoutMs({ roundTripMs: { p95: 1000 } }).ms).toBe(600000);
+    expect(computeTestTimeoutMs({ roundTripMs: { p95: 1 } }).ms).toBe(30000);
+    expect(computeTestTimeoutMs({ roundTripMs: { p95: 100 } }).formula).toContain("3 × 600 × RTT_p95_ms");
   });
 });
