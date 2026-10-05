@@ -2,9 +2,9 @@
 
 **Oturum kilidi:** session_01C59FRaUynaDdhNGZoRbKsY · 2026-10-05T16:30Z (zamanlanmış oturum: kilit 3 saatten yeniyse ve başka oturumunsa hiçbir şey yapmadan çık; değilse kendi kimliğinle yenile, her push'ta zamanı güncelle)
 **Faz:** 0 — Kararlar & iskelet
-**Aktif görev:** `int/faz0-bekciler-2` → `main` PR (T-008d/e/f/g) ∥ T-005d Neon koşusu (../wt-T-005d → `int/faz0-neon`). STATE'in güncel kopyası: `int/faz0-bekciler-2`.
-**Son tamamlanan:** #19 `int/faz0-pooler` → `main` (T-005a/b/c/g, T-015, T-016; security-reviewer 3. tur 0/0/9) · #13 Fly staging (ilk dağıtım yeşil) · #14 T-008g → bekciler-2
-**Sonraki adım:** T-008d → T-008e; T-008f; sonra T-008g (bekçiler taban daldan, `--root`, test-ac `$RUNNER_TEMP`, çalışma anı skip denetimi) → bekciler-2 PR. T-005g → pooler paketi yeniden inceleme → PR. Sonra T-005d (Neon, Actions) ve T-010 (Fly; FLY_API_TOKEN bekleniyor).
+**Aktif görev:** T-005d Neon (../wt-T-005d → `int/faz0-neon`) ∥ T-008j bekçi takipleri ∥ T-004b tip kapsamı + STACK (→ `int/faz0-kapanis`). STATE'in güncel kopyası: `int/faz0-kapanis`.
+**Son tamamlanan:** #20 `int/faz0-bekciler-2` → `main` (T-008d/e/f/g; bekçiler CI'da taban daldan) · #19 pooler · #13 Fly staging
+**Sonraki adım:** T-005d (Neon Actions koşusu; iş akışı main'e girince dispatch) → T-005e/f; T-008j; T-004b; T-009b canlı AC-43; sonra Faz 0 kapısı (`pnpm test:ac --phase 0` + check:pilot + JOURNAL kapı raporu) → Faz 1 kart seti (architect).
 
 ## Çalışma biçimi (kullanıcı kararı 2026-10-05 — ADR-012 rev., PROTOCOL §Onay kaynağı)
 - Kullanıcı PR incelemez. Birleştirme kapısı: CI/oturumda `pnpm verify` + `check:all` + `test:int` + ilgili `test:ac` yeşil; risk matrisine göre `security-reviewer` ve `qa-verifier` BLOCKER: 0 → Supervisor PR'ı kendisi birleştirir (`mcp__github__merge_pull_request`). Korunan değişiklikte PR açıklamasında `APPROVED-BY: supervisor (ADR-012 rev.)`.
@@ -28,7 +28,7 @@ ADR-001 Next.js + ayrı worker · 002 İngilizce kod/DB, Türkçe UI · 003 Driz
 - [x] T-006 PILOT.md — varsayımsal profil (Q-12)
 - [x] T-007, T-008a/b/c/h/i, T-014 (#8). Bilinen risk: int kapsam sahtelemesi (m9), PR gövdesinde gizli HTML
 - [ ] Takip: lockfile bütünlüğü (T-003 MINOR) → T-008i
-- [ ] T-008d/e/f/g bekçiler → `int/faz0-bekciler-2`
+- [x] T-008d/e/f/g (#20). Açık MINOR'lar → T-008j
 - [~] T-009a — kimlik/CODEOWNERS kısmı iptal (ADR-012 rev.); kalan: kullanıcı isterse `main` branch protection · T-009b AC-43/44'ün yeni tanımına göre
 - [x] T-010 Fly staging (#11, #12, #13 main'de; ilk dağıtım yeşil). Takipler: `not found` desenini daralt, taban imaj güncelleme süreci, PR CI'da docker build
 
