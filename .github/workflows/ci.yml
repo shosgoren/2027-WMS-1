@@ -122,7 +122,8 @@ jobs:
         with:
           node-version-file: package.json
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      # T-008j: Testcontainers zincirinin betikleri (ssh2, cpu-features, protobufjs) pnpm 10'da zaten onaysız.
+      - run: pnpm install --frozen-lockfile --ignore-scripts
       # Tam döküm .artifacts/test-int/ (JSON raporu + konsol çıktısı).
       - name: pnpm test:int
         run: |

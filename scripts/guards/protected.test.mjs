@@ -1220,3 +1220,39 @@ describe("check:protected", () => {
     expect(await main(["protected", "--nope"], { root: r.dir, log: () => {} })).toBe(2);
   });
 });
+
+// T-008j (bekciler-2 incelemesi MINOR): `resolution` alanı olmayan `packages:` girdisi integrity-yalnız
+// sayılmıyordu ama hiç değerlendirilmiyordu da (kapanış dışı pakette serbestti) → artık fail-closed.
+describe("protected-paths: resolution'sız packages girdisi (T-008j madde 5)", () => {
+  const ZOD = "  zod@4.0.0:\n    resolution: {integrity: sha512-ZZZ}\n";
+
+  it.each(/** @type {Array<[string, string]>} */ ([
+    ["resolution satırı silinir, başka alan kalır", "  zod@4.0.0:\n    engines: {node: '>=18'}\n"],
+    ["girdi boş akış eşlemesi", "  zod@4.0.0: {}\n"],
+    ["resolution yerine tarball dışı alan (tarball anahtarı girdinin kendisinde)", "  zod@4.0.0:\n    tarball: https://evil.example.invalid/zod.tgz\n"],
+  ]))("saldırı: kapanış dışı pakette %s → korunur", (_name, entry) => {
+    const after = LOCK.replace(ZOD, entry);
+    expect(after).not.toBe(LOCK);
+    expect(lockfileGuarded(after)).toMatch(/^resolution zod@4\.0\.0 <resolution yok>$/m);
+    const hits = contentRules("pnpm-lock.yaml", LOCK, after);
+    expect(hits.map((h) => h.rule)).toEqual(["lockfile"]);
+    expect(hits[0]?.reason).not.toContain("ayrıştırılamadı");
+  });
+
+  it("saldırı: resolution'sız yeni packages girdisi eklenir → korunur", () => {
+    const after = LOCK.replace(ZOD, `${ZOD}\n  evil@1.0.0:\n    engines: {node: '*'}\n`);
+    expect(after).not.toBe(LOCK);
+    expect(contentRules("pnpm-lock.yaml", LOCK, after).map((h) => h.rule)).toEqual(["lockfile"]);
+  });
+
+  it("yanlış pozitif yok: integrity'li resolution + ek alan serbest; değişmeyen kilit serbest", () => {
+    const withEngines = LOCK.replace(ZOD, "  zod@4.0.0:\n    resolution: {integrity: sha512-ZZZ}\n    engines: {node: '>=18'}\n");
+    expect(withEngines).not.toBe(LOCK);
+    expect(lockfileGuarded(withEngines)).not.toMatch(/^resolution /m);
+    expect(contentRules("pnpm-lock.yaml", LOCK, withEngines)).toEqual([]);
+    expect(contentRules("pnpm-lock.yaml", LOCK, LOCK)).toEqual([]);
+    // Depodaki gerçek kilit dosyasında resolution'sız girdi yok (yanlış alarm üretmez).
+    const real = readFileSync(path.join(import.meta.dirname, "../../pnpm-lock.yaml"), "utf8");
+    expect(lockfileGuarded(real)).not.toMatch(/^resolution /m);
+  });
+});

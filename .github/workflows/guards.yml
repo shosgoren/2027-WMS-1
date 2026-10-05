@@ -35,10 +35,11 @@ on:
     branches:
       - main
       - "int/**"
+  # push yalnızca `main` (T-008j): `int/**` dallarına giriş PR üzerinden (yukarıdaki `pull_request`)
+  # denetlenir; int dalına doğrudan push koşusu kaldırıldı (birleştirme commit'i PR'da zaten denetlendi).
   push:
     branches:
       - main
-      - "int/**"
 
 concurrency:
   group: guards-${{ github.event.pull_request.number || github.ref }}
