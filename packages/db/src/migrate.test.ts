@@ -11,6 +11,9 @@ import {
   migrateDown,
   parseArgs,
   redact,
+  redactErrorChain,
+  sameConnectionTarget,
+  migrateUp,
 } from "./migrate.ts";
 
 function codeOf(fn: () => unknown): string | undefined {
@@ -107,10 +110,57 @@ describe("parseArgs", () => {
 });
 
 describe("redact", () => {
-  it("masks the URL and the password", () => {
-    const out = redact(`failed ${UNREACHABLE} with unit-secret-pw`, UNREACHABLE);
+  it("masks the URL, the password, the user name and the host", () => {
+    const out = redact(`failed ${UNREACHABLE} with unit-secret-pw as wms_migrator on 127.0.0.1`, UNREACHABLE);
+    for (const leak of ["unit-secret-pw", "wms_migrator", "127.0.0.1"]) expect(out).not.toContain(leak);
+  });
+
+  it("masks every postgres(ql):// URL in the message, not only the configured one", () => {
+    const out = redact("a postgres://u1:p1@h1:5432/d1 b postgresql://u2:p2@h2/d2", UNREACHABLE);
+    for (const leak of ["u1", "p1", "h1", "u2", "p2", "h2"]) expect(out).not.toContain(leak);
+  });
+
+  it("fails closed on a malformed percent escape: password still masked", () => {
+    const bad = "postgresql://mig_user:p%zzsecret@127.0.0.1:1/unit";
+    const out = redact(`oops p%zzsecret mig_user ${bad}`, bad);
+    expect(out).not.toContain("p%zzsecret");
+    expect(out).not.toContain("mig_user");
+  });
+
+  it("fails closed on an unparsable URL: credentials in the authority are masked", () => {
+    const bad = "postgresql://mig_user:unit-secret-pw@[::bad/unit";
+    const out = redact(`x unit-secret-pw mig_user`, bad);
     expect(out).not.toContain("unit-secret-pw");
-    expect(out).not.toContain("127.0.0.1");
+    expect(out).not.toContain("mig_user");
+  });
+
+  it("redactErrorChain walks causes and masks before truncating", () => {
+    const e = new Error("outer", { cause: new Error(`inner ${UNREACHABLE} unit-secret-pw`) });
+    const out = redactErrorChain(e, UNREACHABLE);
+    expect(out).toContain("outer");
+    expect(out).not.toContain("unit-secret-pw");
+    expect(out).not.toContain("wms_migrator");
+  });
+});
+
+describe("sameConnectionTarget", () => {
+  it("compares host, port, user and database, not the raw string", () => {
+    const base = "postgresql://u:p@db.example:5432/w";
+    expect(sameConnectionTarget(base, "postgres://u:other@DB.example/w?sslmode=require")).toBe(true);
+    expect(sameConnectionTarget(base, "postgresql://u:p@db.example:5433/w")).toBe(false);
+    expect(sameConnectionTarget(base, "postgresql://v:p@db.example:5432/w")).toBe(false);
+    expect(sameConnectionTarget(base, "postgresql://u:p@db.example:5432/x")).toBe(false);
+  });
+});
+
+describe("pooler URLs are refused before any connection", () => {
+  it("rejects a Neon -pooler host and PgBouncer port 6432", async () => {
+    for (const url of [
+      "postgresql://m:p@ep-x-pooler.eu-central-1.aws.neon.tech/w",
+      "postgresql://m:p@127.0.0.1:6432/w",
+    ]) {
+      await expect(migrateUp({ url })).rejects.toMatchObject({ code: "MIGRATION_POOLER_URL" });
+    }
   });
 });
 

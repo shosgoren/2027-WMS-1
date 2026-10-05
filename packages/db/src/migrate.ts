@@ -17,6 +17,21 @@ export const MIGRATIONS_DIR = fileURLToPath(new URL("../migrations", import.meta
 /** Uygulama rolü adı; koşturucu bu rolle çalışmayı reddeder (I-03). */
 export const APP_ROLE_NAME = "wms_app";
 
+/**
+ * Bilinen uygulama rolleri (ad listesi): koşturucu bunlardan biriyle bağlanmayı reddeder (I-03).
+ * Yeni bir uygulama rolü eklendiğinde bu liste güncellenir.
+ */
+export const APP_ROLE_NAMES: readonly string[] = [APP_ROLE_NAME, "wms_auth", "wms_identity_probe"];
+
+/** Migration oturumunda boş kalması gereken bilinen `app.*` ayarları (G-02: tenant bağlamı). */
+export const KNOWN_APP_SETTINGS: readonly string[] = ["app.current_tenant_id"];
+
+/**
+ * Kilit bekleme üst sınırı (ADR-015 §3): eşzamanlı koşucu veya uzun süren bir oturum migration'ı
+ * sonsuza dek bekletmesin; aşılırsa `SET LOCAL lock_timeout` PostgreSQL hatasıyla transaction geri alınır.
+ */
+export const LOCK_TIMEOUT = "60s";
+
 /** Koşu kilidi: `pg_advisory_xact_lock` anahtarı (tek yerde tanımlı; testler aynı ifadeyi kullanır). */
 export const LOCK_KEY_SQL = "hashtextextended('wms:migrate', 0)";
 
@@ -34,6 +49,8 @@ export type MigrationErrorCode =
   | "MIGRATION_UNKNOWN_APPLIED"
   | "MIGRATION_LEDGER_GAP"
   | "MIGRATION_WRONG_ROLE"
+  | "MIGRATION_POOLER_URL"
+  | "MIGRATION_SESSION_STATE"
   | "MIGRATION_NO_URL"
   | "MIGRATION_ENV_FORBIDDEN"
   | "MIGRATION_BAD_ARGS"
@@ -157,10 +174,52 @@ interface LedgerRow {
   checksum_sha256: string;
 }
 
+/** Bağlantı hedefi (host+port+kullanıcı+veritabanı); ayrıştırılamazsa `undefined`. */
+function parseTarget(url: string): { host: string; port: string; user: string; db: string } | undefined {
+  try {
+    const u = new URL(url);
+    const dec = (v: string): string => {
+      try {
+        return decodeURIComponent(v);
+      } catch {
+        return v;
+      }
+    };
+    return {
+      host: u.hostname.toLowerCase(),
+      port: u.port === "" ? "5432" : u.port,
+      user: dec(u.username),
+      db: dec(u.pathname.replace(/^\//, "")),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/** İki URL aynı host+port+kullanıcı+veritabanına mı işaret ediyor? Ayrıştırılamayan çiftte ham eşitlik. */
+export function sameConnectionTarget(a: string, b: string): boolean {
+  const ta = parseTarget(a);
+  const tb = parseTarget(b);
+  if (ta === undefined || tb === undefined) return a === b;
+  return ta.host === tb.host && ta.port === tb.port && ta.user === tb.user && ta.db === tb.db;
+}
+
+/** Pooler'sız doğrudan bağlantı zorunlu: Neon `-pooler` host'u veya yerel PgBouncer 6432 → ret. */
+function assertDirectUrl(url: string): void {
+  const t = parseTarget(url);
+  if (t !== undefined && (t.port === "6432" || t.host.includes("-pooler"))) {
+    throw new MigrationError(
+      "MIGRATION_POOLER_URL",
+      "DATABASE_URL_DIRECT pooler'a işaret ediyor; migration yalnızca doğrudan bağlantıyla çalışır (advisory lock/oturum durumu)",
+    );
+  }
+}
+
 function connect(url: string): Sql {
   if (typeof url !== "string" || url.trim() === "") {
     throw new MigrationError("MIGRATION_NO_URL", "DATABASE_URL_DIRECT tanımlı değil");
   }
+  assertDirectUrl(url);
   return postgres(url, {
     max: 1,
     prepare: false,
@@ -169,20 +228,46 @@ function connect(url: string): Sql {
   });
 }
 
-async function assertMigrationRole(sql: Sql): Promise<void> {
+/** Bağlantı rolü bilinen bir uygulama rolü değilse oturum kullanıcı adını döndürür; aksi halde ret. */
+async function assertMigrationRole(sql: Sql): Promise<string> {
   const rows = await sql<{ current_user: string; session_user: string }[]>`
     SELECT current_user::text AS current_user, session_user::text AS session_user`;
   const r = rows[0];
-  if (r === undefined || r.current_user === APP_ROLE_NAME || r.session_user === APP_ROLE_NAME) {
+  if (
+    r === undefined ||
+    r.current_user !== r.session_user ||
+    APP_ROLE_NAMES.includes(r.current_user) ||
+    APP_ROLE_NAMES.includes(r.session_user)
+  ) {
     throw new MigrationError(
       "MIGRATION_WRONG_ROLE",
-      `migration uygulama rolüyle (${APP_ROLE_NAME}) çalıştırılamaz; DATABASE_URL_DIRECT migration rolüne işaret etmeli`,
+      `migration uygulama rolüyle (${APP_ROLE_NAMES.join("|")}) çalıştırılamaz; DATABASE_URL_DIRECT migration rolüne işaret etmeli`,
+    );
+  }
+  return r.session_user;
+}
+
+/**
+ * Migration dosyası koşturulduktan sonra, defter yazımından ÖNCE: oturum durumu sızmamış olmalı
+ * (SET ROLE / SET SESSION AUTHORIZATION / app.* ayarı). Fail-closed: ihlalde hata → transaction geri alınır.
+ */
+async function assertSessionClean(tx: Tx, expectedUser: string, version: string): Promise<void> {
+  const rows = await tx<{ cu: string; su: string; role: string; leaked: string[] }[]>`
+    SELECT current_user::text AS cu, session_user::text AS su, current_setting('role') AS role,
+           coalesce((SELECT array_agg(n ORDER BY n) FROM unnest(${KNOWN_APP_SETTINGS as string[]}::text[]) AS n
+                      WHERE coalesce(current_setting(n, true), '') <> ''), '{}') AS leaked`;
+  const r = rows[0];
+  if (r === undefined || r.cu !== expectedUser || r.su !== expectedUser || r.role !== "none" || r.leaked.length > 0) {
+    throw new MigrationError(
+      "MIGRATION_SESSION_STATE",
+      `migration ${version} oturum durumunu değiştirdi (rol/oturum kullanıcısı veya app.* ayarı); geri alındı`,
     );
   }
 }
 
 /** Kilit alındıktan SONRA defteri (yoksa oluşturarak) okur ve özetleri/sırayı doğrular. */
 async function lockAndReadLedger(tx: Tx, migrations: readonly Migration[]): Promise<LedgerRow[]> {
+  await tx.unsafe(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT}'`);
   await tx.unsafe(`SELECT pg_advisory_xact_lock(${LOCK_KEY_SQL})`);
   await tx.unsafe(`
     CREATE SCHEMA IF NOT EXISTS wms_meta;
@@ -220,7 +305,7 @@ export async function migrateUp(options: RunOptions): Promise<UpResult> {
   const migrations = loadMigrations(options.dir);
   const sql = connect(options.url);
   try {
-    await assertMigrationRole(sql);
+    const expectedUser = await assertMigrationRole(sql);
     const applied: string[] = [];
     let totalApplied = 0;
     for (;;) {
@@ -230,6 +315,7 @@ export async function migrateUp(options: RunOptions): Promise<UpResult> {
         const pending = migrations[ledger.length];
         if (pending === undefined) return undefined;
         await tx.unsafe(pending.up.toString("utf8"));
+        await assertSessionClean(tx, expectedUser, pending.version);
         await tx`
           INSERT INTO wms_meta.schema_migrations (version, name, checksum_sha256)
           VALUES (${pending.version}, ${pending.name}, ${pending.checksum})`;
@@ -261,7 +347,7 @@ export async function migrateDown(options: RunOptions & { readonly to: string })
   const allowDestructive = DESTRUCTIVE_DOWN_ENVS.includes(env);
   const sql = connect(options.url);
   try {
-    await assertMigrationRole(sql);
+    const expectedUser = await assertMigrationRole(sql);
     const reverted: string[] = [];
     for (;;) {
       const done = await sql.begin(async (tx) => {
@@ -272,6 +358,7 @@ export async function migrateDown(options: RunOptions & { readonly to: string })
         // Ayar yalnızca local|ci'da ve transaction-local açılır; diğerlerinde açıkça kapalı.
         await tx`SELECT set_config('wms_meta.allow_destructive_down', ${allowDestructive ? "on" : "off"}, true)`;
         await tx.unsafe(target.down.toString("utf8"));
+        await assertSessionClean(tx, expectedUser, target.version);
         await tx`DELETE FROM wms_meta.schema_migrations WHERE version = ${target.version}`;
         return target.version;
       });
@@ -304,22 +391,57 @@ export function parseArgs(argv: readonly string[]): CliCommand {
   throw new MigrationError("MIGRATION_BAD_ARGS", "kullanım: migrate.ts up | migrate.ts down --to NNNN");
 }
 
-/** URL/parola/host içeren herhangi bir metni maskeler (G-09). */
+/** Bozuk % kaçışında hata atmaz; ham değeri döndürür. */
+function decoded(v: string): string {
+  try {
+    return decodeURIComponent(v);
+  } catch {
+    return v;
+  }
+}
+
+/** Mesajdaki her postgres(ql):// URL'si (sürücünün yeniden kurduğu dahil). */
+const ANY_PG_URL_RE = /postgres(?:ql)?:\/\/[^\s"'`<>]+/gi;
+const ERROR_CHAIN_MAX_DEPTH = 5;
+const ERROR_CHAIN_MAX_LENGTH = 500;
+
+/**
+ * URL'nin hassas parçalarını (tam URL, kullanıcı adı, parola, host) maskeler (G-09). URL
+ * ayrıştırılamıyorsa fail-closed: kimlik bölümü elle ayıklanıp maskelenir ve mesajdaki tüm
+ * postgres URL'leri maskelenir. Ardından kalan her postgres(ql):// URL'si maskelenir.
+ */
 export function redact(text: string, url: string | undefined): string {
   let out = text;
   if (url !== undefined && url !== "") {
     out = out.split(url).join("[url]");
+    const secrets: string[] = [];
+    let host = "";
     try {
       const u = new URL(url);
-      for (const secret of [decodeURIComponent(u.password), u.password]) {
-        if (secret !== "") out = out.split(secret).join("[gizli]");
-      }
-      if (u.hostname !== "") out = out.split(u.hostname).join("[host]");
+      secrets.push(u.password, decoded(u.password), u.username, decoded(u.username));
+      host = u.hostname;
     } catch {
-      /* geçersiz URL: yukarıdaki tam eşleşme yeterli */
+      const m = /^[a-z][a-z0-9+.-]*:\/\/([^@/?#]*)@/i.exec(url);
+      if (m !== null && m[1] !== undefined) secrets.push(...m[1].split(":").flatMap((p) => [p, decoded(p)]));
     }
+    // Uzun olan önce: kısa parça uzun olanı yarım bırakmasın.
+    for (const secret of secrets.filter((x) => x !== "").sort((x, y) => y.length - x.length)) {
+      out = out.split(secret).join("[gizli]");
+    }
+    if (host !== "") out = out.split(host).join("[host]");
   }
-  return out;
+  return out.replace(ANY_PG_URL_RE, "[url]");
+}
+
+/** `cause` zincirini (en çok 5 halka) birleştirip önce maskeler, sonra 500 karaktere kırpar. */
+export function redactErrorChain(e: unknown, url: string | undefined): string {
+  const parts: string[] = [];
+  let cur: unknown = e;
+  for (let depth = 0; depth < ERROR_CHAIN_MAX_DEPTH && cur !== null && cur !== undefined; depth++) {
+    parts.push(cur instanceof Error ? cur.message : String(cur));
+    cur = cur instanceof Error ? (cur as { cause?: unknown }).cause : undefined;
+  }
+  return redact(parts.join(" <- "), url).slice(0, ERROR_CHAIN_MAX_LENGTH);
 }
 
 /** CLI gövdesi; çıkış kodunu döndürür. Çıktı yalnızca `log`/`logError` ile. */
@@ -334,8 +456,8 @@ export async function main(
     if (url === undefined || url.trim() === "") {
       throw new MigrationError("MIGRATION_NO_URL", "DATABASE_URL_DIRECT tanımlı değil (yalnızca doğrudan migration bağlantısı kabul edilir)");
     }
-    if (env.DATABASE_URL !== undefined && env.DATABASE_URL === url) {
-      throw new MigrationError("MIGRATION_WRONG_ROLE", "DATABASE_URL_DIRECT uygulama bağlantısıyla (DATABASE_URL) aynı olamaz");
+    if (env.DATABASE_URL !== undefined && env.DATABASE_URL.trim() !== "" && sameConnectionTarget(env.DATABASE_URL, url)) {
+      throw new MigrationError("MIGRATION_WRONG_ROLE", "DATABASE_URL_DIRECT uygulama bağlantısıyla (DATABASE_URL) aynı host/port/kullanıcı/veritabanına işaret edemez");
     }
     if (cmd.kind === "up") {
       const r = await migrateUp({ url });
@@ -351,13 +473,12 @@ export async function main(
     return 0;
   } catch (e) {
     if (e instanceof MigrationError) {
-      io.logError(redact(e.message, url));
+      io.logError(redactErrorChain(e, url));
     } else {
-      const err = e as { name?: unknown; code?: unknown; message?: unknown };
+      const err = e as { name?: unknown; code?: unknown };
       const code = typeof err.code === "string" ? ` [${err.code}]` : "";
       const name = typeof err.name === "string" ? err.name : "Error";
-      const message = typeof err.message === "string" ? err.message : "";
-      io.logError(`migrate: ${name}${code}: ${redact(message, url)}`);
+      io.logError(`migrate: ${name}${code}: ${redactErrorChain(e, url)}`);
     }
     return 1;
   }

@@ -11,7 +11,7 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 import pg from "pg";
 import { afterAll, describe, expect, it } from "vitest";
-import { MIGRATIONS_DIR, LOCK_KEY_SQL, main, migrateDown, migrateUp } from "../../packages/db/src/migrate.ts";
+import { MIGRATIONS_DIR, LOCK_KEY_SQL, LOCK_TIMEOUT, main, migrateDown, migrateUp } from "../../packages/db/src/migrate.ts";
 import { APP_ROLE, readIntEnv, redactUrl } from "./harness/env.ts";
 
 const env = readIntEnv(process.env);
@@ -48,12 +48,23 @@ async function freshDatabase(): Promise<string> {
   return withDatabase(env.databaseUrlDirect, name);
 }
 
-/** Repodaki migration dizininin geçici kopyası (özet/ek migration senaryoları için). */
+/**
+ * Repodaki migration dizininin YALNIZCA 0001 içeren geçici kopyası: bu dosya baseline/koşturucu
+ * davranışını sınar; sonraki gerçek migration'lar (0002+) sahte fikstürlerle çakışmaz ve
+ * "applied/ledger = [0001]" beklentileri gerçek dizinden bağımsız kalır.
+ */
 function copyMigrations(): string {
   const dir = mkdtempSync(path.join(tmpdir(), "wms-migrations-"));
   tempDirs.push(dir);
-  cpSync(MIGRATIONS_DIR, dir, { recursive: true });
+  cpSync(MIGRATIONS_DIR, dir, { recursive: true, filter: (src) => !/[\\/]\d{4}_/.test(src) || /[\\/]0001_[^\\/]*$/.test(src) });
   return dir;
+}
+
+let sharedBaseDir: string | undefined;
+/** Değiştirilmemiş, yalnızca 0001 içeren paylaşılan dizin (salt okunur kullanım). */
+function baseDir(): string {
+  sharedBaseDir ??= copyMigrations();
+  return sharedBaseDir;
 }
 
 afterAll(async () => {
@@ -111,24 +122,24 @@ describe(`migrations (target=${env.target})`, () => {
 
   it("forward -> fully back -> forward succeeds; after rollback no application object remains", async () => {
     const url = await freshDatabase();
-    const first = await migrateUp({ url });
+    const first = await migrateUp({ url, dir: baseDir() });
     expect(first.applied).toEqual(["0001"]);
 
-    const down = await migrateDown({ url, to: "0000", wmsEnv: "ci" });
+    const down = await migrateDown({ url, dir: baseDir(), to: "0000", wmsEnv: "ci" });
     expect(down.reverted).toEqual(["0001"]);
     expect(await ledger(url)).toEqual([]);
     // Geri sonrası yalnızca public (boş) ve defter şeması wms_meta kalır (ADR-015 §8).
     expect(await catalogShape(url)).toEqual({ relations: [], schemas: ["public", "wms_meta"] });
 
-    const again = await migrateUp({ url });
+    const again = await migrateUp({ url, dir: baseDir() });
     expect(again.applied).toEqual(["0001"]);
     expect(await ledger(url)).toEqual(["0001"]);
-    expect((await migrateUp({ url })).applied).toEqual([]);
+    expect((await migrateUp({ url, dir: baseDir() })).applied).toEqual([]);
   });
 
   it("0001 grants wms_app only USAGE on public and takes CREATE/TEMP away from PUBLIC; down does not give them back", async () => {
     const url = await freshDatabase();
-    await migrateUp({ url });
+    await migrateUp({ url, dir: baseDir() });
     const probe = (c: pg.Client) =>
       c.query<{ usage: boolean; create: boolean; temp: boolean; public_create: boolean; public_temp: boolean }>(
         // `usage`: wms_app'e DOĞRUDAN verilmiş USAGE (PUBLIC'ten gelen yetki ayrı sayılır).
@@ -148,7 +159,7 @@ describe(`migrations (target=${env.target})`, () => {
       public_create: false,
       public_temp: false,
     });
-    await migrateDown({ url, to: "0000", wmsEnv: "ci" });
+    await migrateDown({ url, dir: baseDir(), to: "0000", wmsEnv: "ci" });
     expect((await withClient(url, probe)).rows[0]).toEqual({
       usage: false,
       create: false,
@@ -160,7 +171,7 @@ describe(`migrations (target=${env.target})`, () => {
 
   it("rejects a modified .up.sql of an applied migration: MIGRATION_CHECKSUM_MISMATCH, nothing applied", async () => {
     const url = await freshDatabase();
-    await migrateUp({ url });
+    await migrateUp({ url, dir: baseDir() });
     const dir = copyMigrations();
     addExtraMigration(dir);
     const upFile = path.join(dir, "0001_baseline.up.sql");
@@ -172,7 +183,7 @@ describe(`migrations (target=${env.target})`, () => {
 
   it("rejects a modified .down.sql of an applied migration: MIGRATION_CHECKSUM_MISMATCH (also for rollback)", async () => {
     const url = await freshDatabase();
-    await migrateUp({ url });
+    await migrateUp({ url, dir: baseDir() });
     const dir = copyMigrations();
     const downFile = path.join(dir, "0001_baseline.down.sql");
     writeFileSync(downFile, `${readFileSync(downFile, "utf8")}\n-- tampered\n`);
@@ -185,7 +196,7 @@ describe(`migrations (target=${env.target})`, () => {
 
   it("two concurrent runners: exactly one applies, the other applies nothing", async () => {
     const url = await freshDatabase();
-    const results = await Promise.all([migrateUp({ url }), migrateUp({ url })]);
+    const results = await Promise.all([migrateUp({ url, dir: baseDir() }), migrateUp({ url, dir: baseDir() })]);
     expect(results.map((r) => r.applied.length).sort()).toEqual([0, 1]);
     expect(await ledger(url)).toEqual(["0001"]);
   });
@@ -196,7 +207,7 @@ describe(`migrations (target=${env.target})`, () => {
       await holder.query("BEGIN");
       await holder.query(`SELECT pg_advisory_xact_lock(${LOCK_KEY_SQL})`);
       let settled = false;
-      const run = migrateUp({ url }).finally(() => {
+      const run = migrateUp({ url, dir: baseDir() }).finally(() => {
         settled = true;
       });
       await new Promise((resolve) => setTimeout(resolve, 750));
@@ -211,28 +222,147 @@ describe(`migrations (target=${env.target})`, () => {
     const url = await freshDatabase();
     await withClient(env.databaseUrlDirect, (c) => c.query(`GRANT pg_monitor TO ${APP_ROLE}`));
     try {
-      await expect(migrateUp({ url })).rejects.toThrow(/0001_baseline: wms_app hiçbir role üye olamaz/);
+      await expect(migrateUp({ url, dir: baseDir() })).rejects.toThrow(/0001_baseline: wms_app hiçbir role üye olamaz/);
       const shape = await catalogShape(url);
       expect(shape.schemas).toEqual(["public"]);
     } finally {
       await withClient(env.databaseUrlDirect, (c) => c.query(`REVOKE pg_monitor FROM ${APP_ROLE}`));
     }
-    expect((await migrateUp({ url })).applied).toEqual(["0001"]);
+    expect((await migrateUp({ url, dir: baseDir() })).applied).toEqual(["0001"]);
   });
 
-  it("runs with DATABASE_URL (application role) are rejected with MIGRATION_WRONG_ROLE", async () => {
-    // Doğrudan koşturucu: uygulama rolü URL'si.
-    await expect(migrateUp({ url: env.databaseUrl })).rejects.toMatchObject({ code: "MIGRATION_WRONG_ROLE" });
-    // CLI: DATABASE_URL_DIRECT yerine uygulama URL'si verilmiş.
+  /** Doğrudan (pooler'sız) host/port/veritabanı + uygulama rolü kimlik bilgisi. */
+  function appRoleDirectUrl(): string {
+    const u = new URL(env.databaseUrlDirect);
+    const app = new URL(env.databaseUrl);
+    u.username = app.username;
+    u.password = app.password;
+    return u.toString();
+  }
+
+  it("runs as the application role (direct host) are rejected with MIGRATION_WRONG_ROLE", async () => {
+    const appDirect = appRoleDirectUrl();
+    await expect(migrateUp({ url: appDirect })).rejects.toMatchObject({ code: "MIGRATION_WRONG_ROLE" });
     const lines: string[] = [];
     const io = { log: (s: string) => lines.push(s), logError: (s: string) => lines.push(s) };
-    const code = await main(["up"], { DATABASE_URL_DIRECT: env.databaseUrl }, io);
+    const code = await main(["up"], { DATABASE_URL_DIRECT: appDirect }, io);
     expect(code).toBe(1);
     expect(lines.join("\n")).toContain("MIGRATION_WRONG_ROLE");
     expect(lines.join("\n")).not.toContain(new URL(env.databaseUrl).password);
     // Yalnızca DATABASE_URL tanımlı: ret.
     expect(await main(["up"], { DATABASE_URL: env.databaseUrl }, io)).toBe(1);
     expect(lines.join("\n")).toContain("MIGRATION_NO_URL");
+  });
+
+  it("refuses a pooler URL as the migration connection (CLI and runner)", async () => {
+    const pooled = new URL(env.databaseUrlDirect);
+    pooled.port = "6432";
+    await expect(migrateUp({ url: pooled.toString() })).rejects.toMatchObject({ code: "MIGRATION_POOLER_URL" });
+    const lines: string[] = [];
+    const code = await main(["up"], { DATABASE_URL_DIRECT: pooled.toString() }, { log: (x) => lines.push(x), logError: (x) => lines.push(x) });
+    expect(code).toBe(1);
+    expect(lines.join("\n")).toContain("MIGRATION_POOLER_URL");
+    expect(lines.join("\n")).not.toContain(pooled.password);
+  });
+
+  it("CLI refuses DATABASE_URL_DIRECT that points at the same host/port/user/db as DATABASE_URL, despite a different string", async () => {
+    const lines: string[] = [];
+    const io = { log: (s: string) => lines.push(s), logError: (s: string) => lines.push(s) };
+    const direct = new URL(env.databaseUrlDirect);
+    direct.searchParams.set("application_name", "x");
+    const code = await main(["up"], { DATABASE_URL: env.databaseUrlDirect, DATABASE_URL_DIRECT: direct.toString() }, io);
+    expect(code).toBe(1);
+    expect(lines.join("\n")).toContain("MIGRATION_WRONG_ROLE");
+  });
+
+  it("a migration that changes session state (SET ROLE / app.* setting) is rejected and rolled back", async () => {
+    for (const [tag, body] of [
+      ["role", `SET ROLE ${APP_ROLE};`],
+      ["role-local", `SET LOCAL ROLE ${APP_ROLE};`],
+      ["session-auth", `SET SESSION AUTHORIZATION ${APP_ROLE};`],
+      ["app-setting", "SELECT set_config('app.current_tenant_id', 'leak', false);"],
+    ] as const) {
+      const url = await freshDatabase();
+      const dir = copyMigrations();
+      writeFileSync(path.join(dir, "0002_leak.up.sql"), `CREATE TABLE public.t_${tag.replace("-", "_")} (id integer);\n${body}\n`);
+      writeFileSync(path.join(dir, "0002_leak.down.sql"), "SELECT 1;\n");
+      await expect(migrateUp({ url, dir }), `variant ${tag}`).rejects.toMatchObject({ code: "MIGRATION_SESSION_STATE" });
+      expect(await ledger(url)).toEqual(["0001"]);
+      expect((await catalogShape(url)).relations).toEqual([]);
+    }
+  });
+
+  it("a rollback whose down changes session state is rejected and rolled back", async () => {
+    const url = await freshDatabase();
+    const dir = copyMigrations();
+    addExtraMigration(dir, `DROP TABLE public.t_extra;\nSET ROLE ${APP_ROLE};\n`);
+    expect((await migrateUp({ url, dir })).applied).toEqual(["0001", "0002"]);
+    await expect(migrateDown({ url, dir, to: "0001", wmsEnv: "ci" })).rejects.toMatchObject({ code: "MIGRATION_SESSION_STATE" });
+    expect(await ledger(url)).toEqual(["0001", "0002"]);
+    expect((await catalogShape(url)).relations).toEqual(["t_extra"]);
+  });
+
+  it("lock waits are bounded by lock_timeout (set transaction-locally)", async () => {
+    const url = await freshDatabase();
+    const dir = copyMigrations();
+    writeFileSync(path.join(dir, "0002_show.up.sql"), "CREATE TABLE public.t_show AS SELECT current_setting('lock_timeout') AS v;\n");
+    writeFileSync(path.join(dir, "0002_show.down.sql"), "DROP TABLE public.t_show;\n");
+    await migrateUp({ url, dir });
+    const v = await withClient(url, (c) => c.query<{ v: string }>("SELECT v FROM public.t_show"));
+    expect(LOCK_TIMEOUT).toBe("60s");
+    expect(v.rows[0]?.v).toBe("1min"); // PostgreSQL 60s'yi "1min" olarak gösterir
+    // Yeni oturumda ayar sızmamıştır (transaction-local).
+    const fresh = await withClient(url, (c) => c.query<{ v: string }>("SELECT current_setting('lock_timeout') AS v"));
+    expect(fresh.rows[0]?.v).not.toBe("1min");
+  });
+
+  it("0001 rejects wms_app that can CREATE in the database, owns a user type or owns a database", async () => {
+    const attempts: { setup: (url: string, db: string) => Promise<void>; cleanup?: () => Promise<void>; msg: RegExp }[] = [
+      {
+        setup: async (_url, db) => {
+          await withClient(env.databaseUrlDirect, (c) => c.query(`GRANT CREATE ON DATABASE ${db} TO ${APP_ROLE}`));
+        },
+        msg: /veritabanında CREATE yetkisi/,
+      },
+      {
+        setup: async (url) => {
+          await withClient(url, async (c) => {
+            await c.query("CREATE TYPE public.t_enum AS ENUM ('a')");
+            await c.query(`ALTER TYPE public.t_enum OWNER TO ${APP_ROLE}`);
+          });
+        },
+        msg: /hiçbir nesnenin sahibi olamaz/,
+      },
+    ];
+    for (const a of attempts) {
+      const url = await freshDatabase();
+      const db = new URL(url).pathname.slice(1);
+      await a.setup(url, db);
+      await expect(migrateUp({ url, dir: baseDir() })).rejects.toThrow(a.msg);
+      expect(await withClient(url, (c) => c.query("SELECT to_regclass('wms_meta.schema_migrations') AS r"))).toMatchObject({
+        rows: [{ r: null }],
+      });
+    }
+    // Veritabanı sahipliği: wms_app'e ait ayrı veritabanı.
+    const name = `wms_mig_${randomBytes(5).toString("hex")}`;
+    await withClient(env.databaseUrlDirect, (c) => c.query(`CREATE DATABASE ${name} OWNER ${APP_ROLE}`));
+    // pg_database kümeye geneldir: sahiplik yalnızca bu denemenin süresince var olmalı (diğer testleri bozmasın).
+    try {
+      await expect(migrateUp({ url: withDatabase(env.databaseUrlDirect, name), dir: baseDir() })).rejects.toThrow(/hiçbir nesnenin sahibi olamaz/);
+    } finally {
+      await withClient(env.databaseUrlDirect, (c) => c.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`));
+    }
+  });
+
+  it("0001 rejects a REPLICATION wms_app (role attribute restored afterwards)", async () => {
+    const url = await freshDatabase();
+    await withClient(env.databaseUrlDirect, (c) => c.query(`ALTER ROLE ${APP_ROLE} REPLICATION`));
+    try {
+      await expect(migrateUp({ url, dir: baseDir() })).rejects.toThrow(/wms_app REPLICATION olamaz/);
+    } finally {
+      await withClient(env.databaseUrlDirect, (c) => c.query(`ALTER ROLE ${APP_ROLE} NOREPLICATION`));
+    }
+    expect((await migrateUp({ url, dir: baseDir() })).applied).toEqual(["0001"]);
   });
 
   it("rollback: a destructive down is refused under WMS_ENV=staging and allowed under ci; production is refused", async () => {
