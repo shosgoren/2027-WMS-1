@@ -1,4 +1,5 @@
 // Worker giriş noktası: `node dist/main.js`. Web'den bağımsız, uzun ömürlü süreç (ADR-001).
+import { createDbClient, withSystemTenant } from "@wms/db";
 import { createJobQueue } from "@wms/queue-adapter";
 import { JOB_TYPES, type JobHandler, type JobType } from "@wms/shared/queue";
 import { createJsonLogger, createLifecycle, EXIT_FAILURE, parseShutdownTimeoutMs } from "./lifecycle.js";
@@ -38,9 +39,13 @@ if (undecided.length > 0) {
   process.exit(EXIT_FAILURE);
 }
 
+// Handler'lar tenant verisine yalnızca `ctx.inTenant` ile erişir; bu, withSystemTenant ile (tenant ACTIVE
+// denetimli, transaction-local bağlam) kurulur (ADR-016 §6). Havuz ayarları `DB_CLIENT_SETTINGS` ile aynıdır.
+const db = createDbClient({ url: databaseUrl, poolMax: 10, prepare: false });
+
 const queue = createJobQueue({
   connectionString: databaseUrl,
-  supervise: true,
+  runInTenant: (tenantId, reason, fn) => withSystemTenant(db, tenantId, `queue.${reason}`, fn),
   stopTimeoutMs: Math.max(1000, timeoutMs - 1000),
   logger,
 });
@@ -60,7 +65,10 @@ logger.info("queue started", {
   registered: JOB_TYPES.filter((t) => HANDLERS[t] !== undefined),
   deferred: DEFERRED_JOB_TYPES,
 });
+
+// Kapanış sırası: önce kuyruk (çalışan işler biter), sonra DB havuzu.
 lifecycle.register({ name: "job-queue", run: () => queue.stop() });
+lifecycle.register({ name: "db", run: () => db.close() });
 
 lifecycle.installProcessHandlers(process);
 lifecycle.start();

@@ -2,7 +2,7 @@
 // sürücü ayarları yalnızca `@wms/db/internal` alt yolundadır (lint ile korunur).
 export { createDbClient } from "./client.ts";
 export type { TenantContext } from "./client.ts";
-export { currentTenantId, withTenant } from "./with-tenant.ts";
+export { currentTenantId, currentUserId, withTenant } from "./with-tenant.ts";
 export { MembershipError, lockOwners, withMembership, withNewTenant, withSystemTenant, withUser } from "./with-membership.ts";
 export type {
   Membership,
@@ -52,3 +52,5 @@ export type {
 export { AUDIT_ACTIONS, AuditError, CHANGE_SUMMARY_MAX_BYTES, REDACTED, appendAudit, isSensitiveKey, looksSensitiveValue, maskChangeSummary, recordSecurityEvent } from "./audit.ts";
 export type { AppendedAudit, AuditAction, AuditEntry, JsonValue, SecurityEventInput } from "./audit.ts";
 export type { AuditLog, NewAuditLog, NewRequestRateLimit, RequestRateLimit } from "./schema/audit.ts";
+// Bağlantı hedefi karşılaştırması (migrate.ts): kuyruk kurulum CLI'ı uygulama bağlantısını reddetmek için kullanır.
+export { sameConnectionTarget } from "./migrate.ts";

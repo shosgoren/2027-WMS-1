@@ -57,6 +57,9 @@ importers:
 
   apps/worker:
     dependencies:
+      '@wms/db':
+        specifier: workspace:*
+        version: link:../../packages/db
       '@wms/queue-adapter':
         specifier: workspace:*
         version: link:../../packages/queue-adapter

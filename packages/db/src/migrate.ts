@@ -11,7 +11,6 @@ import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import postgres from "postgres";
-import { QUEUE_APP_GRANTS_SQL, installQueueSchema } from "../../queue-adapter/src/index.ts";
 
 export const MIGRATIONS_DIR = fileURLToPath(new URL("../migrations", import.meta.url));
 
@@ -153,12 +152,6 @@ export interface RunOptions {
   /** Doğrudan bağlantı URL'si (migration rolü). Asla yazdırılmaz. */
   readonly url: string;
   readonly dir?: string;
-  /**
-   * `up` sonunda pg-boss kuyruk şemasını migration rolüyle kurar/yükseltir ve `wms_app`'e yalnızca gereken
-   * yetkileri verir (T-115, ADR-015: uygulama `migrate: false` ile bağlanır). Varsayılan: yalnızca varsayılan
-   * migration dizini kullanılıyorsa (`dir` verilmemişse) açık; özel `dir` ile koşan sınama koşuları kapalıdır.
-   */
-  readonly queueSchema?: boolean;
   /** `WMS_ENV`; yalnızca `down` için zorunlu. */
   readonly wmsEnv?: string | undefined;
 }
@@ -331,10 +324,6 @@ export async function migrateUp(options: RunOptions): Promise<UpResult> {
       if (next === undefined) break;
       applied.push(next);
       totalApplied += 1;
-    }
-    if (options.queueSchema ?? options.dir === undefined) {
-      await installQueueSchema({ url: options.url });
-      await sql.unsafe(QUEUE_APP_GRANTS_SQL);
     }
     return { applied, totalApplied };
   } finally {
