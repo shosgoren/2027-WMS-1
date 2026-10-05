@@ -5,9 +5,12 @@
 // HER ZAMAN geri alınır (kalıcı veri bırakmaz). Migration rolü (DATABASE_URL_DIRECT) yalnızca
 // tetikleyici ve geri alma doğrulaması içindir.
 import { randomBytes } from "node:crypto";
+import { cpSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import pg from "pg";
 import { afterAll, describe, expect, it } from "vitest";
-import { migrateDown, migrateUp } from "../../../packages/db/src/migrate.ts";
+import { MIGRATIONS_DIR, migrateDown, migrateUp } from "../../../packages/db/src/migrate.ts";
 import { readAuthDatabaseUrl, readIntEnv, redactErrorChain, secretUrls } from "../harness/env.ts";
 
 const env = readIntEnv(process.env);
@@ -316,6 +319,22 @@ describe(`identity grants (target=${env.target})`, () => {
 });
 
 describe(`0002_identity ileri/geri/ileri (target=${env.target})`, () => {
+  // Sonraki migration'lardan (0003+) yalıtım: yalnızca 0001 ve 0002'yi içeren geçici kopya.
+  let dirCache: string | undefined;
+  const dir = (): string => {
+    if (dirCache) return dirCache;
+    const d = mkdtempSync(join(tmpdir(), "wms-mig-0002-"));
+    cpSync(MIGRATIONS_DIR, d, {
+      recursive: true,
+      filter: (src) => !/[\\/]\d{4}_/.test(src) || /[\\/]000[12]_[^\\/]*$/.test(src),
+    });
+    dirCache = d;
+    return d;
+  };
+  afterAll(() => {
+    if (dirCache) rmSync(dirCache, { recursive: true, force: true });
+  });
+
   it("geri aldiktan sonra kimlik tablolari ve islev yok; yeniden ileri basarili", async () => {
     const name = `wms_ident_${randomBytes(5).toString("hex")}`;
     const admin = await connect(env.databaseUrlDirect);
@@ -329,7 +348,7 @@ describe(`0002_identity ileri/geri/ileri (target=${env.target})`, () => {
     u.pathname = `/${name}`;
     const url = u.toString();
 
-    const first = await migrateUp({ url });
+    const first = await migrateUp({ url, dir: dir() });
     expect(first.applied).toContain("0002");
 
     const shape = async (): Promise<{ tables: string[]; funcs: string[] }> => {
@@ -350,14 +369,14 @@ describe(`0002_identity ileri/geri/ileri (target=${env.target})`, () => {
     };
 
     expect((await shape()).tables).toContain("security_events");
-    const down = await migrateDown({ url, to: "0001", wmsEnv: "ci" });
+    const down = await migrateDown({ url, dir: dir(), to: "0001", wmsEnv: "ci" });
     expect(down.reverted).toEqual(["0002"]);
     expect(await shape()).toEqual({ tables: [], funcs: [] });
 
-    const again = await migrateUp({ url });
+    const again = await migrateUp({ url, dir: dir() });
     expect(again.applied).toEqual(["0002"]);
     expect((await shape()).tables).toContain("users");
-    expect((await migrateUp({ url })).applied).toEqual([]);
+    expect((await migrateUp({ url, dir: dir() })).applied).toEqual([]);
   });
 
   it("satir varsa ve ortam yikici geri almaya kapaliysa down RAISE eder", async () => {
@@ -372,14 +391,14 @@ describe(`0002_identity ileri/geri/ileri (target=${env.target})`, () => {
     const u = new URL(env.databaseUrlDirect);
     u.pathname = `/${name}`;
     const url = u.toString();
-    await migrateUp({ url });
+    await migrateUp({ url, dir: dir() });
     const c = await connect(url);
     try {
       await c.query(`INSERT INTO public.security_events (event_type) VALUES ('t102.keep')`);
     } finally {
       await c.end();
     }
-    await expect(migrateDown({ url, to: "0001", wmsEnv: "staging" })).rejects.toThrow(/veri kaybettiren geri alma/);
+    await expect(migrateDown({ url, dir: dir(), to: "0001", wmsEnv: "staging" })).rejects.toThrow(/veri kaybettiren geri alma/);
     const check = await connect(url);
     try {
       const r = await check.query<{ n: string }>("SELECT count(*)::text AS n FROM public.security_events");
