@@ -2,8 +2,8 @@
 
 **Oturum kilidi:** session_01C59FRaUynaDdhNGZoRbKsY · 2026-10-05T16:30Z (zamanlanmış oturum: kilit 3 saatten yeniyse ve başka oturumunsa hiçbir şey yapmadan çık; değilse kendi kimliğinle yenile, her push'ta zamanı güncelle)
 **Faz:** 0 — Kararlar & iskelet
-**Aktif görev:** T-003 CI (worktree ../wt-T-003, `feat/T-003-ci` → `int/faz0-ci`). STATE'in güncel kopyası en son açık `int/*` dalında (şu an `int/faz0-ci`).
-**Son tamamlanan:** PR shosgoren/2027-WMS-1#3 (T-004 STACK/MAP/check-docs + ADR-005 pg-boss + Q-05 PG 17) `main`'de; önce #1 (iskelet)
+**Aktif görev:** `int/faz0-ci` → `main` PR; `int/faz0-bekciler-1` (T-007, T-008a/b/c) security-reviewer'da. STATE'in güncel kopyası `int/faz0-bekciler-1`'e taşınacak.
+**Son tamamlanan:** PR shosgoren/2027-WMS-1#2 (T-003 CI; 5 güvenlik turu, son: BLOCKER 0 · MAJOR 0 · MINOR 1) → `int/faz0-ci`
 **Sonraki adım:** T-003 raporu → security-reviewer → `int/faz0-ci` PR + birleştirme (MAP'te `.github/workflows/` satırını "var" yap, yoksa check-docs FAIL). T-007 sürüyor (`int/faz0-bekciler-1`) → T-008a → T-008b∥c. T-003 sonrası T-005a.
 
 ## Çalışma biçimi (kullanıcı kararı 2026-10-05 — ADR-012 rev., PROTOCOL §Onay kaynağı)
@@ -21,7 +21,7 @@ ADR-001 Next.js + ayrı worker · 002 İngilizce kod/DB, Türkçe UI · 003 Driz
 - [x] T-001 / T-001b Faz 0 kararları → ADR'ler
 - [x] T-002a `pnpm verify` (4245f13, int/faz0-iskelet'te). Bulgular → T-004: TS 6.0.3'te kal (typescript-eslint <6.1); Node 24 LTS, 26 LTS 2026-10-28 → geçiş değerlendir; CI Node 24 sabitle; eslint/vitest config tsc dışında; `@eslint/js` yok
 - [x] T-002b web (Next 16.3.8, React 19.3) · T-002c worker yaşam döngüsü · T-002d compose (PG 17.11, PgBouncer 1.26 transaction, alpine/minio yalnızca yerel, mailpit). Bulgular: worker tsconfig.build.json (T-010); ADR-005 pg-boss 12.36 vs graphile-worker 0.18 → architect (pg-boss transaction-mode pooler'a uygun görünüyor); Docker Hub 429 → CI'da mirror.gcr.io; nvm yolu /opt/nvm
-- [ ] T-003 CI hattı → `int/faz0-ci` (iskelet birleşince)
+- [x] T-003 CI (`ci.yml`: verify, infra, secrets, deps; A-36 audit istisnası bitiş 2026-10-19). Takip: lockfile bütünlüğü (el ile düzenlenmiş lockfile audit'i kandırabilir) → T-008 ek kartı
 - [x] T-004 STACK + MAP + `scripts/check-docs.mjs` (#3). Bulgu: T-008g check-docs'u `check:all`'a bağlar; doğrudan bağımlılık STACK'te yoksa hata önerisi
 - [ ] T-005a entegrasyon test düzeneği → T-005b `withTenant` (security-reviewer zorunlu) → T-005c AC-05/AC-28 (qa-verifier) → `int/faz0-pooler`
 - [ ] T-005d Neon gerçek pooler koşusu (GitHub Actions; sırlar: `NEON_API_KEY`, değişken `NEON_PROJECT_ID`) → T-005e CI eşdeğerliği → `int/faz0-neon`
