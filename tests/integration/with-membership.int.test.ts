@@ -198,10 +198,11 @@ async function mkMember(c: pg.Client, tenantId: string, userId: string, o: Membe
   return id;
 }
 
-async function mkVerification(c: pg.Client): Promise<string> {
+/** Better Auth 1.7.7 sıfırlama kaydı biçimi: identifier `reset-password:<token>`, value = kullanıcı kimliği (MAJOR-1). */
+async function mkVerification(c: pg.Client, userId: string, identifier?: string): Promise<string> {
   const r = await c.query<{ id: string }>(
-    "INSERT INTO public.verifications (identifier, value, expires_at) VALUES ($1, 'fixture', now() + interval '1 hour') RETURNING id",
-    [`t103-reset-${randomBytes(6).toString("hex")}`],
+    "INSERT INTO public.verifications (identifier, value, expires_at) VALUES ($1, $2, now() + interval '1 hour') RETURNING id",
+    [identifier ?? `reset-password:t103-${randomBytes(12).toString("hex")}`, userId],
   );
   const id = (r.rows[0] as { id: string }).id;
   createdVerifications.push(id);
@@ -477,6 +478,59 @@ describe(`withMembership — eşzamanlı yazma yarışı (FOR SHARE; target=${en
   }
 });
 
+describe(`withMembership — rol satırları FOR SHARE (MINOR-6; target=${env.target})`, () => {
+  async function fixture(): Promise<{ tenant: string; user: string; membership: string }> {
+    return admin(async (c) => {
+      const tenant = await mkTenant(c);
+      const user = await mkUser(c);
+      const membership = await mkMember(c, tenant, user, { roles: ["TENANT_ADMIN"] });
+      return { tenant, user, membership };
+    });
+  }
+  const deleteRoles = (membership: string) => `DELETE FROM public.membership_roles WHERE membership_id = '${membership}'`;
+
+  it("A withMembership içinde beklerken B rol satırını siler → B BEKLER; A eski rolleri görür, B sonra tamamlanır", async () => {
+    const f = await fixture();
+    const inside = gate();
+    const hold = gate();
+    let pid = 0;
+    const a = withMembership({ client: app, userId: f.user, tenantId: f.tenant }, async (tx, m) => {
+      pid = await myPid(tx);
+      inside.open();
+      await hold.wait;
+      return m.roles;
+    });
+    await inside.wait;
+    const b = await openClient(env.databaseUrlDirect);
+    const del = b.query(deleteRoles(f.membership));
+    let done = false;
+    void del.then(() => (done = true), () => (done = true));
+    await waitUntilBlockedBy(pid);
+    expect(done, "rol silme, A bitmeden tamamlanmamalı").toBe(false);
+    hold.open();
+    expect(await a).toEqual(["TENANT_ADMIN"]);
+    await del;
+    expect(done).toBe(true);
+  });
+
+  it("tersi: B rol silmesini açık transaction'da tutarken A bloklanır; B commit edince A güncel (boş) rolleri görür", async () => {
+    const f = await fixture();
+    const b = await openClient(env.databaseUrlDirect);
+    await b.query("BEGIN");
+    const pidRow = await b.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+    await b.query(deleteRoles(f.membership));
+    let fnRan = false;
+    const a = withMembership({ client: app, userId: f.user, tenantId: f.tenant }, async (_tx, m) => {
+      fnRan = true;
+      return m.roles;
+    });
+    await waitUntilBlockedBy(Number(pidRow.rows[0]?.pid));
+    expect(fnRan, "A, B commit etmeden fn'e girmemeli").toBe(false);
+    await b.query("COMMIT");
+    expect(await a).toEqual([]);
+  });
+});
+
 // ---------------------------------------------------------------------------------------------
 // withUser / withNewTenant / withSystemTenant / lockOwners
 // ---------------------------------------------------------------------------------------------
@@ -555,19 +609,23 @@ describe(`withUser ve kullanıcı kimliğine dayalı SELECT politikaları (targe
 });
 
 describe(`withNewTenant (target=${env.target})`, () => {
-  it("tenant + sahip üyeliği + TENANT_ADMIN rolü tek transaction'da; RLS atlanmadan; withMembership ile doğrulanır", async () => {
+  const newTenant = (user: string, slug: string, req: string, name = "Yeni") =>
+    withNewTenant(app, { userId: user, slug, name, creationRequestId: req }, async (tx, m) => ({ m, g: await guc(tx), tenants: (await tx.execute<{ id: string }>("SELECT id FROM public.tenants")).map((r) => r.id) }));
+
+  it("tenant + sahip üyeliği + TENANT_ADMIN rolü tek transaction'da; kimlik içeride üretilir; RLS atlanmadan; withMembership ile doğrulanır", async () => {
     const user = await admin((c) => mkUser(c));
-    const tenantId = randomUUID();
     const slug = `t103-new-${randomBytes(4).toString("hex")}`;
-    const inFn = await withNewTenant(app, { tenantId, userId: user, slug, name: "Yeni", creationRequestId: randomUUID() }, async (tx, m) => {
+    const inFn = await withNewTenant(app, { userId: user, slug, name: "Yeni", creationRequestId: randomUUID() }, async (tx, m) => {
       const t = await tx.execute<{ id: string }>("SELECT id FROM public.tenants");
       await tx.execute(
         `INSERT INTO public.tenant_settings (tenant_id, locale, time_zone, onboarding_status)
-         VALUES ('${tenantId}', 'tr-TR', 'Europe/Istanbul', 'IN_PROGRESS')`,
+         VALUES ('${m.tenantId}', 'tr-TR', 'Europe/Istanbul', 'IN_PROGRESS')`,
       );
       return { m, tenants: t.map((r) => r.id), g: await guc(tx) };
     });
+    const tenantId = inFn.m.tenantId;
     createdTenants.push(tenantId);
+    expect(inFn.m.created).toBe(true);
     expect(inFn.tenants).toEqual([tenantId]);
     expect(inFn.g).toEqual({ tenant: tenantId, user: "", reason: "" });
     const verified = await withMembership({ client: app, userId: user, tenantId }, async (_tx, m) => m);
@@ -576,24 +634,103 @@ describe(`withNewTenant (target=${env.target})`, () => {
     expect(row.rows[0]).toEqual({ status: "ACTIVE", is_demo: false, created_by_user_id: user });
   });
 
-  it("fn hatasında tenant, üyelik ve rol dahil hiçbir şey kalmaz; yinelenen slug / (kullanıcı, istek) → 23505", async () => {
+  it("fn hatasında tenant, üyelik ve rol dahil hiçbir şey kalmaz", async () => {
     const user = await admin((c) => mkUser(c));
-    const tenantId = randomUUID();
     const slug = `t103-rb-${randomBytes(4).toString("hex")}`;
     const boom = new Error("boom");
-    const e = await caught(withNewTenant(app, { tenantId, userId: user, slug, name: "X", creationRequestId: randomUUID() }, async () => { throw boom; }));
+    let seen = "";
+    const e = await caught(withNewTenant(app, { userId: user, slug, name: "X", creationRequestId: randomUUID() }, async (_tx, m) => { seen = m.tenantId; throw boom; }));
     expect(e).toBe(boom);
-    const left = await admin((c) => c.query("SELECT (SELECT count(*) FROM public.tenants WHERE id = $1) AS t, (SELECT count(*) FROM public.tenant_memberships WHERE tenant_id = $1) AS m", [tenantId]));
+    const left = await admin((c) => c.query("SELECT (SELECT count(*) FROM public.tenants WHERE id = $1) AS t, (SELECT count(*) FROM public.tenant_memberships WHERE tenant_id = $1) AS m", [seen]));
     expect(left.rows[0]).toEqual({ t: "0", m: "0" });
+  });
 
-    const reqId = randomUUID();
-    const first = randomUUID();
-    await withNewTenant(app, { tenantId: first, userId: user, slug, name: "A", creationRequestId: reqId }, async () => undefined);
-    createdTenants.push(first);
-    const dupSlug = errInfo(await caught(withNewTenant(app, { tenantId: randomUUID(), userId: user, slug, name: "B", creationRequestId: randomUUID() }, async () => undefined)));
-    expect(dupSlug.codes).toContain(UNIQUE_VIOLATION);
-    const dupReq = errInfo(await caught(withNewTenant(app, { tenantId: randomUUID(), userId: user, slug: `${slug}-2`, name: "B", creationRequestId: reqId }, async () => undefined)));
-    expect(dupReq.codes).toContain(UNIQUE_VIOLATION);
+  it("MINOR-7: slug çakışması → SLUG_TAKEN (nötr; PostgreSQL ayrıntısı sızmaz) ve hiçbir şey kalmaz", async () => {
+    const user = await admin((c) => mkUser(c));
+    const slug = `t103-dup-${randomBytes(4).toString("hex")}`;
+    const first = await newTenant(user, slug, randomUUID());
+    createdTenants.push(first.m.tenantId);
+    const user2 = await admin((c) => mkUser(c));
+    const err = await caught(newTenant(user2, slug, randomUUID(), "B"));
+    expect(err).toBeInstanceOf(MembershipError);
+    expect((err as MembershipError).code).toBe("SLUG_TAKEN");
+    expect((err as MembershipError).message).not.toMatch(/tenants_slug_key|duplicate|unique|INSERT|public\./i);
+    expect((err as MembershipError).cause).toBeUndefined();
+    const n = await admin((c) => c.query("SELECT count(*)::int AS n FROM public.tenants WHERE created_by_user_id = $1", [user2]));
+    expect(n.rows[0]).toEqual({ n: 0 });
+  });
+
+  it("MINOR-7: aynı (kullanıcı, creationRequestId) tekrarı mevcut tenant'ı döndürür (created=false); ikinci tenant/üyelik yok; farklı kullanıcının aynı kimliği çakışmaz", async () => {
+    const user = await admin((c) => mkUser(c));
+    const other = await admin((c) => mkUser(c));
+    const req = randomUUID();
+    const slug = `t103-idem-${randomBytes(4).toString("hex")}`;
+    const first = await newTenant(user, slug, req);
+    createdTenants.push(first.m.tenantId);
+    const again = await newTenant(user, `${slug}-farkli`, req);
+    expect(again.m).toEqual({ tenantId: first.m.tenantId, membershipId: first.m.membershipId, userId: user, created: false });
+    expect(again.g).toEqual({ tenant: first.m.tenantId, user: "", reason: "" });
+    expect(again.tenants).toEqual([first.m.tenantId]);
+    const counts = await admin((c) => c.query("SELECT (SELECT count(*) FROM public.tenants WHERE created_by_user_id = $1) AS t, (SELECT count(*) FROM public.tenant_memberships WHERE user_id = $1) AS m", [user]));
+    expect(counts.rows[0]).toEqual({ t: "1", m: "1" });
+    const sameReqOtherUser = await newTenant(other, `${slug}-diger`, req);
+    createdTenants.push(sameReqOtherUser.m.tenantId);
+    expect(sameReqOtherUser.m.created).toBe(true);
+    expect(sameReqOtherUser.m.tenantId).not.toBe(first.m.tenantId);
+  });
+
+  it("MINOR-7: aynı isteğin iki eşzamanlı çağrısı tek tenant üretir (biri created=true, diğeri false)", async () => {
+    const user = await admin((c) => mkUser(c));
+    const req = randomUUID();
+    const slug = `t103-race-${randomBytes(4).toString("hex")}`;
+    const [a, b] = await Promise.all([newTenant(user, slug, req), newTenant(user, slug, req)]);
+    createdTenants.push(a.m.tenantId);
+    expect(b.m.tenantId).toBe(a.m.tenantId);
+    expect([a.m.created, b.m.created].sort()).toEqual([false, true]);
+    const n = await admin((c) => c.query("SELECT count(*)::int AS n FROM public.tenants WHERE created_by_user_id = $1", [user]));
+    expect(n.rows[0]).toEqual({ n: 1 });
+  });
+
+  it("MINOR-8: demo / hatalı biçimli slug → sorgusuz ret (FORBIDDEN); tenant satırı oluşmaz", async () => {
+    const user = await admin((c) => mkUser(c));
+    for (const slug of ["demo", "Demo", "-x1", "x1-", "a_b", "ab"]) {
+      const err = await caught(newTenant(user, slug, randomUUID()));
+      expect((err as MembershipError).code, slug).toBe("FORBIDDEN");
+    }
+    const n = await admin((c) => c.query("SELECT count(*)::int AS n FROM public.tenants WHERE created_by_user_id = $1", [user]));
+    expect(n.rows[0]).toEqual({ n: 0 });
+  });
+});
+
+describe(`tenants_slug_chk (MINOR-8; target=${env.target})`, () => {
+  // attempt() daima ROLLBACK eder: 'demo' / tek karakterli slug gibi paylaşılan adlar kalıcı satır bırakmaz.
+  let adm: pg.Client;
+  beforeAll(async () => {
+    adm = await openClient(env.databaseUrlDirect);
+  });
+  const ins = (slug: string, isDemo: boolean) =>
+    attempt(adm, "INSERT INTO public.tenants (id, slug, name, is_demo) VALUES ($1, $2, 'x', $3)", [randomUUID(), slug, isDemo]);
+
+  it("geçersiz biçimler CHECK ihlali: büyük harf, uç tire, alt çizgi, boşluk, 2 ve 64 karakter, boş", async () => {
+    for (const slug of ["Abc", "-abc", "abc-", "a_b", "a b", "ab", "a".repeat(64), "", "ünal"]) {
+      const r = await ins(slug, false);
+      expect(r.ok, `slug ${JSON.stringify(slug)} reddedilmeli`).toBe(false);
+      if (!r.ok) expect(r.code, r.message).toBe(CHECK_VIOLATION);
+    }
+  });
+
+  it("geçerli biçimler kabul: 1, 3 ve 63 karakter, içeride tire", async () => {
+    for (const slug of ["a", "abc", "a-b", "a1-b2-c3", `a${"b".repeat(61)}c`]) {
+      const r = await ins(slug, false);
+      expect(r.ok, `slug ${slug}: ${r.ok ? "" : r.message}`).toBe(true);
+    }
+  });
+
+  it("'demo' yalnızca is_demo=true iken izinli", async () => {
+    const bad = await ins("demo", false);
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) expect(bad.code).toBe(CHECK_VIOLATION);
+    expect((await ins("demo", true)).ok).toBe(true);
   });
 });
 
@@ -662,6 +799,9 @@ describe(`tenants / üyelik tabloları: wms_app yetkileri ve RLS (target=${env.t
     for (const t of ["tenants", "tenant_memberships", "membership_roles", "invitations", "tenant_settings"]) {
       expect(await expectOk(appRaw, `SELECT 1 FROM public.${t}`), t).toEqual([]);
     }
+    // MINOR-6: satır kilidi için yalnızca id sütununda UPDATE; rol anahtarı/üyelik değiştirilemez.
+    await expectDenied(appRaw, "UPDATE public.membership_roles SET role_key = 'READ_ONLY' WHERE membership_id = $1", [m1], ctx(t1));
+    await expectDenied(appRaw, "UPDATE public.membership_roles SET membership_id = $2 WHERE membership_id = $1", [m1, m1], ctx(t1));
     // Rol silme (rol değişimi) serbest.
     await expectOk(appRaw, "DELETE FROM public.membership_roles WHERE membership_id = $1", [m1], ctx(t1));
   });
@@ -874,6 +1014,37 @@ describe(`wms_probe.identity_exclusive_to_tenant (target=${env.target})`, () => 
     expect(await withSystemTenant(app, f.demo, "probe.test", (tx) => exclusive(tx, f.inDemo))).toBe(false);
   });
 
+  it("MINOR-3: çağıranın tenant'ında ACTIVE üyeliği olmayan hedefin users satırı KİLİTLENMEZ (false, bekleme yok)", async () => {
+    const f = await admin(async (c) => {
+      const t1 = await mkTenant(c);
+      const t2 = await mkTenant(c);
+      const caller = await mkUser(c);
+      const stranger = await mkUser(c);
+      const elsewhere = await mkUser(c);
+      const removedHere = await mkUser(c);
+      await mkMember(c, t1, caller, { roles: ["TENANT_ADMIN"], isOwner: true });
+      await mkMember(c, t2, elsewhere);
+      await mkMember(c, t1, removedHere, { status: "REMOVED" });
+      return { t1, caller, stranger, elsewhere, removedHere };
+    });
+    const holder = await openClient(env.databaseUrlDirect);
+    await holder.query("BEGIN");
+    try {
+      for (const u of [f.stranger, f.elsewhere, f.removedHere]) {
+        // Hedefin users satırı başka bir transaction'da FOR UPDATE kilitli: işlev kilide girişseydi burada takılırdı.
+        await holder.query("SELECT id FROM public.users WHERE id = $1 FOR UPDATE", [u]);
+      }
+      const run = (u: string) => withMembership({ client: app, userId: f.caller, tenantId: f.t1 }, (tx) => exclusive(tx, u));
+      for (const u of [f.stranger, f.elsewhere, f.removedHere]) {
+        const timeout = new Promise<string>((r) => setTimeout(() => r("TAKILDI"), 5000));
+        const res = await Promise.race([run(u), timeout]);
+        expect(res, "işlev kilitlenmiş satırda beklememeli").toBe(false);
+      }
+    } finally {
+      await holder.query("ROLLBACK");
+    }
+  });
+
   it("tenant bağlamı yokken hata; EXECUTE yalnızca wms_app", async () => {
     const u = await admin((c) => mkUser(c));
     const e = errInfo(await caught(withUser(app, u, (tx) => exclusive(tx, u))));
@@ -956,12 +1127,16 @@ async function resetScenario(o: { otherTenantMembership?: "ACTIVE" | "REMOVED"; 
       await mkMember(c, other, target, { status: o.otherTenantMembership });
     }
     // Grant, üyelik eklemeleri/etkinleştirmelerinden SONRA yazılır (tetikleyici açık grant'i siler).
-    const verification = await mkVerification(c);
+    // MINOR-2 bekçisi her rolde çalışır: grant, ihraç eden tenant'ın bağlamında yazılır.
+    const verification = await mkVerification(c, target);
+    await c.query("BEGIN");
+    await c.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenant]);
     await c.query(
       `INSERT INTO public.admin_reset_grants (user_id, issuing_tenant_id, issuing_membership_id, verification_id, expires_at)
        VALUES ($1, $2, $3, $4, now() + make_interval(secs => $5))`,
       [target, tenant, issuerMembership, verification, o.expiresInSec ?? 1800],
     );
+    await c.query("COMMIT");
     return { tenant, issuerMembership, target, targetMembership, verification, ...(other === undefined ? {} : { other }) };
   });
 }
@@ -1005,6 +1180,11 @@ describe(`wms_probe.consume_admin_reset_grant (wms_auth; target=${env.target})`,
     ["hedef is_owner", {}, (c, s) => c.query("UPDATE public.tenant_memberships SET is_owner = true WHERE id = $1", [s.targetMembership])],
     ["hedefin üyeliği REMOVED", {}, (c, s) => c.query("UPDATE public.tenant_memberships SET status = 'REMOVED', removed_at = now() WHERE id = $1", [s.targetMembership])],
     ["hedef başka tenant'ta da ACTIVE", { otherTenantMembership: "ACTIVE" }, async () => undefined],
+    ["MAJOR-1: doğrulama kaydı BAŞKA kullanıcıya ait (value ≠ grant.user_id)", {}, async (c, s) => {
+      const other = await mkUser(c); // gerçek ama başka bir kullanıcının sıfırlama kaydı
+      await c.query("UPDATE public.verifications SET value = $2 WHERE id = $1", [s.verification, other]);
+    }],
+    ["MAJOR-1: doğrulama kaydı sıfırlama kaydı değil (identifier öneki)", {}, (c, s) => c.query("UPDATE public.verifications SET identifier = 'email-verification:x' WHERE id = $1", [s.verification])],
     ["süresi dolmuş grant", {}, (c, s) => c.query("UPDATE public.admin_reset_grants SET expires_at = now() - interval '1 minute' WHERE verification_id = $1", [s.verification])],
   ];
   it.each(invalids)("%s → 'invalid' ve grant silindi", async (_name, opts, mutate) => {
@@ -1050,6 +1230,93 @@ describe(`wms_probe.consume_admin_reset_grant (wms_auth; target=${env.target})`,
     expect((await grantCount(s.verification))?.g).toBe("1");
   });
 
+  it("MINOR-4: kilit sırası users → grant: tekillik işlevi users'ı tutarken consume users'ta bekler, grant satırı KİLİTSİZDİR", async () => {
+    const s = await resetScenario();
+    const issuerUser = await admin((c) => c.query<{ user_id: string }>("SELECT user_id FROM public.tenant_memberships WHERE id = $1", [s.issuerMembership])).then((r) => (r.rows[0] as { user_id: string }).user_id);
+    const inside = gate();
+    const hold = gate();
+    let pid = 0;
+    // A: hedefin users satırını FOR UPDATE tutar (tekillik işlevi), commit etmeden bekler.
+    const a = withMembership({ client: app, userId: issuerUser, tenantId: s.tenant }, async (tx) => {
+      await tx.execute<{ r: boolean }>(`SELECT wms_probe.identity_exclusive_to_tenant('${s.target}'::uuid) AS r`);
+      pid = await myPid(tx);
+      inside.open();
+      await hold.wait;
+    });
+    await inside.wait;
+    await authRaw.query("BEGIN");
+    const consuming = authRaw.query<{ r: string }>("SELECT wms_probe.consume_admin_reset_grant($1::uuid) AS r", [s.verification]);
+    let done = false;
+    void consuming.then(() => (done = true), () => (done = true));
+    await waitUntilBlockedBy(pid);
+    expect(done, "consume, users kilidi bırakılana kadar beklemeli").toBe(false);
+    // Grant satırı henüz kilitlenmemiş olmalı (users önce): NOWAIT kilit alınabilir.
+    const probe = await openClient(env.databaseUrlDirect);
+    await probe.query("BEGIN");
+    const nowait = await probe.query("SELECT id FROM public.admin_reset_grants WHERE verification_id = $1 FOR UPDATE NOWAIT", [s.verification]);
+    expect(nowait.rows).toHaveLength(1);
+    await probe.query("ROLLBACK");
+    hold.open();
+    await a;
+    expect((await consuming).rows[0]?.r).toBe("consumed");
+    await authRaw.query("COMMIT");
+  });
+
+  describe("MINOR-2: admin_reset_grants INSERT bekçisi (issuing_tenant_id = bağlam; issuing_membership_id = o tenant'ın ACTIVE üyeliği)", () => {
+    const insertGrant = "INSERT INTO public.admin_reset_grants (user_id, issuing_tenant_id, issuing_membership_id, verification_id, expires_at) VALUES ($1, $2, $3, $4, now() + interval '30 minutes')";
+    const ctxOf = (t: string): string[] => [`SELECT set_config('app.current_tenant_id', '${t}', true)`];
+
+    async function setup(): Promise<{ tenant: string; target: string; issuer: string; removedIssuer: string; foreignIssuer: string; foreignTenant: string; verification: string }> {
+      return admin(async (c) => {
+        const tenant = await mkTenant(c);
+        const foreignTenant = await mkTenant(c);
+        const target = await mkUser(c);
+        const issuerUser = await mkUser(c);
+        const removedUser = await mkUser(c);
+        const foreignUser = await mkUser(c);
+        const issuer = await mkMember(c, tenant, issuerUser, { roles: ["TENANT_ADMIN"] });
+        const removedIssuer = await mkMember(c, tenant, removedUser, { roles: ["TENANT_ADMIN"], status: "REMOVED" });
+        const foreignIssuer = await mkMember(c, foreignTenant, foreignUser, { roles: ["TENANT_ADMIN"] });
+        await mkMember(c, tenant, target);
+        const verification = await mkVerification(c, target);
+        return { tenant, target, issuer, removedIssuer, foreignIssuer, foreignTenant, verification };
+      });
+    }
+
+    it("geçerli (bağlam = tenant, ACTIVE üyelik) → yazılır", async () => {
+      const f = await setup();
+      await expectOk(appRaw, insertGrant, [f.target, f.tenant, f.issuer, f.verification], ctxOf(f.tenant));
+    });
+
+    it("bağlam yok / bağlam başka tenant / üyelik başka tenant'ın / üyelik REMOVED / üyelik yok → bekçi hatası (42501)", async () => {
+      const f = await setup();
+      const cases: [string, unknown[], string[]][] = [
+        ["bağlam yok", [f.target, f.tenant, f.issuer, f.verification], []],
+        ["bağlam başka tenant", [f.target, f.tenant, f.issuer, f.verification], ctxOf(f.foreignTenant)],
+        ["issuing_tenant_id başka tenant, üyelik de onun", [f.target, f.foreignTenant, f.foreignIssuer, f.verification], ctxOf(f.tenant)],
+        ["üyelik başka tenant'ın", [f.target, f.tenant, f.foreignIssuer, f.verification], ctxOf(f.tenant)],
+        ["üyelik REMOVED", [f.target, f.tenant, f.removedIssuer, f.verification], ctxOf(f.tenant)],
+        ["üyelik yok", [f.target, f.tenant, randomUUID(), f.verification], ctxOf(f.tenant)],
+      ];
+      for (const [name, params, pre] of cases) {
+        const r = await attempt(appRaw, insertGrant, params, pre);
+        expect(r.ok, name).toBe(false);
+        if (!r.ok) {
+          expect(r.code, `${name}: ${r.message}`).toBe(INSUFFICIENT_PRIVILEGE);
+          expect(r.message, name).toMatch(/admin_reset_grants_guard_issuer/);
+        }
+      }
+    });
+
+    it("bekçi migration rolünde de çalışır (ENABLE ALWAYS): bağlamsız INSERT reddedilir", async () => {
+      const f = await setup();
+      const adm = await openClient(env.databaseUrlDirect);
+      const r = await attempt(adm, insertGrant, [f.target, f.tenant, f.issuer, f.verification]);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.message).toMatch(/admin_reset_grants_guard_issuer/);
+    });
+  });
+
   it("wms_auth ve wms_app: admin_reset_grants üzerinde SELECT/UPDATE/DELETE → yetki hatası; wms_app INSERT serbest; wms_app EXECUTE → yetki hatası", async () => {
     const s = await resetScenario();
     for (const client of [authRaw, appRaw]) {
@@ -1061,14 +1328,16 @@ describe(`wms_probe.consume_admin_reset_grant (wms_auth; target=${env.target})`,
     }
     await expectDenied(authRaw, "INSERT INTO public.admin_reset_grants (user_id, issuing_tenant_id, issuing_membership_id, verification_id, expires_at) VALUES ($1, $2, $3, $4, now())", [s.target, s.tenant, s.issuerMembership, randomUUID()]);
     await expectDenied(appRaw, "SELECT wms_probe.consume_admin_reset_grant($1::uuid)", [s.verification]);
-    const v2 = await admin((c) => mkVerification(c));
+    const v2 = await admin((c) => mkVerification(c, s.target));
+    const tenantCtx = [`SELECT set_config('app.current_tenant_id', '${s.tenant}', true)`];
     await expectOk(
       appRaw,
       "INSERT INTO public.admin_reset_grants (user_id, issuing_tenant_id, issuing_membership_id, verification_id, expires_at) VALUES ($1, $2, $3, $4, now() + interval '30 minutes')",
       [s.target, s.tenant, s.issuerMembership, v2],
+      tenantCtx,
     );
     // Sunucu alanları (id, created_at) istemciden yazılamaz.
-    await expectDenied(appRaw, "INSERT INTO public.admin_reset_grants (id, user_id, issuing_tenant_id, issuing_membership_id, verification_id, expires_at) VALUES ($1, $2, $3, $4, $5, now())", [randomUUID(), s.target, s.tenant, s.issuerMembership, v2]);
+    await expectDenied(appRaw, "INSERT INTO public.admin_reset_grants (id, user_id, issuing_tenant_id, issuing_membership_id, verification_id, expires_at) VALUES ($1, $2, $3, $4, $5, now())", [randomUUID(), s.target, s.tenant, s.issuerMembership, v2], tenantCtx);
   });
 
   it("üyelik eklenince / yeniden etkinleşince açık grant ve doğrulama kaydı silinir; REMOVED ekleme silmez", async () => {
@@ -1142,6 +1411,49 @@ describe(`wms_meta / wms_probe erişimi ve katalog (target=${env.target})`, () =
       await expectDenied(client, "DELETE FROM wms_meta.schema_migrations");
       await expectDenied(client, "CREATE TABLE wms_meta.t103_x (a int)");
     }
+  });
+
+  it("MINOR-1: probe politikaları yalnızca SELECT ve yalnızca probe'a bağlı; kilit politikası/UPDATE yetkisi yok (users hariç); wms_app etkilenmez", async () => {
+    const f = await admin(async (c) => {
+      const a = await mkTenant(c);
+      const b = await mkTenant(c);
+      return { a, b };
+    });
+    await admin(async (c) => {
+      const pol = await c.query<{ tablename: string; policyname: string; cmd: string; roles: string[] }>(
+        `SELECT tablename, policyname, cmd, roles::text[] AS roles FROM pg_policies
+          WHERE schemaname = 'public' AND 'wms_identity_probe' = ANY(roles::text[])`,
+      );
+      expect(pol.rows.map((p) => `${p.tablename}.${p.policyname}.${p.cmd}`).sort()).toEqual([
+        "invitations.probe_select.SELECT",
+        "membership_roles.probe_select.SELECT",
+        "tenant_memberships.probe_select.SELECT",
+        "tenants.probe_select.SELECT",
+      ]);
+      for (const p of pol.rows) expect(p.roles, p.policyname).toEqual(["wms_identity_probe"]);
+      const priv = await c.query<Record<string, boolean>>(
+        `SELECT has_any_column_privilege('wms_identity_probe', 'public.tenants', 'UPDATE') AS tenants_upd,
+                has_any_column_privilege('wms_identity_probe', 'public.tenant_memberships', 'UPDATE') AS memberships_upd,
+                has_any_column_privilege('wms_identity_probe', 'public.invitations', 'UPDATE') AS invitations_upd,
+                has_any_column_privilege('wms_identity_probe', 'public.membership_roles', 'UPDATE') AS roles_upd,
+                has_column_privilege('wms_identity_probe', 'public.users', 'id', 'UPDATE') AS users_upd,
+                has_table_privilege('wms_identity_probe', 'public.tenants', 'SELECT') AS tenants_sel`,
+      );
+      expect(priv.rows[0]).toEqual({ tenants_upd: false, memberships_upd: false, invitations_upd: false, roles_upd: false, users_upd: true, tenants_sel: true });
+    });
+    // OR'lanma: probe rolü için `USING (true)` izolasyonu kaldırır (tenant bağlamı olmadan TÜM tenant'ları görür) ...
+    const asProbe = await openClient(env.databaseUrlDirect);
+    const seen = await attempt(asProbe, "SELECT count(*)::int AS n FROM public.tenants WHERE id = ANY($1::uuid[])", [[f.a, f.b]], [`SET LOCAL ROLE ${PROBE_ROLE}`]);
+    expect(seen.ok && seen.rows[0]).toEqual({ n: 2 });
+    // ... ama yalnızca okuyabilir: tenant tablosuna yazamaz (politika ve yetki yok).
+    const write = await attempt(asProbe, "UPDATE public.tenants SET name = name WHERE id = $1", [f.a], [`SET LOCAL ROLE ${PROBE_ROLE}`]);
+    expect(write.ok).toBe(false);
+    if (!write.ok) expect(write.code).toBe(INSUFFICIENT_PRIVILEGE);
+    const lock = await attempt(asProbe, "SELECT id FROM public.tenants WHERE id = $1 FOR UPDATE", [f.a], [`SET LOCAL ROLE ${PROBE_ROLE}`]);
+    expect(lock.ok).toBe(false);
+    // wms_app için probe politikası görünmez: başka tenant bağlamıyla yalnızca kendi tenant'ı görünür.
+    const appSees = await expectOk(appRaw, "SELECT id FROM public.tenants WHERE id = ANY($1::uuid[])", [[f.a, f.b]], [`SELECT set_config('app.current_tenant_id', '${f.a}', true)`]);
+    expect(appSees).toEqual([{ id: f.a }]);
   });
 
   it("wms_probe işlevlerine yalnızca kendi EXECUTE'ları; PUBLIC ve diğer roller yok; probe CREATE yetkisi yok", async () => {

@@ -10,7 +10,7 @@
 //
 // G-11: bu örnek açılamazsa test KIRMIZI olur (atlanmaz, süper kullanıcıyla koşturulmaz).
 import { cpSync, mkdtempSync, rmSync } from "node:fs";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import pg from "pg";
@@ -228,6 +228,59 @@ describe("migrations — süper kullanıcı olmayan migrator (ikinci Testcontain
     expectCatalog(await catalog(u));
 
     // Yalnızca 0003: geri → ileri.
+    expect((await migrateDown({ url: u, to: "0002", wmsEnv: "ci" })).reverted).toEqual(["0003"]);
+    expect((await migrateUp({ url: u })).applied).toEqual(["0003"]);
+    expectCatalog(await catalog(u));
+  });
+
+  // BLOKER-1: tablolar FORCE RLS altındadır; süper kullanıcı OLMAYAN sahip tenant bağlamı olmadan satır göremez. Down
+  // bekçisi RLS'ten bağımsız saymalıdır (NO FORCE ile) — aksi halde dolu tablolar bayraksız düşerdi.
+  it("BLOKER-1: dolu tenants ile staging geri alma RAISE eder, veri ve FORCE RLS korunur; ci bayrağıyla geri alma çalışır", async () => {
+    await setProbeMemberships(STANDARD_GRANT);
+    const u = await freshDatabase();
+    expect((await migrateUp({ url: u })).applied).toEqual(["0001", "0002", "0003"]);
+
+    const tenantId = randomUUID();
+    await withClient(u, async (c) => {
+      // Önkoşul: FORCE RLS altında, bağlamsız sahip gerçekten satır GÖRMEZ (testin anlamı).
+      await c.query("BEGIN");
+      await c.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+      const user = await c.query<{ id: string }>("INSERT INTO public.users (name, email) VALUES ('T103 ns', $1) RETURNING id", [
+        `ns-${randomBytes(4).toString("hex")}@example.test`,
+      ]);
+      await c.query("INSERT INTO public.tenants (id, slug, name) VALUES ($1, $2, 'NS Tenant')", [tenantId, `ns-${randomBytes(4).toString("hex")}`]);
+      await c.query("INSERT INTO public.tenant_memberships (tenant_id, user_id, is_owner) VALUES ($1, $2, true)", [
+        tenantId,
+        (user.rows[0] as { id: string }).id,
+      ]);
+      await c.query("COMMIT");
+      const blind = await c.query<{ n: string }>("SELECT count(*)::text AS n FROM public.tenants");
+      expect(blind.rows[0]?.n, "bağlamsız FORCE RLS sahibi satır görmemeli").toBe("0");
+    });
+
+    await expect(migrateDown({ url: u, to: "0002", wmsEnv: "staging" })).rejects.toThrow(/0003_tenancy down:.*satır var/);
+
+    await withClient(u, async (c) => {
+      // Geri alma transaction'ı iptal oldu: 0003 duruyor, FORCE RLS geri geldi, satırlar yerinde.
+      const ledger = await c.query<{ version: string }>("SELECT version FROM wms_meta.schema_migrations ORDER BY version");
+      expect(ledger.rows.map((r) => r.version)).toEqual(["0001", "0002", "0003"]);
+      const force = await c.query<{ relname: string; relforcerowsecurity: boolean; relrowsecurity: boolean }>(
+        `SELECT relname, relforcerowsecurity, relrowsecurity FROM pg_class
+          WHERE relnamespace = 'public'::regnamespace AND relname = ANY($1::text[]) ORDER BY relname`,
+        [["invitations", "membership_roles", "tenant_memberships", "tenant_settings", "tenants"]],
+      );
+      expect(force.rows).toHaveLength(5);
+      for (const r of force.rows) expect(r, r.relname).toMatchObject({ relforcerowsecurity: true, relrowsecurity: true });
+      await c.query("BEGIN");
+      await c.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+      const kept = await c.query<{ t: string; m: string }>(
+        `SELECT (SELECT count(*) FROM public.tenants)::text AS t, (SELECT count(*) FROM public.tenant_memberships)::text AS m`,
+      );
+      await c.query("ROLLBACK");
+      expect(kept.rows[0]).toEqual({ t: "1", m: "1" });
+    });
+
+    // Bayraklı ortam (ci): aynı dolu veritabanında geri alma çalışır.
     expect((await migrateDown({ url: u, to: "0002", wmsEnv: "ci" })).reverted).toEqual(["0003"]);
     expect((await migrateUp({ url: u })).applied).toEqual(["0003"]);
     expectCatalog(await catalog(u));

@@ -236,21 +236,17 @@ describe(`tenancy schema (T-103, target=${env.target})`, () => {
       expect(p.cmd, p.policyname).toBe("SELECT");
       expect(p.qual, p.policyname).toMatch(/app\.current_tenant_id.*IS NULL/s);
     }
-    // wms_identity_probe politikalari yalnizca o role: SELECT USING (true); UPDATE yalnizca kilit (WITH CHECK false).
+    // wms_identity_probe politikalari yalnizca o role ve yalnizca SELECT USING (true) (MINOR-1: kilit politikalari kaldirildi).
     const probe = pols.filter((p) => p.roles.includes("wms_identity_probe"));
     expect(probe.map((p) => `${p.tablename}.${p.policyname}.${p.cmd}`).sort()).toEqual([
-      "invitations.probe_lock.UPDATE",
       "invitations.probe_select.SELECT",
       "membership_roles.probe_select.SELECT",
-      "tenant_memberships.probe_lock.UPDATE",
       "tenant_memberships.probe_select.SELECT",
-      "tenants.probe_lock.UPDATE",
       "tenants.probe_select.SELECT",
     ]);
     for (const p of probe) {
       expect(p.roles, p.policyname).toEqual(["wms_identity_probe"]);
       expect(p.qual, p.policyname).toBe("true");
-      if (p.cmd === "UPDATE") expect(p.with_check, p.policyname).toBe("false");
     }
   });
 
@@ -269,6 +265,9 @@ describe(`tenancy schema (T-103, target=${env.target})`, () => {
     expect(byName.get("tenants_status_chk")).toMatch(/ACTIVE.*SUSPENDED.*CLOSING/s);
     expect(byName.get("tenant_memberships_status_chk")).toMatch(/ACTIVE.*REMOVED/s);
     expect(byName.get("invitations_token_hash_chk")).toContain("[0-9a-f]{64}");
+    // MINOR-8: slug bicimi ve 'demo' yalnizca is_demo iken.
+    expect(byName.get("tenants_slug_chk")).toContain("[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])?");
+    expect(byName.get("tenants_slug_chk")).toMatch(/demo.*is_demo/s);
   });
 
   it("invitations: UNIQUE (token_hash) ve aktif davet icin (tenant_id, email_normalized) kismi benzersiz indeks", async () => {

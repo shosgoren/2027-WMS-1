@@ -2,21 +2,23 @@
 // üyelik/tenant durumunu YAZMAYLA AYNI transaction'da `FOR SHARE` ile okur (doğrulama ile yazma arasında yarış yok).
 //
 // Akış (`withMembership`): BEGIN → set_config('app.current_tenant_id', $tenant, true) → tenant satırı FOR SHARE →
-// üyelik satırı FOR SHARE → roller → (izin denetimi) → fn(tx, membership) → COMMIT. Eşzamanlı çıkarma, rol değişimi
-// (üyelik satırı UPDATE + roles_version) ve askıya alma (tenant satırı UPDATE) bu transaction bitene kadar bekler;
-// tersi sırada yazma güncel durumu görür. Kilit sırası sabittir (tenants → tenant_memberships): deadlock yok.
+// üyelik satırı FOR SHARE → roller FOR SHARE → (izin denetimi) → fn(tx, membership) → COMMIT. Eşzamanlı çıkarma, rol
+// değişimi (üyelik satırı UPDATE + roles_version), rol satırı silme/ekleme (membership_roles) ve askıya alma (tenant
+// satırı UPDATE) bu transaction bitene kadar bekler; tersi sırada yazma güncel durumu görür. Kilit sırası sabittir
+// (tenants → tenant_memberships → membership_roles): deadlock yok.
 //
 // m1: `withMembership` YALNIZCA `app.current_tenant_id` kurar; `app.current_user_id` yalnızca `withUser`'da;
 // `app.system_reason` yalnızca `withSystemTenant`'te. Hepsi `set_config(..., true)` + aynı `tx` (I-02); `SET` ve
 // string birleştirme yok, değerler parametredir. Geçersiz UUID/gerekçe veritabanına sorgu gönderilmeden reddedilir.
 //
 // db iş kuralı bilmez: izin matrisi PARAMETRE olarak gelir (T-113'te `packages/domain`).
+import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { isUuid, rawDb, type DbClient, type TenantTx } from "./client.ts";
 import type { RoleKey } from "./schema/tenancy.ts";
 
 /** 15 §Hata kodları: üyelik/tenant reddi. */
-export type MembershipErrorCode = "FORBIDDEN" | "TENANT_SUSPENDED" | "TENANT_CLOSING";
+export type MembershipErrorCode = "FORBIDDEN" | "TENANT_SUSPENDED" | "TENANT_CLOSING" | "SLUG_TAKEN";
 
 export class MembershipError extends Error {
   override name = "MembershipError";
@@ -116,7 +118,8 @@ export async function withMembership<T>(
     const roleRows = await tx.execute<{ role_key: RoleKey }>(
       sql`SELECT role_key FROM public.membership_roles
            WHERE tenant_id = ${tenantId}::uuid AND membership_id = ${m.id}::uuid
-           ORDER BY role_key`,
+           ORDER BY role_key
+             FOR SHARE`,
     );
     const roles = roleRows.map((r) => r.role_key);
     if (permission !== undefined && !permits(permission, roles)) {
@@ -148,8 +151,6 @@ export async function withUser<T>(client: DbClient, userId: string, fn: (tx: Ten
 }
 
 export interface NewTenantParams {
-  /** Uygulamanın ürettiği yeni tenant kimliği. */
-  readonly tenantId: string;
   /** Tenant'ı kuran ve sahibi olacak kullanıcı. */
   readonly userId: string;
   readonly slug: string;
@@ -162,38 +163,103 @@ export interface NewTenantOwner {
   readonly membershipId: string;
   readonly tenantId: string;
   readonly userId: string;
+  /** `false`: aynı (kullanıcı, creationRequestId) ile daha önce kurulmuş tenant döndü; `fn` yine çalışır (idempotent olmalı). */
+  readonly created: boolean;
+}
+
+/** `tenants_slug_chk` ile aynı biçim (veritabanı da zorlar); `demo` yalnızca demo tenant'a ayrılmıştır. */
+const SLUG_FORMAT = /^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])?$/;
+
+/** Sürücü hata zincirinde (`cause`) belirli bir kısıtın benzersizlik ihlalini arar. */
+function isUniqueViolation(e: unknown, constraint: string): boolean {
+  let cur: unknown = e;
+  for (let i = 0; i < 6 && cur !== undefined && cur !== null; i++) {
+    const o = cur as { code?: unknown; constraint_name?: unknown; constraint?: unknown; cause?: unknown };
+    if (o.code === "23505" && (o.constraint_name === constraint || o.constraint === constraint)) return true;
+    cur = o.cause;
+  }
+  return false;
 }
 
 /**
  * Yeni tenant + sahip üyeliği (`is_owner`, `TENANT_ADMIN`) TEK transaction'da, RLS atlanmadan (bağlam yeni tenant
  * kimliğiyle kurulur; `tenants` yazma politikası `id = current_tenant`). `fn` aynı transaction'da çalışır
  * (ayarlar, audit …); hata → hepsi geri alınır.
+ *
+ * - Tenant kimliği burada üretilir (çağıran veremez).
+ * - Idempotent: aynı `(userId, creationRequestId)` ile tekrar çağrı mevcut tenant'ı döndürür (`created: false`); ikinci
+ *   tenant oluşmaz. Eşzamanlı iki çağrıda `INSERT ... ON CONFLICT DO NOTHING` ikincisini birincinin commit'ine bekletir.
+ * - Slug başka tenant'ta kullanımda → `SLUG_TAKEN` (PostgreSQL ayrıntısı sızdırılmaz).
  */
 export async function withNewTenant<T>(
   client: DbClient,
   params: NewTenantParams,
   fn: (tx: TenantTx, membership: NewTenantOwner) => Promise<T>,
 ): Promise<T> {
-  const { tenantId, userId, slug, name, creationRequestId } = params ?? ({} as Partial<NewTenantParams>);
-  assertUuid(tenantId, "tenantId");
+  const { userId, slug, name, creationRequestId } = params ?? ({} as Partial<NewTenantParams>);
   assertUuid(userId, "userId");
   assertUuid(creationRequestId, "creationRequestId");
-  if (typeof slug !== "string" || slug === "" || slug !== slug.toLowerCase()) {
-    throw new MembershipError("FORBIDDEN", "new tenant rejected: slug must be a non-empty lowercase string");
+  if (typeof slug !== "string" || !SLUG_FORMAT.test(slug) || slug === "demo") {
+    throw new MembershipError("FORBIDDEN", "new tenant rejected: slug is not a valid tenant slug");
   }
   if (typeof name !== "string" || name.trim() === "") {
     throw new MembershipError("FORBIDDEN", "new tenant rejected: name is empty");
   }
+  const newTenantId = randomUUID();
   const db = rawDb(client);
   return db.transaction(async (tx) => {
-    await tx.execute(sql`SELECT set_config('app.current_tenant_id', ${tenantId}, true)`);
-    await tx.execute(
-      sql`INSERT INTO public.tenants (id, slug, name, created_by_user_id, creation_request_id)
-          VALUES (${tenantId}::uuid, ${slug}, ${name}, ${userId}::uuid, ${creationRequestId}::uuid)`,
-    );
+    // Mevcut kurulumu bul: bağlam YALNIZCA kullanıcı kimliği (tenant bağlamı boş → ek SELECT politikaları), bulununca
+    // bağlam tenant'a çevrilir ve kullanıcı bağlamı temizlenir.
+    const findExisting = async (): Promise<{ tenantId: string; membershipId: string } | undefined> => {
+      await tx.execute(sql`SELECT set_config('app.current_tenant_id', '', true)`);
+      await tx.execute(sql`SELECT set_config('app.current_user_id', ${userId}, true)`);
+      const found = await tx.execute<{ id: string }>(
+        sql`SELECT id FROM public.tenants
+             WHERE created_by_user_id = ${userId}::uuid AND creation_request_id = ${creationRequestId}::uuid`,
+      );
+      const existingId = found[0]?.id;
+      await tx.execute(sql`SELECT set_config('app.current_user_id', '', true)`);
+      if (existingId === undefined) return undefined;
+      await tx.execute(sql`SELECT set_config('app.current_tenant_id', ${existingId}, true)`);
+      const owner = await tx.execute<{ id: string }>(
+        sql`SELECT id FROM public.tenant_memberships
+             WHERE tenant_id = ${existingId}::uuid AND user_id = ${userId}::uuid AND is_owner`,
+      );
+      const membershipId = owner[0]?.id;
+      return membershipId === undefined ? undefined : { tenantId: existingId, membershipId };
+    };
+
+    const existing = await findExisting();
+    if (existing !== undefined) {
+      return fn(tx, { ...existing, userId, created: false });
+    }
+
+    await tx.execute(sql`SELECT set_config('app.current_tenant_id', ${newTenantId}, true)`);
+    let insertedTenant: readonly { id: string }[];
+    try {
+      insertedTenant = await tx.execute<{ id: string }>(
+        sql`INSERT INTO public.tenants (id, slug, name, created_by_user_id, creation_request_id)
+            VALUES (${newTenantId}::uuid, ${slug}, ${name}, ${userId}::uuid, ${creationRequestId}::uuid)
+            ON CONFLICT (created_by_user_id, creation_request_id) DO NOTHING
+            RETURNING id`,
+      );
+    } catch (e) {
+      if (isUniqueViolation(e, "tenants_slug_key")) {
+        throw new MembershipError("SLUG_TAKEN", "tenant slug is already taken");
+      }
+      throw e;
+    }
+    if (insertedTenant.length === 0) {
+      // Eşzamanlı aynı istek kazandı (commit edildi): onu döndür.
+      const raced = await findExisting();
+      if (raced === undefined) {
+        throw new MembershipError("FORBIDDEN", "new tenant rejected: creation request already used");
+      }
+      return fn(tx, { ...raced, userId, created: false });
+    }
     const inserted = await tx.execute<{ id: string }>(
       sql`INSERT INTO public.tenant_memberships (tenant_id, user_id, status, is_owner)
-          VALUES (${tenantId}::uuid, ${userId}::uuid, 'ACTIVE', true)
+          VALUES (${newTenantId}::uuid, ${userId}::uuid, 'ACTIVE', true)
           RETURNING id`,
     );
     const membershipId = inserted[0]?.id;
@@ -202,9 +268,9 @@ export async function withNewTenant<T>(
     }
     await tx.execute(
       sql`INSERT INTO public.membership_roles (tenant_id, membership_id, role_key)
-          VALUES (${tenantId}::uuid, ${membershipId}::uuid, 'TENANT_ADMIN')`,
+          VALUES (${newTenantId}::uuid, ${membershipId}::uuid, 'TENANT_ADMIN')`,
     );
-    return fn(tx, { membershipId, tenantId, userId });
+    return fn(tx, { membershipId, tenantId: newTenantId, userId, created: true });
   });
 }
 

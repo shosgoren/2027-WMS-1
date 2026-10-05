@@ -98,13 +98,18 @@ describe("withMembership — girdi doğrulaması (sorgusuz ret)", () => {
   it("withNewTenant: geçersiz kimlik/slug/ad → sorgusuz ret", async () => {
     const client = newClient();
     const tx = vi.spyOn(rawDb(client), "transaction");
-    const ok = { tenantId: TENANT, userId: USER, slug: "acme", name: "Acme", creationRequestId: REQUEST };
+    const ok = { userId: USER, slug: "acme", name: "Acme", creationRequestId: REQUEST };
     for (const bad of [
-      { ...ok, tenantId: "x" },
       { ...ok, userId: "x" },
       { ...ok, creationRequestId: "x" },
       { ...ok, slug: "" },
       { ...ok, slug: "Acme" },
+      { ...ok, slug: "demo" },
+      { ...ok, slug: "-acme" },
+      { ...ok, slug: "acme-" },
+      { ...ok, slug: "ac_me" },
+      { ...ok, slug: "ab" },
+      { ...ok, slug: "a".repeat(64) },
       { ...ok, name: "  " },
     ]) {
       await expect(withNewTenant(client, bad, async () => "x")).rejects.toBeInstanceOf(MembershipError);
@@ -144,6 +149,10 @@ describe("withMembership — SQL biçimi ve karar tablosu (sahte tx)", () => {
     expect(memberIdx).toBeGreaterThan(tenantIdx);
     expect(queries[tenantIdx]?.sql).toMatch(/FOR SHARE\s*$/);
     expect(queries[memberIdx]?.sql).toMatch(/FOR SHARE\s*$/);
+    // MINOR-6: rol satırları da FOR SHARE (rol silme/ekleme yarışı), üyelikten sonra.
+    const rolesIdx = queries.findIndex((q) => q.sql.includes("FROM public.membership_roles"));
+    expect(rolesIdx).toBeGreaterThan(memberIdx);
+    expect(queries[rolesIdx]?.sql).toMatch(/FOR SHARE\s*$/);
   });
 
   const denials: [string, Parameters<typeof membershipResponder>[0], string][] = [
@@ -220,21 +229,60 @@ describe("withUser / withSystemTenant / withNewTenant — set_config biçimi", (
     await expect(withSystemTenant(client, TENANT, "email.send", async () => "x")).rejects.toMatchObject({ code: "FORBIDDEN" });
   });
 
-  it("withNewTenant: tenant bağlamı → tenant, üyelik (is_owner) ve TENANT_ADMIN rolü aynı tx'te; system_reason kurmaz", async () => {
+  it("withNewTenant: tenant kimliği içeride üretilir; tenant, üyelik (is_owner) ve TENANT_ADMIN rolü aynı tx'te; system_reason kurmaz", async () => {
     const client = newClient();
-    const { tx, queries } = fakeTx(client, (q) => (q.includes("INSERT INTO public.tenant_memberships") ? [{ id: MEMBERSHIP }] : []));
-    const out = await withNewTenant(client, { tenantId: TENANT, userId: USER, slug: "acme", name: "Acme", creationRequestId: REQUEST }, async (t, m) => {
+    const { tx, queries } = fakeTx(client, (q) => {
+      if (q.includes("INSERT INTO public.tenants")) return [{ id: "inserted" }];
+      if (q.includes("INSERT INTO public.tenant_memberships")) return [{ id: MEMBERSHIP }];
+      return [];
+    });
+    const out = await withNewTenant(client, { userId: USER, slug: "acme", name: "Acme", creationRequestId: REQUEST }, async (t, m) => {
       expect(t).toBe(tx);
       return m;
     });
-    expect(out).toEqual({ membershipId: MEMBERSHIP, tenantId: TENANT, userId: USER });
-    expect(queries[0]?.sql).toBe("SELECT set_config('app.current_tenant_id', $1, true)");
+    expect(out.created).toBe(true);
+    expect(out.membershipId).toBe(MEMBERSHIP);
+    expect(out.userId).toBe(USER);
+    expect(out.tenantId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    const insertTenant = queries.find((q) => q.sql.startsWith("INSERT INTO public.tenants"));
+    expect(insertTenant?.params[0]).toBe(out.tenantId);
+    expect(insertTenant?.sql).toContain("ON CONFLICT (created_by_user_id, creation_request_id) DO NOTHING");
     expect(queries.map((q) => q.sql).filter((s) => s.startsWith("INSERT")).map((s) => s.split("(")[0]?.trim())).toEqual([
       "INSERT INTO public.tenants",
       "INSERT INTO public.tenant_memberships",
       "INSERT INTO public.membership_roles",
     ]);
     expect(queries.map((q) => q.sql).join("\n")).not.toContain("app.system_reason");
+  });
+
+  it("withNewTenant: aynı (kullanıcı, istek) için mevcut tenant döner (created=false); hiçbir INSERT yok", async () => {
+    const client = newClient();
+    const { queries } = fakeTx(client, (q) => {
+      if (q.includes("FROM public.tenants")) return [{ id: TENANT }];
+      if (q.includes("FROM public.tenant_memberships")) return [{ id: MEMBERSHIP }];
+      return [];
+    });
+    const out = await withNewTenant(client, { userId: USER, slug: "acme", name: "Acme", creationRequestId: REQUEST }, async (_t, m) => m);
+    expect(out).toEqual({ tenantId: TENANT, membershipId: MEMBERSHIP, userId: USER, created: false });
+    expect(queries.some((q) => q.sql.startsWith("INSERT"))).toBe(false);
+  });
+
+  it("withNewTenant: slug çakışması → SLUG_TAKEN, PostgreSQL ayrıntısı sızmaz", async () => {
+    const client = newClient();
+    const pgError = Object.assign(new Error('duplicate key value violates unique constraint "tenants_slug_key"'), {
+      code: "23505",
+      constraint_name: "tenants_slug_key",
+    });
+    const wrapped = Object.assign(new Error("Failed query: INSERT INTO public.tenants ..."), { cause: pgError });
+    fakeTx(client, (q) => {
+      if (q.includes("INSERT INTO public.tenants")) throw wrapped;
+      return [];
+    });
+    const err = await withNewTenant(client, { userId: USER, slug: "acme", name: "Acme", creationRequestId: REQUEST }, async () => "x").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MembershipError);
+    expect((err as MembershipError).code).toBe("SLUG_TAKEN");
+    expect((err as MembershipError).message).not.toMatch(/tenants_slug_key|duplicate|INSERT/);
+    expect((err as MembershipError).cause).toBeUndefined();
   });
 
   it("lockOwners FOR UPDATE ve sahip kimlikleri döner", async () => {

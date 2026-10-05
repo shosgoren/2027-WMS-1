@@ -15,6 +15,14 @@
 -- * Süper kullanıcı: pg_has_role(..., 'MEMBER WITH ADMIN OPTION') süper kullanıcı için daima true döner
 --   (PostgreSQL 17'de doğrulandı) — bu yüzden dolaylı-ADMIN denetimi yalnızca süper kullanıcı olmayan migration
 --   rolünde yapılır; süper kullanıcıda doğrudan satır denetimi (a)/(b) yine çalışır.
+-- * app.system_reason (withSystemTenant) bir GÜVENLİK SINIRI DEĞİLDİR: wms_app aynı transaction'da kendi
+--   set_config('app.system_reason', ...) çağrısını yapabilir. Tetikleyici bekçisi (public.tenancy_guard_system_reason)
+--   KOD HATASINA karşı korumadır (yanlış gerekçeyle yanlış tenant'a üyelik/rol yazmayı yakalar); kötü niyetli bir
+--   wms_app oturumuna karşı koruma değildir. Asıl sınırlar RLS + sütun yetkileridir. (ADR notu: Supervisor.)
+-- * probe politikaları (TO wms_identity_probe) izolasyon politikalarıyla İZNİN VEYASI (permissive politikalar OR'lanır)
+--   birleşir: probe rolü için `USING (true)` politikası tenant izolasyonunu o rol için tamamen kaldırır. Bu yüzden
+--   politikalar yalnızca probe'a bağlıdır (wms_app/wms_auth etkilenmez) ve yalnızca SELECT'tir; probe satır
+--   KİLİDİ yalnızca public.users üzerinde (UPDATE (id)) alınır, tenant tablolarında kilit politikası/yetkisi yoktur.
 -- Koşturucu tek transaction içinde çalıştırır; denetim ihlali = RAISE = hiçbir şey uygulanmaz.
 
 -- ---------------------------------------------------------------------------------------------
@@ -104,7 +112,9 @@ CREATE TABLE public.tenants (
   CONSTRAINT tenants_slug_key UNIQUE (slug),
   CONSTRAINT tenants_creator_request_key UNIQUE (created_by_user_id, creation_request_id),
   CONSTRAINT tenants_status_chk CHECK (status IN ('ACTIVE', 'SUSPENDED', 'CLOSING')),
-  CONSTRAINT tenants_slug_chk CHECK (slug <> '' AND slug = lower(slug)),
+  -- Biçim: küçük harf/rakam/tire, uçlarda tire yok, 1 veya 3-63 karakter. 'demo' yalnızca demo tenant'a ayrılmıştır
+  -- (wms_app is_demo yazamaz; demo tenant'ı migration/operasyon rolü kurar). Ayrılmış kelime listesi T-121'dedir.
+  CONSTRAINT tenants_slug_chk CHECK (slug ~ '^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])?$' AND (slug <> 'demo' OR is_demo)),
   CONSTRAINT tenants_name_chk CHECK (name <> ''),
   -- Onboarding idempotency çifti birlikte dolu ya da birlikte boş (demo tenant'ı migration/operasyon rolü kurar).
   CONSTRAINT tenants_creator_pair_chk CHECK ((created_by_user_id IS NULL) = (creation_request_id IS NULL)),
@@ -252,13 +262,13 @@ CREATE POLICY tenant_settings_isolation ON public.tenant_settings
   USING      (tenant_id = NULLIF(pg_catalog.current_setting('app.current_tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(pg_catalog.current_setting('app.current_tenant_id', true), '')::uuid);
 
--- Yalnızca wms_identity_probe (ADR-016 §9): okuma + yalnızca kilit (UPDATE ... WITH CHECK (false)).
+-- Yalnızca wms_identity_probe (ADR-016 §9): yalnızca okuma. Politikalar TO wms_identity_probe olduğundan diğer
+-- roller için görünmez; probe için izolasyon politikalarıyla OR'lanır (yani probe tüm satırları görür — işlevlerin
+-- tenant'lar arası yoklaması için gereken budur). Kilit politikası/yetkisi YOK: işlevler bu tablolarda satır
+-- kilitlemez (kilit yalnızca public.users'ta, UPDATE (id) ile).
 CREATE POLICY probe_select ON public.tenant_memberships FOR SELECT TO wms_identity_probe USING (true);
-CREATE POLICY probe_lock   ON public.tenant_memberships FOR UPDATE TO wms_identity_probe USING (true) WITH CHECK (false);
 CREATE POLICY probe_select ON public.tenants            FOR SELECT TO wms_identity_probe USING (true);
-CREATE POLICY probe_lock   ON public.tenants            FOR UPDATE TO wms_identity_probe USING (true) WITH CHECK (false);
 CREATE POLICY probe_select ON public.invitations        FOR SELECT TO wms_identity_probe USING (true);
-CREATE POLICY probe_lock   ON public.invitations        FOR UPDATE TO wms_identity_probe USING (true) WITH CHECK (false);
 CREATE POLICY probe_select ON public.membership_roles   FOR SELECT TO wms_identity_probe USING (true);
 
 -- ---------------------------------------------------------------------------------------------
@@ -279,6 +289,10 @@ GRANT UPDATE (status, is_owner, joined_at, removed_at, roles_version) ON public.
 
 GRANT SELECT, DELETE ON public.membership_roles TO wms_app;
 GRANT INSERT (tenant_id, id, membership_id, role_key) ON public.membership_roles TO wms_app;
+-- MINOR-6: withMembership rol satırlarını FOR SHARE okur; PostgreSQL satır kilidi için SELECT'e ek olarak en az bir
+-- sütunda UPDATE ister (DELETE yetmez — doğrulandı). Yalnızca sahte-anahtar sütunu id: role_key/membership_id/tenant_id
+-- DEĞİŞTİRİLEMEZ (rol değişimi sil + ekle ile yapılır). id hiçbir FK'nin hedefi değildir.
+GRANT UPDATE (id) ON public.membership_roles TO wms_app;
 
 GRANT SELECT ON public.invitations TO wms_app;
 GRANT INSERT (tenant_id, id, email_normalized, role_key, token_hash, delivered_via, expires_at,
@@ -294,11 +308,12 @@ GRANT UPDATE (locale, time_zone, sector_template_key, sector_template_version, t
 GRANT INSERT (user_id, issuing_tenant_id, issuing_membership_id, verification_id, expires_at)
   ON public.admin_reset_grants TO wms_app;
 
--- wms_identity_probe (ADR-016 §9): gereken tablolarda SELECT + tek sütunda UPDATE (yalnızca satır kilidi için).
+-- wms_identity_probe (ADR-016 §9): tenant tablolarında yalnızca SELECT; tek sütunda UPDATE yalnızca public.users'ta
+-- (FOR UPDATE / FOR KEY SHARE satır kilidi için; MINOR-1: kullanılmayan UPDATE (id) yetkileri kaldırıldı).
 GRANT USAGE ON SCHEMA public TO wms_identity_probe;
-GRANT SELECT, UPDATE (id) ON public.tenant_memberships TO wms_identity_probe;
-GRANT SELECT, UPDATE (id) ON public.tenants            TO wms_identity_probe;
-GRANT SELECT, UPDATE (id) ON public.invitations        TO wms_identity_probe;
+GRANT SELECT ON public.tenant_memberships              TO wms_identity_probe;
+GRANT SELECT ON public.tenants                         TO wms_identity_probe;
+GRANT SELECT ON public.invitations                     TO wms_identity_probe;
 GRANT SELECT ON public.membership_roles                TO wms_identity_probe;
 GRANT SELECT, UPDATE (id) ON public.users              TO wms_identity_probe;
 GRANT SELECT, DELETE ON public.admin_reset_grants      TO wms_identity_probe;
@@ -342,6 +357,37 @@ CREATE TRIGGER membership_roles_system_reason_guard
 ALTER TABLE public.tenant_memberships ENABLE ALWAYS TRIGGER tenant_memberships_system_reason_guard;
 ALTER TABLE public.membership_roles   ENABLE ALWAYS TRIGGER membership_roles_system_reason_guard;
 
+-- admin_reset_grants INSERT bekçisi (MINOR-2): grant, çağıranın tenant bağlamında ve o tenant'ın ACTIVE üyeliği adına
+-- yazılabilir. SECURITY DEFINER DEĞİL: üyelik sorgusu çağıranın RLS'i altında çalışır (yalnızca kendi tenant'ı görünür),
+-- yani başka tenant'ın üyeliği ayrıca görünmez. admin_reset_grants platform tablosu olduğundan RLS'i yoktur; tenant
+-- tutarlılığını bu tetikleyici zorlar.
+CREATE FUNCTION public.admin_reset_grants_guard_issuer() RETURNS trigger
+  LANGUAGE plpgsql
+  SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+  cur_tenant uuid;
+BEGIN
+  cur_tenant := NULLIF(pg_catalog.current_setting('app.current_tenant_id', true), '')::uuid;
+  IF cur_tenant IS NULL OR NEW.issuing_tenant_id IS DISTINCT FROM cur_tenant THEN
+    RAISE EXCEPTION 'admin_reset_grants_guard_issuer: issuing_tenant_id geçerli tenant bağlamıyla eşleşmiyor'
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM public.tenant_memberships m
+                  WHERE m.id = NEW.issuing_membership_id AND m.tenant_id = cur_tenant AND m.status = 'ACTIVE') THEN
+    RAISE EXCEPTION 'admin_reset_grants_guard_issuer: issuing_membership_id bu tenant''ın ACTIVE üyeliği değil'
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  RETURN NEW;
+END
+$fn$;
+REVOKE ALL ON FUNCTION public.admin_reset_grants_guard_issuer() FROM PUBLIC;
+
+CREATE TRIGGER admin_reset_grants_guard_issuer
+  BEFORE INSERT ON public.admin_reset_grants
+  FOR EACH ROW EXECUTE FUNCTION public.admin_reset_grants_guard_issuer();
+ALTER TABLE public.admin_reset_grants ENABLE ALWAYS TRIGGER admin_reset_grants_guard_issuer;
+
 -- ---------------------------------------------------------------------------------------------
 -- 6. wms_probe şeması ve probe sahipli işlevler (SET ROLE kalıbı; ADR-015 4. tur MINOR-3, 5. tur MINOR-2)
 -- ---------------------------------------------------------------------------------------------
@@ -370,6 +416,12 @@ BEGIN
   IF $1 IS NULL THEN
     RETURN false;
   END IF;
+  -- MINOR-3: kilit yalnızca çağıranın tenant'ında ACTIVE üyeliği olan hedef için alınır (yoksa false, kilit yok);
+  -- rastgele kullanıcı kimliğiyle users satırı kilitlenemez. Kilit sonrası aşağıdaki sorgular güncel durumu görür.
+  IF NOT EXISTS (SELECT 1 FROM public.tenant_memberships m
+                  WHERE m.user_id = $1 AND m.tenant_id = cur_tenant AND m.status = 'ACTIVE') THEN
+    RETURN false;
+  END IF;
   PERFORM 1 FROM public.users u WHERE u.id = $1 FOR UPDATE;
   IF NOT FOUND THEN
     RETURN false;
@@ -382,8 +434,13 @@ BEGIN
 END
 $fn$;
 
--- (ii) consume_admin_reset_grant: tek atomik DELETE ... RETURNING; satır yok -> 'absent'; koşullar tamam -> 'consumed';
--- aksi 'invalid' (grant her iki durumda silinmiş kalır — fail-closed).
+-- (ii) consume_admin_reset_grant: satır yok -> 'absent'; koşullar tamam -> 'consumed'; aksi 'invalid' (grant her iki
+-- durumda silinmiş kalır — fail-closed).
+-- KİLİT SIRASI (MINOR-4): her yolda ÖNCE users satırı, SONRA admin_reset_grants satırı (tetikleyici ve users ON DELETE
+-- CASCADE yolları da bu sırayı izler). Grant önce KİLİTSİZ okunur (user_id değişmez), users FOR UPDATE alınır, sonra
+-- DELETE ... RETURNING; eşzamanlı ikinci tüketim users kilidinde bekler ve DELETE satır bulamayınca 'absent' döner.
+-- T-117b NOTU: kanca yine de deadlock (40P01) / serialization hatalarını RED olarak ele almalıdır (fail-closed;
+-- parola sıfırlama tamamlanmaz, kullanıcı yeniden dener); hata yutulup devam edilmez.
 CREATE FUNCTION wms_probe.consume_admin_reset_grant(verification_id uuid) RETURNS text
   LANGUAGE plpgsql
   SECURITY DEFINER
@@ -391,22 +448,36 @@ CREATE FUNCTION wms_probe.consume_admin_reset_grant(verification_id uuid) RETURN
 AS $fn$
 DECLARE
   g public.admin_reset_grants%ROWTYPE;
+  target uuid;
+  locked boolean;
 BEGIN
-  DELETE FROM public.admin_reset_grants a WHERE a.verification_id = $1 RETURNING a.* INTO g;
+  SELECT a.user_id INTO target FROM public.admin_reset_grants a WHERE a.verification_id = $1;
   IF NOT FOUND THEN
     RETURN 'absent';
+  END IF;
+
+  -- Tekillik denetimi için hedefin users satırı FOR UPDATE (ADR-016 §9 kilit sözleşmesi); grant'ten ÖNCE.
+  PERFORM 1 FROM public.users u WHERE u.id = target FOR UPDATE;
+  locked := FOUND;
+
+  DELETE FROM public.admin_reset_grants a WHERE a.verification_id = $1 RETURNING a.* INTO g;
+  IF NOT FOUND THEN
+    RETURN 'absent';   -- eşzamanlı çağrı veya üyelik tetikleyicisi önce tükettiyse
+  END IF;
+  IF NOT locked THEN
+    RETURN 'invalid';
   END IF;
 
   IF g.expires_at <= pg_catalog.now() THEN
     RETURN 'invalid';
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM public.verifications v WHERE v.id = g.verification_id) THEN
-    RETURN 'invalid';
-  END IF;
-
-  -- Tekillik denetimi için hedefin users satırı FOR UPDATE (ADR-016 §9 kilit sözleşmesi).
-  PERFORM 1 FROM public.users u WHERE u.id = g.user_id FOR UPDATE;
-  IF NOT FOUND THEN
+  -- MAJOR-1: doğrulama kaydı VAR ve grant'in hedef kullanıcısına ait olmalı. Better Auth 1.7.7 sıfırlama kaydı
+  -- (api/routes/password.mjs, requestPasswordReset / resetPassword): identifier = 'reset-password:<token>',
+  -- value = user.id (metin). Başka kullanıcının kaydı (veya sıfırlama olmayan kayıt) -> 'invalid'.
+  IF NOT EXISTS (SELECT 1 FROM public.verifications v
+                  WHERE v.id = g.verification_id
+                    AND pg_catalog.starts_with(v.identifier, 'reset-password:')
+                    AND v.value = g.user_id::text) THEN
     RETURN 'invalid';
   END IF;
 
@@ -539,6 +610,25 @@ BEGIN
      OR pg_catalog.has_table_privilege('wms_app', 'public.invitations', 'DELETE')
      OR pg_catalog.has_table_privilege('wms_app', 'public.tenant_settings', 'DELETE') THEN
     RAISE EXCEPTION '0003_tenancy: wms_app üyelik/davet/ayar tablolarında DELETE taşıyor';
+  END IF;
+
+  -- MINOR-6: wms_app membership_roles'ta yalnızca id'yi (satır kilidi için) güncelleyebilir; rol anahtarı değişmez.
+  IF NOT pg_catalog.has_column_privilege('wms_app', 'public.membership_roles', 'id', 'UPDATE')
+     OR pg_catalog.has_column_privilege('wms_app', 'public.membership_roles', 'role_key', 'UPDATE')
+     OR pg_catalog.has_column_privilege('wms_app', 'public.membership_roles', 'membership_id', 'UPDATE')
+     OR pg_catalog.has_column_privilege('wms_app', 'public.membership_roles', 'tenant_id', 'UPDATE') THEN
+    RAISE EXCEPTION '0003_tenancy: wms_app membership_roles UPDATE yetkisi yalnızca (id) olmalı';
+  END IF;
+  -- MINOR-1: probe tenant tablolarında yalnızca SELECT taşır (UPDATE/INSERT/DELETE yok); users'ta yalnızca UPDATE (id).
+  IF pg_catalog.has_table_privilege('wms_identity_probe', 'public.tenants', 'INSERT, UPDATE, DELETE, TRUNCATE')
+     OR pg_catalog.has_table_privilege('wms_identity_probe', 'public.tenant_memberships', 'INSERT, UPDATE, DELETE, TRUNCATE')
+     OR pg_catalog.has_table_privilege('wms_identity_probe', 'public.invitations', 'INSERT, UPDATE, DELETE, TRUNCATE')
+     OR pg_catalog.has_table_privilege('wms_identity_probe', 'public.membership_roles', 'INSERT, UPDATE, DELETE, TRUNCATE')
+     OR pg_catalog.has_any_column_privilege('wms_identity_probe', 'public.tenants', 'UPDATE')
+     OR pg_catalog.has_any_column_privilege('wms_identity_probe', 'public.tenant_memberships', 'UPDATE')
+     OR pg_catalog.has_any_column_privilege('wms_identity_probe', 'public.invitations', 'UPDATE')
+     OR NOT pg_catalog.has_column_privilege('wms_identity_probe', 'public.users', 'id', 'UPDATE') THEN
+    RAISE EXCEPTION '0003_tenancy: wms_identity_probe tenant tablolarında yalnızca SELECT taşımalı (users''ta UPDATE (id))';
   END IF;
 
   -- wms_meta: wms_app/wms_auth/probe hiçbir yetki taşımaz.

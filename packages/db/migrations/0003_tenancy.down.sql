@@ -5,11 +5,23 @@
 -- (sahiplik yeterli, CREATE gerekmez) -> RESET ROLE -> bekçi işlevi -> tablolar -> DROP SCHEMA wms_probe (RESTRICT;
 -- içindeki tüm işlevler önceden kaldırıldığından CASCADE gerekmez) -> up'ın verdiği yetkilerin geri alınması.
 -- Öncesinde var olan güvenlik ayarı gevşetilmez: PUBLIC'e/başka role hiçbir şey geri verilmez.
+-- BLOKER-1: bekçi sayımı RLS'ten BAĞIMSIZ olmalı. Tablolar FORCE ROW LEVEL SECURITY altındadır; süper kullanıcı olmayan
+-- tablo sahibi (Neon üretim yolu) tenant bağlamı olmadan HİÇ SATIR GÖRMEZ -> dolu tablolar "boş" sayılıp bayraksız
+-- düşerdi. Çözüm: sayımdan önce RLS tablolarında NO FORCE ROW LEVEL SECURITY (tablo sahibi için RLS devre dışı kalır;
+-- sahip = migration rolü, down'u çalıştıran rol). Kabul edilebilir çünkü bu betik zaten tabloları düşürür ve koşturucu
+-- tek transaction'da çalıştırır: bekçi RAISE ederse NO FORCE de geri alınır (FORCE korunur, veri korunur); başarılıysa
+-- tablolar düşer. Sayım ayrıca count(*) yerine EXISTS ile yapılır (tek satır yeter). Yalnızca RLS'li tablolar
+-- değiştirilir (admin_reset_grants platform tablosudur, RLS'i yoktur).
 DO $guard$
 DECLARE
   t text;
   has_rows boolean;
 BEGIN
+  FOREACH t IN ARRAY ARRAY['tenant_settings', 'invitations', 'membership_roles', 'tenant_memberships', 'tenants'] LOOP
+    IF pg_catalog.to_regclass('public.' || t) IS NOT NULL THEN
+      EXECUTE format('ALTER TABLE public.%I NO FORCE ROW LEVEL SECURITY', t);
+    END IF;
+  END LOOP;
   FOREACH t IN ARRAY ARRAY['admin_reset_grants', 'tenant_settings', 'invitations', 'membership_roles',
                            'tenant_memberships', 'tenants'] LOOP
     IF pg_catalog.to_regclass('public.' || t) IS NOT NULL THEN
@@ -23,6 +35,7 @@ END
 $guard$;
 
 -- Tetikleyiciler (tablo sahibi = migration rolü).
+DROP TRIGGER admin_reset_grants_guard_issuer ON public.admin_reset_grants;
 DROP TRIGGER tenant_memberships_admin_reset_cleanup ON public.tenant_memberships;
 DROP TRIGGER tenant_memberships_system_reason_guard ON public.tenant_memberships;
 DROP TRIGGER membership_roles_system_reason_guard ON public.membership_roles;
@@ -36,6 +49,7 @@ DROP FUNCTION wms_probe.identity_exclusive_to_tenant(uuid);
 RESET ROLE;
 
 DROP FUNCTION public.tenancy_guard_system_reason();
+DROP FUNCTION public.admin_reset_grants_guard_issuer();
 
 -- tenants okuma politikası tenant_memberships'e bağımlıdır (alt sorgu): tablolardan önce kaldırılır.
 DROP POLICY tenants_select_own_memberships ON public.tenants;
