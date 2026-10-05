@@ -23,11 +23,11 @@ Kaynak sözdizimi: `<dosya>#<json.yolu>` (package.json alanı) veya `docker-comp
 | MinIO (yerel/CI) | alpine/minio | RELEASE.2025-10-15T17-29-55Z | docker-compose.yml#minio | ADR-006 |
 | Mailpit (yerel/CI) | axllent/mailpit | v1.31.4 | docker-compose.yml#mailpit | |
 | Testcontainers | testcontainers | — T-005a | | |
-| Drizzle ORM | drizzle-orm | — T-005b (Q-03) | | ADR-003 |
-| PostgreSQL sürücüsü | — | — T-005b (Q-03) | | ADR-003 |
-| PostgreSQL ana sürümü (Neon) | — | — Q-05 (kullanıcı beyanı 2026-10-05: 17; T-005d doğrular) | | ADR-004 |
-| Neon pooler türü/sürümü | — | — Q-02 | | ADR-004 |
-| Prepared statement ayarı | — | — Q-04 | | ADR-004 |
+| Drizzle ORM | drizzle-orm | 0.45.3 | packages/db/package.json#dependencies.drizzle-orm | ADR-003; Neon koşu 3 (T-005d) |
+| PostgreSQL sürücüsü (postgres.js) | postgres | 3.4.9 | packages/db/package.json#dependencies.postgres | ADR-003; Neon koşu 3 (T-005d) |
+| PostgreSQL (Neon) | — | — sağlayıcı yönetir, kilitlenemez; gözlenen 18.6 (proje pg_version 18, Q-05, T-005d koşu 3) | | ADR-004 |
+| Neon pooler | — | — PgBouncer transaction (belge); sürüm gözlenemedi (Q-02 açık) | | ADR-004 |
+| Prepared statement ayarı | — | — `prepare=false` (üretim, T-005d kapı koşusu; Q-04 kapandı); kod kaynağı `packages/db` `DB_CLIENT_SETTINGS` | | ADR-004 |
 | Kuyruk kütüphanesi | — | — pg-boss seçildi (ADR-005 eki 2026-10-05); sürüm ilk kuyruk kartında kilitlenir (aday 12.36.0) | | ADR-005 |
 | Tailwind CSS | tailwindcss | — ilk kullanan kart | | |
 | Shadcn/Radix, Lucide | — | — ilk kullanan kart | | |
@@ -38,15 +38,16 @@ Kaynak sözdizimi: `<dosya>#<json.yolu>` (package.json alanı) veya `docker-comp
 Sürüm notları (kaynak: kurulu `package.json`/`pnpm-lock.yaml`, 2026-10-05):
 - **TypeScript 6.0.3'te kalınır:** typescript-eslint 8.71.0'ın desteklediği TypeScript aralığı `<6.1.0`; TS yükseltmesi typescript-eslint desteğini bekler.
 - **Node.js:** 24 Active LTS (`engines` `>=24 <25`). Node 26 LTS'e 2026-10-28'de geçer; geçiş ayrı kartla yapılır (`engines`, `@types/node`, CI Node sürümü birlikte).
-- **PostgreSQL:** compose `postgres:17.11` Neon projesinin ana sürümüyle (kullanıcı beyanı: 17) hizalıdır; Neon'daki gerçek sürüm Q-05/T-005d ile doğrulanana kadar kesin sayılmaz.
-- **PgBouncer 1.26.0** yalnızca yerel/CI içindir; Neon pooler'ıyla eşdeğerliği Q-02'ye bağlıdır.
+- **PostgreSQL 18.x:** Neon projesi `pg_version=18`, `server_version` 18.6 (pooled ve doğrudan; T-005d koşu 3: https://github.com/shosgoren/2027-WMS-1/actions/runs/37388724069). Yerel/CI compose `postgres:18.6-trixie` bununla hizalıdır (T-005e). Önceki "PG 17" kaydı (kullanıcı beyanı 2026-10-05) ölçümle düzeltildi. Neon küçük sürümü sağlayıcı yönetir; ana sürüm değişikliği yeniden spike tetikleyicisidir (ADR-004).
+- **PgBouncer 1.26.0** yalnızca yerel/CI içindir. Neon pooler'ı da transaction-mode PgBouncer'dır (belge: https://neon.com/docs/connect/connection-pooling); Neon PgBouncer sürümü gözlenemedi, bu yüzden sürüm eşdeğerliği doğrulanamadı (Q-02 açık). Compose `max_prepared_statements=1000`, `max_client_conn=10000`, `query_wait_timeout=120` Neon belgesindeki değerlerle aynıdır; sunucu havuz boyutu farklıdır (compose 1–2 AC-05 için; Neon `0.9 × max_connections`, ayarlanamaz — Q-31).
+- **Sürücü:** postgres.js 3.4.9 + drizzle-orm 0.45.3, `prepare=false`; Neon pooler'ı arkasında AC-05/AC-28 PASS (T-005d koşu 3). Bu paketlerin ana sürüm değişikliği yeniden spike tetikleyicisidir (ADR-004).
 
 ## Karar durumu
 | Katman | Seçim | ADR (durum) |
 |---|---|---|
 | Uygulama mimarisi | Next.js App Router monolit + ayrı kalıcı worker, pnpm monorepo, ortak `packages/domain` | ADR-001 (kabul) |
-| ORM | Drizzle; sürücü ve prepared statement ayarı T-005 sonucuna bağlı (Q-03, Q-04) | ADR-003 (kabul) |
-| DB | Neon PostgreSQL + transaction pooler; teknik alanlar T-005 ile doldurulur | ADR-004 (kabul) |
+| ORM | Drizzle 0.45.3 + postgres.js 3.4.9, `prepare=false` (Q-03, Q-04 kapandı; T-005d) | ADR-003 (kabul) |
+| DB | Neon PostgreSQL 18 (`aws-eu-central-1`) + transaction-mode PgBouncer pooler; teknik alanlar T-005d ile dolduruldu, pooler sürümü gözlenemedi (Q-02) | ADR-004 (kabul) |
 | Kuyruk | Postgres kuyruğu (Faz 0–4); kütüphane pg-boss (ADR-005 eki) | ADR-005 (kabul) |
 | Dosya | S3 uyumlu özel bucket; yerelde MinIO; prod sağlayıcısı ADR-007 | ADR-006 (kabul) |
 | Web arayüzü | TypeScript strict, Tailwind, Shadcn/Radix, Lucide | — (ilk kullanan kart) |
