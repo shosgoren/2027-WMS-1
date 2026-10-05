@@ -1,0 +1,108 @@
+# Etkin WMS — yerel geliştirme altyapısı (T-002d).
+# Kullanım: cp .env.example .env && docker compose up -d --wait && pnpm infra:smoke
+# Redis yok (ADR-005: Postgres kuyruğu). İmajlar tam sürüm etiketiyle sabitlenir.
+# Portlar yalnızca 127.0.0.1'e açılır. Uygulama → pgbouncer, migration/doğrudan → postgres.
+name: ${COMPOSE_PROJECT_NAME:-etkin-wms}
+
+services:
+  postgres:
+    # Ana sürüm = Neon projesinin sürümü (PG 17, Q-05 supervisor kararı 2026-10-05). T-005d doğrular.
+    image: postgres:17.11-trixie
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER .env içinde tanımlı olmalı}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD .env içinde tanımlı olmalı}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB .env içinde tanımlı olmalı}
+      WMS_APP_PASSWORD: ${WMS_APP_PASSWORD:?WMS_APP_PASSWORD .env içinde tanımlı olmalı}
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      # PostgreSQL 17 imajında PGDATA ve VOLUME = /var/lib/postgresql/data (18+ imajında farklıdır).
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # TCP üzerinden: init sırasındaki geçici sunucu yalnızca unix soketini dinler.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.26.0-p0
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB .env içinde tanımlı olmalı}
+      WMS_APP_PASSWORD: ${WMS_APP_PASSWORD:?WMS_APP_PASSWORD .env içinde tanımlı olmalı}
+      PGBOUNCER_ADMIN_PASSWORD: ${PGBOUNCER_ADMIN_PASSWORD:?PGBOUNCER_ADMIN_PASSWORD .env içinde tanımlı olmalı}
+      PGBOUNCER_DEFAULT_POOL_SIZE: ${PGBOUNCER_DEFAULT_POOL_SIZE:-20}
+      PGBOUNCER_MAX_PREPARED_STATEMENTS: ${PGBOUNCER_MAX_PREPARED_STATEMENTS:-1000}
+    # İmajın kendi entrypoint'i yerine: şablon ini'yi doldur, userlist'i üret, pgbouncer'ı başlat.
+    # Üretilen dosyalar yalnızca konteyner içinde /tmp/pgbouncer altındadır (0600).
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        case "$$PGBOUNCER_DEFAULT_POOL_SIZE" in ''|*[!0-9]*) echo "PGBOUNCER_DEFAULT_POOL_SIZE sayı olmalı" >&2; exit 1;; esac
+        case "$$PGBOUNCER_MAX_PREPARED_STATEMENTS" in ''|*[!0-9]*) echo "PGBOUNCER_MAX_PREPARED_STATEMENTS sayı olmalı" >&2; exit 1;; esac
+        case "$$POSTGRES_DB" in ''|*[!A-Za-z0-9_]*) echo "POSTGRES_DB yalnızca harf/rakam/_ içerebilir" >&2; exit 1;; esac
+        case "$$WMS_APP_PASSWORD$$PGBOUNCER_ADMIN_PASSWORD" in *'"'*) echo "parolalar çift tırnak içeremez" >&2; exit 1;; esac
+        umask 077
+        mkdir -p /tmp/pgbouncer
+        sed -e "s/__POSTGRES_DB__/$$POSTGRES_DB/g" \
+            -e "s/__DEFAULT_POOL_SIZE__/$$PGBOUNCER_DEFAULT_POOL_SIZE/g" \
+            -e "s/__MAX_PREPARED_STATEMENTS__/$$PGBOUNCER_MAX_PREPARED_STATEMENTS/g" \
+            /etc/pgbouncer-template/pgbouncer.ini > /tmp/pgbouncer/pgbouncer.ini
+        printf '"%s" "%s"\n' \
+          wms_app "$$WMS_APP_PASSWORD" \
+          pgbouncer_admin "$$PGBOUNCER_ADMIN_PASSWORD" > /tmp/pgbouncer/userlist.txt
+        exec /usr/bin/pgbouncer /tmp/pgbouncer/pgbouncer.ini
+    ports:
+      - "127.0.0.1:${PGBOUNCER_HOST_PORT:-6432}:6432"
+    volumes:
+      - ./infra/pgbouncer/pgbouncer.ini:/etc/pgbouncer-template/pgbouncer.ini:ro
+    healthcheck:
+      test: ["CMD-SHELL", "PGPASSWORD=\"$$PGBOUNCER_ADMIN_PASSWORD\" psql -h 127.0.0.1 -p 6432 -U pgbouncer_admin -d pgbouncer -XAtqc 'SHOW VERSION' >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  minio:
+    # MinIO projesi Docker Hub'a imaj yayımlamayı bıraktı; alpine/minio resmi sürüm
+    # etiketinden yeniden derlenmiş topluluk imajıdır (bkz. T-002d raporu, Bulgular).
+    image: alpine/minio:RELEASE.2025-10-15T17-29-55Z
+    # İmaj minio (uid 100) kullanıcısıyla çalışır ama /data root'a aittir; bu yüzden veri,
+    # imajda minio'ya ait /home/minio altında tutulur (named volume sahipliği oradan devralır).
+    command: ["server", "/home/minio/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER .env içinde tanımlı olmalı}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD .env içinde tanımlı olmalı}
+    ports:
+      - "127.0.0.1:${MINIO_API_HOST_PORT:-9000}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_HOST_PORT:-9001}:9001"
+    volumes:
+      - minio-data:/home/minio
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  mailpit:
+    image: axllent/mailpit:v1.31.4
+    ports:
+      - "127.0.0.1:${MAILPIT_SMTP_HOST_PORT:-1025}:1025"
+      - "127.0.0.1:${MAILPIT_UI_HOST_PORT:-8025}:8025"
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+volumes:
+  postgres-data:
+  minio-data:
