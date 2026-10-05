@@ -6,7 +6,7 @@ Q-01 | Neon'da hangi bölge kullanılacak; güncel bölge listesinde TR bölgesi
 Q-02 | Neon pooler'ının türü ve sürümü nedir (PgBouncer ise hangi sürüm); sağlayıcı tarafı güncellemeler nasıl izlenecek (yeniden spike tetikleyicisi); CI'daki docker PgBouncer bununla davranış olarak eşdeğer mi? | ADR-004, T-005, I-02 | açık
 Q-03 | Hangi PostgreSQL sürücüsü kullanılacak (postgres.js / node-postgres / Neon serverless) ve Drizzle ile hangi sürümler? | ADR-003, ADR-004, T-004, T-005 | açık
 Q-04 | Neon pooler'ı protokol düzeyi prepared statement destekliyor mu; sürücüde prepared statement açık mı kapalı mı olacak? (Karar T-005 test sonucuna göre) | ADR-003, ADR-004, T-005 | açık
-Q-05 | Neon'da hangi PostgreSQL ana sürümü kullanılacak? | ADR-004, T-004, T-005 | açık
+Q-05 | Neon'da hangi PostgreSQL ana sürümü kullanılacak? | ADR-004, T-004, T-005 | **kapandı 2026-10-05 (kullanıcı):** PostgreSQL 17 (Neon projesi `etkin-wms`); yerel compose 17.11; T-005d gerçek sürümü doğrular
 Q-06 | Neon'da migration ve session'a bağlı worker işleri için doğrudan (pooler'sız) bağlantı nasıl sağlanacak; uygulama rolü ile migration rolü ayrımı nasıl kurulacak? | ADR-004, T-005, I-02 | açık
 Q-07 | AB bölgesinde barındırma için KVKK yurt dışı aktarım mekanizması (standart sözleşme, bildirim yükümlülükleri) hukukçu tarafından yazılı olarak onaylandı mı? Onaysız gerçek kişisel veriyle prod'a çıkılmaz | ADR-007, ADR-004, ADR-006, prod kapısı | açık
 Q-08 | Ürün adı? | UI metinleri, i18n katalog, alan adı | **kapandı 2026-10-05 (kullanıcı):** "Etkin WMS". "Rafta" (şartname) ve "Stoklu" (tasarım) kullanılmaz; kod paketleri `@wms/*` kalır
