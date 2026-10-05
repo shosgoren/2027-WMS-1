@@ -143,6 +143,39 @@ describe("check:scope fixture senaryoları", () => {
     expect(bad.lines).toContainEqual(expect.stringMatching(/^\[check:scope\] FAIL OUT_OF_SCOPE src\/c\.mjs — kart dosya listesinde yok \(T-100, T-101; durum M\)$/));
   });
 
+  it("int/ dalında kartsız Supervisor commit'i (STATE, kart, ADR) → OK", async () => {
+    const r = fixture();
+    r.branch("int/dilim");
+    r.branch("feat/T-100-x").write("src/a.mjs", "a2\n").commit("100").checkout("int/dilim");
+    r.merge("feat/T-100-x", "Merge remote-tracking branch 'origin/feat/T-100-x' into int/dilim");
+    r.write("docs/STATE.md", "durum\n").write("docs/tasks/T-102.md", "kart düzeltmesi\n").write("docs/adr/ADR-001.md", "a\n").commit("supervisor");
+    const res = await check(r.dir);
+    expect(res.code).toBe(0);
+    expect(res.lines).toEqual(["check:scope OK"]);
+  });
+
+  it("int/ dalında Supervisor yolları dışındaki kartsız dosya → FAIL", async () => {
+    const r = fixture();
+    r.branch("int/dilim").write("docs/STATE.md", "durum\n").write("docs/INVARIANTS.md", "x\n").commit("supervisor");
+    const res = await check(r.dir);
+    expect(res.code).toBe(1);
+    expect(res.lines).toEqual([
+      "[check:scope] FAIL OUT_OF_SCOPE docs/INVARIANTS.md — kart dosya listesinde yok (birleştirilmiş kart yok; durum A)",
+      "check:scope FAIL (1)",
+    ]);
+  });
+
+  it("feat dalında kartta olmayan STATE değişikliği → FAIL", async () => {
+    const r = fixture();
+    r.branch("feat/T-100-x").write("src/a.mjs", "a2\n").write("docs/STATE.md", "durum\n").commit("iş");
+    const res = await check(r.dir);
+    expect(res.code).toBe(1);
+    expect(res.lines).toEqual([
+      "[check:scope] FAIL OUT_OF_SCOPE docs/STATE.md — kart dosya listesinde yok (T-100; durum A)",
+      "check:scope FAIL (1)",
+    ]);
+  });
+
   it("int/ dalında birleştirilen dalın kartı yoksa → FAIL CARD_NOT_FOUND", async () => {
     const r = fixture();
     r.branch("int/dilim");

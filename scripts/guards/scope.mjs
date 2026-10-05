@@ -16,6 +16,22 @@ import { NO_FILE, UsageError } from "./lib/output.mjs";
  */
 
 /**
+ * `int/*` dallarında (yalnızca orada) kartsız Supervisor commit'lerine açık yollar
+ * (PROTOCOL §2: Supervisor STATE/JOURNAL/kart/ADR kayıtlarını entegrasyon dalında tutar;
+ * Supervisor kararı, T-008a). `feat|fix/T-xxx` dallarında geçerli değildir — orada yalnızca
+ * kart listesi. Bu yolların korunanlığı ayrı bekçidedir (`check:protected`).
+ */
+export const SUPERVISOR_PATHS = Object.freeze([
+  "docs/STATE.md",
+  "docs/JOURNAL.md",
+  "docs/OPEN_QUESTIONS.md",
+  "docs/DECISIONS.md",
+  "docs/adr/**",
+  "docs/tasks/**",
+  "docs/MAP.md",
+]);
+
+/**
  * @param {string[]} argv
  * @returns {ScopeArgs}
  */
@@ -114,6 +130,7 @@ export function run(ctx) {
 
     const cardPaths = scope.cards.map((c) => c.path);
     const globs = scope.cards.flatMap((c) => c.globs);
+    if (scope.kind === "int") globs.push(...SUPERVISOR_PATHS);
     const ids = scope.cards.map((c) => c.id).join(", ") || "birleştirilmiş kart yok";
     const changes = changedFiles(root, base);
     out.detail("changes", changes);
