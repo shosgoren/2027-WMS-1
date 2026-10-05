@@ -1,4 +1,4 @@
-# CLAUDE.md — Rafta WMS (her oturumda otomatik yüklenir; kısa tutulur)
+# CLAUDE.md — Etkin WMS (her oturumda otomatik yüklenir; kısa tutulur)
 
 Çok kiracılı (multi-tenant) depo & stok yönetimi SaaS'ı. Modüler monolit, PostgreSQL + RLS, değişmez stok defteri.
 
