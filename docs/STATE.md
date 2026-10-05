@@ -33,7 +33,8 @@ ADR-001 Next.js + ayrı worker · 002 İngilizce kod/DB, Türkçe UI · 003 Driz
 - [x] T-010 Fly staging (#11, #12, #13 main'de; ilk dağıtım yeşil). Takipler: `not found` desenini daralt, taban imaj güncelleme süreci, PR CI'da docker build
 
 ## Engeller
-- U-06 (2026-10-05 istendi): `FLY_API_TOKEN`'ı org token yerine `etkin-wms-staging` uygulamasına kapsamlı deploy token'la değiştir, eski org token'ı iptal et. Staging ilk dağıtım yeşil: https://github.com/shosgoren/2027-WMS-1/actions/runs/37352935682 (web+worker fra started, smoke OK) → https://etkin-wms-staging.fly.dev / kullanıcı eylemi bekleyenler (2026-10-05 tek mesajla istendi)
+- U-06 kapandı (2026-10-05): kullanıcı `FLY_API_TOKEN`'ı uygulama kapsamlı deploy token'la değiştirdi; doğrulama dispatch koşusu yeşil https://github.com/shosgoren/2027-WMS-1/actions/runs/37356910665. Eski org token'ın iptali kullanıcıya hatırlatıldı.
+- U-07 (2026-10-05 istendi): `NEON_API_KEY`'i `etkin-wms` projesine kapsamlı anahtarla değiştir, eski org anahtarını iptal et (T-005d güvenlik MAJOR). T-005d bu olmadan main'e girmez.
 - U-01 Neon: kullanıcı 2026-10-05 tamamladığını bildirdi (proje etkin-wms, AWS Frankfurt, PG 17; `NEON_API_KEY` sırrı + `NEON_PROJECT_ID` değişkeni). Doğrulama T-005d ilk Actions koşusunda → T-005d
 - U-02 Fly.io: kullanıcı 2026-10-05 tamamladığını bildirdi (hesap + kart + `FLY_API_TOKEN` repo sırrı). Doğrulama T-010 ilk dağıtım koşusunda
 - U-03 Resend: kullanıcı 2026-10-05 `RESEND_API_KEY` repo sırrını ekledi; alan adı bildirilmedi → doğrulanmış alan adı olana kadar Resend yalnızca hesap sahibinin adresine `onboarding@resend.dev`'den gönderebilir; diğer alıcılar için davet/şifre bağlantısı ekranda gösterilir (ADR-013, kapalı bayrak). Faz 1 e-posta kartında
