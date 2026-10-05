@@ -1,0 +1,21 @@
+# Docker derleme bağlamı (T-010). Yerel derleme çıktıları, bağımlılıklar, sırlar ve
+# belgeler imaja/bağlama girmez; imaj bağımlılıkları kilit dosyasından yeniden kurar.
+**/node_modules
+**/.next
+**/dist
+.artifacts
+.git
+.github
+.githooks
+.env
+.env.*
+**/*.log
+.claude
+CLAUDE.md
+docs
+infra
+scripts
+tests
+Dockerfile
+.dockerignore
+fly*.toml
