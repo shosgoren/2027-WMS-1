@@ -599,7 +599,13 @@ export const PASSWORD_REJECT_SQLSTATES = new Set(["22023", "28P01"]);
 export function isPasswordRejection(r) {
   if (r.ok || r.sqlstate === null) return false;
   if (/connection to server/i.test(r.error ?? "")) return false;
-  return PASSWORD_REJECT_SQLSTATES.has(r.sqlstate) || /password/i.test(r.error ?? "");
+  if (PASSWORD_REJECT_SQLSTATES.has(r.sqlstate)) return true;
+  // Metin eşleşmesi dar tutulur: 42xxx (sözdizimi, yetki, çakışan rol) asla parola reddi değildir
+  // ve yalnızca birincil ERROR satırına bakılır — psql'in `LINE n: … PASSWORD '***'` bağlamı ya da
+  // DETAIL/HINT satırları yeniden denemeyi tetiklemez.
+  if (r.sqlstate.startsWith("42")) return false;
+  const primary = (r.error ?? "").split(/\r?\n/).find((l) => /\bERROR:/.test(l)) ?? "";
+  return /password/i.test(primary);
 }
 
 /**

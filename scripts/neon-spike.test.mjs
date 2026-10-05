@@ -343,6 +343,15 @@ describe("createAppRole (SCRAM → reddedilirse bir kez düz parola)", () => {
     expect(isPasswordRejection({ ok: true, stdout: "", sqlstate: null, error: null })).toBe(false);
   });
 
+  it("isPasswordRejection: LINE bağlamı, DETAIL satırı ve 42xxx sınıfı yeniden denemeyi tetiklemez", () => {
+    const syntax = "ERROR:  42601: syntax error at or near \"x\"\nLINE 1: CREATE ROLE wms_app LOGIN PASSWORD '***' x\n                                                    ^";
+    expect(isPasswordRejection({ ok: false, stdout: "", sqlstate: "42601", error: syntax })).toBe(false);
+    expect(isPasswordRejection({ ok: false, stdout: "", sqlstate: "42501", error: "ERROR:  42501: permission denied to set password" })).toBe(false);
+    const detail = "ERROR:  XX000: internal error\nDETAIL:  password policy service unavailable";
+    expect(isPasswordRejection({ ok: false, stdout: "", sqlstate: "XX000", error: detail })).toBe(false);
+    expect(isPasswordRejection({ ok: false, stdout: "", sqlstate: "28P01", error: "ERROR:  28P01: anything" })).toBe(true);
+  });
+
   it("192 bitten kısa parola reddedilir", () => {
     expect(() => createAppRole({ direct, password: "ab".repeat(16), redactor: createRedactor(), mask: () => undefined, run: fakeRun([]).run })).toThrow(/192/);
   });
