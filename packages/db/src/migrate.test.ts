@@ -248,8 +248,17 @@ describe("parseTarget (driver-resolved, strict pre-checks)", () => {
   it("treats localhost and 127.0.0.1 as the same host and flags host/port query overrides", () => {
     const hosts = ["postgresql://u@localhost/d", "postgresql://u@127.0.0.1/d"].map((u) => parseTarget(u)?.hosts);
     expect(new Set(hosts.map((h) => JSON.stringify(h))).size).toBe(1);
-    expect(parseTarget("postgresql://u@h/d?host=/tmp")?.hasHostOverride).toBe(true);
-    expect(parseTarget("postgresql://u@h/d?sslmode=require")?.hasHostOverride).toBe(false);
+    expect(parseTarget("postgresql://u@h/d?host=/tmp")?.hasUnsafeQuery).toBe(true);
+    expect(parseTarget("postgresql://u@h/d?sslmode=require")?.hasUnsafeQuery).toBe(false);
+  });
+
+  it("accepts only sslmode, ssl* and application_name in the query (allowlist; decoded, case-sensitive keys)", () => {
+    for (const ok of ["sslmode=require", "sslrootcert=system&sslmode=verify-full", "application_name=a%40b", "sslmode=require&application_name=x", ""]) {
+      expect(parseTarget(`postgresql://u@h/d?${ok}`)?.hasUnsafeQuery, ok).toBe(false);
+    }
+    for (const bad of ["user=other", "database=other", "options=-c%20role%3Dx", "options=-c%20search_path%3Dx", "host=h2", "hostaddr=1.2.3.4", "port=6432", "unknown=1", "%75ser=x", "User=x", "sslmode=require&user=x", "SSLMODE=require", "connect_timeout=1"]) {
+      expect(parseTarget(`postgresql://u@h/d?${bad}`)?.hasUnsafeQuery, bad).toBe(true);
+    }
   });
 });
 
@@ -313,6 +322,10 @@ describe("pooler URLs are refused before any connection", () => {
       "postgresql://m:p@h:notaport/w",
       "postgresql://m:p@h/w?host=ep-x-pooler.example",
       "postgresql://m:p@h/w?port=6432",
+      "postgresql://m:p@h/w?user=wms_app",
+      "postgresql://m:p@h/w?database=other",
+      "postgresql://m:p@h/w?options=-c%20role%3Dwms_app",
+      "postgresql://m:p@h/w?unknown=1",
       "mysql://m:p@h/w",
       "postgres://u@pooler-host:6432,a@direct:5432/db",
       "postgres://u@direct:5432#,pooler:6432/db",

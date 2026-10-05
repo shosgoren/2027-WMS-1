@@ -430,6 +430,46 @@ describe(`migrations (target=${env.target})`, () => {
     expect(attrs.rows[0]).toEqual({ rolcreatedb: false, n: "0" });
   });
 
+  it("post-run audit: attributes of the probe role and database-level (role-independent) settings are rejected", async () => {
+    // Probe rolü altyapı adımıdır (T-101b/T-105); bu dalda yoksa test süresince yaratılır ve silinir.
+    const existed = (await withClient(env.databaseUrlDirect, (c) => c.query("SELECT 1 FROM pg_roles WHERE rolname = 'wms_identity_probe'"))).rowCount === 1;
+    if (!existed) {
+      await withClient(env.databaseUrlDirect, (c) => c.query("CREATE ROLE wms_identity_probe NOLOGIN NOSUPERUSER NOBYPASSRLS"));
+    }
+    try {
+      const url = await freshDatabase();
+      const dir = copyMigrations();
+      writeFileSync(path.join(dir, "0002_probe.up.sql"), "ALTER ROLE wms_identity_probe BYPASSRLS;\n");
+      writeFileSync(path.join(dir, "0002_probe.down.sql"), "SELECT 1;\n");
+      await expect(migrateUp({ url, dir })).rejects.toMatchObject({ code: "MIGRATION_APP_OWNERSHIP" });
+      expect(await ledger(url)).toEqual(["0001"]);
+      const flag = await withClient(env.databaseUrlDirect, (c) => c.query("SELECT rolbypassrls FROM pg_roles WHERE rolname = 'wms_identity_probe'"));
+      expect(flag.rows[0]).toEqual({ rolbypassrls: false });
+    } finally {
+      if (!existed) await withClient(env.databaseUrlDirect, (c) => c.query("DROP ROLE IF EXISTS wms_identity_probe"));
+    }
+    // Rol-bağımsız veritabanı ayarı (izin listesi boş): her ayar ret; her biri ayrı veritabanında.
+    for (const setting of ["work_mem = '8MB'", "statement_timeout = '5min'", "session_replication_role = origin"]) {
+      const url = await freshDatabase();
+      const db = new URL(url).pathname.slice(1);
+      await withClient(env.databaseUrlDirect, (c) => c.query(`ALTER DATABASE ${db} SET ${setting}`));
+      const err = await migrateUp({ url, dir: baseDir() }).then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+      expect(err, setting).toBeDefined();
+      expect(["MIGRATION_APP_OWNERSHIP", "MIGRATION_SESSION_STATE"], setting).toContain((err as { code: string }).code);
+    }
+  });
+
+  it("refuses URL query parameters outside the allowlist (user/database/options override the startup message)", async () => {
+    for (const q of ["user=wms_app", "database=postgres", "options=-c%20role%3Dwms_app", "unknown=1"]) {
+      const u = new URL(env.databaseUrlDirect);
+      u.search = q;
+      await expect(migrateUp({ url: u.toString() }), q).rejects.toMatchObject({ code: "MIGRATION_POOLER_URL" });
+    }
+  });
+
   it("the ownership audit also runs on the down path: a down that leaves wms_app owning an object is rejected", async () => {
     const url = await freshDatabase();
     const dir = copyMigrations();

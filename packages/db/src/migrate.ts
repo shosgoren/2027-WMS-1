@@ -23,6 +23,13 @@ export const APP_ROLE_NAME = "wms_app";
  */
 export const APP_ROLE_NAMES: readonly string[] = [APP_ROLE_NAME, "wms_auth", "wms_identity_probe"];
 
+/**
+ * Rol-bağımsız (veritabanı/küme düzeyi) `ALTER DATABASE ... SET` ayarlarından izinli olanlar. Boş: her yeni
+ * bağlantıya (uygulama rolleri dahil) sızan her ayar ret (`session_replication_role`, `search_path`,
+ * `default_transaction_read_only`, `role`, `app.*` …). Zararsız bir ayar gerekirse gerekçesiyle eklenir.
+ */
+export const ALLOWED_DB_LEVEL_SETTINGS: readonly string[] = [];
+
 /** Sahiplik denetimi kapsamı: probe rolü (ADR-016) meşru işlev sahibidir, bu yüzden dışarıda. */
 export const OWNERSHIP_ROLE_NAMES: readonly string[] = [APP_ROLE_NAME, "wms_auth"];
 
@@ -183,12 +190,14 @@ export interface ConnectionTarget {
   readonly hosts: readonly { host: string; port: string }[];
   readonly user: string;
   readonly db: string;
-  /** URL sorgusunda `host`/`hostaddr`/`port` var: hedef belirsiz. */
-  readonly hasHostOverride: boolean;
+  /** URL sorgusunda izin listesi dışı parametre var (`user`, `database`, `options`, `host`, `port`, bilinmeyen …): StartupMessage/hedef ezilebilir. */
+  readonly hasUnsafeQuery: boolean;
 }
 
 const LOOPBACK_HOSTS: readonly string[] = ["localhost", "127.0.0.1"];
 /** Sürücünün çözdüğü host yalnızca bu karakterlerden oluşabilir (IPv6 `[::1]` sürücüde `[` olarak bozulur → ret). */
+/** Bağlantı URL sorgusunda kabul edilen anahtarlar: `sslmode`, `ssl*` ve `application_name`. */
+const SAFE_QUERY_KEY_RE = /^(?:ssl[a-z_]*|application_name)$/;
 const HOST_NAME_RE = /^[a-z0-9._-]+$/;
 
 /**
@@ -222,18 +231,21 @@ export function parseTarget(url: string): ConnectionTarget | undefined {
     hosts.push({ host, port: String(port) });
   }
   const query = trimmed.includes("?") ? trimmed.slice(trimmed.indexOf("?") + 1) : "";
-  const hasHostOverride = query.split("&").some((kv) => /^(host|hostaddr|port)(=|$)/i.test(kv));
-  return { hosts, user: String(o.user), db: String(o.database), hasHostOverride };
+  // İzin listesi (sürücü sorgu parametrelerini options.connection'a taşır ve `user`/`database`/`options`
+  // gibi anahtarlar StartupMessage'ı ezer): yalnızca TLS ve application_name. Anahtar çözülmüş haliyle,
+  // büyük/küçük harf duyarlı karşılaştırılır (`%75ser`, `User` da ret).
+  const hasUnsafeQuery = [...new URLSearchParams(query).keys()].some((k) => !SAFE_QUERY_KEY_RE.test(k));
+  return { hosts, user: String(o.user), db: String(o.database), hasUnsafeQuery };
 }
 
 /**
  * İki URL aynı sunucu+kullanıcı+veritabanına işaret edebilir mi? Fail-closed: ayrıştırılamayan,
- * belirsiz (`?host=`) veya host listeleri kesişen çiftte `true` (ret). `localhost`/`127.0.0.1` eşdeğer.
+ * izin listesi dışı sorgu parametreli veya host listeleri kesişen çiftte `true` (ret). `localhost`/`127.0.0.1` eşdeğer.
  */
 export function sameConnectionTarget(a: string, b: string): boolean {
   const ta = parseTarget(a);
   const tb = parseTarget(b);
-  if (ta === undefined || tb === undefined || ta.hasHostOverride || tb.hasHostOverride) return true;
+  if (ta === undefined || tb === undefined || ta.hasUnsafeQuery || tb.hasUnsafeQuery) return true;
   if (ta.user !== tb.user || ta.db !== tb.db) return false;
   return ta.hosts.some((x) => tb.hosts.some((y) => x.host === y.host && x.port === y.port));
 }
@@ -244,10 +256,10 @@ export function sameConnectionTarget(a: string, b: string): boolean {
  */
 function assertDirectUrl(url: string): void {
   const t = parseTarget(url);
-  if (t === undefined || t.hasHostOverride || t.hosts.length !== 1) {
+  if (t === undefined || t.hasUnsafeQuery || t.hosts.length !== 1) {
     throw new MigrationError(
       "MIGRATION_POOLER_URL",
-      "DATABASE_URL_DIRECT ayrıştırılamadı, çok host'lu veya host/port sorgu parametresi içeriyor; tek host'lu doğrudan bağlantı gerekir",
+      "DATABASE_URL_DIRECT ayrıştırılamadı, çok host'lu veya izin listesi dışı sorgu parametresi içeriyor (yalnızca sslmode/ssl*/application_name); tek host'lu doğrudan bağlantı gerekir",
     );
   }
   const only = t.hosts[0] as { host: string; port: string };
@@ -425,7 +437,9 @@ async function assertNoAppOwnership(tx: Tx, version: string): Promise<void> {
   const rows = await tx.unsafe<{ cat: string }[]>(OWNED_CATALOGS_SQL, [OWNERSHIP_ROLE_NAMES as string[]]);
   if (rows.length > 0) problems.push(`nesne sahibi: ${rows.map((x) => x.cat).join(", ")}`);
 
-  // Rol nitelikleri/üyelikler her migration sonrası yeniden denetlenir (migration bunları gevşetmiş olabilir).
+  // Rol nitelikleri/üyelikler her migration sonrası yeniden denetlenir (migration bunları gevşetmiş olabilir):
+  // sahiplik istisnası yalnızca probe için; nitelik/üyelik üç uygulama rolünün hepsinde denetlenir. Rol henüz
+  // yaratılmamışsa satır dönmez (denetlenecek nitelik yok), hata da verilmez.
   const attrs = await tx<{ rolname: string; why: string }[]>`
     SELECT r.rolname::text AS rolname,
            concat_ws(',',
@@ -435,18 +449,19 @@ async function assertNoAppOwnership(tx: Tx, version: string): Promise<void> {
              CASE WHEN r.rolcreatedb THEN 'CREATEDB' END,
              CASE WHEN r.rolreplication THEN 'REPLICATION' END,
              CASE WHEN EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members m WHERE m.member = r.oid) THEN 'ROL ÜYELİĞİ' END) AS why
-      FROM pg_catalog.pg_roles r WHERE r.rolname = ANY (${OWNERSHIP_ROLE_NAMES as string[]}::text[])`;
+      FROM pg_catalog.pg_roles r WHERE r.rolname = ANY (${APP_ROLE_NAMES as string[]}::text[])`;
   for (const a of attrs) if (a.why !== "") problems.push(`${a.rolname}: ${a.why}`);
 
   // Rol/veritabanı düzeyinde ayarlar (ALTER ROLE/DATABASE ... SET): uygulama rollerinde HİÇBİRİ olamaz;
-  // veritabanı/küme düzeyinde app.*, search_path ve role ayarı olamaz (her yeni bağlantıya sızar).
+  // rol-bağımsız (veritabanı/küme düzeyi, setrole=0) ayarlarda yalnızca ALLOWED_DB_LEVEL_SETTINGS izinlidir.
   const settings = await tx<{ n: number }[]>`
     SELECT count(*)::int AS n FROM pg_catalog.pg_db_role_setting s
      WHERE s.setdatabase IN (0, (SELECT oid FROM pg_catalog.pg_database WHERE datname = current_database()))
        AND (s.setrole IN (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = ANY (${APP_ROLE_NAMES as string[]}::text[]))
             OR (s.setrole = 0
-                AND EXISTS (SELECT 1 FROM unnest(s.setconfig) c WHERE c LIKE 'app.%' OR c LIKE 'search\\_path=%' OR c LIKE 'role=%')))`;
-  if ((settings[0]?.n ?? 0) > 0) problems.push("pg_db_role_setting (rol/veritabanı düzeyi ayar)");
+                AND EXISTS (SELECT 1 FROM unnest(s.setconfig) c
+                             WHERE split_part(c, '=', 1) <> ALL (${ALLOWED_DB_LEVEL_SETTINGS as string[]}::text[]))))`;
+  if ((settings[0]?.n ?? 0) > 0) problems.push("pg_db_role_setting (uygulama rolü ayarı veya izinsiz veritabanı/küme düzeyi ayar)");
 
   if (problems.length > 0) {
     throw new MigrationError(
