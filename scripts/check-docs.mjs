@@ -2,6 +2,7 @@
 // `node scripts/check-docs.mjs`: docs/STACK.md ve docs/MAP.md'nin repo gerçekliğiyle uyumunu doğrular (T-004).
 // (a) STACK "Kilitli sürümler" tablosunda sürümü yazılı her satır, kaynak dosyadaki değerle birebir eşleşir;
 //     `^`/`~` aralığı (STACK'te veya kaynakta) hatadır. Sürüm hücresi `—` ile başlayan satır kilitsizdir, atlanır.
+//     Ayrıca (T-004b) her workspace'in her doğrudan bağımlılığı tabloda kilitli bir satıra sahiptir (`checkStackCoverage`).
 // (b) MAP tablosunda `var` işaretli her yol mevcuttur, `planlı: …` işaretliler mevcut değildir.
 // Konsola yalnızca uyuşmazlıklar + tek özet satırı basılır; FAIL → çıkış kodu 1. Yeni npm bağımlılığı yoktur.
 import { existsSync, readFileSync } from "node:fs";
@@ -206,6 +207,97 @@ export function checkStack(md, readFile) {
   return { ok: failures.length === 0, count, failures };
 }
 
+/** Doğrudan bağımlılık sayılan `package.json` alanları (T-004b). */
+export const DEP_SECTIONS = /** @type {const} */ (["dependencies", "devDependencies", "optionalDependencies"]);
+
+/**
+ * `pnpm-lock.yaml` metnindeki `importers:` bloğundan workspace dizinlerini okur (YAML kütüphanesi
+ * olmadan; importer anahtarları blok içinde 2 boşluk girintilidir). Blok yoksa `null`.
+ * @param {string} text
+ * @returns {string[] | null}
+ */
+export function lockImporters(text) {
+  const lines = text.split(/\r?\n/);
+  const at = lines.findIndex((l) => /^importers:\s*$/.test(l));
+  if (at === -1) return null;
+  /** @type {string[]} */
+  const importers = [];
+  for (let i = at + 1; i < lines.length; i++) {
+    const line = lines[i] ?? "";
+    if (line.trim() === "") continue;
+    if (!line.startsWith(" ")) break; // sonraki üst düzey anahtar
+    const m = /^ {2}(?! )(['"]?)([^'":]+)\1:/.exec(line);
+    if (m && m[2]) importers.push(m[2]);
+  }
+  return importers;
+}
+
+/**
+ * Doğrudan bağımlılık kapsamı: her workspace'in (`pnpm-lock.yaml#importers`) `package.json`
+ * dosyasındaki her doğrudan bağımlılık için STACK'te kaynağı `<dosya>#<alan>.<ad>` olan, sürümü
+ * kilitli bir satır bulunmalıdır (`workspace:` bağımlılıkları hariç). Satırın sürüm eşleşmesi
+ * `checkStack` ile ayrıca doğrulanır.
+ * @param {string} md
+ * @param {ReadFile} readFile
+ * @returns {CheckResult} `count` = denetlenen doğrudan bağımlılık sayısı
+ */
+export function checkStackCoverage(md, readFile) {
+  const table = parseStackTable(md);
+  if (!table) return { ok: false, count: 0, failures: ['stack: "## Kilitli sürümler" tablosu bulunamadı'] };
+  const iVer = table.header.indexOf("sürüm");
+  const iSrc = table.header.indexOf("kaynak");
+  if (iVer === -1 || iSrc === -1) return { ok: false, count: 0, failures: ["stack: tablo başlığında `sürüm`/`kaynak` sütunu yok"] };
+  const locked = new Set(
+    table.rows
+      .filter((r) => (r[iVer] ?? "") !== "" && !(r[iVer] ?? "").startsWith(UNLOCKED_MARK))
+      .map((r) => r[iSrc] ?? ""),
+  );
+  const lock = readFile("pnpm-lock.yaml");
+  if (lock === null) return { ok: false, count: 0, failures: ["stack: pnpm-lock.yaml okunamadı (doğrudan bağımlılık kapsamı)"] };
+  const importers = lockImporters(lock);
+  if (importers === null || importers.length === 0) {
+    return { ok: false, count: 0, failures: ["stack: pnpm-lock.yaml içinde `importers:` bulunamadı"] };
+  }
+  /** @type {string[]} */
+  const failures = [];
+  let count = 0;
+  for (const imp of importers) {
+    const file = imp === "." ? "package.json" : `${imp}/package.json`;
+    const text = readFile(file);
+    if (text === null) {
+      failures.push(`stack: kapsam: ${file} okunamadı (pnpm-lock.yaml importer "${imp}")`);
+      continue;
+    }
+    /** @type {unknown} */
+    let pkg;
+    try {
+      pkg = JSON.parse(text);
+    } catch {
+      failures.push(`stack: kapsam: ${file} JSON çözümlenemedi`);
+      continue;
+    }
+    if (typeof pkg !== "object" || pkg === null) {
+      failures.push(`stack: kapsam: ${file} nesne değil`);
+      continue;
+    }
+    for (const section of DEP_SECTIONS) {
+      const deps = /** @type {Record<string, unknown>} */ (pkg)[section];
+      if (deps === undefined) continue;
+      if (typeof deps !== "object" || deps === null) {
+        failures.push(`stack: kapsam: ${file}#${section} nesne değil`);
+        continue;
+      }
+      for (const [name, spec] of Object.entries(deps)) {
+        if (typeof spec === "string" && spec.startsWith("workspace:")) continue;
+        count++;
+        const src = `${file}#${section}.${name}`;
+        if (!locked.has(src)) failures.push(`stack: doğrudan bağımlılık STACK'te kilitli değil: ${name} (${src})`);
+      }
+    }
+  }
+  return { ok: failures.length === 0, count, failures };
+}
+
 /**
  * MAP tablosundaki yolların durumunu doğrular.
  * @param {string} md
@@ -263,7 +355,14 @@ export function main() {
   };
   const stackMd = readFile("docs/STACK.md");
   const mapMd = readFile("docs/MAP.md");
-  const stack = stackMd === null ? { ok: false, count: 0, failures: ["stack: docs/STACK.md okunamadı"] } : checkStack(stackMd, readFile);
+  const versions = stackMd === null ? { ok: false, count: 0, failures: ["stack: docs/STACK.md okunamadı"] } : checkStack(stackMd, readFile);
+  const coverage = stackMd === null ? { ok: false, count: 0, failures: [] } : checkStackCoverage(stackMd, readFile);
+  /** @type {CheckResult} */
+  const stack = {
+    ok: versions.ok && coverage.ok,
+    count: versions.count,
+    failures: [...versions.failures, ...coverage.failures],
+  };
   const map = mapMd === null
     ? { ok: false, count: 0, failures: ["map: docs/MAP.md okunamadı"] }
     : checkMap(mapMd, (rel) => existsSync(path.join(root, rel)));

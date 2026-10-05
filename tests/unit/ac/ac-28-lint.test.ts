@@ -285,9 +285,10 @@ describe("AC-28 lint (T-015): yanlış pozitif ve bekçi yükleyicisi muafiyeti"
   );
 
   it(
-    "@AC-28 scripts/guards/cli.mjs: yalnızca import(<ifade>) serbest",
+    "@AC-28 scripts/guards/cli.mjs: yalnızca import(pathToFileURL(<ifade>).href) serbest",
     async () => {
-      const loader = 'export async function load(file: string): Promise<unknown> {\n  return import(file);\n}\n';
+      const loader =
+        'import { pathToFileURL } from "node:url";\n\nexport async function load(file: string): Promise<unknown> {\n  return import(pathToFileURL(file).href);\n}\n';
       const ok = await lint(loader, GUARD_LOADER_PATH);
       expect(ok.messages.filter((m) => m.ruleId === SYNTAX_RULE_ID)).toHaveLength(0);
       expect(ok.errorCount).toBe(0);
@@ -297,6 +298,99 @@ describe("AC-28 lint (T-015): yanlış pozitif ve bekçi yükleyicisi muafiyeti"
     },
     60_000,
   );
+
+  // T-008k: muafiyet yalnızca `pathToFileURL(x).href`; diğer statik olmayan biçimler cli.mjs'te de error.
+  it.each([
+    ["import(file)", "export async function load(file: string): Promise<unknown> {\n  return import(file);\n}\n"],
+    ["import(x.href)", "export async function load(x: { href: string }): Promise<unknown> {\n  return import(x.href);\n}\n"],
+    [
+      'import(pathToFileURL(x)["href"])',
+      'import { pathToFileURL } from "node:url";\n\nexport async function load(x: string): Promise<unknown> {\n  return import(pathToFileURL(x)["href"]);\n}\n',
+    ],
+    [
+      "import(pathToFileURL(x).pathname)",
+      'import { pathToFileURL } from "node:url";\n\nexport async function load(x: string): Promise<unknown> {\n  return import(pathToFileURL(x).pathname);\n}\n',
+    ],
+    [
+      "import(url.pathToFileURL(x).href)",
+      'import url from "node:url";\n\nexport async function load(x: string): Promise<unknown> {\n  return import(url.pathToFileURL(x).href);\n}\n',
+    ],
+    [
+      "import(pathToFileURL(...xs).href)",
+      'import { pathToFileURL } from "node:url";\n\nexport async function load(xs: string[]): Promise<unknown> {\n  return import(pathToFileURL(...xs).href);\n}\n',
+    ],
+  ])(
+    "@AC-28 T-008k scripts/guards/cli.mjs: %s → error",
+    async (_name, code) => {
+      const result = await lint(code, GUARD_LOADER_PATH);
+      const hits = result.messages.filter((m) => m.ruleId === SYNTAX_RULE_ID);
+      expect(hits).toHaveLength(1);
+      expect(hits[0]?.severity).toBe(2);
+    },
+    60_000,
+  );
+
+  // T-008k güvenlik MINOR-5: `pathToFileURL` adı cli.mjs'te yeniden bağlanamaz (muafiyet ada bakar).
+  const FAKE_URL = "(s: string) => ({ href: s })";
+  it.each([
+    [
+      "parametre gölgelemesi",
+      `export async function load(pathToFileURL: ${FAKE_URL}, x: string): Promise<unknown> {\n  return import(pathToFileURL(x).href);\n}\n`,
+    ],
+    [
+      "varsayılanlı parametre",
+      `export async function load(x: string, pathToFileURL: ${FAKE_URL} = (s) => ({ href: s })): Promise<unknown> {\n  return import(pathToFileURL(x).href);\n}\n`,
+    ],
+    ["yerel const", `export async function load(x: string): Promise<unknown> {\n  const pathToFileURL = ${FAKE_URL};\n  return import(pathToFileURL(x).href);\n}\n`],
+    [
+      "desenle bağlama",
+      `export async function load(x: string, o: { f: ${FAKE_URL} }): Promise<unknown> {\n  const { f: pathToFileURL } = o;\n  return import(pathToFileURL(x).href);\n}\n`,
+    ],
+    [
+      "yerel işlev bildirimi",
+      "export async function load(x: string): Promise<unknown> {\n  function pathToFileURL(s: string) {\n    return { href: s };\n  }\n  return import(pathToFileURL(x).href);\n}\n",
+    ],
+    [
+      "başka modülden içe aktarma",
+      'import { pathToFileURL } from "./evil.mjs";\n\nexport async function load(x: string): Promise<unknown> {\n  return import(pathToFileURL(x).href);\n}\n',
+    ],
+    [
+      "node:url'den başka adla içe aktarma",
+      'import { fileURLToPath as pathToFileURL } from "node:url";\n\nexport async function load(x: string): Promise<unknown> {\n  return import(pathToFileURL(x).href);\n}\n',
+    ],
+    [
+      "catch parametresi",
+      `export async function load(x: string): Promise<unknown> {\n  try {\n    return await import("node:url");\n  } catch (pathToFileURL) {\n    return import((pathToFileURL as { href: string }).href + x);\n  }\n}\n`,
+    ],
+  ])(
+    "@AC-28 T-008k scripts/guards/cli.mjs: pathToFileURL yeniden bağlama (%s) → error",
+    async (_name, code) => {
+      const result = await lint(code, GUARD_LOADER_PATH);
+      const hits = result.messages.filter((m) => m.ruleId === SYNTAX_RULE_ID && m.message.includes("yeniden bağlama/gölgeleme"));
+      expect(hits.length).toBeGreaterThanOrEqual(1);
+      expect(hits[0]?.severity).toBe(2);
+    },
+    60_000,
+  );
+
+  it.each([
+    ["eslint-disable-next-line", 'export async function load(x: string): Promise<unknown> {\n  // eslint-disable-next-line no-restricted-syntax -- muafiyet denemesi\n  return import(x);\n}\n'],
+    ["eslint-disable bloğu", 'export async function load(x: string): Promise<unknown> {\n  /* eslint-disable no-restricted-syntax */\n  return import(x);\n}\n'],
+  ])(
+    "@AC-28 T-008k scripts/guards/cli.mjs: satır içi %s yorumu etkisiz → import(x) hâlâ error",
+    async (_name, code) => {
+      const result = await lint(code, GUARD_LOADER_PATH);
+      const hits = result.messages.filter((m) => m.ruleId === SYNTAX_RULE_ID && m.severity === 2);
+      expect(hits).toHaveLength(1);
+    },
+    60_000,
+  );
+
+  it("@AC-28 T-008k: eslint-disable yorumu cli.mjs dışında çalışmaya devam eder (kod tabanı kırılmaz)", async () => {
+    const code = 'export async function load(x: string): Promise<unknown> {\n  // eslint-disable-next-line no-restricted-syntax -- test\n  return import(x);\n}\n';
+    const result = await lint(code, path.join(REPO_ROOT, "scripts/guards/__ac28_probe__.mjs"));
+    expect(result.messages.filter((m) => m.ruleId === SYNTAX_RULE_ID)).toHaveLength(0);
+  }, 60_000);
 
   it.each([
     ['import("@wms/db/internal")', 'export async function leak(): Promise<unknown> {\n  return import("@wms/db/internal");\n}\n', SYNTAX_RULE_ID],
