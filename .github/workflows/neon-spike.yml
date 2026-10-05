@@ -1,0 +1,87 @@
+# Etkin WMS — Neon gerçek pooler koşusu (T-005d / ADR-004, ADR-013). KORUNAN DOSYA (PROTOCOL §3b).
+# `pnpm spike:neon` (scripts/neon-spike.mjs): geçici Neon dalı `spike-<run_id>` oluşturur, wms_app
+# rolünü kurar, T-005c'nin DEĞİŞMEMİŞ AC testlerini Neon pooler'ı arkasında iki kez koşar (kapı:
+# üretim ayarı; tanı: INT_DB_PREPARE ters), ADR-004 alanlarını ölçer ve dalı siler.
+#
+# Tetikleyici: YALNIZCA workflow_dispatch. İş akışı önce `main`'e birleşir, sonra Supervisor GitHub
+# API ile tetikler. Dispatch herhangi bir dal seçilerek başlatılabildiği için iş
+# `if: github.ref == 'refs/heads/main'` ile yalnızca `main` üzerinde koşar (deploy-staging.yml ile aynı
+# bilinen risk: özel repoda ücretsiz planda environment dal kuralı yok; main'e yazabilen güvenilen taraf).
+#
+# Sır kapsamı (G-09): NEON_API_KEY (repo sırrı) ve NEON_PROJECT_ID (repo değişkeni) YALNIZCA
+# "Spike" ve "Cleanup" adımlarının env'indedir; `environment` yok. Checkout kimlik bilgisi saklamaz.
+# Betik her gizli değeri (anahtar, proje/dal/uç nokta kimliği, host'lar, sahip rol, parolalar, URL'ler)
+# `::add-mask::` ile maskeler; test çıktısı ayrıca satır satır maskelenir, ham çıktıda gizli değer
+# görülürse koşu kırmızıdır. Yalnızca `.artifacts/t-005d/summary.{json,md}` yüklenir.
+# Üçüncü taraf kodu: action'lar tam commit SHA ile sabit (ci.yml ile aynı sürümler).
+name: neon-spike
+
+on:
+  workflow_dispatch:
+
+# Aynı anda tek koşu (Neon ücretsiz planında dal sınırı); koşan iptal edilmez.
+concurrency:
+  group: neon-spike
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+# .pnpmfile kodu hiçbir adımda yüklenmez (ci.yml ile aynı savunma).
+env:
+  npm_config_ignore_pnpmfile: "true"
+
+jobs:
+  spike:
+    name: spike
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # pnpm sürümü package.json "packageManager" alanından okunur.
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      # Node sürümü package.json "engines.node" alanından. Sır gören işte önbellek kullanılmaz.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: package.json
+          package-manager-cache: false
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      # Rol oluşturma / sürüm / pooler kanıtı psql (libpq ≥16: sslrootcert=system) ile yapılır.
+      - name: Ensure psql
+        run: |
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -q
+            sudo apt-get install -y -q postgresql-client
+          fi
+          psql --version
+      - name: Spike
+        env:
+          NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
+          NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
+        run: pnpm spike:neon
+      # İş iptal/zaman aşımında da artık geçici dal kalmasın (aynı ad; yoksa no-op). Silinemezse kırmızı.
+      - name: Cleanup
+        if: always()
+        env:
+          NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
+          NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
+        run: node scripts/neon-spike.mjs --cleanup
+      # upload-artifact gizli (.ile başlayan) yolları atlar; YALNIZCA iki özet dosyası kopyalanır.
+      - name: Stage summary
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/neon-spike"
+          for f in summary.json summary.md; do
+            if [ -f ".artifacts/t-005d/$f" ]; then cp ".artifacts/t-005d/$f" "$RUNNER_TEMP/neon-spike/"; fi
+          done
+      - name: Upload summary
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: neon-spike-summary
+          path: ${{ runner.temp }}/neon-spike/
+          if-no-files-found: warn
+          retention-days: 30
