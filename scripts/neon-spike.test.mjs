@@ -6,12 +6,15 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   branchNameFor,
   buildSummary,
+  cell,
+  createAppRole,
   createAppRoleSql,
   createLineFilter,
   createNeonApi,
   createRedactor,
   extractConnection,
   gatePassed,
+  isPasswordRejection,
   main,
   maskSecret,
   parseAppRoleCheck,
@@ -266,6 +269,94 @@ describe("SCRAM-SHA-256 (RFC 5802 / RFC 7677)", () => {
   });
 });
 
+describe("createAppRole (SCRAM → reddedilirse bir kez düz parola)", () => {
+  const PW192 = "cd".repeat(24); // sentetik, 192 bit uzunluğunda hex
+  const direct = { host: HOST, user: OWNER, password: PASSWORD, database: "neondb" };
+  /**
+   * @param {Array<{ ok: boolean, sqlstate?: string | null, error?: string | null }>} script
+   */
+  function fakeRun(script) {
+    /** @type {string[]} */
+    const sqls = [];
+    /** @type {(t: any, sql: string) => import("./neon-spike.mjs").PsqlResult} */
+    const run = (_t, sql) => {
+      sqls.push(sql);
+      const next = script[sqls.length - 1];
+      if (next === undefined) throw new Error("beklenmeyen ek psql çağrısı");
+      return { ok: next.ok, stdout: "", sqlstate: next.sqlstate ?? null, error: next.error ?? null };
+    };
+    return { run, sqls };
+  }
+
+  it("SCRAM kabul edilirse tek deneme; düz parola hiç gönderilmez; özet maskelenir", () => {
+    const f = fakeRun([{ ok: true }]);
+    /** @type {string[]} */
+    const masked = [];
+    const r = createAppRole({ direct, password: PW192, redactor: createRedactor(), mask: (v) => masked.push(v), run: f.run });
+    expect(r).toMatchObject({ ok: true, path: "scram" });
+    expect(f.sqls).toHaveLength(1);
+    expect(f.sqls[0]).not.toContain(PW192);
+    expect(f.sqls[0]).toContain("SCRAM-SHA-256$4096:");
+    expect(masked).toHaveLength(1);
+    expect(f.sqls[0]).toContain(masked[0]);
+  });
+
+  it("parola reddi (22023) → bir kez düz parolayla yeniden dener; yol ve iki deneme kaydedilir", () => {
+    const f = fakeRun([{ ok: false, sqlstate: "22023", error: "ERROR:  22023: password is too weak" }, { ok: true }]);
+    const r = createAppRole({ direct, password: PW192, redactor: createRedactor(), mask: () => undefined, run: f.run });
+    expect(r.ok).toBe(true);
+    expect(r.path).toBe("plaintext-retry");
+    expect(r.attempts.map((a) => [a.path, a.ok, a.sqlstate])).toEqual([
+      ["scram", false, "22023"],
+      ["plaintext", true, null],
+    ]);
+    expect(f.sqls[1]).toContain(`PASSWORD '${PW192}'`);
+  });
+
+  it("düz parola da reddedilirse başarısız (üçüncü deneme yok)", () => {
+    const f = fakeRun([
+      { ok: false, sqlstate: "28P01", error: "x" },
+      { ok: false, sqlstate: "28P01", error: "y" },
+    ]);
+    const r = createAppRole({ direct, password: PW192, redactor: createRedactor(), mask: () => undefined, run: f.run });
+    expect(r).toMatchObject({ ok: false, path: "plaintext-retry" });
+    expect(f.sqls).toHaveLength(2);
+  });
+
+  it("başka neden (yetki 42501, çakışan rol 42710, bağlantı hatası) → yeniden deneme yok", () => {
+    for (const fail of [
+      { ok: false, sqlstate: "42501", error: "ERROR:  42501: permission denied to create role" },
+      { ok: false, sqlstate: "42710", error: 'ERROR:  42710: role "wms_app" already exists' },
+      { ok: false, sqlstate: null, error: 'psql: error: connection to server at "<ip>" failed: FATAL:  password authentication failed' },
+    ]) {
+      const f = fakeRun([fail]);
+      const r = createAppRole({ direct, password: PW192, redactor: createRedactor(), mask: () => undefined, run: f.run });
+      expect(r).toMatchObject({ ok: false, path: "scram" });
+      expect(f.sqls).toHaveLength(1);
+    }
+  });
+
+  it("isPasswordRejection: SQLSTATE'siz veya bağlantı hatası asla parola reddi sayılmaz", () => {
+    expect(isPasswordRejection({ ok: false, stdout: "", sqlstate: "22023", error: "x" })).toBe(true);
+    expect(isPasswordRejection({ ok: false, stdout: "", sqlstate: "XX000", error: "ERROR:  XX000: invalid password format" })).toBe(true);
+    expect(isPasswordRejection({ ok: false, stdout: "", sqlstate: null, error: "password" })).toBe(false);
+    expect(isPasswordRejection({ ok: true, stdout: "", sqlstate: null, error: null })).toBe(false);
+  });
+
+  it("isPasswordRejection: LINE bağlamı, DETAIL satırı ve 42xxx sınıfı yeniden denemeyi tetiklemez", () => {
+    const syntax = "ERROR:  42601: syntax error at or near \"x\"\nLINE 1: CREATE ROLE wms_app LOGIN PASSWORD '***' x\n                                                    ^";
+    expect(isPasswordRejection({ ok: false, stdout: "", sqlstate: "42601", error: syntax })).toBe(false);
+    expect(isPasswordRejection({ ok: false, stdout: "", sqlstate: "42501", error: "ERROR:  42501: permission denied to set password" })).toBe(false);
+    const detail = "ERROR:  XX000: internal error\nDETAIL:  password policy service unavailable";
+    expect(isPasswordRejection({ ok: false, stdout: "", sqlstate: "XX000", error: detail })).toBe(false);
+    expect(isPasswordRejection({ ok: false, stdout: "", sqlstate: "28P01", error: "ERROR:  28P01: anything" })).toBe(true);
+  });
+
+  it("192 bitten kısa parola reddedilir", () => {
+    expect(() => createAppRole({ direct, password: "ab".repeat(16), redactor: createRedactor(), mask: () => undefined, run: fakeRun([]).run })).toThrow(/192/);
+  });
+});
+
 describe("psql çıktı ayrıştırıcıları", () => {
   it("SQLSTATE (VERBOSITY verbose)", () => {
     expect(parsePsqlSqlstate("psql:<stdin>:1: ERROR:  42501: permission denied to create role")).toBe("42501");
@@ -459,6 +550,27 @@ describe("buildSummary / renderSummaryMd", () => {
     expect(md).toContain("gözlenemedi");
     expect(md).toContain("çalıştırılmadı");
     expect(md).toContain("YALNIZCA istemci havuzuyla");
+  });
+
+  it("rol oluşturma hatası (SQLSTATE + çok satırlı maskeli mesaj) tabloyu bozmadan özete girer", () => {
+    const s = buildSummary({
+      date: "2026-10-05T00:00:00Z",
+      result: "FAIL",
+      blocked: "Q-06: wms_app sahip rolüyle doğrudan bağlantıda oluşturulamadı (yol scram, SQLSTATE 42501)",
+      appRole: {
+        created: false,
+        path: "scram",
+        attempts: [{ path: "scram", ok: false, sqlstate: "42501", error: "ERROR:  42501: permission denied\nLOCATION:  a|b" }],
+        check: "çalıştırılmadı",
+      },
+    });
+    const md = renderSummaryMd(s);
+    const row = md.split("\n").find((l) => l.startsWith("| Doğrudan bağlantı yöntemi |"));
+    expect(row).toContain("42501");
+    expect(row).toContain("permission denied");
+    expect(row).toContain("a\\|b");
+    expect(md).toContain("BLOCKED: Q-06");
+    expect(cell("x\ny|z")).toBe("x y\\|z");
   });
 
   it("dolu özet: değerler görünür, girdiye karışmış gizli değer redaksiyon sonrası kalmaz", () => {
