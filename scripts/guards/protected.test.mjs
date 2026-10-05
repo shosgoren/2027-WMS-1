@@ -2,7 +2,7 @@
 // GitHub istemcisi (`lib/github.mjs`, sahte `fetch` yalnızca burada), kipler ve fail-closed davranış.
 // Fixture depolar `lib/testkit.mjs` ile geçici dizinde gerçek git ile kurulur. "… saldırısı" adlı
 // testler security-reviewer'ın (int/faz0-bekciler-1) denediği atlatmanın kendisidir (T-008h).
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -1123,6 +1123,79 @@ describe("check:protected", () => {
     expect(stale).toContain("rapordan sonra korunan değişiklik: package.json");
     // Taban yoksa fail-closed.
     expect(securityFreshness(r2.dir, head(r2), "origin/yok")(reviewed2)).toContain("yerelde yok");
+  });
+
+  describe("T-008k güvenlik BLOCKER-1: tazelik ağaç girdisi (mod, blob) karşılaştırmasıdır", () => {
+    const X = "scripts/guards/x.mjs";
+    /** PR korunan dosyayı oluşturur, rapor o commit'e bağlanır; `mutate` rapordan sonraki değişikliktir. */
+    const afterReport = (/** @type {string | Buffer} */ initial, /** @type {(r: ReturnType<typeof fixture>) => void} */ mutate, /** @type {(r: ReturnType<typeof fixture>) => void} */ prep = () => {}) => {
+      const r = fixture();
+      prep(r);
+      r.write(X, /** @type {string} */ (initial)).commit("PR: korunan dosya");
+      const reviewed = head(r);
+      mutate(r);
+      return securityFreshness(r.dir, head(r), "origin/main")(reviewed);
+    };
+
+    it("saldırı: tek satır taşıma (+/- satır kümesi aynı) → bayat", () => {
+      const stale = afterReport("export const a = 1;\nexport const b = 2;\nexport const c = 3;\n", (r) =>
+        r.write(X, "export const b = 2;\nexport const a = 1;\nexport const c = 3;\n").commit("taşı"));
+      expect(stale).toContain(`rapordan sonra korunan değişiklik: ${X}`);
+    });
+
+    it("saldırı: blok taşıma → bayat", () => {
+      const lines = ["// 1", "// 2", "// 3", "// 4", "// 5", "// 6"];
+      const moved = [...lines.slice(3), ...lines.slice(0, 3)];
+      const stale = afterReport(lines.join("\n") + "\n", (r) => r.write(X, moved.join("\n") + "\n").commit("blok taşı"));
+      expect(stale).toContain(X);
+    });
+
+    it("saldırı: NUL baytlı dosya + .gitattributes -diff (metin farkı boş) → bayat", () => {
+      const stale = afterReport(
+        "export const a = 1;\0\nfoo\n",
+        (r) => r.write(X, "export const a = 1;\0\nbar\n").commit("ikili değişiklik"),
+        (r) => r.write(".gitattributes", `${X} -diff\n`).commit("attr"),
+      );
+      expect(stale).toContain(X);
+    });
+
+    it("saldırı: yalnızca kip değişikliği (chmod +x) → bayat", () => {
+      const stale = afterReport("export const a = 1;\n", (r) => {
+        chmodSync(path.join(r.dir, X), 0o755);
+        r.commit("chmod +x");
+      });
+      expect(stale).toContain(X);
+    });
+
+    it("saldırı: korunan dosyayı rapordan sonra silmek → bayat", () => {
+      const stale = afterReport("export const a = 1;\n", (r) => r.remove(X).commit("sil"));
+      expect(stale).toContain(X);
+    });
+
+    it("yanlış pozitif yok: rapordan sonra yalnızca taban birleştirmesi korunan dosyayı getirir → taze", () => {
+      const r = fixture();
+      r.write(X, "export const own = 1;\n").commit("PR");
+      const reviewed = head(r);
+      r.checkout("main").write("scripts/guards/y.mjs", "export const base = 1;\n").commit("taban").publish("main");
+      r.checkout("feat/T-100-x").merge("main", "Merge main");
+      expect(securityFreshness(r.dir, head(r), "origin/main")(reviewed)).toBeNull();
+    });
+
+    it("muhafazakâr: PR ve taban aynı korunan dosyayı değiştirdi (birleşik içerik ikisinden de farklı) → bayat", () => {
+      const r = fixture();
+      r.write(X, "a\nb\nc\nd\ne\nf\ng\n").commit("taban tohumu").publish("main").git("update-ref", "refs/heads/main", "HEAD");
+      r.branch("feat/T-101-y");
+      r.write(X, "A\nb\nc\nd\ne\nf\ng\n").commit("PR");
+      const reviewed = head(r);
+      r.checkout("main").write(X, "a\nb\nc\nd\ne\nf\nG\n").commit("taban").publish("main");
+      r.checkout("feat/T-101-y").merge("main", "Merge main");
+      expect(securityFreshness(r.dir, head(r), "origin/main")(reviewed)).toContain(X);
+    });
+
+    it("yanlış pozitif yok: rapordan sonra korunmayan dosya değişir → taze", () => {
+      const stale = afterReport("export const a = 1;\n", (r) => r.write("docs/STATE.md", "# durum 2\n").commit("belge"));
+      expect(stale).toBeNull();
+    });
   });
 
   it("push: before ≠ HEAD^1 (birden fazla birleştirme) → APPROVAL_UNVERIFIABLE", async () => {

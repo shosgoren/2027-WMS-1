@@ -382,6 +382,31 @@ const TENANT_SETTING_SYNTAX = [
   },
 ];
 
+/**
+ * T-008k güvenlik MINOR-5: `import(pathToFileURL(x).href)` muafiyeti ADA bakar; ad yeniden bağlanırsa
+ * (gölgeleme, başka modülden içe aktarma, yerel işlev/değişken, parametre, desen) muafiyet sahte olur.
+ * cli.mjs'te `pathToFileURL` yalnızca `node:url`'den `import { pathToFileURL }` ile bağlanabilir.
+ */
+const MSG_PATH_TO_FILE_URL_REBIND =
+  "cli.mjs'te `pathToFileURL` adı yalnızca `import { pathToFileURL } from \"node:url\"` ile bağlanabilir; yeniden bağlama/gölgeleme yasak (T-008k).";
+const PATH_TO_FILE_URL = "[name='pathToFileURL']";
+const PATH_TO_FILE_URL_REBINDING = [
+  "ImportDeclaration:not([source.value='node:url']) > :matches(ImportSpecifier, ImportDefaultSpecifier, ImportNamespaceSpecifier)[local.name='pathToFileURL']",
+  "ImportDeclaration > ImportSpecifier[local.name='pathToFileURL']:not([imported.name='pathToFileURL'])",
+  "ImportDeclaration > :matches(ImportDefaultSpecifier, ImportNamespaceSpecifier)[local.name='pathToFileURL']",
+  "VariableDeclarator[id.name='pathToFileURL']",
+  ":matches(ObjectPattern, ArrayPattern) Identifier" + PATH_TO_FILE_URL,
+  "FunctionDeclaration[id.name='pathToFileURL']",
+  "FunctionExpression[id.name='pathToFileURL']",
+  "ClassDeclaration[id.name='pathToFileURL']",
+  "ClassExpression[id.name='pathToFileURL']",
+  ":function > Identifier.params" + PATH_TO_FILE_URL,
+  ":function > AssignmentPattern.params > Identifier.left" + PATH_TO_FILE_URL,
+  ":function > RestElement.params > Identifier.argument" + PATH_TO_FILE_URL,
+  "CatchClause > Identifier.param" + PATH_TO_FILE_URL,
+  "AssignmentExpression[left.name='pathToFileURL']",
+].map((selector) => ({ selector, message: MSG_PATH_TO_FILE_URL_REBIND }));
+
 /** `import(<ifade>)` muafiyetinin tek dosyası (T-015). */
 const GUARD_LOADER_FILE = "scripts/guards/cli.mjs";
 
@@ -446,6 +471,7 @@ export default defineConfig(
         ...RAW_CLIENT_SYNTAX.map((s) => (s === IMPORT_NON_STATIC ? IMPORT_NON_STATIC_EXCEPT_FILE_URL : s)),
         ...CODE_EXEC_SYNTAX,
         ...TENANT_SETTING_SYNTAX,
+        ...PATH_TO_FILE_URL_REBINDING,
       ],
     },
   },

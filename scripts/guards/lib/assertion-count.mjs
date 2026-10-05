@@ -246,17 +246,21 @@ export function classifyAssertion(call, sf) {
   return { constant: false, reason: "" };
 }
 
-/** `constInitializer` özyineleme sınırı (`const a = b; const b = a`). */
-let constDepth = 0;
+/** Döngüsel/çok derin `const` çözümü (`const a = b; const b = a`): çözülemez → assertion sayılmaz. */
+class ConstCycle extends Error {}
+/** Çözümü sürmekte olan ilk değer düğümleri (döngü tespiti) ve derinlik sınırı. */
+/** @type {Set<ts.Expression>} */
+const resolving = new Set();
+const MAX_CONST_DEPTH = 8;
 
 /**
- * Tanımlayıcının en yakın bildirimi tek adlı `const` ise ilk değer ifadesi; aksi halde (let/var,
- * parametre, bildirim yok, desenle bildirim) `null` (T-008k). Kapsam yürüyüşü: yakın kapsamdan dışa.
+ * Tanımlayıcının en yakın bildirimi tek adlı `const` ise ilk değeri ve bildirimin kapsam düğümü;
+ * aksi halde (let/var, parametre, bildirim yok, desenle bildirim) `null` (T-008k). Kapsam yürüyüşü:
+ * yakın kapsamdan dışa.
  * @param {ts.Identifier} id
- * @returns {ts.Expression | null}
+ * @returns {{ init: ts.Expression, scope: ts.Node } | null}
  */
-function constInitializer(id) {
-  if (constDepth > 8) return null;
+function lookupConst(id) {
   /** @type {ts.Node | undefined} */
   let n = id.parent;
   while (n !== undefined) {
@@ -267,7 +271,7 @@ function constInitializer(id) {
           for (const d of st.declarationList.declarations) {
             if (ts.isIdentifier(d.name) && d.name.text === id.text) {
               if (!(st.declarationList.flags & ts.NodeFlags.Const) || d.initializer === undefined) return null;
-              return d.initializer;
+              return { init: d.initializer, scope: n };
             }
             if (!ts.isIdentifier(d.name) && d.name.getText().includes(id.text)) return null;
           }
@@ -280,18 +284,149 @@ function constInitializer(id) {
 }
 
 /**
- * Boş dizi sabiti mi (`[]`, ya da ilk değeri `[]` olan yerel `const`).
+ * Yerel `const` sabitinin ilk değerini `fn` ile çözer; çözülemezse `null`. Döngü/derinlik aşımı
+ * `ConstCycle` fırlatır (`ineffectiveReason` yakalar → muhafazakâr: assertion sayılmaz).
+ * @template T
+ * @param {ts.Identifier} id
+ * @param {(init: ts.Expression, scope: ts.Node) => T} fn
+ * @returns {T | null}
+ */
+function resolveConst(id, fn) {
+  const found = lookupConst(id);
+  if (found === null) return null;
+  if (resolving.has(found.init) || resolving.size >= MAX_CONST_DEPTH) throw new ConstCycle(id.text);
+  resolving.add(found.init);
+  try {
+    return fn(found.init, found.scope);
+  } finally {
+    resolving.delete(found.init);
+  }
+}
+
+/** Sıfır uzunluklu kalan dizi yöntemleri (boş dizide boş dizi döndürür). */
+const EMPTY_PRESERVING = new Set(["slice", "filter", "map", "flat", "flatMap", "reverse", "sort", "toSorted", "toReversed"]);
+/** Yan etkisiz dizi okumaları: `const` boş dizinin bu kullanımları onu değiştirmez. */
+const READ_ONLY_MEMBERS = new Set(["forEach", "map", "filter", "some", "every", "find", "findIndex", "findLast", "findLastIndex", "flatMap", "reduce", "reduceRight", "length", "slice", "concat", "includes", "indexOf", "lastIndexOf", "join", "at", "entries", "keys", "values"]);
+
+/**
+ * Üye adı: `x.name` ya da `x["name"]` (dize sabiti anahtar); aksi `null` (T-008k MINOR-3).
+ * @param {ts.Expression} e
+ * @returns {string | null}
+ */
+function memberName(e) {
+  const x = unwrap(e);
+  if (ts.isPropertyAccessExpression(x)) return x.name.text;
+  if (ts.isElementAccessExpression(x)) {
+    const k = unwrap(x.argumentExpression);
+    if (ts.isStringLiteralLike(k)) return k.text;
+  }
+  return null;
+}
+
+/**
+ * @param {ts.Node} n
+ * @returns {n is ts.PropertyAccessExpression | ts.ElementAccessExpression}
+ */
+function isMemberAccess(n) {
+  return ts.isPropertyAccessExpression(n) || ts.isElementAccessExpression(n);
+}
+
+/**
+ * `name` tanımlayıcısının `scope` içindeki her başvurusu, boş dizi sabitini DEĞİŞTİRMEZ mi (muhafazakâr:
+ * for-of konusu ve salt okunur üyeler dışındaki her başvuru — `push`/`unshift`/`splice`, `length`
+ * ataması, dizin ataması, argüman/atama olarak geçirme, takma ad — değişiklik sayılır; konuma bakılmaz,
+ * çünkü kapsamdaki işlev başka yerden çağrılabilir).
+ * @param {ts.Node} scope
+ * @param {string} name
+ * @returns {boolean}
+ */
+function neverMutated(scope, name) {
+  let ok = true;
+  /** @param {ts.Node} n */
+  const visit = (n) => {
+    if (!ok) return;
+    if (ts.isIdentifier(n) && n.text === name && !(ts.isVariableDeclaration(n.parent) && n.parent.name === n)) {
+      const p = n.parent;
+      let benign = false;
+      if (ts.isForOfStatement(p) && p.expression === n) benign = true;
+      else if (isMemberAccess(p) && unwrap(p.expression) === n) {
+        const m = memberName(p);
+        if (m !== null && READ_ONLY_MEMBERS.has(m)) {
+          benign = true;
+          if (m === "length") {
+            const pp = p.parent;
+            if (pp !== undefined && ts.isBinaryExpression(pp) && pp.left === p && pp.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && pp.operatorToken.kind <= ts.SyntaxKind.LastAssignment) benign = false;
+            if (pp !== undefined && (ts.isPrefixUnaryExpression(pp) || ts.isPostfixUnaryExpression(pp)) && (pp.operator === ts.SyntaxKind.PlusPlusToken || pp.operator === ts.SyntaxKind.MinusMinusToken)) benign = false;
+          }
+        }
+      }
+      if (!benign) ok = false;
+      return;
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(scope);
+  return ok;
+}
+
+/**
+ * Boş dizi veren ifade biçimleri (tanımlayıcı olmayan): `[]`, `Array.from(<boş>)`, `Array.of()`,
+ * `Array()`/`new Array()`, `<boş>.concat(<boş>…)`, `<boş>.slice()/filter()/map()/…`.
+ * @param {ts.Expression} expr
+ * @returns {boolean}
+ */
+function emptyArrayExpr(expr) {
+  const e = unwrap(expr);
+  if (ts.isArrayLiteralExpression(e)) return e.elements.length === 0;
+  if (ts.isNewExpression(e)) {
+    const c = unwrap(e.expression);
+    return ts.isIdentifier(c) && c.text === "Array" && (e.arguments ?? []).length === 0;
+  }
+  if (!ts.isCallExpression(e)) return false;
+  const c = unwrap(e.expression);
+  if (ts.isIdentifier(c)) return c.text === "Array" && e.arguments.length === 0;
+  if (!isMemberAccess(c)) return false;
+  const m = memberName(c);
+  const recv = unwrap(c.expression);
+  if (ts.isIdentifier(recv) && recv.text === "Array") {
+    if (m === "of") return e.arguments.length === 0;
+    if (m === "from") return e.arguments.length === 1 && isEmptyArray(/** @type {ts.Expression} */ (e.arguments[0]));
+    return false;
+  }
+  if (m === "concat") return isEmptyArray(recv) && e.arguments.every((a) => isEmptyArray(a));
+  if (m !== null && EMPTY_PRESERVING.has(m)) return isEmptyArray(recv);
+  return false;
+}
+
+/**
+ * Boş dizi sabiti mi (boş dizi ifadesi, ya da ilk değeri boş dizi olan ve kapsamında hiç
+ * değiştirilmeyen yerel `const`).
  * @param {ts.Expression} expr
  * @returns {boolean}
  */
 function isEmptyArray(expr) {
-  let e = unwrap(expr);
+  const e = unwrap(expr);
   if (ts.isIdentifier(e)) {
-    const init = constInitializer(e);
-    if (init === null) return false;
-    e = unwrap(init);
+    return resolveConst(e, (init, scope) => emptyArrayExpr(init) && neverMutated(scope, e.text)) ?? false;
   }
-  return ts.isArrayLiteralExpression(e) && e.elements.length === 0;
+  return emptyArrayExpr(e);
+}
+
+/**
+ * Sayısal sabit değeri (sayı sabiti, eksi işaretli sabit, yerel `const` sayı); belli değilse `null`.
+ * @param {ts.Expression} expr
+ * @returns {number | null}
+ */
+function numericConst(expr) {
+  const e = unwrap(expr);
+  /** @type {number | null} */
+  let v = null;
+  if (ts.isNumericLiteral(e)) v = Number(e.text);
+  else if (ts.isPrefixUnaryExpression(e) && e.operator === ts.SyntaxKind.MinusToken) {
+    const o = numericConst(e.operand);
+    v = o === null ? null : -o;
+  } else if (ts.isIdentifier(e)) v = resolveConst(e, (init) => numericConst(init));
+  return v === null || Number.isNaN(v) ? null : v;
 }
 
 /**
@@ -305,11 +440,11 @@ function zeroTripFor(f) {
   if (init === undefined || cond === undefined || !ts.isVariableDeclarationList(init) || init.declarations.length !== 1) return false;
   const d = /** @type {ts.VariableDeclaration} */ (init.declarations[0]);
   if (!ts.isIdentifier(d.name) || d.initializer === undefined || !ts.isBinaryExpression(cond)) return false;
-  const a = unwrap(d.initializer);
   const l = unwrap(cond.left);
-  const r = unwrap(cond.right);
-  if (!ts.isNumericLiteral(a) || !ts.isIdentifier(l) || l.text !== d.name.text || !ts.isNumericLiteral(r)) return false;
-  const [x, y] = [Number(a.text), Number(r.text)];
+  if (!ts.isIdentifier(l) || l.text !== d.name.text) return false;
+  const x = numericConst(d.initializer);
+  const y = numericConst(cond.right);
+  if (x === null || y === null) return false;
   switch (cond.operatorToken.kind) {
     case ts.SyntaxKind.LessThanToken:
       return !(x < y);
@@ -345,35 +480,64 @@ function isFunctionValue(n) {
 function calleeName(call) {
   const c = unwrap(call.expression);
   if (ts.isIdentifier(c)) return c.text;
-  if (ts.isPropertyAccessExpression(c)) return c.name.text;
-  return null;
+  return memberName(c);
 }
 
-/** @type {WeakMap<ts.SourceFile, Map<string, number>>} */
-const identifierCounts = new WeakMap();
+/** @type {WeakMap<ts.SourceFile, Map<string, ts.Identifier[]>>} */
+const identifiersByName = new WeakMap();
 
 /**
- * Dosyada bu adın geçtiği tanımlayıcı sayısı (bildirimin kendisi dahil; üye adları da sayılır → kullanım
- * varsayımı lehine yanılır, yani etkisiz saymak için kanıt aranır).
+ * Dosyada bu adı taşıyan tanımlayıcı düğümleri (üye adları dahil).
  * @param {ts.Node} node
  * @param {string} name
- * @returns {number}
+ * @returns {ts.Identifier[]}
  */
-function identifierCount(node, name) {
+function identifiersNamed(node, name) {
   const sf = node.getSourceFile();
-  let counts = identifierCounts.get(sf);
-  if (counts === undefined) {
+  let byName = identifiersByName.get(sf);
+  if (byName === undefined) {
+    /** @type {Map<string, ts.Identifier[]>} */
     const m = new Map();
     /** @param {ts.Node} n */
     const visit = (n) => {
-      if (ts.isIdentifier(n)) m.set(n.text, (m.get(n.text) ?? 0) + 1);
+      if (ts.isIdentifier(n)) m.set(n.text, [...(m.get(n.text) ?? []), n]);
       ts.forEachChild(n, visit);
     };
     visit(sf);
-    counts = m;
-    identifierCounts.set(sf, counts);
+    byName = m;
+    identifiersByName.set(sf, byName);
   }
-  return counts.get(name) ?? 0;
+  return byName.get(name) ?? [];
+}
+
+/**
+ * Tanımlayıcı bir işlevin KULLANIMI mı: yalnızca çağrı ifadesinin çağrılanı (`f()`, `new f()`,
+ * `f.call/apply/bind(...)`) ya da bir çağrının argümanı (`it("x", f)`). `void f;`, `const g = f;`,
+ * `[f]` gibi geçişler kullanım sayılmaz (T-008k MINOR-2; muhafazakâr: işlev etkisiz sayılır).
+ * @param {ts.Identifier} id
+ * @returns {boolean}
+ */
+function isFunctionUse(id) {
+  /** @type {ts.Node} */
+  let n = id;
+  let p = id.parent;
+  while (p !== undefined && (ts.isParenthesizedExpression(p) || ts.isAsExpression(p) || ts.isNonNullExpression(p) || ts.isSatisfiesExpression(p))) {
+    n = p;
+    p = p.parent;
+  }
+  if (p === undefined) return false;
+  if (ts.isCallExpression(p) || ts.isNewExpression(p)) return p.expression === n || /** @type {readonly ts.Node[]} */ (p.arguments ?? []).includes(n);
+  if (ts.isPropertyAccessExpression(p) && p.expression === n && /^(?:call|apply|bind)$/.test(p.name.text)) return ts.isCallExpression(p.parent) && p.parent.expression === p;
+  return false;
+}
+
+/**
+ * Bildirilen işlev dosyada çağrılıyor/argüman olarak geçiriliyor mu.
+ * @param {ts.Identifier} nameNode bildirimdeki ad düğümü
+ * @returns {boolean}
+ */
+function functionUsed(nameNode) {
+  return identifiersNamed(nameNode, nameNode.text).some((id) => id !== nameNode && isFunctionUse(id));
 }
 
 /**
@@ -398,7 +562,7 @@ function chainAwaited(thenCall) {
     if (p === undefined) return false;
     if (ts.isParenthesizedExpression(p) || ts.isAsExpression(p) || ts.isNonNullExpression(p) || ts.isSatisfiesExpression(p)) {
       n = p;
-    } else if (ts.isPropertyAccessExpression(p) && p.expression === n && ts.isCallExpression(p.parent) && /^(?:then|catch|finally)$/.test(p.name.text)) {
+    } else if (isMemberAccess(p) && p.expression === n && ts.isCallExpression(p.parent) && /^(?:then|catch|finally)$/.test(memberName(p) ?? "")) {
       n = p.parent;
     } else if (ts.isArrayLiteralExpression(p) && ts.isCallExpression(p.parent) && /^(?:all|allSettled|race|any)$/.test(calleeName(p.parent) ?? "")) {
       n = p.parent;
@@ -420,9 +584,10 @@ function stepReason(child, p) {
     const callee = unwrap(p.expression);
     const name = calleeName(p);
     if (name !== null && TIMER_CALLS.has(name)) return "zamanlayıcı geri çağrısı (test bitince koşar; doğrulanmaz)";
-    if (ts.isPropertyAccessExpression(callee)) {
-      if (ITERATOR_METHODS.has(callee.name.text) && isEmptyArray(callee.expression)) return "erişilemeyen kod (boş dizi yineleyicisi)";
-      if (/^(?:then|catch|finally)$/.test(callee.name.text) && !chainAwaited(p)) return "await edilmemiş then/catch/finally geri çağrısı";
+    if (isMemberAccess(callee)) {
+      const m = memberName(callee) ?? "";
+      if (ITERATOR_METHODS.has(m) && isEmptyArray(callee.expression)) return "erişilemeyen kod (boş dizi yineleyicisi)";
+      if (/^(?:then|catch|finally)$/.test(m) && !chainAwaited(p)) return "await edilmemiş then/catch/finally geri çağrısı";
     }
   }
   if (ts.isTryStatement(p) && (child === p.tryBlock || child === p.catchClause) && p.finallyBlock !== undefined && returnsInFinally(p.finallyBlock)) {
@@ -438,13 +603,13 @@ function stepReason(child, p) {
       q = q.parent;
     }
     if (ts.isFunctionDeclaration(child)) {
-      if (child.name !== undefined && !isExported(child) && identifierCount(child, child.name.text) === 1) return "çağrılmayan iç işlev";
+      if (child.name !== undefined && !isExported(child) && !functionUsed(child.name)) return "çağrılmayan iç işlev";
     } else if (q !== undefined && ts.isExpressionStatement(q)) {
       return "çağrılmayan iç işlev (ifade deyimi)";
     } else if (q !== undefined && ts.isVariableDeclaration(q) && q.initializer === outer && ts.isIdentifier(q.name)) {
       const stmt = q.parent?.parent;
       const exported = stmt !== undefined && ts.isVariableStatement(stmt) && isExported(stmt);
-      if (!exported && identifierCount(q, q.name.text) === 1) return "çağrılmayan iç işlev";
+      if (!exported && !functionUsed(q.name)) return "çağrılmayan iç işlev";
     }
   }
   return null;
@@ -475,7 +640,7 @@ function returnsInFinally(block) {
  * @param {ts.Expression} expr
  * @returns {boolean | null}
  */
-export function constantTruthiness(expr) {
+function truthiness(expr) {
   const e = unwrap(expr);
   switch (e.kind) {
     case ts.SyntaxKind.TrueKeyword:
@@ -492,16 +657,28 @@ export function constantTruthiness(expr) {
   if (ts.isIdentifier(e)) {
     if (e.text === "undefined" || e.text === "NaN") return false;
     // T-008k: `const f = false; if (f)` — yerel `const` sabiti (en yakın bildirim; yeniden atanamaz).
-    const init = constInitializer(e);
-    return init === null ? null : constantTruthiness(init);
+    return resolveConst(e, (init) => truthiness(init));
   }
   if (ts.isVoidExpression(e)) return false;
   if (ts.isPrefixUnaryExpression(e) && e.operator === ts.SyntaxKind.ExclamationToken) {
-    const v = constantTruthiness(e.operand);
+    const v = truthiness(e.operand);
     return v === null ? null : !v;
   }
   if (ts.isArrayLiteralExpression(e) || ts.isObjectLiteralExpression(e) || ts.isArrowFunction(e) || ts.isFunctionExpression(e)) return true;
   return null;
+}
+
+/**
+ * @param {ts.Expression} expr
+ * @returns {boolean | null} döngüsel/çok derin `const` çözümünde `null`
+ */
+export function constantTruthiness(expr) {
+  try {
+    return truthiness(expr);
+  } catch (e) {
+    if (e instanceof ConstCycle) return null;
+    throw e;
+  }
 }
 
 /**
@@ -554,6 +731,19 @@ function awaitedOrReturned(node) {
  * @returns {string | null}
  */
 export function ineffectiveReason(call) {
+  try {
+    return ineffectiveReasonInner(call);
+  } catch (e) {
+    if (e instanceof ConstCycle) return `çözülemeyen döngüsel/çok derin const tanımı (${e.message})`;
+    throw e;
+  }
+}
+
+/**
+ * @param {ts.CallExpression} call
+ * @returns {string | null}
+ */
+function ineffectiveReasonInner(call) {
   if (isAsyncMatcher(call) && !awaitedOrReturned(call)) return "await edilmemiş .resolves/.rejects/expect.poll";
   /** @type {ts.Node} */
   let child = call;
@@ -562,17 +752,17 @@ export function ineffectiveReason(call) {
     const extra = stepReason(child, p);
     if (extra !== null) return extra;
     if (ts.isIfStatement(p) && child !== p.expression) {
-      const v = constantTruthiness(p.expression);
+      const v = truthiness(p.expression);
       if ((v === false && child === p.thenStatement) || (v === true && child === p.elseStatement)) return "erişilemeyen kod (sabit koşullu dal)";
     } else if ((ts.isWhileStatement(p) || ts.isForStatement(p)) && child === p.statement) {
       const cond = ts.isWhileStatement(p) ? p.expression : p.condition;
-      if (cond !== undefined && constantTruthiness(cond) === false) return "erişilemeyen kod (sabit yanlış döngü koşulu)";
+      if (cond !== undefined && truthiness(cond) === false) return "erişilemeyen kod (sabit yanlış döngü koşulu)";
     } else if (ts.isConditionalExpression(p) && child !== p.condition) {
-      const v = constantTruthiness(p.condition);
+      const v = truthiness(p.condition);
       if ((v === false && child === p.whenTrue) || (v === true && child === p.whenFalse)) return "erişilemeyen kod (sabit koşullu ifade)";
     } else if (ts.isBinaryExpression(p) && child === p.right) {
       const op = p.operatorToken.kind;
-      const v = constantTruthiness(p.left);
+      const v = truthiness(p.left);
       if ((op === ts.SyntaxKind.AmpersandAmpersandToken && v === false) || ((op === ts.SyntaxKind.BarBarToken || op === ts.SyntaxKind.QuestionQuestionToken) && v === true)) {
         return "erişilemeyen kod (kısa devre)";
       }

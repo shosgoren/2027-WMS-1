@@ -240,9 +240,11 @@ export function summaryMismatch(outcomes, summary) {
 export function spawnIsolated(bin, args, opts) {
   // `detached` (setsid) spawnSync'te de uygulanır; @types/node yalnızca SpawnOptions'ta tanımlar.
   /** @type {import("node:child_process").SpawnSyncOptionsWithStringEncoding & { detached: boolean }} */
-  // `stdio` (T-008k): stdin kapalı; stdout/stderr BU süreçte boru olarak alınır. Vitest işçileri ve
-  // onların torunları boruyu doğrudan devralmaz (vitest işçi çıktısını kendi stdout'una yeniden
-  // basar); yine de boruya sahte satır yazılırsa `reportMismatch` tek-özet-satırı şartıyla yakalar.
+  // `stdio` (T-008k): stdin kapalı; stdout/stderr BU süreçte boru olarak alınır. Alt süreçler (ve
+  // torunları) boruyu DEVRALABİLİR ve ona sahte satır yazabilir; bu engellenmez. Savunma
+  // `reportMismatch`in "stdout'ta tam olarak bir `Tests` özet satırı" şartıdır: ikinci (sahte) satır
+  // ya da eksik satır REPORT_MISMATCH verir. Süreç grubu sonlandırması (aşağıda) yalnızca artık
+  // süreçleri temizler, çıktı bütünlüğünü sağlamaz.
   const options = { cwd: opts.cwd, env: opts.env, encoding: "utf8", maxBuffer: 256 * 1024 * 1024, detached: true, stdio: ["ignore", "pipe", "pipe"] };
   const r = spawnSync(bin, args, options);
   if (typeof r.pid === "number" && r.pid > 0) {

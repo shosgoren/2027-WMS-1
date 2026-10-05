@@ -159,30 +159,33 @@ function protectedBetween(root, from, to) {
 }
 
 /**
- * `mb..to` farkının, yalnızca `path` için, konumdan bağımsız `+`/`-` satırları (dizin karması ve
- * `@@` satır numaraları atılır: tabanı birleştirmek bu satırları değiştirmez).
+ * `rev` ağacındaki `file` girdisi: `"<mod> <blob id>"`; yol yoksa `""` (silinme/yeni dosya = girdi
+ * yokluğu). Metin farkına bakmaz: satır/blok taşıma, ikili dosya, `.gitattributes -diff`, kip
+ * değişikliği (chmod +x) hepsi (mod, blob) çiftinde görünür (T-008k güvenlik MINOR/BLOCKER-1).
  * @param {string} root
- * @param {string} mb
- * @param {string} to
+ * @param {string} rev
  * @param {string} file
  * @returns {string}
  */
-function ownPatch(root, mb, to, file) {
-  const out = git(root, ["diff", "--no-renames", "--no-ext-diff", "--no-textconv", "--no-color", "-U0", "--no-relative", mb, to, "--", file]);
-  return out
-    .split("\n")
-    .filter((l) => (l.startsWith("+") || l.startsWith("-")) && !l.startsWith("+++") && !l.startsWith("---"))
-    .join("\n");
+function treeEntry(root, rev, file) {
+  const out = git(root, ["ls-tree", "-z", rev, "--", file]);
+  for (const rec of out.split("\0")) {
+    const tab = rec.indexOf("\t");
+    if (tab < 0 || rec.slice(tab + 1) !== file) continue;
+    const [mode, type, id] = rec.slice(0, tab).split(" ");
+    return `${mode} ${type} ${id}`;
+  }
+  return "";
 }
 
 /**
  * Güvenlik raporu SHA'sının tazelik denetimi (T-008i MINOR 8; T-008k madde 8). `null` = taze.
- * `target` verilirse (PR tabanı: `origin/<base>` veya push'ta `HEAD^1`) "rapordan sonra korunan
- * değişiklik" PR'ın KENDİ korunan değişiklik kümesine göre hesaplanır: her iki uç için
- * `merge-base(target, uç)..uç` korunan değişiklikleri ve bunların `+`/`-` satırları karşılaştırılır.
- * Tabanı sonradan birleştirmek PR'ın kendi kümesini değiştirmez (taban tarafı değişiklikler
- * merge-base ilerleyince düşer) → rapor bayatlamaz; PR'ın korunan dosyalarına sonradan dokunmak veya
- * tabandan başka bir daldan korunan değişiklik getirmek kümeyi değiştirir → bayat. `target`
+ * `target` verilirse (PR tabanı: `origin/<base>` veya push'ta `HEAD^1`) karar metin farkıyla değil
+ * AĞAÇ GİRDİSİ karşılaştırmasıyla verilir. Aday yollar: PR'ın korunan değişiklikleri
+ * (`merge-base(target, uç)..uç`, iki uç için) ∪ `sha..head` arasında değişen korunan yollar. Her yol
+ * p için (mod, blob) çifti: head[p] == rapor[p] → taze; değilse head[p] == taban[p] (tabanın o
+ * yoldaki girdisi birebir alınmış; yalnızca taban birleştirmesi) → taze; aksi STALE. Hem PR hem
+ * taban aynı dosyayı değiştirdiyse sonuç ikisinden de farklıdır → STALE (muhafazakâr). `target`
  * verilmezse eski davranış (`sha..head` doğrudan fark).
  * @param {string} root
  * @param {string} head PR head SHA'sı
@@ -211,7 +214,11 @@ export function securityFreshness(root, head, target) {
       const mbHead = git(root, ["merge-base", target, head]).trim();
       const ownAtSha = protectedBetween(root, mbSha, sha).map((h) => h.path);
       const ownAtHead = protectedBetween(root, mbHead, head).map((h) => h.path);
-      const changed = [...new Set([...ownAtSha, ...ownAtHead])].filter((f) => ownPatch(root, mbSha, sha, f) !== ownPatch(root, mbHead, head, f));
+      const between = protectedBetween(root, sha, head).map((h) => h.path);
+      const changed = [...new Set([...ownAtSha, ...ownAtHead, ...between])].filter((f) => {
+        const h = treeEntry(root, head, f);
+        return h !== treeEntry(root, sha, f) && h !== treeEntry(root, target, f);
+      });
       if (changed.length > 0) return `rapordan sonra korunan değişiklik: ${changed.join(", ")}`;
       return null;
     } catch (e) {

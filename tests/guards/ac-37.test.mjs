@@ -390,6 +390,21 @@ const INEFFECTIVE = [
   ["çağrılmayan iç işlev bildirimi", `function inner() {\n  ${ASSERT}\n}`],
   ["çağrılmayan iç ok işlevi", `const inner = () => {\n  ${ASSERT}\n};`],
   ["ifade deyimi işlev", `(() => {\n  ${ASSERT}\n});`],
+  // T-008k güvenlik incelemesi MINOR 1-4.
+  ["döngüsel const tanımı (RangeError yok, sayılmaz)", `if (a) {\n  ${ASSERT}\n}`, "const a = b;\nconst b = a;"],
+  ["kendine başvuran const koşulu", `if (a) {\n  ${ASSERT}\n}`, "const a = a;"],
+  ["işlev yalnızca `void` ile geçirilmiş (bildirim)", `function inner() {\n  ${ASSERT}\n}\nvoid inner;`],
+  ["işlev yalnızca takma adla geçirilmiş (ok işlevi)", `const inner = () => {\n  ${ASSERT}\n};\nconst alias = inner;\nvoid alias;`],
+  ["const sayaç sınırı sıfır", `const n = 0;\nfor (let i = 0; i < n; i++) {\n  ${ASSERT}\n}`],
+  ["const başlangıç ve sınır", `const s = 5;\nconst n = 3;\nfor (let i = s; i < n; i++) {\n  ${ASSERT}\n}`],
+  ["for-of Array.from([])", `for (const x of Array.from([])) {\n  ${ASSERT}\n  void x;\n}`],
+  ["boş dizi concat() forEach", `[].concat().forEach(() => {\n  ${ASSERT}\n});`],
+  ["Array.from([]) const forEach", `const xs = Array.from([]);\nxs.forEach(() => {\n  ${ASSERT}\n});`],
+  ["new Array() for-of", `for (const x of new Array()) {\n  ${ASSERT}\n  void x;\n}`],
+  ["hesaplanmış üye globalThis[\"setTimeout\"]", `globalThis["setTimeout"](() => {\n  ${ASSERT}\n}, 10);`],
+  ["hesaplanmış üye boş dizi [\"forEach\"]", `[]["forEach"](() => {\n  ${ASSERT}\n});`],
+  ["hesaplanmış üye await'siz [\"then\"]", `Promise.resolve()["then"](() => {\n  ${ASSERT}\n});`],
+  ["const boş dizi yalnızca okunuyor", `const xs = [];\nvoid xs.length;\nfor (const x of xs) {\n  ${ASSERT}\n  void x;\n}`],
 ];
 
 /** @type {Array<[string, string, string?]>} */
@@ -409,6 +424,21 @@ const EFFECTIVE = [
   ["çağrılan iç işlev bildirimi", `function inner() {\n  ${ASSERT}\n}\ninner();`],
   ["çağrılan iç ok işlevi", `const inner = () => {\n  ${ASSERT}\n};\ninner();`],
   ["çağrılan IIFE", `(() => {\n  ${ASSERT}\n})();`],
+  // T-008k güvenlik incelemesi MINOR 1-4.
+  ["işlev argüman olarak geçirilmiş", `function inner() {\n  ${ASSERT}\n}\n[1].forEach(inner);`],
+  ["işlev .call ile çağrılmış", `const inner = () => {\n  ${ASSERT}\n};\ninner.call(null);`],
+  ["const sayaç sınırı 2", `const n = 2;\nfor (let i = 0; i < n; i++) {\n  ${ASSERT}\n}`],
+  ["let sayaç sınırı yeniden atanır", `let n = 0;\nn = 2;\nfor (let i = 0; i < n; i++) {\n  ${ASSERT}\n}`],
+  ["const dizi push sonrası for-of", `const xs = [];\nxs.push(1);\nfor (const x of xs) {\n  ${ASSERT}\n  void x;\n}`],
+  ["const dizi unshift sonrası forEach", `const xs = [];\nxs.unshift(1);\nxs.forEach(() => {\n  ${ASSERT}\n});`],
+  ["const dizi splice sonrası for-of", `const xs = [];\nxs.splice(0, 0, 1);\nfor (const x of xs) {\n  ${ASSERT}\n  void x;\n}`],
+  ["const dizi length ataması sonrası for-of", `const xs = [];\nxs.length = 2;\nfor (const x of xs) {\n  ${ASSERT}\n  void x;\n}`],
+  ["const dizi dizin ataması sonrası for-of", `const xs = [];\nxs[0] = 1;\nfor (const x of xs) {\n  ${ASSERT}\n  void x;\n}`],
+  ["const dizi argüman olarak geçirilip doldurulur", `const xs = [];\nfill(xs);\nfor (const x of xs) {\n  ${ASSERT}\n  void x;\n}`, "function fill(a) {\n  a.push(1);\n}"],
+  ["const dizi takma adla doldurulur", `const xs = [];\nconst ys = xs;\nys.push(1);\nfor (const x of xs) {\n  ${ASSERT}\n  void x;\n}`],
+  ["Array.from([1]) for-of", `for (const x of Array.from([1])) {\n  ${ASSERT}\n  void x;\n}`],
+  ["boş dizi concat([1]) forEach", `[].concat([1]).forEach(() => {\n  ${ASSERT}\n});`],
+  ["hesaplanmış üye zamanlayıcıyı bekleyip sonra assertion", `await new Promise((resolve) => globalThis["setTimeout"](resolve, 1));\n${ASSERT}`],
 ];
 
 describe("assertion-count etkisiz assertion biçimleri (T-008k madde 7)", () => {

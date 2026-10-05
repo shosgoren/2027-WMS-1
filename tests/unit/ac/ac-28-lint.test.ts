@@ -330,6 +330,49 @@ describe("AC-28 lint (T-015): yanlış pozitif ve bekçi yükleyicisi muafiyeti"
     60_000,
   );
 
+  // T-008k güvenlik MINOR-5: `pathToFileURL` adı cli.mjs'te yeniden bağlanamaz (muafiyet ada bakar).
+  const FAKE_URL = "(s: string) => ({ href: s })";
+  it.each([
+    [
+      "parametre gölgelemesi",
+      `export async function load(pathToFileURL: ${FAKE_URL}, x: string): Promise<unknown> {\n  return import(pathToFileURL(x).href);\n}\n`,
+    ],
+    [
+      "varsayılanlı parametre",
+      `export async function load(x: string, pathToFileURL: ${FAKE_URL} = (s) => ({ href: s })): Promise<unknown> {\n  return import(pathToFileURL(x).href);\n}\n`,
+    ],
+    ["yerel const", `export async function load(x: string): Promise<unknown> {\n  const pathToFileURL = ${FAKE_URL};\n  return import(pathToFileURL(x).href);\n}\n`],
+    [
+      "desenle bağlama",
+      `export async function load(x: string, o: { f: ${FAKE_URL} }): Promise<unknown> {\n  const { f: pathToFileURL } = o;\n  return import(pathToFileURL(x).href);\n}\n`,
+    ],
+    [
+      "yerel işlev bildirimi",
+      "export async function load(x: string): Promise<unknown> {\n  function pathToFileURL(s: string) {\n    return { href: s };\n  }\n  return import(pathToFileURL(x).href);\n}\n",
+    ],
+    [
+      "başka modülden içe aktarma",
+      'import { pathToFileURL } from "./evil.mjs";\n\nexport async function load(x: string): Promise<unknown> {\n  return import(pathToFileURL(x).href);\n}\n',
+    ],
+    [
+      "node:url'den başka adla içe aktarma",
+      'import { fileURLToPath as pathToFileURL } from "node:url";\n\nexport async function load(x: string): Promise<unknown> {\n  return import(pathToFileURL(x).href);\n}\n',
+    ],
+    [
+      "catch parametresi",
+      `export async function load(x: string): Promise<unknown> {\n  try {\n    return await import("node:url");\n  } catch (pathToFileURL) {\n    return import((pathToFileURL as { href: string }).href + x);\n  }\n}\n`,
+    ],
+  ])(
+    "@AC-28 T-008k scripts/guards/cli.mjs: pathToFileURL yeniden bağlama (%s) → error",
+    async (_name, code) => {
+      const result = await lint(code, GUARD_LOADER_PATH);
+      const hits = result.messages.filter((m) => m.ruleId === SYNTAX_RULE_ID && m.message.includes("yeniden bağlama/gölgeleme"));
+      expect(hits.length).toBeGreaterThanOrEqual(1);
+      expect(hits[0]?.severity).toBe(2);
+    },
+    60_000,
+  );
+
   it.each([
     ['import("@wms/db/internal")', 'export async function leak(): Promise<unknown> {\n  return import("@wms/db/internal");\n}\n', SYNTAX_RULE_ID],
     ["require(değişken)", "declare const require: (id: string) => unknown;\n\nexport const f = (n: string) => require(n);\n", SYNTAX_RULE_ID],

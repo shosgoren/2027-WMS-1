@@ -1,7 +1,7 @@
 {
   "acTests": {
     "AC-05": 2,
-    "AC-28": 24,
+    "AC-28": 25,
     "AC-37": 14,
     "AC-43": 12,
     "AC-44": 11
@@ -12,6 +12,6 @@
     "tests/guards/ac-44.test.mjs": 42,
     "tests/integration/ac/ac-05-pooler-isolation.int.test.ts": 15,
     "tests/integration/ac/ac-28-runtime.int.test.ts": 16,
-    "tests/unit/ac/ac-28-lint.test.ts": 54
+    "tests/unit/ac/ac-28-lint.test.ts": 56
   }
 }
