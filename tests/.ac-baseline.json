@@ -1,0 +1,8 @@
+{
+  "acTests": {
+    "AC-43": 12
+  },
+  "acFileAssertions": {
+    "tests/guards/ac-43.test.mjs": 37
+  }
+}
