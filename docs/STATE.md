@@ -2,9 +2,9 @@
 
 **Oturum kilidi:** session_01C59FRaUynaDdhNGZoRbKsY · 2026-10-05T16:30Z (zamanlanmış oturum: kilit 3 saatten yeniyse ve başka oturumunsa hiçbir şey yapmadan çık; değilse kendi kimliğinle yenile, her push'ta zamanı güncelle)
 **Faz:** 0 — Kararlar & iskelet
-**Aktif görev:** `int/faz0-pooler` (T-005a #5, T-005b #6, T-005c #7) paket security-reviewer'da ∥ T-008i (../wt-T-008i → `int/faz0-bekciler-1`). STATE'in güncel kopyası: `int/faz0-bekciler-1`.
-**Son tamamlanan:** #4 `int/faz0-ci` → `main` (CI dört iş yeşil). `int/faz0-bekciler-1` (T-007, T-008a/b/c) security-reviewer: BLOCKER 2 · MAJOR 7 · MINOR 9 → T-008h
-**Sonraki adım:** T-008h → security-reviewer yeniden → bekciler-1 PR (`APPROVED-BY ... @ <head SHA>`). T-005a → T-005b → T-005c. Sonra T-008d/e/f/g (bekçiler taban daldan koşar) ve T-005d (Neon).
+**Aktif görev:** T-008d ∥ T-008f (→ `int/faz0-bekciler-2`) ∥ T-005g lint sertleştirme (→ `int/faz0-pooler`). STATE'in güncel kopyası: `int/faz0-bekciler-2`.
+**Son tamamlanan:** #8 `int/faz0-bekciler-1` → `main` (T-007, T-008a/b/c/h/i, T-014; security-reviewer 3. tur BLOCKER 0 · MAJOR 0 · MINOR 5)
+**Sonraki adım:** T-008d → T-008e; T-008f; sonra T-008g (bekçiler taban daldan, `--root`, test-ac `$RUNNER_TEMP`, çalışma anı skip denetimi) → bekciler-2 PR. T-005g → pooler paketi yeniden inceleme → PR. Sonra T-005d (Neon, Actions) ve T-010 (Fly; FLY_API_TOKEN bekleniyor).
 
 ## Çalışma biçimi (kullanıcı kararı 2026-10-05 — ADR-012 rev., PROTOCOL §Onay kaynağı)
 - Kullanıcı PR incelemez. Birleştirme kapısı: CI/oturumda `pnpm verify` + `check:all` + `test:int` + ilgili `test:ac` yeşil; risk matrisine göre `security-reviewer` ve `qa-verifier` BLOCKER: 0 → Supervisor PR'ı kendisi birleştirir (`mcp__github__merge_pull_request`). Korunan değişiklikte PR açıklamasında `APPROVED-BY: supervisor (ADR-012 rev.)`.
@@ -26,7 +26,7 @@ ADR-001 Next.js + ayrı worker · 002 İngilizce kod/DB, Türkçe UI · 003 Driz
 - [~] T-005a ✓ (#5) · T-005b ✓ (#6, postgres.js 3.4.9 + drizzle 0.45.3, prepare:false A-öneri) · T-005c ✓ (#7, AC-05 pool1/2 + AC-28 PASS) → paket incelemesi → `main`. Takipler: T-005e CI'da pool 1 koşusu; `@wms/db/internal` `sql` dışa verimi; DrizzleQueryError parametreleri loga (G-09) → gözlem kartı; DB_CLIENT_SETTINGS composition root (Faz 1); tests/**/*.ts typecheck kapsamı + STACK testcontainers/pg kilidi → T-004b; T-005c kartı mutasyonu `WITH CHECK (true)`
 - [ ] T-005d Neon gerçek pooler koşusu (GitHub Actions; sırlar: `NEON_API_KEY`, değişken `NEON_PROJECT_ID`) → T-005e CI eşdeğerliği → `int/faz0-neon`
 - [x] T-006 PILOT.md — varsayımsal profil (Q-12)
-- [~] T-007 ✓ · T-008a ✓ · T-008b ✓ · T-008c ✓ (int/faz0-bekciler-1) → T-008h sertleştirme → paket PR. Bilinen risk m9: int dalında kapsam, birleştirme commit konusu + Supervisor kart düzenlemesiyle genişletilebilir (Supervisor güvenilen taraf)
+- [x] T-007, T-008a/b/c/h/i, T-014 (#8). Bilinen risk: int kapsam sahtelemesi (m9), PR gövdesinde gizli HTML
 - [ ] Takip: lockfile bütünlüğü (T-003 MINOR) → T-008i
 - [ ] T-008d/e/f/g bekçiler → `int/faz0-bekciler-2`
 - [~] T-009a — kimlik/CODEOWNERS kısmı iptal (ADR-012 rev.); kalan: kullanıcı isterse `main` branch protection · T-009b AC-43/44'ün yeni tanımına göre
