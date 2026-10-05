@@ -17,8 +17,9 @@ on:
     branches:
       - main
       - "int/**"
-      # Birleştirilmeyecek negatif kanıt dalları (T-003 kabul ölçütü). PR'a dönüşmedikleri için
-      # pull_request tetiklemez; workflow_dispatch ise iş akışının varsayılan dalda olmasını ister.
+      # Birleştirilmeyecek negatif kanıt dalları (T-003 kabul ölçütü; Supervisor 2026-10-05 kalmasını
+      # onayladı). PR'a dönüşmedikleri için pull_request tetiklemez; workflow_dispatch ise iş akışının
+      # varsayılan dalda olmasını ister. Bekçi/CI değişikliklerinin kırmızı kanıtı da buradan alınır.
       - "ci-probe/**"
 
 concurrency:
@@ -133,8 +134,53 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       # Eşik (A-öneri, T-003): high ve critical → kırmızı. Tüm çalışma alanı, prod + dev bağımlılıkları.
+      #
+      # Audit istisnası A-36 (Supervisor kararı 2026-10-05) — BİTİŞ 2026-10-19 (dahil):
+      #   GHSA-vfj7-8cjw-p6xm / CVE-2026-93687 (braces <=3.0.3, high, yamalı sürüm yok).
+      #   Yalnızca dev zinciri: apps/web devDependency @next/eslint-plugin-next → fast-glob →
+      #   micromatch → braces; prod paketine girmez. Yalnızca bu tek advisory yoksayılır;
+      #   eşik değişmez, --prod / --ignore-unfixable kullanılmaz.
+      #   Bitiş geçince "A-36 expiry" adımı deps'i kırmızıya çevirir: istisna yenilenir
+      #   (yeni Supervisor kararı, korunan değişiklik) ya da kaldırılır.
+      - name: Audit exception A-36 expiry
+        run: |
+          expires=2026-10-19
+          today=$(date -u +%F)
+          if [[ "$today" > "$expires" ]]; then
+            echo "::error::audit exception A-36 expired (bitiş $expires, bugün $today) — GHSA-vfj7-8cjw-p6xm"
+            exit 1
+          fi
+          echo "audit exception A-36 geçerli (bitiş $expires, bugün $today)"
+      # İstisna hâlâ gerekli mi? Advisory artık raporlanmıyorsa uyarı (istisna kaldırılmalı).
+      - name: Audit exception A-36 still needed?
+        run: |
+          set +e
+          pnpm audit --json > "$RUNNER_TEMP/audit.json"
+          set -e
+          node --input-type=module - "$RUNNER_TEMP/audit.json" <<'EOF'
+          import { readFileSync } from "node:fs";
+          const report = JSON.parse(readFileSync(process.argv[2], "utf8"));
+          if (report.advisories === undefined) {
+            console.error("audit raporu okunamadı (advisories alanı yok)");
+            process.exit(1);
+          }
+          const ids = Object.values(report.advisories).map((a) => a.github_advisory_id);
+          if (ids.includes("GHSA-vfj7-8cjw-p6xm")) {
+            console.log("A-36: GHSA-vfj7-8cjw-p6xm hâlâ raporlanıyor — istisna gerekli");
+          } else {
+            console.log("::warning::A-36: GHSA-vfj7-8cjw-p6xm artık raporlanmıyor — istisna gereksiz, ci.yml'den kaldırın");
+          }
+          EOF
+      # Not: pnpm `--ignore` değeri pnpm-workspace.yaml'a (auditConfig) yazar; çalışma ağacı
+      # temiz kalsın diye dosya hemen geri alınır. Audit çıkış kodu korunur.
       - name: pnpm audit (high, critical)
-        run: pnpm audit --audit-level high
+        run: |
+          set +e
+          pnpm audit --audit-level high --ignore GHSA-vfj7-8cjw-p6xm
+          rc=$?
+          set -e
+          git checkout -- pnpm-workspace.yaml
+          exit "$rc"
       # Lisans: çalışma alanı paketlerinin DOĞRUDAN bağımlılıklarından biri GPL/AGPL ise kırmızı.
       # (LGPL bu kurala girmez.) Lisansı belirlenemeyen doğrudan bağımlılık da kırmızıdır.
       # Install başarısızsa bu adım da başarısız olur (0 doğrudan bağımlılık = FAIL); yanlış yeşil üretmez.
