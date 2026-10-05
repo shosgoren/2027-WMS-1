@@ -6,6 +6,14 @@
 //   --local   yalnızca `check:protected`'a geçer (commit öncesi kanca: API yok, korunan değişiklik
 //             uyarıdır). Diğer bekçiler her kipte aynıdır.
 // Denetlenen kök `cli.mjs --root` ile verilir; belge denetimi de aynı köke karşı koşar.
+//
+// Tabanda bulunmayan bekçi (Supervisor kararı, T-008g bulgu 1–2): CI bekçiyi TABANIN kodundan
+// koşar. Tabanda modül dosyası yoksa (ör. bekçiyi tanıtan paket henüz main'e girmemiş) bekçi
+// FAIL değil `SKIPPED_NOT_IN_BASE` olarak raporlanır (özet: `<ad> SKIPPED(base)`) ve PR'ın
+// kopyasından ASLA koşturulmaz. Gerekçe: yeni bekçi dosyası korunan yoldur; onu tanıtan PR,
+// tabandan koşan `check:protected` onayından geçer ve ilk birleşmeden sonra tabandan koşar.
+// İstisna yok: güven kökü bekçileri (`scope`, `tests`, `protected`) tabanda yoksa FAIL
+// (`GUARD_NOT_IN_BASE`); onlarsız onay ve kapsam denetlenemez.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { checkMap, checkStack, summaryLine } from "../check-docs.mjs";
@@ -14,8 +22,11 @@ import { UsageError } from "./lib/output.mjs";
 /** Sıra PROTOCOL §3b ve REPORT_TEMPLATE özet satırıyla aynıdır. */
 export const ALL_GUARDS = /** @type {const} */ (["scope", "tests", "ac-ratchet", "protected", "assertions"]);
 
+/** Tabanda yoksa atlanamayan bekçiler (güven kökü). */
+export const TRUST_ROOT_GUARDS = /** @type {const} */ (["scope", "tests", "protected"]);
+
 /**
- * @typedef {{ name: string, ok: boolean, exitCode: number | null, error?: string }} StepResult
+ * @typedef {{ name: string, ok: boolean, skipped?: boolean, exitCode: number | null, error?: string }} StepResult
  * @typedef {(guard: string, args: string[]) => Promise<number>} RunGuard
  */
 
@@ -69,11 +80,11 @@ export function checkDocs(root, log) {
  * @returns {string}
  */
 export function formatAllSummary(steps) {
-  return `check:all → ${steps.map((s) => `${s.name} ${s.ok ? "OK" : "FAIL"}`).join(" | ")}`;
+  return `check:all → ${steps.map((s) => `${s.name} ${s.skipped ? "SKIPPED(base)" : s.ok ? "OK" : "FAIL"}`).join(" | ")}`;
 }
 
 /**
- * @param {{ root: string, argv: string[], log: (line: string) => void, runGuard: RunGuard, docs?: (root: string, log: (line: string) => void) => boolean }} opts
+ * @param {{ root: string, argv: string[], log: (line: string) => void, runGuard: RunGuard, hasGuard: (guard: string) => boolean, docs?: (root: string, log: (line: string) => void) => boolean }} opts
  * @returns {Promise<number>} 0 = hepsi OK, 1 = en az biri FAIL
  */
 export async function runAll(opts) {
@@ -83,6 +94,16 @@ export async function runAll(opts) {
   /** @type {StepResult[]} */
   const steps = [];
   for (const g of ALL_GUARDS) {
+    if (!opts.hasGuard(g)) {
+      if (/** @type {readonly string[]} */ (TRUST_ROOT_GUARDS).includes(g)) {
+        log(`[check:${g}] FAIL GUARD_NOT_IN_BASE - — çalıştırılan bekçi kopyasında ${g}.mjs yok; güven kökü bekçisi atlanamaz`);
+        steps.push({ name: g, ok: false, exitCode: null, error: "GUARD_NOT_IN_BASE" });
+      } else {
+        log(`[check:${g}] SKIPPED_NOT_IN_BASE ${g} — çalıştırılan (taban) bekçi kopyasında ${g}.mjs yok; PR'ın kopyası koşturulmaz, ilk birleşmeden sonra tabandan koşar`);
+        steps.push({ name: g, ok: true, skipped: true, exitCode: null });
+      }
+      continue;
+    }
     const args = g === "protected" && local ? ["--local"] : [];
     try {
       const code = await runGuard(g, args);

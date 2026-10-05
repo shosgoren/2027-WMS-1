@@ -18,6 +18,11 @@
 #   - Geçiş kipi ("legacy"): tabanda `cli.mjs` var ama `all.mjs` (bu kart) yok → tabanın bekçileri
 #     tek tek, tabanın kendi `main(argv, { root })` işleviyle PR dizinine karşı koşar (yine tabanın
 #     kodu; gevşetme değil). `main`'e `all.mjs` girdikten sonra kullanılmaz; kaldırılması takip işidir.
+#   - Tabanda bulunmayan bekçi (Supervisor kararı; her iki kipte, `all.mjs` ile aynı kural): modül
+#     tabanda yoksa `SKIPPED_NOT_IN_BASE` (özet `<ad> SKIPPED(base)`), PR'ın kopyasından koşturulmaz.
+#     Yeni bekçi korunan dosyadır; onu tanıtan PR tabandan koşan check:protected onayından geçer ve
+#     ilk birleşmeden sonra tabandan koşar. Güven kökü (scope, tests, protected) tabanda yoksa FAIL.
+#     `check-pilot` tabanda `pilot.mjs` yoksa aynı kuralla atlanır.
 #   - Yalnızca yerleşik GITHUB_TOKEN (G-09), yalnızca `check-all`'ın bekçi adımında (check:protected
 #     PR açıklamasını API'den okur). İzinler en dar: contents: read, pull-requests: read.
 # Commit öncesi kanca (`.githooks/pre-commit`) atlanabilir (`--no-verify`); zorlama buradadır.
@@ -164,8 +169,19 @@ jobs:
           const root = path.resolve("pr");
           const { main } = await import(pathToFileURL(path.join(base, "scripts/guards/cli.mjs")).href);
           const steps = [];
+          const trustRoot = ["scope", "tests", "protected"];
           for (const g of ["scope", "tests", "ac-ratchet", "protected", "assertions"]) {
-            steps.push([g, (await main([g], { root })) === 0]);
+            if (!existsSync(path.join(base, "scripts/guards", `${g}.mjs`))) {
+              if (trustRoot.includes(g)) {
+                console.log(`[check:${g}] FAIL GUARD_NOT_IN_BASE - — tabanda ${g}.mjs yok; güven kökü bekçisi atlanamaz`);
+                steps.push([g, "FAIL"]);
+              } else {
+                console.log(`[check:${g}] SKIPPED_NOT_IN_BASE ${g} — tabanda ${g}.mjs yok; PR'ın kopyası koşturulmaz`);
+                steps.push([g, "SKIPPED(base)"]);
+              }
+              continue;
+            }
+            steps.push([g, (await main([g], { root })) === 0 ? "OK" : "FAIL"]);
           }
           const docsFile = path.join(base, "scripts/check-docs.mjs");
           if (existsSync(docsFile)) {
@@ -177,10 +193,10 @@ jobs:
             const map = mapMd === null ? { ok: false, count: 0, failures: ["map: docs/MAP.md okunamadı"] } : checkMap(mapMd, (rel) => existsSync(path.join(root, rel)));
             for (const f of [...stack.failures, ...map.failures]) console.log(f);
             console.log(summaryLine(stack, map));
-            steps.push(["docs", stack.ok && map.ok]);
+            steps.push(["docs", stack.ok && map.ok ? "OK" : "FAIL"]);
           }
-          console.log(`check:all (geçiş) → ${steps.map(([n, ok]) => `${n} ${ok ? "OK" : "FAIL"}`).join(" | ")}`);
-          process.exitCode = steps.every(([, ok]) => ok) ? 0 : 1;
+          console.log(`check:all (geçiş) → ${steps.map(([n, st]) => `${n} ${st}`).join(" | ")}`);
+          process.exitCode = steps.some(([, st]) => st === "FAIL") ? 1 : 0;
           EOF
       # upload-artifact gizli yolları atlar; .artifacts gizli olmayan geçici dizine kopyalanır.
       - name: Stage guard artifacts
@@ -315,7 +331,9 @@ jobs:
           BASE_NAME: ${{ steps.ctx.outputs.base_name }}
         run: |
           set -euo pipefail
-          if [ -f base/scripts/guards/all.mjs ]; then
+          if [ -f base/scripts/guards/cli.mjs ] && [ ! -f base/scripts/guards/pilot.mjs ]; then
+            echo "::notice::check:pilot SKIPPED_NOT_IN_BASE — tabanda pilot.mjs yok; PR'ın kopyası koşturulmaz"
+          elif [ -f base/scripts/guards/all.mjs ]; then
             node base/scripts/guards/cli.mjs pilot --root pr
           elif [ -f base/scripts/guards/cli.mjs ]; then
             echo "::warning::taban bekçisinde --root yok (geçiş kipi)"

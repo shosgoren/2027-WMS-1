@@ -88,7 +88,13 @@ export async function main(argv, opts = {}) {
 
   if (name === "all") {
     try {
-      return await runAll({ root, argv: rest, log, runGuard: (g, args) => main([g, ...args], { root, guardsDir, log }) });
+      return await runAll({
+        root,
+        argv: rest,
+        log,
+        runGuard: (g, args) => main([g, ...args], { root, guardsDir, log }),
+        hasGuard: (g) => existsSync(path.join(guardsDir, `${g}.mjs`)),
+      });
     } catch (e) {
       if (!(e instanceof UsageError)) throw e;
       log(`check:all HATA: ${e.message}`);

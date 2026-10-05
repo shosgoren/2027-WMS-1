@@ -11,6 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { runAll } from "../../scripts/guards/all.mjs";
 import { createRepo } from "../../scripts/guards/lib/testkit.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -269,5 +270,55 @@ describe("test:ac --ci çalışma anı atlama denetimi + --root/--out (T-008g 5c
       encoding: "utf8",
     });
     expect(res.status).toBe(2);
+  });
+});
+
+describe("check:all tabanda bulunmayan bekçi (Supervisor kararı, T-008g bulgu 1–2)", () => {
+  /**
+   * @param {string[]} missing tabanda olmayan bekçiler
+   * @param {string[]} [failing] koşup FAIL dönen bekçiler
+   */
+  async function runWithBase(missing, failing = []) {
+    /** @type {string[]} */
+    const lines = [];
+    /** @type {string[]} */
+    const ran = [];
+    const root = mkdtempSync(path.join(os.tmpdir(), "ac37-all-"));
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }));
+    const code = await runAll({
+      root,
+      argv: [],
+      log: (l) => lines.push(l),
+      runGuard: async (g) => {
+        ran.push(g);
+        return failing.includes(g) ? 1 : 0;
+      },
+      hasGuard: (g) => !missing.includes(g),
+      docs: () => true,
+    });
+    return { code, ran, text: lines.join("\n"), summary: lines.at(-1) ?? "" };
+  }
+
+  it("tabanda olmayan ac-ratchet/assertions → SKIPPED(base), koşturulmaz; geri kalan OK ise çıkış 0", async () => {
+    const res = await runWithBase(["ac-ratchet", "assertions"]);
+    expect(res.summary).toBe("check:all → scope OK | tests OK | ac-ratchet SKIPPED(base) | protected OK | assertions SKIPPED(base) | docs OK");
+    expect(res.text).toContain("SKIPPED_NOT_IN_BASE ac-ratchet");
+    expect(res.ran).toEqual(["scope", "tests", "protected"]);
+    expect(res.code).toBe(0);
+  });
+
+  it("atlanan bekçi varken başka bekçi FAIL → çıkış 1", async () => {
+    const res = await runWithBase(["assertions"], ["protected"]);
+    expect(res.summary).toContain("protected FAIL");
+    expect(res.summary).toContain("assertions SKIPPED(base)");
+    expect(res.code).toBe(1);
+  });
+
+  it.each(["scope", "tests", "protected"])("güven kökü %s tabanda yoksa FAIL GUARD_NOT_IN_BASE, koşturulmaz", async (g) => {
+    const res = await runWithBase([g]);
+    expect(res.text).toContain(`[check:${g}] FAIL GUARD_NOT_IN_BASE`);
+    expect(res.summary).toContain(`${g} FAIL`);
+    expect(res.ran).not.toContain(g);
+    expect(res.code).toBe(1);
   });
 });
