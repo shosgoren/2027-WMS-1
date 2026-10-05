@@ -1,7 +1,7 @@
 // Unit: migration koşturucusu (T-101). Ağ erişimi YOK: geri alma ortam/hedef denetimleri
 // bağlantıdan önce yapılır; ulaşılamaz URL bir sızıntıyı bağlantı hatasıyla görünür kılar.
 import { createHash } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   MigrationError,
   computeChecksum,
@@ -10,6 +10,7 @@ import {
   matchMigrationFiles,
   migrateDown,
   parseArgs,
+  parseTarget,
   redact,
   redactErrorChain,
   sameConnectionTarget,
@@ -134,6 +135,26 @@ describe("redact", () => {
     expect(out).not.toContain("mig_user");
   });
 
+  it("masks the generic URL first: a short user name equal to the scheme prefix does not break the pattern (MINOR 6)", () => {
+    const url = "postgresql://postgres:s3cr3t-pw@db.internal:5432/app";
+    const out = redact(`boom postgresql://postgres:s3cr3t-pw@db.internal:5432/app and postgres://postgres:zzz@other.host/x`, url);
+    expect(out).toBe("boom [url] and [url]");
+    expect(out).not.toContain("ql://");
+  });
+
+  it("masks short names only on word boundaries (the rest of the message stays readable)", () => {
+    const url = "postgresql://db:pw-long-secret@dbhost.internal/app";
+    const out = redact("db error in database dbhost.internal for db", url);
+    expect(out).toBe("[gizli] error in database [gizli] for [gizli]");
+  });
+
+  it("masks every host of a multi-host URL", () => {
+    const url = "postgresql://u:pw-secret-x@h1.example:5432,h2.example:5433/d";
+    const out = redact("tried h1.example then h2.example", url);
+    expect(out).not.toContain("h1.example");
+    expect(out).not.toContain("h2.example");
+  });
+
   it("redactErrorChain walks causes and masks before truncating", () => {
     const e = new Error("outer", { cause: new Error(`inner ${UNREACHABLE} unit-secret-pw`) });
     const out = redactErrorChain(e, UNREACHABLE);
@@ -143,13 +164,54 @@ describe("redact", () => {
   });
 });
 
+describe("parseTarget", () => {
+  it("parses a multi-host URL that new URL() rejects, and falls back to PGPORT / default 5432", () => {
+    const t = parseTarget("postgresql://u:p@h1:5433,h2/db", { PGPORT: "6543" });
+    expect(t?.hosts).toEqual([
+      { host: "h1", port: "5433" },
+      { host: "h2", port: "6543" },
+    ]);
+    expect(t?.user).toBe("u");
+    expect(t?.db).toBe("db");
+    expect(parseTarget("postgresql://u@h/db", {})?.hosts).toEqual([{ host: "h", port: "5432" }]);
+  });
+
+  it("is undefined for garbage, a bad scheme, a missing host or a non-numeric port", () => {
+    for (const bad of ["not a url", "mysql://u@h/db", "postgresql://u@/db", "postgresql://u@h:abc/db", "postgresql://u@[::bad/db"]) {
+      expect(parseTarget(bad, {}), bad).toBeUndefined();
+    }
+    expect(parseTarget("postgresql://u@h/db", { PGPORT: "x" })).toBeUndefined();
+  });
+
+  it("treats localhost, 127.0.0.1 and ::1 as the same host and flags host/port query overrides", () => {
+    const hosts = ["postgresql://u@localhost/d", "postgresql://u@127.0.0.1/d", "postgresql://u@[::1]/d"].map((u) => parseTarget(u, {})?.hosts);
+    expect(new Set(hosts.map((h) => JSON.stringify(h))).size).toBe(1);
+    expect(parseTarget("postgresql://u@h/d?host=/tmp", {})?.hasHostOverride).toBe(true);
+    expect(parseTarget("postgresql://u@h/d?sslmode=require", {})?.hasHostOverride).toBe(false);
+  });
+});
+
 describe("sameConnectionTarget", () => {
   it("compares host, port, user and database, not the raw string", () => {
     const base = "postgresql://u:p@db.example:5432/w";
-    expect(sameConnectionTarget(base, "postgres://u:other@DB.example/w?sslmode=require")).toBe(true);
-    expect(sameConnectionTarget(base, "postgresql://u:p@db.example:5433/w")).toBe(false);
-    expect(sameConnectionTarget(base, "postgresql://v:p@db.example:5432/w")).toBe(false);
-    expect(sameConnectionTarget(base, "postgresql://u:p@db.example:5432/x")).toBe(false);
+    expect(sameConnectionTarget(base, "postgres://u:other@DB.example/w?sslmode=require", {})).toBe(true);
+    expect(sameConnectionTarget(base, "postgresql://u:p@db.example:5433/w", {})).toBe(false);
+    expect(sameConnectionTarget(base, "postgresql://v:p@db.example:5432/w", {})).toBe(false);
+    expect(sameConnectionTarget(base, "postgresql://u:p@db.example:5432/x", {})).toBe(false);
+  });
+
+  it("treats localhost and 127.0.0.1 as equivalent and honours PGPORT when the port is omitted", () => {
+    expect(sameConnectionTarget("postgresql://u:p@localhost:5432/w", "postgresql://u:q@127.0.0.1/w", {})).toBe(true);
+    expect(sameConnectionTarget("postgresql://u:p@localhost/w", "postgresql://u:q@127.0.0.1:5433/w", { PGPORT: "5433" })).toBe(true);
+    expect(sameConnectionTarget("postgresql://u:p@localhost/w", "postgresql://u:q@127.0.0.1:5432/w", { PGPORT: "5433" })).toBe(false);
+  });
+
+  it("fails closed: unparsable, host-override and overlapping multi-host inputs count as the same target", () => {
+    expect(sameConnectionTarget("garbage", "postgresql://u@h/d", {})).toBe(true);
+    expect(sameConnectionTarget("garbage", "garbage2", {})).toBe(true);
+    expect(sameConnectionTarget("postgresql://u@a/d?host=b", "postgresql://u@c/d", {})).toBe(true);
+    expect(sameConnectionTarget("postgresql://u@a,b/d", "postgresql://u@b/d", {})).toBe(true);
+    expect(sameConnectionTarget("postgresql://u@a,b/d", "postgresql://u@c/d", {})).toBe(false);
   });
 });
 
@@ -160,6 +222,29 @@ describe("pooler URLs are refused before any connection", () => {
       "postgresql://m:p@127.0.0.1:6432/w",
     ]) {
       await expect(migrateUp({ url })).rejects.toMatchObject({ code: "MIGRATION_POOLER_URL" });
+    }
+  });
+
+  it("fails closed on multi-host, unparsable and host-override URLs (MINOR 4)", async () => {
+    for (const url of [
+      "postgresql://m:p@h1:5432,h2:6432/w",
+      "postgresql://m:p@h1,h2/w",
+      "postgresql://m:p@[::bad/w",
+      "postgresql://m:p@h:notaport/w",
+      "postgresql://m:p@h/w?host=ep-x-pooler.example",
+      "postgresql://m:p@h/w?port=6432",
+      "mysql://m:p@h/w",
+    ]) {
+      await expect(migrateUp({ url }), url).rejects.toMatchObject({ code: "MIGRATION_POOLER_URL" });
+    }
+  });
+
+  it("takes PGPORT into account when the URL has no port", async () => {
+    vi.stubEnv("PGPORT", "6432");
+    try {
+      await expect(migrateUp({ url: "postgresql://m:p@127.0.0.1/w" })).rejects.toMatchObject({ code: "MIGRATION_POOLER_URL" });
+    } finally {
+      vi.unstubAllEnvs();
     }
   });
 });
