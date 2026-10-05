@@ -1,8 +1,8 @@
 # STATE (≤80 satır — her görev sonunda Supervisor günceller)
 
-**Oturum kilidi:** session_01C59FRaUynaDdhNGZoRbKsY · 2026-10-05T20:50Z (zamanlanmış oturum: kilit 3 saatten yeniyse ve başka oturumunsa hiçbir şey yapmadan çık; değilse kendi kimliğinle yenile, her push'ta zamanı güncelle)
+**Oturum kilidi:** session_01C59FRaUynaDdhNGZoRbKsY · 2026-10-05T21:45Z (zamanlanmış oturum: kilit 3 saatten yeniyse ve başka oturumunsa hiçbir şey yapmadan çık; değilse kendi kimliğinle yenile, her push'ta zamanı güncelle)
 **Faz:** 0 — Kararlar & iskelet
-**Aktif görev:** Birleşmeyi bekleyen (CI/E-02): #25 T-109, #28 T-110, #26 T-008k (0·0·2 @a425180), #27 T-005d düzeltmesi (0·0·5), #29 Faz 1 planı (0·0·6), #30 T-101 (0·0·8; Faz 0 kapısından sonra). Ajanlar: T-102 (+T-101/T-101b birleştirme, güvenlik MAJOR düzeltmesi) ∥ T-101c PgBouncer SCRAM ∥ T-101d koşturucu sertleştirme. T-101b @4bd82c1 0·0·3 (PR T-101 sonrası). STATE'in güncel kopyası: `int/faz0-kapanis`.
+**Aktif görev:** CI/E-02 bekleyen PR'lar: #27 T-005d düzeltmesi (deps dışında yeşil → birleştir + neon-spike dispatch), #26 T-008k, #25 T-109, #28 T-110, #29 Faz 1 planı, #30 T-101. `int/faz1-sema` yığını hazır (PR'lar Faz 0 kapısı + T-101 birleşince): T-101b 4bd82c1 · T-101c e5c7f9b (inceleme sürüyor) · T-101d 92d5210 · T-102 738de3b · T-103 aba8151 · T-104 7043b01 (AC-04/AC-18 PASS). Çalışan: T-107 (`feat/T-107-audit`, T-103 üstünde). T-110b ceb4b18 (#28 sonrası). STATE'in güncel kopyası: `int/faz0-kapanis`.
 **Son tamamlanan:** #20 `int/faz0-bekciler-2` → `main` (T-008d/e/f/g; bekçiler CI'da taban daldan) · #19 pooler · #13 Fly staging
 **Sonraki adım:** Faz 1 planı güvenlik 3. tur @b400466 BLOCKER 0 · MAJOR 0 · MINOR 8 → MINOR'lar kartlara → ADR-014/015/016 kabul PR'ı (korunan). #25/#26/#27 CI yeşilse birleştir. T-005d (Neon Actions koşusu; iş akışı main'e girince dispatch) → T-005e/f; T-008j; T-004b; T-009b canlı AC-43; sonra Faz 0 kapısı (`pnpm test:ac --phase 0` + check:pilot + JOURNAL kapı raporu) → Faz 1 kart seti (architect).
 
@@ -37,6 +37,7 @@ ADR-001 Next.js + ayrı worker · 002 İngilizce kod/DB, Türkçe UI · 003 Driz
 - T-110 #28 MINOR: href yalnızca uygulama içi yol, Esc yükleniyorken, STACK lucide satırı, odak/48px T-131
 - T-102 MINOR-1 risk kaydı: wms_app security_events'te tenant'tan bağımsız tüm kullanıcıların ip/user_agent/detail'ini okur (kart gereği) — T-113'te sütun/işlevle daraltma değerlendirilir
 - T-005d düz parola yeniden denemesi (Supervisor kararı 2026-10-05): kabul edilen risk — parola koşuya özel, geçici dal silinir; Neon `log_statement`/`pg_stat_statements` metni ve dal silme başarısızsa rolün yaşaması bilinen risk; T-005f Q-06 kaydına işlenir
+- İnceleme takipleri (kart başlamadan ilgili karta işlenir): T-112 ← reauth.* olaylarını yalnızca wms_auth yazabilsin (T-102 @77317fe) · T-121 ← withNewTenant imzası (tenantId içeride, `created`, ad değişiminden sonra tekrar → IDEMPOTENCY_MISMATCH), SLUG_TAKEN hata kodu 15-engineering'e · T-105 ← Neon'da FORCE RLS altında operasyon rolü tenant bağlamı, ALLOWED_DB_LEVEL_SETTINGS, pg_subscription/largeobject okunabilirliği · app-settings bekçisini check:all'a bağlama kartı · T-131 ← ConfirmDialog çift Esc · OPEN_QUESTIONS A-xx ← T-103 varsayımları (tenants yaratıcı alanları nullable, tenant_settings varsayılanları, invitations.created_at yok, wms_app sütun GRANT'ları, süresi dolmuş davet T-117'de iptal)
 - T-101 Faz 0 kapısından önce başlatıldı (Supervisor kararı: zaman kullanımı); birleştirme kapıdan sonra
 
 ## Engeller
@@ -52,11 +53,6 @@ ADR-001 Next.js + ayrı worker · 002 İngilizce kod/DB, Türkçe UI · 003 Driz
 ## İnceleme takipleri (security-reviewer faz0-iskelet, MINOR — ilgili kartta ele alınır)
 - T-005b/d: uygulama süreçleri yalnızca `DATABASE_URL` alır, `DATABASE_URL_DIRECT` (süper kullanıcı) yalnızca migration (RLS bypass yolu) · AC-05 session-level `set_config` sızıntısını açıkça kapsar · T-005a `test:int` betiği eklenir
 - T-003: compose imajları digest ile sabitlenir · compose parola denetimine `\n`/`\r` · worker log maskeleme (DB/kuyruk eklenince) · ADR-006 adaptörü: bucket oluşturma + root olmayan erişim anahtarı
-
-## Supervisor kararı bekleyen tasarım noktaları (T-006…T-009 kart raporu)
-- T-007 `test:ac --ci`: PR'da mevcut `@AC` testleri koşar, `NO_TEST` yalnızca kapısı geçilmiş fazlar için hata → Supervisor T-007'de kesinleştirir
-- `check:pilot` `check:all`'a girmez; Faz 0 kapısında ayrıca denetlenir
-- Karantina: `skip` hiç serbest değil; karantinalı test koşar, kapıyı kırmaz
 
 ## Açık sorular (özet; detay OPEN_QUESTIONS.md)
 Q-01…Q-06 Neon teknik alanları (T-005) · Q-07 KVKK hukukçu onayı · Q-12 pilot değerleri · Q-13 pilot hacim tanımı · Q-10 Neon sır kanalı (→ GitHub repo sırları, ADR-013) · Q-11 BullMQ eşikleri
