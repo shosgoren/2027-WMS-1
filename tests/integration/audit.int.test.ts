@@ -178,7 +178,7 @@ describe(`audit_logs yazma (target=${env.target})`, () => {
   it("boyut sınırı aşılırsa VALIDATION_FAILED ve satır yazılmaz", async () => {
     const marker = `big-${randomBytes(4).toString("hex")}`;
     const err = await withSystemTenant(app, tA, "t107.test", async (tx) =>
-      appendAudit(tx, { action: "tenant.settings_changed", entityId: marker, changeSummary: { v: "a".repeat(9000) } }),
+      appendAudit(tx, { action: "tenant.settings_changed", entityId: marker, changeSummary: Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`f${i}`, "a".repeat(1000)])) }),
     ).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(AuditError);
     expect((err as AuditError).code).toBe("VALIDATION_FAILED");
@@ -362,7 +362,7 @@ describe("recordSecurityEvent (kendi transaction'ı, tenant bağlamsız)", () =>
 
   it("geçersiz olay türü ve boyut aşımı VALIDATION_FAILED", async () => {
     await expect(recordSecurityEvent(app, { eventType: "Bad Type" })).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
-    await expect(recordSecurityEvent(app, { eventType: "x", detail: { v: "a".repeat(9000) } })).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+    await expect(recordSecurityEvent(app, { eventType: "x", detail: Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`f${i}`, "a".repeat(1000)])) })).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
   });
 });
 

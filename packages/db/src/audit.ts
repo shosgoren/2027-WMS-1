@@ -42,9 +42,16 @@ export const REDACTED = "[REDACTED]";
  *    private|auth|pin|salt|digest`; ayrıca `sid` yalnızca ayrı SEGMENT olarak (alt dize `inside`, `side` gibi sözcükleri
  *    gereksiz yakalardı). FAZLA MASKELEME KABUL EDİLİR (güvenli yön): `barcode`, `postal_code`, `shipping` da maskelenir.
  *  - 256 karakterden uzun anahtar/ad → maskelenir (fail-closed, ReDoS yok); alt dize taraması doğrusaldır.
- *  - DEĞER taraması (anahtardan bağımsız, yalnızca ilk 4096 karakter, bütün desenler sınırlı niceleyicili): JWT deseni,
- *    dize içinde herhangi bir yerde `Authorization:` / `Bearer ` / `Basic ` / `Token ` + belirteç, kullanıcı bilgili URL
- *    (`şema://kullanıcı:parola@`), duyarlı adlı `ad=değer` (sorgu, URL parçası `#access_token=`, çerez dizesi `sid=`).
+ *  - DEĞER taraması (anahtardan bağımsız; desenler sınırlı niceleyicili/doğrusal): JWT deseni (`eyJ…`.`…`), dize içinde
+ *    herhangi bir yerde `Authorization:` / `Bearer ` / `Basic ` / `Token ` (+ yeni satır dahil boşluk) + belirteç,
+ *    kullanıcı bilgili URL (`şema://[kullanıcı][:parola]@`, `/` içerebilir), ve GENEL desen: dize içinde herhangi bir
+ *    yerde `<ad>["']?\s*[:=]` ve ad duyarlıysa (`x-api-key: …`, `"password":"…"`, `?token=`, `#access_token=`, `sid=`,
+ *    `auth[token]=`, yüzde kodlu ad çözülür, 128'den uzun ad fail-closed) TÜM değer maskelenir.
+ *  - 4096 karakterden uzun dize değeri FAIL-CLOSED: tamamı `[REDACTED]` (kısmi tarama sınır kesen belirteci kaçırırdı;
+ *    uzun düz metin kaybı kabul edilir). `{`/`[` ile başlayan ≤4096 dize JSON.parse edilir, başarılıysa özyinelemeli
+ *    (aynı bütçe) maskelenip yeniden serileştirilir; ayrıştırılamazsa yukarıdaki dize kuralları uygulanır.
+ *  - Bilinen sınır: kural tabanlı maskeleme heuristiktir; ad taşımayan, desene uymayan çıplak sır (ör. rastgele
+ *    hex) yalnızca anahtar adı duyarlıysa maskelenir. Çağıranlar sırları değer olarak `changeSummary`'e koymamalıdır.
  *  - Ad/değer çiftleri: `{ name|key|header|field: <duyarlı>, value|val|content|data: … }`, `[["Authorization","…"]]` ve
  *    düz başlık dizisi `[k1, v1, k2, v2]` (çift sıradaki eleman adı duyarlıysa sonraki maskelenir).
  */
@@ -95,33 +102,78 @@ export function isSensitiveKey(key: string): boolean {
   return hasSegment(key, "sid");
 }
 
-/** Sorgu/çerez/parça parametre adı: anahtar kuralı + `sig`. */
+/** Ad/parametre adı (sorgu, çerez, JSON/başlık anahtarı): anahtar kuralı + tam `sig`; yüzde kodlu ad çözülür. */
 function isSensitiveParamName(name: string): boolean {
-  return isSensitiveKey(name) || name.toLowerCase().includes("sig");
+  if (name.length > MAX_PARAM_NAME_LENGTH) return true; // fail-closed
+  let n = name;
+  if (n.includes("%")) {
+    try {
+      n = decodeURIComponent(n);
+    } catch {
+      /* geçersiz kodlama: ham ad denenir */
+    }
+  }
+  return isSensitiveKey(n) || n.toLowerCase() === "sig";
 }
 
-const JWT_RE = /eyJ[A-Za-z0-9_-]{5,2000}\.[A-Za-z0-9_-]{5,2000}\.[A-Za-z0-9_-]{0,2000}/;
-const AUTH_TOKEN_RE = /\b(?:Bearer|Basic|Token)[ \t]{1,16}[^\s]{8,}/i;
-const USERINFO_URL_RE = /[A-Za-z][A-Za-z0-9+.-]{0,20}:\/\/[^\s/@:]{1,128}:[^\s/@]{1,128}@/;
-const PARAM_RE = /(?:^|[?&;#\s])([A-Za-z0-9_.%-]{1,128})=/g;
+// Bütün desenler doğrusal ya da sınırlı niceleyicilidir; girdi zaten en çok 4096 karakterdir.
+const JWT_RE = /eyJ[A-Za-z0-9_-]{5,4096}\.[A-Za-z0-9_-]{5,4096}\.[A-Za-z0-9_-]{0,4096}/;
+const AUTH_TOKEN_RE = /(?:Bearer|Basic|Token)\s{1,16}\S{8,}/i;
+// `şema://[kullanıcı][:parola]@` — boş kullanıcı, kaçışsız `/` ve `:` içeren userinfo dahil (sınır 256).
+const USERINFO_URL_RE = /[A-Za-z][A-Za-z0-9+.-]{0,20}:\/\/[^@\s]{0,256}@/;
+const MAX_PARAM_NAME_LENGTH = 128;
 
-/** Değerde sır deseni var mı (anahtardan bağımsız; yalnızca ilk 4096 karakter taranır). */
-export function looksSensitiveValue(full: string): boolean {
-  const v = full.length > VALUE_SCAN_LIMIT ? full.slice(0, VALUE_SCAN_LIMIT) : full;
-  if (v.length < 8) return false;
-  if (v.toLowerCase().includes("authorization:")) return true;
-  if (JWT_RE.test(v) || AUTH_TOKEN_RE.test(v) || USERINFO_URL_RE.test(v)) return true;
-  if (v.includes("=")) {
-    for (const m of v.matchAll(PARAM_RE)) {
-      if (isSensitiveParamName(m[1] as string)) return true;
+function isNameChar(c: string): boolean {
+  return (
+    (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9") || c === "_" || c === "." || c === "-" ||
+    c === "%" || c === "[" || c === "]"
+  );
+}
+
+/**
+ * Genel `<ad>["']?\s*[:=]` deseni (regex'siz, tek geçiş): dize içinde herhangi bir yerde, adı duyarlı olan bir
+ * ad/değer ayracı (`x-api-key: …`, `password: …`, `"password":"…"`, `?token=…`, `#access_token=…`, `sid=…`,
+ * `auth[token]=…`). Ad = ayraçtan önceki ad karakterleri koşusu (köşeli parantez içi dahil); 128'den uzun ad → true.
+ */
+function hasSensitiveKeyedPair(v: string): boolean {
+  const n = v.length;
+  let runStart = -1;
+  for (let i = 0; i <= n; i++) {
+    const c = i < n ? (v[i] as string) : "";
+    if (c !== "" && isNameChar(c)) {
+      if (runStart < 0) runStart = i;
+      continue;
+    }
+    if (runStart >= 0) {
+      let j = i;
+      if (v[j] === '"' || v[j] === "'") j++;
+      let ws = 0;
+      while (ws < 16 && j < n && (v[j] === " " || v[j] === "\t" || v[j] === "\n" || v[j] === "\r")) {
+        j++;
+        ws++;
+      }
+      if (j < n && (v[j] === ":" || v[j] === "=") && isSensitiveParamName(v.slice(runStart, i))) return true;
+      runStart = -1;
     }
   }
   return false;
 }
 
+/**
+ * Değerde sır deseni var mı (anahtardan bağımsız). 4096 karakterden uzun dizeler FAIL-CLOSED duyarlı sayılır (tamamı
+ * maskelenir; kısmi tarama sınırı kesen belirteci kaçırırdı). JSON dizeleri `maskString` içinde yapısal işlenir.
+ */
+export function looksSensitiveValue(v: string): boolean {
+  if (v.length > VALUE_SCAN_LIMIT) return true;
+  if (v.length < 8) return false;
+  if (v.toLowerCase().includes("authorization:")) return true;
+  if (JWT_RE.test(v) || AUTH_TOKEN_RE.test(v) || USERINFO_URL_RE.test(v)) return true;
+  return hasSensitiveKeyedPair(v);
+}
+
 /** Ad/değer çiftlerinin ad ve değer alanları. */
 const PAIR_NAME_FIELDS = ["name", "key", "header", "field"] as const;
-const PAIR_VALUE_FIELDS = new Set(["value", "val", "content", "data"]);
+const PAIR_VALUE_FIELDS = new Set(["value", "values", "val", "content", "data"]);
 
 const MAX_DEPTH = 12;
 /** Özyineleme bütçesi (MINOR-3): düğüm sayısı ve ÇIKTI bayt sayısı aşılınca erken ret (tam ağaç gezilmez). */
@@ -178,13 +230,26 @@ function spend(b: Budget, bytes: number): void {
   if (b.bytes > b.maxBytes) throw new AuditError(`change_summary exceeds ${b.maxBytes} bytes`);
 }
 
-function maskString(v: string, b: Budget): string {
+function maskString(v: string, depth: number, seen: Set<object>, b: Budget): string {
+  // JSON dizesi (`{`/`[` ile başlar, ≤ 4096): ayrıştırılıp aynı bütçeyle yapısal maskelenir ve yeniden serileştirilir.
+  if (v.length <= VALUE_SCAN_LIMIT && (v.startsWith("{") || v.startsWith("["))) {
+    let parsed: unknown;
+    let ok = false;
+    try {
+      parsed = JSON.parse(v);
+      ok = typeof parsed === "object" && parsed !== null;
+    } catch {
+      ok = false;
+    }
+    if (ok) {
+      const inner = mask(parsed, depth + 1, seen, b);
+      return JSON.stringify(inner ?? null);
+    }
+  }
   if (looksSensitiveValue(v)) {
     spend(b, REDACTED.length + 2);
     return REDACTED;
   }
-  // Çıktı en az UTF-16 uzunluğu kadar bayt tutar: büyük dize tamamı kodlanmadan reddedilir.
-  if (v.length > b.maxBytes) throw new AuditError(`change_summary exceeds ${b.maxBytes} bytes`);
   spend(b, Buffer.byteLength(JSON.stringify(v), "utf8"));
   return v;
 }
@@ -201,16 +266,16 @@ function mask(value: unknown, depth: number, seen: Set<object>, b: Budget): Json
     spend(b, 5);
     return value;
   }
-  if (typeof value === "string") return maskString(value, b);
+  if (typeof value === "string") return maskString(value, depth, seen, b);
   if (typeof value === "number") {
     if (!Number.isFinite(value)) throw new AuditError("change_summary contains a non-finite number");
     spend(b, String(value).length);
     return value;
   }
-  if (typeof value === "bigint") return maskString(value.toString(), b);
+  if (typeof value === "bigint") return maskString(value.toString(), depth, seen, b);
   if (value instanceof Date) {
     if (Number.isNaN(value.getTime())) throw new AuditError("change_summary contains an invalid date");
-    return maskString(value.toISOString(), b);
+    return maskString(value.toISOString(), depth, seen, b);
   }
   if (typeof value !== "object") throw new AuditError("change_summary contains a non-JSON value");
   if (seen.has(value)) throw new AuditError("change_summary contains a circular reference");

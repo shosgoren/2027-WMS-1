@@ -61,7 +61,8 @@ describe("maskeleme", () => {
     // Kart ölçütü (alt dize, büyük/küçük harf duyarsız): password|token|secret|totp|code|hash|otp|key
     "password", "newPassword", "TOKEN", "resetToken", "client_secret", "totpSecret", "backupCodes", "passwordHash", "otp",
     "apiKey", "Key", "key", "monkey", "hashtag", "barcode", "postal_code", "sku_code", "code", "otp_code", "OTPCode",
-    "verificationCode", "api_key", "X-API-Key", "apikey",
+    "verificationCode", "api_key", "X-API-Key", "apikey", "resetCode", "access-key", "accessToken", "sessionId", "client_secret",
+    "signing_key", "encryption-key", "SessionToken", "hash", "passwordHash", "resetToken", "totpSecret", "backupCodes",
     // Genişletilmiş liste
     "cookie", "Set-Cookie", "Authorization", "session", "sessionId", "credential", "credentials", "bearer", "jwt",
     "passphrase", "pwd", "pass", "signature", "private", "privateData", "auth", "pin", "salt", "digest",
@@ -224,14 +225,22 @@ describe("ReDoS dayanıklılığı (üst sınır geniş: kırılgan değil)", ()
   });
 });
 
+/** Her dizesi 4096 karakterin altında kalan, toplamı büyük nesne (uzun dizeler ayrıca fail-closed maskelenir). */
+function chunked(fields: number, chunk: number, ch = "a"): Record<string, string> {
+  const o: Record<string, string> = {};
+  for (let i = 0; i < fields; i++) o[`f${i}`] = ch.repeat(chunk);
+  return o;
+}
+
 describe("boyut sınırı", () => {
   it("sınırda kabul, bir bayt fazlada VALIDATION_FAILED (kırpma yok)", () => {
-    const overhead = Buffer.byteLength(JSON.stringify({ v: "" }), "utf8");
-    const ok = { v: "a".repeat(CHANGE_SUMMARY_MAX_BYTES - overhead) };
+    const base = chunked(6, 1000);
+    const overhead = Buffer.byteLength(JSON.stringify({ ...base, z: "" }), "utf8");
+    const ok = { ...base, z: "a".repeat(CHANGE_SUMMARY_MAX_BYTES - overhead) };
     expect(Buffer.byteLength(maskChangeSummary(ok).json, "utf8")).toBe(CHANGE_SUMMARY_MAX_BYTES);
     const err = (() => {
       try {
-        maskChangeSummary({ v: "a".repeat(CHANGE_SUMMARY_MAX_BYTES - overhead + 1) });
+        maskChangeSummary({ ...base, z: "a".repeat(CHANGE_SUMMARY_MAX_BYTES - overhead + 1) });
       } catch (e) {
         return e;
       }
@@ -241,8 +250,70 @@ describe("boyut sınırı", () => {
   });
 
   it("boyut maskelemeden sonra ölçülür; çok baytlı karakterler bayt olarak sayılır", () => {
-    expect(() => maskChangeSummary({ password: "x".repeat(20000) })).not.toThrow();
-    expect(() => maskChangeSummary({ v: "ğ".repeat(CHANGE_SUMMARY_MAX_BYTES / 2) })).toThrow(AuditError);
+    expect(() => maskChangeSummary({ password: "x".repeat(20000), ...chunked(5, 1000) })).not.toThrow();
+    expect(() => maskChangeSummary(chunked(5, 1000, "ğ"))).toThrow(AuditError);
+  });
+});
+
+describe("uzun dize fail-closed (4096)", () => {
+  const LONG = 4096;
+  it("4096 karakterden uzun dize tamamen maskelenir (sondaki Bearer / ?token= dahil)", () => {
+    const pad = "x ".repeat(2050);
+    const { value } = maskChangeSummary({
+      a: `${pad}Bearer abcdef0123456789`,
+      b: `${pad}?token=zzz-sentinel`,
+      c: "y".repeat(LONG + 1),
+    });
+    expect(value).toEqual({ a: REDACTED, b: REDACTED, c: REDACTED });
+  });
+
+  it("sınırı kesen belirteç (4088 + Bearer ...) maskelenir; tam 4096 uzunluk taranır", () => {
+    const straddle = `${"x".repeat(4088)}Bearer abcdef0123456789`;
+    expect(straddle.length).toBeGreaterThan(LONG);
+    expect(maskChangeSummary({ s: straddle }).value).toEqual({ s: REDACTED });
+    expect(looksSensitiveValue("x".repeat(LONG))).toBe(false);
+    expect(looksSensitiveValue("x".repeat(LONG + 1))).toBe(true);
+    expect(maskChangeSummary({ s: `${"x".repeat(LONG - 24)}Bearer abcdef0123456789` }).value).toEqual({ s: REDACTED });
+  });
+});
+
+describe("genel anahtar:değer deseni ve JSON dizeleri", () => {
+  it.each([
+    "x-api-key: abc123-sentinel",
+    "password: hunter2-sentinel",
+    '{"password":"hunter2-sentinel"',
+    'cfg "password" : "hunter2-sentinel"',
+    "?%70assword=hunter2-sentinel",
+    "auth[token]=abc-sentinel",
+    "https://x.example.test/?a=1&Auth[Token]=abc-sentinel",
+    "ssh://:pw-sentinel@host.example.test/x",
+    "https://user:p/w-sentinel@host.example.test/x",
+    "Bearer\nabcdef0123456789",
+    "note\nSet-Cookie: abc-sentinel",
+    `${"n".repeat(129)}=value-sentinel`,
+    `eyJ${"a".repeat(3000)}.${"b".repeat(100)}.`,
+  ])("değer maskelenir: %j", (v) => {
+    expect(maskChangeSummary({ msg: v }).value).toEqual({ msg: REDACTED });
+  });
+
+  it("JSON dizesi yapısal maskelenir ve yeniden serileştirilir; ayrıştırılamayan dize dize kurallarına düşer", () => {
+    const { value, json } = maskChangeSummary({
+      a: '{"password":"hunter2-sentinel","n":1,"nested":{"apiKey":"k-sentinel","ok":"fine"}}',
+      b: '[{"name":"Authorization","value":"v-sentinel"},{"name":"Accept","values":["x"]}]',
+      c: "[INFO] hello world",
+      d: "{not json} password: zzz-sentinel",
+    });
+    expect(value).toEqual({
+      a: `{"password":"${REDACTED}","n":1,"nested":{"apiKey":"${REDACTED}","ok":"fine"}}`,
+      b: `[{"name":"Authorization","value":"${REDACTED}"},{"name":"Accept","values":["x"]}]`,
+      c: "[INFO] hello world",
+      d: REDACTED,
+    });
+    expect(json).not.toMatch(/sentinel/);
+  });
+
+  it("ad/değer çiftinde values alanı maskelenir", () => {
+    expect(maskChangeSummary({ h: { name: "cookie", values: ["a", "b"] } }).value).toEqual({ h: { name: "cookie", values: REDACTED } });
   });
 });
 
@@ -253,7 +324,8 @@ describe("özyineleme bütçesi (erken ret)", () => {
   });
 
   it("büyük dize bayt bütçesi aşılınca reddedilir; maskelenen büyük sır reddedilmez", () => {
-    expect(() => maskChangeSummary({ a: "x".repeat(CHANGE_SUMMARY_MAX_BYTES + 1) })).toThrow(/exceeds/);
+    expect(maskChangeSummary({ a: "x".repeat(CHANGE_SUMMARY_MAX_BYTES + 1) }).value).toEqual({ a: REDACTED });
+    expect(() => maskChangeSummary(chunked(9, 1000))).toThrow(/exceeds/);
     expect(() => maskChangeSummary({ token: "x".repeat(1_000_000), ok: 1 })).not.toThrow();
   });
 
@@ -318,7 +390,7 @@ describe("recordSecurityEvent", () => {
     for (const eventType of ["", "Login", "x y", "a;b"]) {
       await expect(recordSecurityEvent(client, { eventType })).rejects.toBeInstanceOf(AuditError);
     }
-    await expect(recordSecurityEvent(client, { eventType: "login_failed", detail: { big: "a".repeat(9000) } })).rejects.toBeInstanceOf(AuditError);
+    await expect(recordSecurityEvent(client, { eventType: "login_failed", detail: chunked(9, 1000) })).rejects.toBeInstanceOf(AuditError);
     expect(tx).not.toHaveBeenCalled();
   });
 
