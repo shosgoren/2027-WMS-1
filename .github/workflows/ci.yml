@@ -164,7 +164,6 @@ jobs:
           const [auditPath, webPkgPath] = process.argv.slice(2);
           // Muafiyetler: advisory → kayıt + izin verilen tek dev zinciri öneki (pnpm yol biçimi).
           const EXEMPT = {
-            "GHSA-vfj7-8cjw-p6xm": { record: "A-36", devDep: "@next/eslint-plugin-next", prefix: "apps__web>@next/eslint-plugin-next>" },
           };
           let report;
           try {
