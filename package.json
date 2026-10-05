@@ -8,6 +8,8 @@
   },
   "scripts": {
     "verify": "node scripts/verify.mjs",
+    "db:migrate": "pnpm --filter @wms/db db:migrate",
+    "db:rollback": "pnpm --filter @wms/db db:rollback",
     "infra:smoke": "node scripts/compose-smoke.mjs",
     "test:int": "vitest run -c vitest.int.config.ts",
     "test:int:neon": "WMS_INT_TARGET=neon vitest run -c vitest.int.config.ts",

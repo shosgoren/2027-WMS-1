@@ -10,11 +10,15 @@
 //
 // neon hedefi: hiçbir şey kaldırılmaz; DATABASE_URL ve DATABASE_URL_DIRECT zorunludur, eksikse
 // koşu açık hatayla düşer (atlama yok). URL'ler loglanmaz; yalnızca maskeli host (G-09).
+//
+// Her iki hedefte testlerden önce `migrate up` (migration rolü, DATABASE_URL_DIRECT) uygulanır
+// (T-101, ADR-015 §8); hata varsa koşu testlerden önce düşer.
 import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DockerComposeEnvironment, Wait, type StartedDockerComposeEnvironment } from "testcontainers";
-import { APP_ROLE, PGBOUNCER_ADMIN_URL_VAR, maskHost, parsePoolSize, parsePrepare, parseTarget, readIntEnv } from "./env.ts";
+import { migrateUp } from "../../../packages/db/src/migrate.ts";
+import { APP_ROLE, PGBOUNCER_ADMIN_URL_VAR, maskHost, parsePoolSize, parsePrepare, parseTarget, readIntEnv, redactErrorChain } from "./env.ts";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const SERVICES = ["postgres", "pgbouncer"];
@@ -38,6 +42,7 @@ export async function setup(): Promise<void> {
   if (target === "neon") {
     const env = readIntEnv(process.env);
     console.log(`[test:int] target=neon app=${maskHost(env.databaseUrl)} direct=${maskHost(env.databaseUrlDirect)}`);
+    await applyMigrations(env.databaseUrlDirect);
     return;
   }
 
@@ -67,10 +72,21 @@ export async function setup(): Promise<void> {
 
   try {
     exportUrls(environment, { migratorUser, migratorPassword, appPassword, adminPassword, db, poolSize });
+    await applyMigrations(process.env.DATABASE_URL_DIRECT ?? "");
   } catch (e) {
     await teardown();
     throw e;
   }
+}
+
+async function applyMigrations(directUrl: string): Promise<void> {
+  let r;
+  try {
+    r = await migrateUp({ url: directUrl });
+  } catch (e) {
+    throw new Error(`[test:int] migrate up failed: ${redactErrorChain(e, [directUrl])}`);
+  }
+  console.log(`[test:int] migrate up: ${r.applied.length} uygulandı, toplam ${r.totalApplied}`);
 }
 
 interface Credentials {
