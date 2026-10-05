@@ -35,7 +35,7 @@ ADR-001 Next.js + ayrı worker · 002 İngilizce kod/DB, Türkçe UI · 003 Driz
 ## Engeller / kullanıcı eylemi bekleyenler (2026-10-05 tek mesajla istendi)
 - U-01 Neon: kullanıcı 2026-10-05 tamamladığını bildirdi (proje etkin-wms, AWS Frankfurt, PG 17; `NEON_API_KEY` sırrı + `NEON_PROJECT_ID` değişkeni). Doğrulama T-005d ilk Actions koşusunda → T-005d
 - U-02 Fly.io: kullanıcı 2026-10-05 tamamladığını bildirdi (hesap + kart + `FLY_API_TOKEN` repo sırrı). Doğrulama T-010 ilk dağıtım koşusunda
-- U-03 (isteğe bağlı) Resend `RESEND_API_KEY` (+ alan adı) → Faz 1 e-posta; yoksa bağlantı ekranda gösterilir
+- U-03 Resend: kullanıcı 2026-10-05 `RESEND_API_KEY` repo sırrını ekledi; alan adı bildirilmedi → doğrulanmış alan adı olana kadar Resend yalnızca hesap sahibinin adresine `onboarding@resend.dev`'den gönderebilir; diğer alıcılar için davet/şifre bağlantısı ekranda gösterilir (ADR-013, kapalı bayrak). Faz 1 e-posta kartında
 - U-04 Q-07 hukukçu onayı → yalnızca gerçek kişisel veriyle prod için; demo için engel değil
 - E-01 kapandı: bu ortamda npm/Docker Hub açık.
 
