@@ -1,0 +1,55 @@
+# Etkin WMS — Fly.io staging (T-010 / ADR-013). Dağıtım yalnızca GitHub Actions'tan
+# (.github/workflows/deploy-staging.yml): `flyctl deploy --remote-only -c fly.staging.toml`.
+# Sır yok: DB/S3/e-posta bu kartta bağlanmaz; sırlar ileride `flyctl secrets` ile verilir, buraya yazılmaz.
+# Belge: https://fly.io/docs/reference/configuration/ · https://fly.io/docs/launch/processes/
+app = "etkin-wms-staging"
+primary_region = "fra"
+# Fly varsayılanı SIGINT + 5 sn; worker zarif kapanışı (WORKER_SHUTDOWN_TIMEOUT_MS varsayılanı
+# 10 sn, apps/worker/src/lifecycle.ts) ve Next bağlantı boşaltması için SIGTERM + 15 sn.
+kill_signal = "SIGTERM"
+kill_timeout = "15s"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[deploy]
+  strategy = "rolling"
+
+[env]
+  NODE_ENV = "production"
+  # Next standalone sunucusu HOSTNAME/PORT'u okur; tüm arayüzlerde dinlemeli (Fly proxy dışarıdan bağlanır).
+  HOSTNAME = "0.0.0.0"
+  PORT = "3000"
+
+# Süreç komutu imajın CMD'sinin yerine geçer (ENTRYPOINT yok). Yollar imajda doğrulandı:
+# standalone izleme kökü depo kökü → /app/apps/web/server.js; worker → /app/apps/worker/dist/main.js.
+[processes]
+  web = "node apps/web/server.js"
+  worker = "node apps/worker/dist/main.js"
+
+# Yalnızca web'e HTTP hizmeti; worker'da hizmet yok → proxy dokunmaz, otomatik durdurulmaz (kalıcı süreç).
+[http_service]
+  processes = ["web"]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    path = "/api/health"
+    timeout = "5s"
+
+# En küçük makineler (ADR-013); ölçekleme yok.
+[[vm]]
+  processes = ["web"]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+
+[[vm]]
+  processes = ["worker"]
+  size = "shared-cpu-1x"
+  memory = "256mb"

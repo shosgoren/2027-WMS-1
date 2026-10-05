@@ -1,0 +1,104 @@
+# Etkin WMS — staging dağıtımı (T-010 / ADR-013). KORUNAN DOSYA (PROTOCOL §3b).
+# Tek Docker imajını Fly.io `etkin-wms-staging` uygulamasına (fra; süreç grupları web + worker)
+# dağıtır, ardından `/api/health` ve worker durumunu doğrular.
+#
+# Tetikleyici: `main`'e push (birleşme) ve `workflow_dispatch`. Dispatch, iş akışı varsayılan dalda
+# olduktan sonra HERHANGİ bir dal seçilerek (o dalın iş akışı tanımıyla) başlatılabilir; bu yüzden iş
+# `if: github.ref == 'refs/heads/main'` ile yalnızca `main` üzerinde koşar. Bilinen risk: GitHub
+# environment + dal kuralı (sırrı yalnızca main'e açma) özel repoda ücretsiz planda yok; repoya yazma
+# yetkisi olan herkes (main'i değiştirebilen) güvenilen taraftır.
+#
+# Sır kapsamı (G-09): FLY_API_TOKEN YALNIZCA "Deploy" adımının env'indedir. Checkout kimlik bilgisi
+# saklamaz; diğer adımlar (kurulum, smoke) sırrı görmez. Smoke, deploy adımının yazdığı
+# `flyctl status --json` dosyasını okur.
+# Token türü: uygulama mevcutsa iş akışı org düzeyinde HİÇBİR komut (orgs list / apps create) koşmaz;
+# uygulama düzeyinde deploy token'ı (`fly tokens create deploy -a etkin-wms-staging`) yeterlidir.
+# Org token'ı yalnızca ilk oluşturma içindir: ilk yeşil koşudan sonra kullanıcı FLY_API_TOKEN'ı
+# uygulama kapsamlı deploy token'la değiştirir (U-06).
+# Üçüncü taraf kodu: action'lar tam commit SHA ile sabit; flyctl resmî sürüm ikilisi SHA-256 ile
+# doğrulanır (superfly/flyctl-actions/setup-flyctl yerine — o action sağlama doğrulaması yapmaz).
+name: deploy-staging
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Aynı anda tek dağıtım; koşan dağıtım İPTAL EDİLMEZ (yarım dağıtım bırakılmaz), yenisi sırada bekler.
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+# .pnpmfile kodu hiçbir adımda yüklenmez (ci.yml ile aynı savunma; bu iş pnpm kullanmaz).
+env:
+  npm_config_ignore_pnpmfile: "true"
+
+jobs:
+  deploy:
+    name: deploy
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      FLY_APP: etkin-wms-staging
+      FLY_CONFIG: fly.staging.toml
+      HEALTH_URL: https://etkin-wms-staging.fly.dev/api/health
+      # flyctl (Apache-2.0) resmî sürüm ikilisi; SHA-256 sürümün flyctl_<sürüm>_checksums.txt dosyasından.
+      FLYCTL_VERSION: 0.4.111
+      FLYCTL_SHA256: 1878d7fb1f8a418039042cf0749e4b7216c6c7018b66ae10611a64c2b6d9aa9e
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Node sürümü package.json "engines.node" alanından (smoke betiği için; bağımlılık kurulmaz).
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: package.json
+          package-manager-cache: false
+      - name: Install flyctl
+        run: |
+          tarball="flyctl_${FLYCTL_VERSION}_Linux_x86_64.tar.gz"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/superfly/flyctl/releases/download/v${FLYCTL_VERSION}/${tarball}"
+          echo "${FLYCTL_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/flyctl"
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP/flyctl" flyctl
+          echo "$RUNNER_TEMP/flyctl" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/flyctl/flyctl" version
+      # 1) Varlık denetimi `flyctl status -a` (uygulama düzeyi token yeterli). Uygulama varsa org
+      #    komutlarına girilmez. Yalnızca hata "bulunamadı" ise (ilk koşu) token'ın erişebildiği TEK
+      #    organizasyonda oluşturulur; birden çok org → tahmin edilmez, kırmızı. Diğer her hata
+      #    (yetki, ağ) kırmızıdır — oluşturma yoluna düşülmez (fail-closed).
+      # 2) Yapılandırma doğrulanır, uzak derleyicide (Fly) imaj derlenip dağıtılır.
+      #    --ha=false: süreç grubu başına tek makine (ADR-013: en küçük, ölçekleme yok).
+      - name: Deploy
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          if [ -z "$FLY_API_TOKEN" ]; then
+            echo "::error::FLY_API_TOKEN repo sırrı tanımlı değil"
+            exit 1
+          fi
+          if status_err=$(flyctl status --app "$FLY_APP" 2>&1 > /dev/null); then
+            echo "app $FLY_APP mevcut → org komutları atlanır"
+          elif printf '%s' "$status_err" | grep -qiE 'could not find app|not found'; then
+            orgs=$(flyctl orgs list --json)
+            slug=$(node -e 'const o = JSON.parse(process.argv[1]); const k = Object.keys(o); if (k.length !== 1) { console.error("org sayısı " + k.length + "; tek org bekleniyor"); process.exit(1); } console.log(k[0]);' "$orgs")
+            echo "app $FLY_APP yok → oluşturuluyor (org: $slug)"
+            flyctl apps create "$FLY_APP" --org "$slug"
+          else
+            echo "::error::flyctl status başarısız (uygulama bulunamadı hatası değil); oluşturma denenmez"
+            printf '%s\n' "$status_err"
+            exit 1
+          fi
+          flyctl config validate --strict --config "$FLY_CONFIG" --app "$FLY_APP"
+          flyctl deploy --remote-only --config "$FLY_CONFIG" --app "$FLY_APP" --ha=false --yes \
+            --image-label "git-${GITHUB_SHA}"
+          flyctl status --app "$FLY_APP"
+          flyctl status --app "$FLY_APP" --json > "$RUNNER_TEMP/fly-status.json"
+      - name: Smoke
+        run: node scripts/deploy-smoke.mjs --url "$HEALTH_URL" --status-file "$RUNNER_TEMP/fly-status.json"

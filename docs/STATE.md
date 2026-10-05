@@ -2,8 +2,8 @@
 
 **Oturum kilidi:** session_01C59FRaUynaDdhNGZoRbKsY · 2026-10-05T16:30Z (zamanlanmış oturum: kilit 3 saatten yeniyse ve başka oturumunsa hiçbir şey yapmadan çık; değilse kendi kimliğinle yenile, her push'ta zamanı güncelle)
 **Faz:** 0 — Kararlar & iskelet
-**Aktif görev:** T-008d ∥ T-008f (→ `int/faz0-bekciler-2`) ∥ T-005g lint sertleştirme (→ `int/faz0-pooler`). STATE'in güncel kopyası: `int/faz0-bekciler-2`.
-**Son tamamlanan:** #8 `int/faz0-bekciler-1` → `main` (T-007, T-008a/b/c/h/i, T-014; security-reviewer 3. tur BLOCKER 0 · MAJOR 0 · MINOR 5)
+**Aktif görev:** `int/faz0-bekciler-2` → `main` PR (T-008d/e/f/g) ∥ T-005d Neon koşusu (../wt-T-005d → `int/faz0-neon`). STATE'in güncel kopyası: `int/faz0-bekciler-2`.
+**Son tamamlanan:** #19 `int/faz0-pooler` → `main` (T-005a/b/c/g, T-015, T-016; security-reviewer 3. tur 0/0/9) · #13 Fly staging (ilk dağıtım yeşil) · #14 T-008g → bekciler-2
 **Sonraki adım:** T-008d → T-008e; T-008f; sonra T-008g (bekçiler taban daldan, `--root`, test-ac `$RUNNER_TEMP`, çalışma anı skip denetimi) → bekciler-2 PR. T-005g → pooler paketi yeniden inceleme → PR. Sonra T-005d (Neon, Actions) ve T-010 (Fly; FLY_API_TOKEN bekleniyor).
 
 ## Çalışma biçimi (kullanıcı kararı 2026-10-05 — ADR-012 rev., PROTOCOL §Onay kaynağı)
@@ -23,7 +23,7 @@ ADR-001 Next.js + ayrı worker · 002 İngilizce kod/DB, Türkçe UI · 003 Driz
 - [x] T-002b web (Next 16.3.8, React 19.3) · T-002c worker yaşam döngüsü · T-002d compose (PG 17.11, PgBouncer 1.26 transaction, alpine/minio yalnızca yerel, mailpit). Bulgular: worker tsconfig.build.json (T-010); ADR-005 pg-boss 12.36 vs graphile-worker 0.18 → architect (pg-boss transaction-mode pooler'a uygun görünüyor); Docker Hub 429 → CI'da mirror.gcr.io; nvm yolu /opt/nvm
 - [x] T-003 CI (`ci.yml`: verify, infra, secrets, deps; A-36 audit istisnası bitiş 2026-10-19). Takip: lockfile bütünlüğü (el ile düzenlenmiş lockfile audit'i kandırabilir) → T-008 ek kartı
 - [x] T-004 STACK + MAP + `scripts/check-docs.mjs` (#3). Bulgu: T-008g check-docs'u `check:all`'a bağlar; doğrudan bağımlılık STACK'te yoksa hata önerisi
-- [~] T-005a ✓ (#5) · T-005b ✓ (#6, postgres.js 3.4.9 + drizzle 0.45.3, prepare:false A-öneri) · T-005c ✓ (#7, AC-05 pool1/2 + AC-28 PASS) → paket incelemesi → `main`. Takipler: T-005e CI'da pool 1 koşusu; `@wms/db/internal` `sql` dışa verimi; DrizzleQueryError parametreleri loga (G-09) → gözlem kartı; DB_CLIENT_SETTINGS composition root (Faz 1); tests/**/*.ts typecheck kapsamı + STACK testcontainers/pg kilidi → T-004b; T-005c kartı mutasyonu `WITH CHECK (true)`
+- [x] T-005a ✓ (#5) · T-005b ✓ (#6, postgres.js 3.4.9 + drizzle 0.45.3, prepare:false A-öneri) · T-005c ✓ (#7, AC-05 pool1/2 + AC-28 PASS) → paket incelemesi → `main`. Takipler: T-005e CI'da pool 1 koşusu; `@wms/db/internal` `sql` dışa verimi; DrizzleQueryError parametreleri loga (G-09) → gözlem kartı; DB_CLIENT_SETTINGS composition root (Faz 1); tests/**/*.ts typecheck kapsamı + STACK testcontainers/pg kilidi → T-004b; T-005c kartı mutasyonu `WITH CHECK (true)`
 - [ ] T-005d Neon gerçek pooler koşusu (GitHub Actions; sırlar: `NEON_API_KEY`, değişken `NEON_PROJECT_ID`) → T-005e CI eşdeğerliği → `int/faz0-neon`
 - [x] T-006 PILOT.md — varsayımsal profil (Q-12)
 - [x] T-007, T-008a/b/c/h/i, T-014 (#8). Bilinen risk: int kapsam sahtelemesi (m9), PR gövdesinde gizli HTML
