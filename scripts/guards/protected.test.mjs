@@ -1,12 +1,14 @@
-// T-008c `check:protected` testleri: korunan yol/içerik kuralları (`protected-paths.mjs`),
+// T-008c/T-008h `check:protected` testleri: korunan yol/içerik kuralları (`protected-paths.mjs`),
 // GitHub istemcisi (`lib/github.mjs`, sahte `fetch` yalnızca burada), kipler ve fail-closed davranış.
-// Fixture depolar `lib/testkit.mjs` ile geçici dizinde gerçek git ile kurulur.
+// Fixture depolar `lib/testkit.mjs` ile geçici dizinde gerçek git ile kurulur. "… saldırısı" adlı
+// testler security-reviewer'ın (int/faz0-bekciler-1) denediği atlatmanın kendisidir (T-008h).
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { main } from "./cli.mjs";
-import { APPROVAL_LINE, REASONS } from "./lib/approval.mjs";
+import { approvalLine, REASONS } from "./lib/approval.mjs";
+import { gitEnv } from "./lib/git.mjs";
 import { API_VERSION, contextFromEnv, createGitHubClient, GitHubError, toPullInfo } from "./lib/github.mjs";
 import { createReporter, UsageError } from "./lib/output.mjs";
 import { createRepo } from "./lib/testkit.mjs";
@@ -17,10 +19,11 @@ import {
   baselineLowered,
   classifyChanges,
   contentRules,
-  npmrcConfigLines,
+  globToRegExp,
+  lockfileGuarded,
+  matchesGlob,
   poolerImages,
   staticRule,
-  yamlConfigBlock,
 } from "./protected-paths.mjs";
 
 /** @type {Array<() => void>} */
@@ -30,7 +33,8 @@ afterEach(() => {
 });
 
 const SEC0 = "security-reviewer: BLOCKER: 0 · MAJOR: 0 · MINOR: 1";
-const OK_BODY = `Gerekçe.\n\n${APPROVAL_LINE}\n${SEC0}\n`;
+/** @param {string} sha PR head SHA'sı */
+const okBody = (sha) => `Gerekçe.\n\n${approvalLine(sha)}\n${SEC0}\n`;
 const SHA_A = "a".repeat(40);
 
 const COMPOSE = `services:
@@ -109,7 +113,7 @@ function fakeClient(opts) {
  * @returns {PullInfo}
  */
 function pull(p) {
-  return { number: 7, state: "open", body: OK_BODY, baseRef: "main", mergedAt: null, ...p };
+  return { number: 7, state: "open", body: okBody(p.headSha), baseRef: "main", mergedAt: null, ...p };
 }
 
 /**
@@ -189,16 +193,69 @@ describe("protected-paths: yol kuralları", () => {
     "tests/QUARANTINE.md",
     ".pnpmfile.cjs",
     "apps/web/.pnpmfile.mjs",
+    // T-008h B1/M5/M6: paket yöneticisi yapılandırmasının tamamı, yamalar
+    ".npmrc",
+    "apps/web/.npmrc",
+    "pnpm-workspace.yaml",
+    "patches/vitest@5.0.3.patch",
+    "patches/sub/x.diff",
+    "apps/web/patches/pg.patch",
+    "vendor/fix.patch",
+    // T-008h m8: AC faz değişikliği
+    "docs/PILOT.md",
+    // T-008h M7: nokta ile başlayan adlar `**`/`*` altında da
+    ".github/workflows/.x.yml",
+    "scripts/guards/lib/.h.mjs",
+    "scripts/guards/.hidden/x.mjs",
+    ".githooks/.pre-commit",
+    "apps/.x/tsconfig.json",
+    "apps/web/.eslint.config.mjs/eslint.config.mjs",
   ])("%s korunur", (p) => {
     expect(staticRule(p)).not.toBeNull();
   });
 
-  it.each(["src/a.mjs", "docs/STATE.md", "docs/tasks/T-100.md", "scripts/compose-smoke.mjs", "apps/web/app/page.tsx", "tests/.ac-baseline.json"])(
+  it.each([
+    "src/a.mjs",
+    "docs/STATE.md",
+    "docs/tasks/T-100.md",
+    "scripts/compose-smoke.mjs",
+    "apps/web/app/page.tsx",
+    "tests/.ac-baseline.json",
+    "docs/PILOT.md.bak",
+    "xscripts/guards/a.mjs",
+    "scripts/guardsx/a.mjs",
+    "src/patch.mjs",
+  ])(
     "%s yol kuralıyla korunmaz",
     (p) => {
       expect(staticRule(p)).toBeNull();
     },
   );
+});
+
+describe("protected-paths: glob eşleyici (T-008h M7)", () => {
+  it("M7 saldırısı: Node path.matchesGlob `**` ile nokta adlarını eşlemez; bizimki eşler", () => {
+    expect(path.posix.matchesGlob(".github/workflows/.x.yml", ".github/**")).toBe(false); // saldırının dayanağı
+    expect(matchesGlob(".github/workflows/.x.yml", ".github/**")).toBe(true);
+    expect(matchesGlob("scripts/guards/lib/.h.mjs", "scripts/guards/**")).toBe(true);
+  });
+
+  it("`*` bölüm içi, `**` sıfır veya daha çok dizin; özel karakterler düz", () => {
+    expect(matchesGlob("tsconfig.json", "**/tsconfig*.json")).toBe(true);
+    expect(matchesGlob("a/b/tsconfig.build.json", "**/tsconfig*.json")).toBe(true);
+    expect(matchesGlob("a/tsconfigXjson", "**/tsconfig*.json")).toBe(false);
+    expect(matchesGlob("packages/db/src/locking.ts", "packages/db/src/locking.*")).toBe(true);
+    expect(matchesGlob("packages/db/src/x/locking.ts", "packages/db/src/locking.*")).toBe(false);
+    expect(matchesGlob("db/migrations/0001.sql", "**/migrations/**")).toBe(true);
+    expect(matchesGlob("migrations/a/b.sql", "**/migrations/**")).toBe(true);
+    expect(matchesGlob("scripts/guards", "scripts/guards/**")).toBe(false);
+    expect(matchesGlob("docs/adr/ADR-012.md", "docs/adr/ADR-*.md")).toBe(true);
+    expect(matchesGlob("docs/adr/ADR-0/1.md", "docs/adr/ADR-*.md")).toBe(false);
+  });
+
+  it("desteklenmeyen glob sözdizimi sessizce yanlış eşlemez, hata verir", () => {
+    for (const g of ["a/?.js", "a/[ab].js", "a/{x,y}.js", "a/!x", "a/b**/c"]) expect(() => globToRegExp(g), g).toThrow();
+  });
 });
 
 describe("protected-paths: içerik kuralları", () => {
@@ -238,7 +295,7 @@ describe("protected-paths: içerik kuralları", () => {
     expect(contentRules("docs/DECISIONS.md", b, b + "ADR-003 | t | c | kabul\n")[0]?.reason).toContain("ADR-003");
   });
 
-  it("kök package.json: ORM/sürücü sürümü ve bekçi betikleri korunur; diğer alanlar serbest", () => {
+  it("kök package.json: ORM/sürücü/bekçi aracı sürümü ve betiklerin tamamı korunur; diğer alanlar serbest", () => {
     const b = JSON.stringify(ROOT_PKG);
     /** @param {(p: any) => void} f */
     const after = (f) => {
@@ -247,7 +304,15 @@ describe("protected-paths: içerik kuralları", () => {
       return JSON.stringify(p);
     };
     expect(contentRules("package.json", b, after((p) => (p.dependencies.zod = "4.1.0")))).toEqual([]);
-    expect(contentRules("package.json", b, after((p) => (p.scripts.dev = "y")))).toEqual([]);
+    expect(contentRules("package.json", b, after((p) => (p.description = "x")))).toEqual([]);
+    // T-008h B2: tüm betikler (yaşam döngüsü, pre/post) korunur; `dev` dahil.
+    expect(contentRules("package.json", b, after((p) => (p.scripts.dev = "y")))[0]?.reason).toContain("scripts.dev");
+    expect(contentRules("package.json", b, after((p) => (p.devDependencies.vitest = "5.0.4")))[0]?.reason).toContain(
+      "devDependencies.vitest",
+    );
+    expect(contentRules("package.json", b, after((p) => (p.devDependencies["@vitest/coverage-v8"] = "5.0.3")))[0]?.reason).toContain(
+      "devDependencies.@vitest/coverage-v8",
+    );
     expect(contentRules("package.json", b, after((p) => (p.dependencies["drizzle-orm"] = "0.46.0")))[0]?.reason).toContain(
       "dependencies.drizzle-orm",
     );
@@ -264,14 +329,49 @@ describe("protected-paths: içerik kuralları", () => {
     expect(contentRules("package.json", b, "{bozuk")[0]?.reason).toContain("ayrıştırılamadı");
   });
 
-  it("tüm package.json'lar: auditConfig, overrides, resolutions, configDependencies (üst düzey ve pnpm.) korunur", () => {
+  it("B2 saldırısı: precheck:*/preverify/postinstall/prepare betikleri korunur (tüm manifestlerde)", () => {
+    const b = JSON.stringify(ROOT_PKG);
+    for (const [k, v] of /** @type {Array<[string, string]>} */ ([
+      ["precheck:protected", "node -e \"process.exit(0)\""],
+      ["postcheck:protected", "true"],
+      ["preverify", "x"],
+      ["postinstall", "node evil.mjs"],
+      ["prepare", "node evil.mjs"],
+      ["pretest:ac", "x"],
+    ])) {
+      for (const file of ["package.json", "apps/web/package.json"]) {
+        const a = JSON.stringify({ ...ROOT_PKG, scripts: { ...ROOT_PKG.scripts, [k]: v } });
+        const h = contentRules(file, b, a);
+        expect(h[0]?.rule, `${file} ${k}`).toBe("package-json");
+        expect(h[0]?.reason, `${file} ${k}`).toContain(`scripts.${k}`);
+      }
+    }
+  });
+
+  it("tüm package.json'lar: scripts, pnpm (tamamı), auditConfig, overrides, resolutions, configDependencies … korunur", () => {
     const b = JSON.stringify({ name: "web", dependencies: { pg: "8.0.0" } });
     /** @param {Record<string, unknown>} extra */
     const after = (extra) => JSON.stringify({ name: "web", dependencies: { pg: "8.0.0" }, ...extra });
-    // Alt pakette sürüm alanı kök kuralıdır, burada serbest.
-    expect(contentRules("apps/web/package.json", b, JSON.stringify({ name: "web", dependencies: { pg: "8.1.0" } }))).toEqual([]);
+    expect(contentRules("apps/web/package.json", b, after({ dependencies: { pg: "8.0.0", zod: "4.0.0" } }))).toEqual([]);
+    // T-008h M5: korunan paket sürümü yalnızca kökte değil, tüm manifestlerde; `catalog:` ile de.
+    expect(contentRules("apps/web/package.json", b, JSON.stringify({ name: "web", dependencies: { pg: "8.1.0" } }))[0]?.reason).toContain(
+      "dependencies.pg",
+    );
+    expect(contentRules("apps/web/package.json", b, JSON.stringify({ name: "web", dependencies: { pg: "catalog:" } }))[0]?.reason).toContain(
+      "dependencies.pg",
+    );
+    expect(
+      contentRules("apps/web/package.json", b, after({ devDependencies: { typescript: "catalog:evil" } }))[0]?.reason,
+    ).toContain("devDependencies.typescript");
     /** @type {Array<[Record<string, unknown>, string]>} */
     const cases = [
+      [{ scripts: { build: "next build" } }, "scripts.build"],
+      [{ pnpm: { patchedDependencies: { vitest: "patches/v.patch" } } }, "pnpm.patchedDependencies"],
+      [{ pnpm: { onlyBuiltDependencies: ["evil"] } }, "pnpm.onlyBuiltDependencies"],
+      [{ pnpm: { packageExtensions: { vitest: { dependencies: { evil: "1" } } } } }, "pnpm.packageExtensions"],
+      [{ packageManager: "pnpm@9.0.0" }, "packageManager"],
+      [{ devEngines: { runtime: { name: "node", version: "20" } } }, "devEngines"],
+      [{ dependenciesMeta: { evil: { injected: true } } }, "dependenciesMeta"],
       [{ pnpm: { auditConfig: { ignoreCves: [] } } }, "pnpm.auditConfig"],
       [{ auditConfig: {} }, "auditConfig"],
       [{ overrides: { lodash: "4.0.0" } }, "overrides"],
@@ -289,31 +389,82 @@ describe("protected-paths: içerik kuralları", () => {
     }
   });
 
-  it("pnpm-workspace.yaml: auditConfig/overrides/configDependencies/pnpmfile blokları korunur, diğer anahtarlar serbest", () => {
-    const b = 'packages:\n  - "apps/*"\nauditConfig:\n  ignoreCves:\n    - CVE-1\n';
-    expect(yamlConfigBlock(b)).toBe("auditConfig:\n  ignoreCves:\n    - CVE-1");
-    expect(contentRules("pnpm-workspace.yaml", b, b.replace('"apps/*"', '"apps/*"\n  - "packages/*"'))).toEqual([]);
-    expect(contentRules("pnpm-workspace.yaml", b, b + "    - CVE-2\n")[0]?.rule).toBe("pm-config");
-    expect(contentRules("pnpm-workspace.yaml", null, "auditConfig: {ignoreCves: [CVE-9]}\n")[0]?.rule).toBe("pm-config");
-    for (const add of [
-      "overrides:\n  lodash: 4.0.0\n",
-      "configDependencies:\n  x: 1.0.0+sha512-abc\n",
-      "pnpmfile: hooks/x.cjs\n",
-      "globalPnpmfile: /tmp/x.cjs\n",
-    ]) {
-      expect(contentRules("pnpm-workspace.yaml", b, b + add)[0]?.rule, add).toBe("pm-config");
+  it("B1 saldırısı: .npmrc / pnpm-workspace.yaml'da her anahtar (node-options, script-shell, catalog …) korunur", () => {
+    const ws = 'packages:\n  - "apps/*"\n';
+    for (const [file, before, after] of /** @type {Array<[string, string | null, string]>} */ ([
+      [".npmrc", "save-exact=true\n", "save-exact=true\nnode-options=--import=./x.mjs\n"],
+      [".npmrc", null, "script-shell=./evil.sh\n"],
+      [".npmrc", "", "registry=https://evil.example.invalid/\n"],
+      [".npmrc", "", "ignore-scripts=true\n"],
+      [".npmrc", "", "enable-pre-post-scripts=true\n"],
+      [".npmrc", "save-exact=true\n", "save-exact=false\n"],
+      ["apps/web/.npmrc", null, "nodeOptions=--require ./x.cjs\n"],
+      ["pnpm-workspace.yaml", ws, ws + "nodeOptions: --import=./x.mjs\n"],
+      ["pnpm-workspace.yaml", ws, ws + "catalog:\n  pg: 9.0.0\n"],
+      ["pnpm-workspace.yaml", ws, ws + "catalogs:\n  db:\n    pg: 9.0.0\n"],
+      ["pnpm-workspace.yaml", ws, ws + "patchedDependencies:\n  vitest: patches/v.patch\n"],
+      ["pnpm-workspace.yaml", ws, ws + "onlyBuiltDependencies:\n  - evil\n"],
+      ["pnpm-workspace.yaml", ws, ws + "packageExtensions:\n  vitest:\n    dependencies:\n      evil: 1.0.0\n"],
+      ["pnpm-workspace.yaml", ws, ws.replace('"apps/*"', '"apps/*"\n  - "packages/*"')],
+    ])) {
+      const hits = classifyChanges([{ status: before === null ? "A" : "M", path: file }], {
+        before: () => before,
+        after: () => after,
+      });
+      expect(hits.map((h) => h.path), `${file}: ${after}`).toEqual([file]);
     }
-    const o = b + "overrides:\n  lodash: 4.0.0\n";
-    expect(contentRules("pnpm-workspace.yaml", o, o.replace("4.0.0", "4.0.1"))[0]?.rule).toBe("pm-config");
   });
 
-  it(".npmrc: audit/pnpmfile/override anahtarları korunur, diğerleri serbest", () => {
-    expect(npmrcConfigLines("# audit=false\naudit-level = high\nsave-exact=true\n")).toBe("audit-level=high");
-    expect(contentRules(".npmrc", "audit-level=high\n", "audit-level=high\nsave-exact=false\n")).toEqual([]);
-    expect(contentRules(".npmrc", "audit-level=high\n", "audit-level=critical\n")[0]?.rule).toBe("pm-config");
-    expect(contentRules("apps/web/.npmrc", null, "audit=false\n")[0]?.rule).toBe("pm-config");
-    expect(contentRules(".npmrc", null, "global-pnpmfile=/tmp/x.cjs\n")[0]?.rule).toBe("pm-config");
-    expect(contentRules(".npmrc", null, "pnpmfile=x.cjs\n")[0]?.rule).toBe("pm-config");
+  it("M6: pnpm-lock.yaml'da korunan paketin girdisi/resolution'ı, tarball/git çözümlemesi ve kilit ayarları korunur", () => {
+    const lock = [
+      "lockfileVersion: '9.0'",
+      "",
+      "settings:",
+      "  autoInstallPeers: true",
+      "",
+      "importers:",
+      "  .:",
+      "    devDependencies:",
+      "      vitest:",
+      "        specifier: 5.0.3",
+      "        version: 5.0.3",
+      "",
+      "packages:",
+      "",
+      "  '@vitest/runner@5.0.3':",
+      "    resolution: {integrity: sha512-AAA}",
+      "",
+      "  vitest@5.0.3:",
+      "    resolution: {integrity: sha512-BBB}",
+      "    engines: {node: '>=22'}",
+      "",
+      "  zod@4.0.0:",
+      "    resolution: {integrity: sha512-CCC}",
+      "",
+      "snapshots:",
+      "",
+      "  vitest@5.0.3:",
+      "    dependencies:",
+      "      zod: 4.0.0",
+      "",
+    ].join("\n");
+    expect(lockfileGuarded(lock)).toContain("vitest@5.0.3 resolution: {integrity: sha512-BBB}");
+    expect(lockfileGuarded(lock)).not.toContain("zod");
+    // Serbest: korunmayan paketin integrity güncellemesi, snapshot değişikliği.
+    expect(contentRules("pnpm-lock.yaml", lock, lock.replace("sha512-CCC", "sha512-DDD"))).toEqual([]);
+    expect(contentRules("pnpm-lock.yaml", lock, lock.replace("      zod: 4.0.0", "      zod: 4.0.1"))).toEqual([]);
+    for (const [name, after] of /** @type {Array<[string, string]>} */ ([
+      ["vitest resolution", lock.replace("sha512-BBB", "sha512-EVIL")],
+      ["vitest tarball", lock.replace("{integrity: sha512-BBB}", "{tarball: https://evil.example.invalid/vitest.tgz}")],
+      ["@vitest/runner sürüm", lock.replace("'@vitest/runner@5.0.3':", "'@vitest/runner@5.0.4':")],
+      ["korunmayan pakete tarball", lock.replace("{integrity: sha512-CCC}", "{tarball: https://evil.example.invalid/zod.tgz}")],
+      ["korunmayan pakete git", lock.replace("{integrity: sha512-CCC}", "{commit: abc, repo: https://evil.example.invalid/z.git, type: git}")],
+      ["çok satırlı resolution", lock.replace("    resolution: {integrity: sha512-CCC}", "    resolution:\n      tarball: https://evil.example.invalid/z.tgz")],
+      ["settings", lock.replace("autoInstallPeers: true", "autoInstallPeers: false")],
+      ["patchedDependencies", lock.replace("importers:", "patchedDependencies:\n  vitest: {path: patches/v.patch, hash: x}\n\nimporters:")],
+    ])) {
+      expect(contentRules("pnpm-lock.yaml", lock, after)[0]?.rule, name).toBe("lockfile");
+    }
   });
 
   it("compose: pooler imaj etiketi korunur, diğer imajlar serbest", () => {
@@ -384,11 +535,11 @@ describe("lib/github.mjs", () => {
 
   it("pullsForCommit: commits/{sha}/pulls", async () => {
     const f = fakeFetch([{ status: 200, json: [{ ...PR_JSON, merged_at: "2026-10-05T10:00:00Z", body: null }] }]);
-    const c = createGitHubClient({ token: "t", repository: "o/r", apiUrl: "https://ghe.example.invalid/api/v3/", fetchImpl: f.fetchImpl });
+    const c = createGitHubClient({ token: "t", repository: "o/r", apiUrl: "https://api.github.com/", fetchImpl: f.fetchImpl });
     const ps = await c.pullsForCommit(SHA_A);
     expect(ps[0]?.mergedAt).toBe("2026-10-05T10:00:00Z");
     expect(ps[0]?.body).toBeNull();
-    expect(f.calls[0]?.url).toBe(`https://ghe.example.invalid/api/v3/repos/o/r/commits/${SHA_A}/pulls?per_page=100`);
+    expect(f.calls[0]?.url).toBe(`https://api.github.com/repos/o/r/commits/${SHA_A}/pulls?per_page=100`);
   });
 
   it("HTTP hatası, ağ hatası, JSON dışı, beklenmeyen biçim → GitHubError (token mesajda yok)", async () => {
@@ -409,8 +560,30 @@ describe("lib/github.mjs", () => {
   it("geçersiz yapılandırma reddedilir", () => {
     expect(() => createGitHubClient({ token: "", repository: "o/r" })).toThrow(GitHubError);
     expect(() => createGitHubClient({ token: "t", repository: "o/r/../x" })).toThrow(GitHubError);
-    expect(() => createGitHubClient({ token: "t", repository: "o/r", apiUrl: "http://api.github.com" })).toThrow(/https/);
+    expect(() => createGitHubClient({ token: "t", repository: "o/r", apiUrl: "http://api.github.com" })).toThrow(GitHubError);
     expect(() => toPullInfo({ ...PR_JSON, head: { sha: "kısa" } })).toThrow(/head.sha/);
+  });
+
+  it("m4 saldırısı: GITHUB_API_URL yalnızca https://api.github.com (token başka hosta gitmez)", () => {
+    const f = fakeFetch([]);
+    for (const apiUrl of [
+      "https://evil.example.invalid",
+      "https://api.github.com.evil.example.invalid",
+      "https://api.github.com@evil.example.invalid",
+      "https://ghe.example.invalid/api/v3",
+      "https://api.github.com/repos/x/y/../..",
+    ]) {
+      expect(() => createGitHubClient({ token: "t", repository: "o/r", apiUrl, fetchImpl: f.fetchImpl }), apiUrl).toThrow(/izinli değil/);
+    }
+    expect(f.calls).toEqual([]);
+  });
+
+  it("m4 saldırısı: REPO_RE `..` ve `.` bölümlerini reddeder", () => {
+    for (const repository of ["o/..", "../r", "o/.", "o/a..b", ".x/r", "o/r/x", "o", "-o/r"]) {
+      expect(() => createGitHubClient({ token: "t", repository }), repository).toThrow(GitHubError);
+    }
+    expect(() => createGitHubClient({ token: "t", repository: "shosgoren/2027-WMS-1" })).not.toThrow();
+    expect(() => createGitHubClient({ token: "t", repository: "o-1/r.x_y" })).not.toThrow();
   });
 
   it("contextFromEnv: pull_request, push, diğer olaylar, eksik yük", () => {
@@ -431,6 +604,37 @@ describe("lib/github.mjs", () => {
     expect(contextFromEnv({ GITHUB_EVENT_NAME: "workflow_dispatch" }, read).kind).toBe("none");
     expect(contextFromEnv({ GITHUB_EVENT_NAME: "pull_request", GITHUB_EVENT_PATH: "yok.json" }, read).kind).toBe("none");
     expect(contextFromEnv({ GITHUB_EVENT_NAME: "pull_request" }, read).kind).toBe("none");
+  });
+});
+
+describe("lib/git.mjs ortam sertleştirmesi (T-008h m5)", () => {
+  it("gitEnv GIT_CONFIG_* / GIT_CONFIG_PARAMETERS / GIT_CONFIG_GLOBAL / GIT_REPLACE_REF_BASE siler", () => {
+    const env = gitEnv({
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "diff.external",
+      GIT_CONFIG_VALUE_0: "/tmp/x",
+      GIT_CONFIG_PARAMETERS: "'core.fsmonitor'='/tmp/x'",
+      GIT_CONFIG_GLOBAL: "/tmp/g",
+      GIT_CONFIG_SYSTEM: "/tmp/s",
+      GIT_CONFIG: "/tmp/c",
+      GIT_REPLACE_REF_BASE: "refs/evil/",
+      GIT_DIR: "/x",
+      PATH: "/bin",
+    });
+    expect(env).toEqual({ PATH: "/bin" });
+  });
+
+  it("m5 saldırısı: refs/replace ile HEAD tabana eşlenirse bile korunan değişiklik görülür (--no-replace-objects)", async () => {
+    const r = fixture();
+    const mainSha = r.git("rev-parse", "main").trim();
+    r.write("docs/INVARIANTS.md", "# gevşetildi\n").commit("x");
+    const h = head(r);
+    r.git("replace", h, mainSha);
+    // Saldırının dayanağı: replace etkin git, HEAD'i taban commit'i olarak görür (boş fark).
+    expect(r.git("diff", "--name-only", "main", "HEAD").trim()).toBe("");
+    const res = await check(r, { env: prEnv(r), client: fakeClient({ pulls: [pull({ headSha: h, body: SEC0 })] }).client });
+    expect(res.code).toBe(1);
+    expect(res.text).toContain(`FAIL ${REASONS.NO_APPROVAL} docs/INVARIANTS.md`);
   });
 });
 
@@ -560,11 +764,110 @@ describe("check:protected", () => {
     expect(res.text).toContain(REASONS.UNVERIFIABLE);
   });
 
-  it("çalışma ağacı ve izlenmeyen dosyalar da sayılır; yeni korunan dosya (ilk oluşturma) korunur", async () => {
+  it("--local: çalışma ağacı ve izlenmeyen dosyalar da sayılır; yeni korunan dosya (ilk oluşturma) korunur", async () => {
     const r = fixture();
     r.write(".github/workflows/ci.yml", "on: push\n");
+    const res = await check(r, { argv: ["--local"] });
+    expect(res.text).toContain(`WARN ${WARN_LOCAL} .github/workflows/ci.yml`);
+  });
+
+  it("bağlamsız (CI dışı, --local değil): yeni korunan dosya commit'lenince → APPROVAL_UNVERIFIABLE", async () => {
+    const r = fixture();
+    r.write(".github/workflows/ci.yml", "on: push\n").commit("x");
     const res = await check(r);
     expect(res.text).toContain(`FAIL ${REASONS.UNVERIFIABLE} .github/workflows/ci.yml`);
+  });
+
+  it("M2 saldırısı: commit'li korunan değişiklik çalışma ağacında geri alınır → yine FAIL (PR olayı ve --pr)", async () => {
+    const r = fixture();
+    r.write("docs/INVARIANTS.md", "# gevşetildi\n").commit("x");
+    r.write("docs/INVARIANTS.md", "# I\n"); // çalışma ağacı tabana eşit
+    const body = { headSha: head(r), body: SEC0 };
+    const ev = await check(r, { env: prEnv(r), client: fakeClient({ pulls: [pull(body)] }).client });
+    expect(ev.code).toBe(1);
+    expect(ev.text).toContain(`FAIL ${REASONS.NO_APPROVAL} docs/INVARIANTS.md`);
+    const arg = await check(r, { argv: ["--pr", "7"], client: fakeClient({ pulls: [pull(body)] }).client });
+    expect(arg.code).toBe(1);
+    expect(arg.text).toContain(`FAIL ${REASONS.NO_APPROVAL} docs/INVARIANTS.md`);
+  });
+
+  it("M2 saldırısı: commit'te bekçi betiği eklenip çalışma ağacında kaldırılırsa içerik HEAD'den okunur → FAIL", async () => {
+    const r = fixture();
+    const pkg = { ...ROOT_PKG, scripts: { ...ROOT_PKG.scripts, "precheck:protected": "node -e 0" } };
+    r.write("package.json", JSON.stringify(pkg, null, 2) + "\n").commit("x");
+    r.write("package.json", JSON.stringify(ROOT_PKG, null, 2) + "\n");
+    const res = await check(r, { env: prEnv(r), client: fakeClient({ pulls: [pull({ headSha: head(r), body: SEC0 })] }).client });
+    expect(res.code).toBe(1);
+    expect(res.text).toContain(`FAIL ${REASONS.NO_APPROVAL} package.json`);
+    expect(res.text).toContain("scripts.precheck:protected");
+  });
+
+  it("PR kipinde çalışma ağacı sayılmaz (yalnızca commit'ler)", async () => {
+    const r = fixture();
+    r.write("docs/INVARIANTS.md", "# commit'lenmemiş\n");
+    const res = await check(r, { env: prEnv(r), client: fakeClient({ pulls: [pull({ headSha: head(r), body: "" })] }).client });
+    expect(res.code).toBe(0);
+  });
+
+  it("M3 saldırısı: PR/CI kipinde --base HEAD (boş fark) yok sayılır → FAIL", async () => {
+    const r = fixture();
+    r.write("docs/INVARIANTS.md", "# gevşetildi\n").commit("x");
+    const p = pull({ headSha: head(r), body: SEC0 });
+    for (const argv of [["--base", "HEAD"], ["--pr", "7", "--base", "HEAD"], ["--base=feat/T-100-x"]]) {
+      const res = await check(r, { argv, env: argv.includes("--pr") ? {} : prEnv(r), client: fakeClient({ pulls: [p] }).client });
+      expect(res.code, argv.join(" ")).toBe(1);
+      expect(res.text, argv.join(" ")).toContain(`FAIL ${REASONS.NO_APPROVAL} docs/INVARIANTS.md`);
+    }
+  });
+
+  it("M3 saldırısı: PR olayında taban API'deki base.ref'tir (GITHUB_BASE_REF HEAD'i gösterse de)", async () => {
+    const r = fixture();
+    r.write("docs/INVARIANTS.md", "# gevşetildi\n").commit("x").publish("feat/T-100-x");
+    const env = { ...prEnv(r), GITHUB_BASE_REF: "feat/T-100-x" };
+    const res = await check(r, { env, client: fakeClient({ pulls: [pull({ headSha: head(r), body: SEC0 })] }).client });
+    expect(res.code).toBe(1);
+    expect(res.text).toContain(`FAIL ${REASONS.NO_APPROVAL} docs/INVARIANTS.md`);
+  });
+
+  it("M4 saldırısı: onay önceki head için yazılmış, sonra yeni commit push'lanmış → APPROVAL_STALE", async () => {
+    const r = fixture();
+    r.write("docs/INVARIANTS.md", "# I2\n").commit("x");
+    const approvedHead = head(r);
+    r.write("docs/INVARIANTS.md", "# I3 (onaydan sonra)\n").commit("y");
+    const res = await check(r, {
+      env: prEnv(r),
+      client: fakeClient({ pulls: [pull({ headSha: head(r), body: okBody(approvedHead) })] }).client,
+    });
+    expect(res.code).toBe(1);
+    expect(res.text).toContain(`FAIL ${REASONS.STALE} docs/INVARIANTS.md`);
+  });
+
+  it.each([
+    ["B1 .npmrc node-options", ".npmrc", "node-options=--import=./x.mjs\n"],
+    ["B1 .npmrc script-shell", ".npmrc", "script-shell=./x.sh\n"],
+    ["B1 pnpm-workspace nodeOptions", "pnpm-workspace.yaml", 'packages:\n  - "apps/*"\nnodeOptions: --import=./x.mjs\n'],
+    ["M5 catalog", "pnpm-workspace.yaml", 'packages:\n  - "apps/*"\ncatalog:\n  pg: 9.0.0\n'],
+    ["M5 alt paket sürücü sürümü", "apps/web/package.json", JSON.stringify({ name: "web", dependencies: { pg: "catalog:" } })],
+    ["M6 yama", "patches/pg@8.0.0.patch", "--- a\n+++ b\n"],
+    ["M7 nokta adlı iş akışı", ".github/workflows/.x.yml", "on: push\n"],
+    ["M7 nokta adlı bekçi yardımcısı", "scripts/guards/lib/.h.mjs", "export {};\n"],
+    ["m8 PILOT", "docs/PILOT.md", "# pilot: AC-34 3A\n"],
+  ])("%s saldırısı: onaysız PR → FAIL PROTECTED_NO_APPROVAL", async (_name, file, content) => {
+    const r = fixture();
+    r.write(file, content).commit("x");
+    const res = await check(r, { env: prEnv(r), client: fakeClient({ pulls: [pull({ headSha: head(r), body: SEC0 })] }).client });
+    expect(res.code).toBe(1);
+    expect(res.text).toContain(`FAIL ${REASONS.NO_APPROVAL} ${file}`);
+  });
+
+  it("B2 saldırısı: package.json'a pre/post/yaşam döngüsü betiği → FAIL PROTECTED_NO_APPROVAL", async () => {
+    for (const k of ["precheck:protected", "preverify", "postinstall", "prepare"]) {
+      const r = fixture();
+      r.write("package.json", JSON.stringify({ ...ROOT_PKG, scripts: { ...ROOT_PKG.scripts, [k]: "node -e 0" } }, null, 2) + "\n").commit("x");
+      const res = await check(r, { env: prEnv(r), client: fakeClient({ pulls: [pull({ headSha: head(r), body: SEC0 })] }).client });
+      expect(res.code, k).toBe(1);
+      expect(res.text, k).toContain(`FAIL ${REASONS.NO_APPROVAL} package.json`);
+    }
   });
 
   it("CLI üzerinden: --local uyarı + OK; bilinmeyen argüman çıkış 2", async () => {

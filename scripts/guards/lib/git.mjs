@@ -1,7 +1,10 @@
 // Bekçilerin ortak git yardımcıları (T-008a). Yalnızca `git` CLI'ı (`execFileSync`, kabuk yok).
 // Depo her zaman `cwd` ile belirlenir: ortamdaki GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE … gibi
 // konum değişkenleri silinir; aksi hâlde commit kancasında koşan bir bekçi (veya testi)
-// yanlış depoya bakabilirdi.
+// yanlış depoya bakabilirdi. Ayrıca (T-008h m5) çıktıyı değiştirebilen yapılandırma/nesne
+// değişkenleri (`GIT_CONFIG*`, `GIT_CONFIG_PARAMETERS`, `GIT_REPLACE_REF_BASE`) silinir ve her
+// çağrı `--no-replace-objects` ile koşar: `refs/replace/*` bir commit'i/blob'u başka içerikle
+// gösteremez.
 import { execFileSync } from "node:child_process";
 
 /** Varsayılan hedef dal (kartın Dal satırında `int/…` hedefi yoksa). */
@@ -18,6 +21,10 @@ const LOCATION_VARS = [
   "GIT_NAMESPACE",
   "GIT_PREFIX",
 ];
+
+/** Yapılandırma enjeksiyonu ve nesne değiştirme değişkenleri (önekle: `GIT_CONFIG*`). */
+const CONFIG_VAR_RE = /^GIT_CONFIG/;
+const EXTRA_VARS = ["GIT_REPLACE_REF_BASE"];
 
 export class GitError extends Error {
   /**
@@ -38,7 +45,8 @@ export class GitError extends Error {
 export function gitEnv(base = process.env) {
   /** @type {NodeJS.ProcessEnv} */
   const env = { ...base };
-  for (const k of LOCATION_VARS) delete env[k];
+  for (const k of [...LOCATION_VARS, ...EXTRA_VARS]) delete env[k];
+  for (const k of Object.keys(env)) if (CONFIG_VAR_RE.test(k)) delete env[k];
   return env;
 }
 
@@ -50,7 +58,7 @@ export function gitEnv(base = process.env) {
  */
 export function git(cwd, args) {
   try {
-    return execFileSync("git", args, {
+    return execFileSync("git", ["--no-replace-objects", ...args], {
       cwd,
       env: gitEnv(),
       encoding: "utf8",

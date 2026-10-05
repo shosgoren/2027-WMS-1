@@ -9,7 +9,12 @@
 //   ONLY                      .only zinciri; fit/fdescribe; `{ only: … }`
 //   TODO                      .todo zinciri; `t.todo()`; `{ todo: … }`
 //   CONDITIONAL_SKIP          .skipIf/.runIf; test/describe gövdesinde `if (<koşul>) return`
-//                             ve koşul process.env / CI / platform okuyor
+//                             ve koşul process.env / CI / platform okuyor ya da ortamdan türetilmiş
+//                             bir değişkeni okuyor (`const s = !!process.env.X; … if (s) return`)
+// Test kökleri (T-008h m6): genel adlar (it/test/describe/suite) + `vitest`, `@playwright/test`,
+// `node:test` içe aktarımlarının takma adları (`import { it as t }`, varsayılan, ad alanı
+// `import * as v` → `v.it`), bunlardan türeyen değişkenler (`const t2 = test.extend({…})`,
+// `const c = it.concurrent`) ve yapı bozma (`const { skip } = it` → SKIP).
 //   QUARANTINE_NOT_SUPPORTED  yukarıdakilerden biri `@quarantine` etiketli testte. İstisna yok:
 //                             karantina `skip` ile değil, T-008e'de "koşar, kapıyı kırmaz"
 //                             olarak uygulanır (PROTOCOL §Karantina: testler her CI'da koşturulur).
@@ -51,6 +56,8 @@ const OPTION_KEYS = new Map([
   ["only", "ONLY"],
   ["todo", "TODO"],
 ]);
+/** Test çerçevesi modülleri (içe aktarım takma adları izlenir). */
+const TEST_MODULES = new Set(["vitest", "@playwright/test", "node:test"]);
 /** Gövdesi koşullu atlama için taranmayan kanca üyeleri (`test.beforeEach` …). */
 const HOOK_MEMBERS = new Set(["beforeEach", "afterEach", "beforeAll", "afterAll"]);
 
@@ -166,17 +173,22 @@ function memberName(node) {
 }
 
 /**
- * Koşul ifadesi ortam değişkeni, CI veya platform okuyor mu.
+ * Koşul ifadesi ortam değişkeni, CI veya platform okuyor mu (doğrudan ya da ortamdan türetilmiş
+ * değişken üzerinden).
  * @param {ts.Node} node
+ * @param {ReadonlySet<string>} [envVars] ortamdan türetilmiş değişken adları
  * @returns {boolean}
  */
-function readsEnvironment(node) {
+function readsEnvironment(node, envVars = new Set()) {
   /** @param {string} name */
   const envName = (name) =>
     /^(?:ci|is_?ci|env)$/i.test(name) || /platform/i.test(name) || /^is_?(?:windows|win32|mac|macos|darwin|linux)$/i.test(name);
   /** @param {ts.Node} n @returns {boolean} */
   const visit = (n) => {
     if (ts.isIdentifier(n) && envName(n.text)) return true;
+    if (ts.isIdentifier(n) && envVars.has(n.text) && !(n.parent !== undefined && ts.isPropertyAccessExpression(n.parent) && n.parent.name === n)) {
+      return true;
+    }
     if (ts.isPropertyAccessExpression(n) && envName(n.name.text)) return true;
     if (ts.isElementAccessExpression(n) && ts.isStringLiteralLike(n.argumentExpression) && envName(n.argumentExpression.text)) {
       return true;
@@ -184,6 +196,32 @@ function readsEnvironment(node) {
     return ts.forEachChild(n, visit) === true;
   };
   return visit(node);
+}
+
+/**
+ * Parantez, `await`, `as`, `!` sarmalayıcılarını soyar.
+ * @param {ts.Expression} e
+ * @returns {ts.Expression}
+ */
+function unwrap(e) {
+  let x = e;
+  while (ts.isParenthesizedExpression(x) || ts.isAwaitExpression(x) || ts.isAsExpression(x) || ts.isNonNullExpression(x) || ts.isSatisfiesExpression(x)) {
+    x = x.expression;
+  }
+  return x;
+}
+
+/**
+ * Deyimdeki bağlama adları (`a`, `{ a, b: c }` → a, c; iç içe dahil).
+ * @param {ts.BindingName} name
+ * @returns {string[]}
+ */
+function bindingNames(name) {
+  if (ts.isIdentifier(name)) return [name.text];
+  /** @type {string[]} */
+  const out = [];
+  for (const el of name.elements) if (!ts.isOmittedExpression(el)) out.push(...bindingNames(el.name));
+  return out;
 }
 
 /**
@@ -217,6 +255,119 @@ export function scanSource(text, file) {
 
   /** @param {ts.Node} node */
   const lineOf = (node) => sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
+
+  /** Test kökü yerel adları. */
+  const bases = new Set(BASE_NAMES);
+  /** Devre dışı bırakan önekli yerel adlar → neden kodu. */
+  const prefixed = new Map(PREFIXED);
+  /** Test modülü ad alanları (`import * as v from "vitest"`). */
+  /** @type {Set<string>} */
+  const namespaces = new Set();
+  /** Ortamdan türetilmiş değişken adları. */
+  /** @type {Set<string>} */
+  const envVars = new Set();
+  /** @type {ts.VariableDeclaration[]} */
+  const decls = [];
+
+  /**
+   * İfade bir test kökü zinciri mi (`it`, `t.concurrent`, `v.it.each(…)`).
+   * @param {ts.Expression} expr
+   * @returns {boolean}
+   */
+  function isTestChain(expr) {
+    const root = chainRoot(expr);
+    if (root === null) return false;
+    if (bases.has(root.text)) return true;
+    return namespaces.has(root.text) && BASE_NAMES.has(chainMembers(expr)[0] ?? "");
+  }
+
+  /**
+   * Önekli devre dışı kök (`xit`, takma adı veya `v.xit`) → neden kodu.
+   * @param {ts.Expression} expr
+   * @returns {string | undefined}
+   */
+  function prefixedCode(expr) {
+    const root = chainRoot(expr);
+    if (root === null) return undefined;
+    if (prefixed.has(root.text)) return prefixed.get(root.text);
+    if (namespaces.has(root.text)) return PREFIXED.get(chainMembers(expr)[0] ?? "");
+    return undefined;
+  }
+
+  /** @param {ts.Node} n */
+  function collect(n) {
+    if (ts.isImportDeclaration(n) && ts.isStringLiteral(n.moduleSpecifier) && TEST_MODULES.has(n.moduleSpecifier.text)) {
+      const c = n.importClause;
+      if (c !== undefined) {
+        if (c.name !== undefined) bases.add(c.name.text);
+        const nb = c.namedBindings;
+        if (nb !== undefined && ts.isNamespaceImport(nb)) namespaces.add(nb.name.text);
+        if (nb !== undefined && ts.isNamedImports(nb)) {
+          for (const el of nb.elements) {
+            const imported = (el.propertyName ?? el.name).text;
+            if (BASE_NAMES.has(imported)) bases.add(el.name.text);
+            const code = PREFIXED.get(imported);
+            if (code !== undefined) prefixed.set(el.name.text, code);
+          }
+        }
+      }
+    }
+    if (ts.isVariableDeclaration(n) && n.initializer !== undefined) decls.push(n);
+    ts.forEachChild(n, collect);
+  }
+  collect(sf);
+
+  // Türetilmiş kökler ve ortam bayrakları: sabit noktaya kadar.
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const d of decls) {
+      const init = unwrap(/** @type {ts.Expression} */ (d.initializer));
+      if (ts.isIdentifier(d.name) && !bases.has(d.name.text)) {
+        const derivable =
+          ts.isIdentifier(init) ||
+          ts.isPropertyAccessExpression(init) ||
+          ts.isElementAccessExpression(init) ||
+          (ts.isCallExpression(init) && memberName(init.expression) === "extend");
+        if (derivable && isTestChain(init)) {
+          bases.add(d.name.text);
+          changed = true;
+        }
+      }
+      if (ts.isObjectBindingPattern(d.name)) {
+        // `const { it: t } = v` / `const { test } = await import("vitest")`
+        const fromModule =
+          (ts.isIdentifier(init) && namespaces.has(init.text)) ||
+          (ts.isCallExpression(init) &&
+            init.expression.kind === ts.SyntaxKind.ImportKeyword &&
+            init.arguments[0] !== undefined &&
+            ts.isStringLiteralLike(init.arguments[0]) &&
+            TEST_MODULES.has(init.arguments[0].text));
+        if (fromModule) {
+          for (const el of d.name.elements) {
+            if (!ts.isIdentifier(el.name)) continue;
+            const prop = el.propertyName !== undefined && ts.isIdentifier(el.propertyName) ? el.propertyName.text : el.name.text;
+            if (BASE_NAMES.has(prop) && !bases.has(el.name.text)) {
+              bases.add(el.name.text);
+              changed = true;
+            }
+            const code = PREFIXED.get(prop);
+            if (code !== undefined && !prefixed.has(el.name.text)) {
+              prefixed.set(el.name.text, code);
+              changed = true;
+            }
+          }
+        }
+      }
+      if (readsEnvironment(init, envVars)) {
+        for (const name of bindingNames(d.name)) {
+          if (!envVars.has(name)) {
+            envVars.add(name);
+            changed = true;
+          }
+        }
+      }
+    }
+  }
 
   /**
    * Düğümün içinde bulunduğu deyimlerden birinin baş yorumunda veya kapsayan test çağrısının
@@ -266,7 +417,7 @@ export function scanSource(text, file) {
     const fn = [...call.arguments].reverse().find((a) => ts.isArrowFunction(a) || ts.isFunctionExpression(a));
     if (fn === undefined || !(ts.isArrowFunction(fn) || ts.isFunctionExpression(fn)) || !ts.isBlock(fn.body)) return;
     for (const stmt of fn.body.statements) {
-      if (isIfReturn(stmt) && readsEnvironment(stmt.expression)) {
+      if (isIfReturn(stmt) && readsEnvironment(stmt.expression, envVars)) {
         report(stmt, "CONDITIONAL_SKIP", `${rootName} gövdesinde ortama bağlı erken dönüş: if (${stmt.expression.getText(sf)}) return`);
       }
     }
@@ -277,29 +428,44 @@ export function scanSource(text, file) {
     // it.skip / describe.concurrent.only / test["todo"] / it.skipIf(…) …
     const member = memberName(node);
     if (member !== null && MODIFIERS.has(member) && (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node))) {
-      const root = chainRoot(node.expression);
-      if (root !== null && BASE_NAMES.has(root.text)) {
+      if (isTestChain(node.expression)) {
         report(node, /** @type {string} */ (MODIFIERS.get(member)), `${node.getText(sf)}`);
+      }
+    }
+
+    // Yapı bozma: const { skip } = it / const { only: o } = test.concurrent
+    if (ts.isVariableDeclaration(node) && ts.isObjectBindingPattern(node.name) && node.initializer !== undefined && isTestChain(unwrap(node.initializer))) {
+      for (const el of node.name.elements) {
+        const prop =
+          el.propertyName !== undefined && (ts.isIdentifier(el.propertyName) || ts.isStringLiteralLike(el.propertyName))
+            ? el.propertyName.text
+            : ts.isIdentifier(el.name)
+              ? el.name.text
+              : null;
+        const code = prop === null ? undefined : MODIFIERS.get(prop);
+        if (code !== undefined) report(el, code, `const { ${el.getText(sf)} } = ${node.initializer.getText(sf)}`);
       }
     }
 
     if (ts.isCallExpression(node) || ts.isTaggedTemplateExpression(node)) {
       const callee = ts.isCallExpression(node) ? node.expression : node.tag;
       const root = chainRoot(callee);
-      // xit / fdescribe … (zincirli: xit.each(…)(…))
-      if (root !== null && PREFIXED.has(root.text)) {
-        report(root, /** @type {string} */ (PREFIXED.get(root.text)), `${root.text}(…)`);
+      // xit / fdescribe … (zincirli: xit.each(…)(…)); takma ad ve ad alanı dahil
+      const pcode = prefixedCode(callee);
+      if (root !== null && pcode !== undefined) {
+        report(root, pcode, `${root.text}${namespaces.has(root.text) ? `.${chainMembers(callee)[0] ?? ""}` : ""}(…)`);
       }
+      const testCall = isTestChain(callee);
       if (ts.isCallExpression(node)) {
         const name = memberName(callee);
         // ctx.skip() / this.skip() / t.skip() / t.todo() — test kökü dışındaki alıcılar
-        if ((name === "skip" || name === "todo") && !(root !== null && BASE_NAMES.has(root.text))) {
+        if ((name === "skip" || name === "todo") && !testCall) {
           report(node, name === "skip" ? "SKIP" : "TODO", `${callee.getText(sf)}()`);
         }
         // Bağlamdan ayrıştırılmış `skip()`
         if (ts.isIdentifier(callee) && callee.text === "skip") report(node, "SKIP", "skip()");
 
-        if (root !== null && BASE_NAMES.has(root.text)) {
+        if (root !== null && testCall) {
           // node:test seçenekleri: test("…", { skip: true }, fn)
           for (const arg of node.arguments) {
             if (!ts.isObjectLiteralExpression(arg)) continue;

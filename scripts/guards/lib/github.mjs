@@ -7,6 +7,10 @@
 // `merge_commit_sha` kullanılmaz (API 2026-03-10 sürümünde kaldırıldı).
 // Ortam (GitHub Actions varsayılan değişkenleri): GITHUB_REPOSITORY, GITHUB_API_URL,
 // GITHUB_EVENT_NAME, GITHUB_EVENT_PATH, GITHUB_SHA, GITHUB_REF_NAME; GITHUB_TOKEN iş akışından verilir.
+// API kökü (T-008h m4): yalnızca `https://api.github.com`. GitHub belgesi: GITHUB_API_URL "Returns the
+// API URL" (github.com'da REST kökü `https://api.github.com`); iş akışı GITHUB_* değişkenlerini
+// değiştiremez, ama yerel `--pr` koşusunda ortam serbesttir: başka kök belirteci sızdırır ve sahte
+// onaylı PR yanıtı döndürebilir. GHES / ghe.com desteklenmez (fail-closed; depo github.com'da).
 // Arayüz enjekte edilebilir (`fetchImpl`); test çifti yalnızca testlerde (G-07).
 import { readFileSync } from "node:fs";
 
@@ -14,7 +18,8 @@ export const API_VERSION = "2022-11-28";
 export const DEFAULT_API_URL = "https://api.github.com";
 const TIMEOUT_MS = 15_000;
 const SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
-const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+/** `owner/repo`; `.`/`..` içeren bölüm (yol geçişi) reddedilir. */
+const REPO_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/(?!.*\.\.)(?!\.$)[A-Za-z0-9_.-]{1,100}$/;
 
 export class GitHubError extends Error {
   /** @param {string} message */
@@ -64,7 +69,7 @@ export function createGitHubClient(opts) {
   if (opts.token === "") throw new GitHubError("GITHUB_TOKEN boş");
   if (!REPO_RE.test(opts.repository)) throw new GitHubError(`GITHUB_REPOSITORY geçersiz: "${opts.repository}"`);
   const apiUrl = (opts.apiUrl ?? DEFAULT_API_URL).replace(/\/+$/, "");
-  if (!/^https:\/\//.test(apiUrl)) throw new GitHubError(`GITHUB_API_URL https değil: "${apiUrl}"`);
+  if (apiUrl !== DEFAULT_API_URL) throw new GitHubError(`GITHUB_API_URL izinli değil: "${apiUrl}" (yalnızca ${DEFAULT_API_URL})`);
   const fetchImpl = opts.fetchImpl ?? /** @type {FetchLike} */ (/** @type {unknown} */ (globalThis.fetch));
   const [owner, repo] = /** @type {[string, string]} */ (opts.repository.split("/"));
   const repoPath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
