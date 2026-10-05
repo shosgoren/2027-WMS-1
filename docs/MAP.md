@@ -19,5 +19,5 @@ Durum: `var` = yol repoda mevcut; `planlı: <kart>` = henüz yok, ilgili kart a�
 | docker-compose.yml | var | Yerel altyapı: postgres, pgbouncer, minio, mailpit |
 | .env.example | var | Ortam değişkeni şablonu (sır içermez) |
 | scripts/ | var | Repo betikleri: `verify`, `compose-smoke`, `check-docs` |
-| .github/workflows/ | planlı: T-003 | CI iş akışları |
+| .github/workflows/ | var | CI iş akışları (`ci.yml`: verify, infra, secrets, deps — T-003) |
 | docs/ | var | spec/, adr/, tasks/, agents/, STATE, MAP, STACK, INVARIANTS, ACCEPTANCE, PHASES |
