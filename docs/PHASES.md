@@ -1,8 +1,6 @@
 # Fazlar ve Üretim Kapıları
 Her faz başında `architect` fazı kartlara böler; faz sonunda Supervisor kapı raporu verir ve kullanıcı onayı olmadan sonraki faza geçilmez.
 
-| Faz | Kapsam | Çıkış kapısı |
-|---|---|---|
 **Kapı kuralı:** Bir fazın kapısı, `docs/ACCEPTANCE.md`'de "Faz" sütunu o faz olan **tüm** AC'lerin geçmesidir; aşağıdaki tablo bu listeyi tekrarlar ama tek doğru kaynak ACCEPTANCE'tır. Testler `@AC-xx` etiketiyle yazılır; `pnpm test:ac --phase N` o fazın tüm AC'lerini koşturur ve etiketli testi olmayan AC'yi **hata** sayar (eksik test = kapı kapalı). Koşullu AC'ler (`ACCEPTANCE.md` §Koşullu) koşulları sağlanıyorsa kapıya otomatik eklenir. Bir AC'yi başka faza taşımak veya koşullu yapmak §Onay kaynağı kuralıyla insan onayı ister. Kabul senaryoları sağlayıcıdan bağımsız sonuç tanımlar; belirli bir altyapıya (Redis, broker, ORM) bağlı senaryolar yalnızca koşullu bölümde yer alır.
 
 | Faz | Kapsam | Çıkış kapısı (AC'ler + ek kanıt) |
