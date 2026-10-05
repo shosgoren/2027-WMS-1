@@ -3,15 +3,17 @@
 // Uygulama tarafı YALNIZCA DATABASE_URL (wms_app, PgBouncer transaction mode) ile bağlanır. Migration rolü
 // (DATABASE_URL_DIRECT) yalnızca doğrulama okumaları ve temizlik içindir. Veriler sentetik UUID'lerdir (G-09).
 import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import pg from "pg";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createDbClient, currentTenantId, withTenant } from "../../../packages/db/src/index.ts";
 import { DB_CLIENT_SETTINGS, createTenantContext, rawDb, type DbClient } from "../../../packages/db/src/client.ts";
 import type { TenantTx } from "../../../packages/queue-adapter/src/index.ts";
-import { QUEUE_SCHEMA, assertBamCommandsExpected, createJobQueue, installQueueSchema, type PgBossJobQueue } from "../../../packages/queue-adapter/src/index.ts";
+import { QUEUE_SCHEMA, assertBamCommandsExpected, createJobQueue, installQueueSchema, isExpectedBamCommand, pgBossAsyncCommandsForVerification, type PgBossJobQueue } from "../../../packages/queue-adapter/src/index.ts";
 import { JOB_PAYLOAD_SCHEMAS, JOB_TYPES, QueueError, type Job, type JobContext } from "../../../packages/shared/src/queue.ts";
 import { readIntEnv, redactErrorChain } from "../harness/env.ts";
 
@@ -172,7 +174,6 @@ describe("wms_app en dar yetki (BLOCKER: bam/version/queue)", () => {
   });
 
   it("bekleyen bam komutu beklenen biçimde değilse kurulum reddedilir (fail-closed) ve komut çalışmaz", async () => {
-    expect(() => assertBamCommandsExpected([`CREATE INDEX job_x ON ${QUEUE_SCHEMA}.job (name)`])).not.toThrow();
     expect(() => assertBamCommandsExpected([`ALTER ROLE wms_app SUPERUSER`])).toThrow(/unexpected pending/);
     expect(() => assertBamCommandsExpected([`CREATE INDEX a ON ${QUEUE_SCHEMA}.job (name); ALTER ROLE wms_app SUPERUSER`])).toThrow();
     const id = randomUUID();
@@ -186,7 +187,51 @@ describe("wms_app en dar yetki (BLOCKER: bam/version/queue)", () => {
       expect(r.rows[0].rolsuper).toBe(false);
     } finally {
       await admin.query(`DELETE FROM ${QUEUE_SCHEMA}.bam WHERE id = $1`, [id]);
+      // Reddedilen koşu yetkileri geri aldı (fail-closed) ve geri vermedi; temiz kurulum yetkileri yeniden verir.
+      await installQueueSchema({ url: env.databaseUrlDirect });
     }
+  });
+
+  it("allowlist: kurulu pg-boss'un gerçek async komutlarının hepsi kabul; dar dilbilgisi dışı örnekler ret", () => {
+    const real = pgBossAsyncCommandsForVerification();
+    expect(real.length).toBeGreaterThanOrEqual(9);
+    for (const c of real) expect(isExpectedBamCommand(c), c).toBe(true);
+    expect(isExpectedBamCommand(`DROP INDEX CONCURRENTLY IF EXISTS ${QUEUE_SCHEMA}.job_common_i5`)).toBe(true);
+    const bad = [
+      `ALTER TABLE ${QUEUE_SCHEMA}.job ADD COLUMN x int`,
+      `CREATE INDEX a ON ${QUEUE_SCHEMA}.job (lower(name))`,
+      `CREATE INDEX a ON ${QUEUE_SCHEMA}.job ((SELECT 1))`,
+      `CREATE INDEX a ON ${QUEUE_SCHEMA}.job (name) WHERE name = (SELECT 1)`,
+      `CREATE INDEX a ON ${QUEUE_SCHEMA}.job (name) WHERE pg_sleep(1) IS NULL`,
+      `CREATE INDEX a ON public.job (name)`,
+      `CREATE INDEX a ON ${QUEUE_SCHEMA}.job (name); ALTER ROLE wms_app SUPERUSER`,
+      `CREATE INDEX a ON ${QUEUE_SCHEMA}.job (name) WHERE state = 'x' OR true`,
+      `DROP INDEX public.some_index`,
+      `DROP TABLE ${QUEUE_SCHEMA}.job`,
+    ];
+    for (const c of bad) expect(isExpectedBamCommand(c), c).toBe(false);
+  });
+
+  it("pgboss işlevlerinde PUBLIC EXECUTE yok; wms_app yalnızca job_now() çalıştırır", async () => {
+    await asApp(async (c) => {
+      await expect(c.query(`SELECT ${QUEUE_SCHEMA}.job_now()`)).resolves.toBeDefined();
+      await expect(c.query(`SELECT ${QUEUE_SCHEMA}.job_table_run('SELECT 1')`)).rejects.toMatchObject(denied);
+      await expect(c.query(`SELECT ${QUEUE_SCHEMA}.create_queue('x', '{}'::jsonb)`)).rejects.toMatchObject(denied);
+    });
+    const r = await admin.query(
+      `SELECT p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = $1 AND has_function_privilege('public', p.oid, 'EXECUTE')`,
+      [QUEUE_SCHEMA],
+    );
+    expect(r.rows).toEqual([]);
+  });
+
+  it("install-cli: DATABASE_URL ile aynı hedef reddedilir", async () => {
+    const cli = path.resolve(import.meta.dirname, "../../../packages/queue-adapter/src/install-cli.ts");
+    const run = promisify(execFile);
+    await expect(
+      run(process.execPath, [cli], { env: { ...process.env, DATABASE_URL: env.databaseUrlDirect, DATABASE_URL_DIRECT: env.databaseUrlDirect } }),
+    ).rejects.toMatchObject({ code: 1 });
   });
 
   it("kurulum uygulama rolüyle çalıştırılamaz", async () => {

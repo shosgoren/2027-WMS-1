@@ -21,7 +21,7 @@ import {
   type JobType,
 } from "@wms/shared/queue";
 import { sql } from "drizzle-orm";
-import { PgBoss, fromDrizzle, type Job as BossJob } from "pg-boss";
+import { PgBoss, fromDrizzle, getMigrationPlans, type Job as BossJob } from "pg-boss";
 import { z } from "zod";
 
 /** Tenant transaction'ı: `@wms/db` genel yüzeyindeki `withTenant` callback'inin `tx` tipi. */
@@ -115,7 +115,8 @@ export function createJobQueue(options: JobQueueOptions): PgBossJobQueue {
     migrate: false,
     createSchema: false,
     // wms_app yönetim tablolarına (queue/version/bam/instance/...) yazamaz: bakım/süpervizyon ve örnek kaydı
-    // kapalı. Süresi dolan/tamamlanan işlerin bakımı wms_worker rolüyle T-115c'dedir.
+    // kapalı. Süresi dolan/tamamlanan işlerin bakımı ile job tablolarında RLS, zarf tenant doğrulaması ve wms_worker
+    // ayrımı: T-115c (job RLS + zarf tenant doğrulaması + wms_worker).
     supervise: false,
     registerInstance: false,
     schedule: false,
@@ -237,6 +238,18 @@ export class QueueInstallError extends Error {
 const APP_ROLES: readonly string[] = ["wms_app", "wms_auth", "wms_identity_probe"];
 
 /**
+ * Önceki yetkileri geri alır: `wms_app`'in tablo/sıra/işlev yetkileri ve işlevlerde PUBLIC EXECUTE. (pg-boss
+ * işlevleri PUBLIC EXECUTE ile doğar; çalıştırma yetkisi yalnızca gerekene verilir: uygulama yolu yalnızca
+ * `job_now()` çağırır.)
+ */
+function revokeSql(schema: string): string {
+  return `REVOKE ALL ON ALL TABLES IN SCHEMA ${schema} FROM wms_app;
+  REVOKE ALL ON ALL SEQUENCES IN SCHEMA ${schema} FROM wms_app;
+  REVOKE ALL ON ALL FUNCTIONS IN SCHEMA ${schema} FROM wms_app;
+  REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA ${schema} FROM PUBLIC`;
+}
+
+/**
  * `wms_app`'e verilen EN DAR yetkiler (kurulu pg-boss 12.36.0 kaynağından: send=`insertJobs` → `job`/`job_common` (ortak bölüm) INSERT;
  * fetch/complete/fail → `job` UPDATE ve SELECT; sürüm denetimi `check()` → `version.version`; kuyruk önbelleği
  * `getQueues` → `queue` SELECT). `bam`, `schedule`, `subscription`, `instance`, `queue_stats`, `warning`,
@@ -244,27 +257,57 @@ const APP_ROLES: readonly string[] = ["wms_app", "wms_auth", "wms_identity_probe
  * bu yüzden `wms_app` oraya yazabilseydi rol ayrımı (I-03) aşılırdı. Önceki geniş yetkiler önce geri alınır.
  */
 export const QUEUE_APP_GRANTS_SQL = `
-  REVOKE ALL ON ALL TABLES IN SCHEMA ${QUEUE_SCHEMA} FROM wms_app;
-  REVOKE ALL ON ALL SEQUENCES IN SCHEMA ${QUEUE_SCHEMA} FROM wms_app;
-  REVOKE ALL ON ALL FUNCTIONS IN SCHEMA ${QUEUE_SCHEMA} FROM wms_app;
+  ${revokeSql(QUEUE_SCHEMA)};
   GRANT USAGE ON SCHEMA ${QUEUE_SCHEMA} TO wms_app;
   GRANT SELECT, INSERT, UPDATE ON ${QUEUE_SCHEMA}.job, ${QUEUE_SCHEMA}.job_common TO wms_app;
   GRANT SELECT ON ${QUEUE_SCHEMA}.queue TO wms_app;
-  GRANT SELECT (version) ON ${QUEUE_SCHEMA}.version TO wms_app`;
+  GRANT SELECT (version) ON ${QUEUE_SCHEMA}.version TO wms_app;
+  GRANT EXECUTE ON FUNCTION ${QUEUE_SCHEMA}.job_now() TO wms_app`;
 
-/** pg-boss'un kendi sürüm migration'larının ürettiği `bam` komutları: yalnızca pg-boss şemasında indeks işi. */
-const BAM_COMMAND_RE = new RegExp(
-  String.raw`^\s*(?:CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?\w+\s+ON\s+${QUEUE_SCHEMA}\.\w+|DROP\s+INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+EXISTS\s+)?${QUEUE_SCHEMA}\.\w+|ALTER\s+TABLE\s+${QUEUE_SCHEMA}\.\w+\s)`,
+// pg-boss 12.36.0'ın `bam` kuyruğuna gerçekten yazdığı komutların biçimi (dist/migrationStore.js `async:` girdileri,
+// `job_table_format` sonrası): yalnızca indeks oluşturma/silme. Sütun listesi yalnızca tanımlayıcılar (+ASC/DESC);
+// parantezli ifade ve işlev çağrısı YOK; WHERE yalnızca sütun karşılaştırmaları (sabit: yalnızca sözcük karakterli
+// dize). `ALTER TABLE` dalı yoktur.
+const IDENT = String.raw`[a-z_][a-z0-9_]*`;
+const LITERAL = String.raw`'\w*'`;
+const COL = String.raw`${IDENT}(?:\s+(?:ASC|DESC))?`;
+const COMPARE = String.raw`(?:NOT\s+)?${IDENT}|${IDENT}\s+(?:=|<>|<=|>=|<|>)\s+${LITERAL}|${IDENT}\s+IS\s+(?:NOT\s+)?NULL|${IDENT}\s+IN\s+\(${LITERAL}(?:,\s*${LITERAL})*\)`;
+const BAM_CREATE_RE = new RegExp(
+  String.raw`^CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?${IDENT}\s+ON\s+${QUEUE_SCHEMA}\.${IDENT}\s+\(${COL}(?:,\s*${COL})*\)(?:\s+INCLUDE\s+\(${IDENT}(?:,\s*${IDENT})*\))?(?:\s+WHERE\s+(?:${COMPARE})(?:\s+AND\s+(?:${COMPARE}))*)?$`,
   "i",
 );
+const BAM_DROP_RE = new RegExp(String.raw`^DROP\s+INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+EXISTS\s+)?${QUEUE_SCHEMA}\.${IDENT}$`, "i");
+
+/** Komut beklenen pg-boss `bam` biçiminde mi (tek ifade, yukarıdaki dar dilbilgisi). */
+export function isExpectedBamCommand(command: string): boolean {
+  const text = command.trim().replace(/;$/, "").trim();
+  return !text.includes(";") && (BAM_CREATE_RE.test(text) || BAM_DROP_RE.test(text));
+}
 
 /** İşlenmemiş bir `bam` komutu beklenen biçimde değilse reddeder (fail-closed). Çalıştırma pg-boss'tadır. */
 export function assertBamCommandsExpected(commands: readonly string[]): void {
   for (const command of commands) {
-    if (!BAM_COMMAND_RE.test(command) || command.replace(/;\s*$/, "").includes(";")) {
+    if (!isExpectedBamCommand(command)) {
       throw new QueueInstallError("unexpected pending pg-boss bam command; refusing to run it with the migration role");
     }
   }
+}
+
+/**
+ * Kurulu pg-boss'un sürüm migration'larının `job_table_run_async` ile `bam`'a yazacağı gerçek komutlar (doğrulama
+ * testi için): `getMigrationPlans` çıktısındaki satır içi biçimden, `job_common` tablosu için.
+ */
+export function pgBossAsyncCommandsForVerification(): string[] {
+  const plan = getMigrationPlans(QUEUE_SCHEMA, 25);
+  const lines = plan.split("\n").map((l) => l.trim());
+  const out: string[] = [];
+  lines.forEach((line, i) => {
+    if (line.startsWith("-- inlined from") && line.includes("job_table_run_async")) {
+      const next = lines[i + 1];
+      if (next !== undefined) out.push(next.replace(/;$/, ""));
+    }
+  });
+  return out;
 }
 
 function describeFailure(err: unknown): QueueInstallError {
@@ -301,13 +344,28 @@ export async function installQueueSchema(options: InstallQueueSchemaOptions): Pr
     const db = probe.getDb();
     const who = await db.executeSql("SELECT current_user::text AS u, session_user::text AS s");
     const row = who.rows[0] as { u: string; s: string } | undefined;
-    if (row === undefined || APP_ROLES.includes(row.u) || APP_ROLES.includes(row.s)) {
+    if (row === undefined || APP_ROLES.includes(row.u) || APP_ROLES.includes(row.s) || row.u !== row.s) {
       throw new QueueInstallError("queue schema install must run with the migration role, not an application role");
     }
-    const exists = await db.executeSql(`SELECT to_regclass('${QUEUE_SCHEMA}.bam') IS NOT NULL AS present`);
-    if ((exists.rows[0] as { present?: boolean } | undefined)?.present === true) {
-      const pending = await db.executeSql(`SELECT command FROM ${QUEUE_SCHEMA}.bam WHERE status <> 'completed'`);
-      assertBamCommandsExpected(pending.rows.map((r: { command: string }) => r.command));
+    // Olumlu doğrulama: rol pgboss şemasının sahibi olmalı; şema yoksa veritabanında CREATE yetkisi olmalı.
+    const authority = await db.executeSql(
+      `SELECT (SELECT pg_get_userbyid(nspowner) = current_user FROM pg_namespace WHERE nspname = '${QUEUE_SCHEMA}') AS owns_schema,
+              (SELECT true FROM pg_namespace WHERE nspname = '${QUEUE_SCHEMA}') AS schema_exists,
+              has_database_privilege(current_user, current_database(), 'CREATE') AS can_create`,
+    );
+    const auth = authority.rows[0] as { owns_schema: boolean | null; schema_exists: boolean | null; can_create: boolean } | undefined;
+    const authorised = auth?.schema_exists === true ? auth.owns_schema === true : auth?.can_create === true;
+    if (!authorised) {
+      throw new QueueInstallError("queue schema install role must own the pgboss schema (or may create it)");
+    }
+    // Önce yetkileri geri al (bam denetiminden ÖNCE): şema varsa wms_app'in eski geniş yetkileri ve PUBLIC EXECUTE kalkar.
+    if (auth?.schema_exists === true) {
+      await db.executeSql(revokeSql(QUEUE_SCHEMA));
+      const exists = await db.executeSql(`SELECT to_regclass('${QUEUE_SCHEMA}.bam') IS NOT NULL AS present`);
+      if ((exists.rows[0] as { present?: boolean } | undefined)?.present === true) {
+        const pending = await db.executeSql(`SELECT command FROM ${QUEUE_SCHEMA}.bam WHERE status <> 'completed'`);
+        assertBamCommandsExpected(pending.rows.map((r: { command: string }) => r.command));
+      }
     }
   } catch (err) {
     throw describeFailure(err);

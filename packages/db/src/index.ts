@@ -52,3 +52,5 @@ export type {
 export { AUDIT_ACTIONS, AuditError, CHANGE_SUMMARY_MAX_BYTES, REDACTED, appendAudit, isSensitiveKey, looksSensitiveValue, maskChangeSummary, recordSecurityEvent } from "./audit.ts";
 export type { AppendedAudit, AuditAction, AuditEntry, JsonValue, SecurityEventInput } from "./audit.ts";
 export type { AuditLog, NewAuditLog, NewRequestRateLimit, RequestRateLimit } from "./schema/audit.ts";
+// Bağlantı hedefi karşılaştırması (migrate.ts): kuyruk kurulum CLI'ı uygulama bağlantısını reddetmek için kullanır.
+export { sameConnectionTarget } from "./migrate.ts";
