@@ -14,7 +14,13 @@
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "isolatedModules": true,
-    "resolveJsonModule": true
+    "resolveJsonModule": true,
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+    "paths": {
+      "@next/eslint-plugin-next": ["./apps/web/node_modules/@next/eslint-plugin-next/dist/index.d.ts"],
+      "estree": ["./node_modules/.pnpm/node_modules/@types/estree/index.d.ts"]
+    }
   },
-  "include": ["scripts/**/*.mjs"]
+  "include": ["scripts/**/*.mjs", "tests/**/*.ts", "vitest*.config.ts", "eslint.config.mjs"]
 }
