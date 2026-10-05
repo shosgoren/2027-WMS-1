@@ -12,6 +12,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import pg from "pg";
 import { describe, expect, it } from "vitest";
+import * as audit from "../../../packages/db/src/schema/audit.ts";
 import * as identity from "../../../packages/db/src/schema/identity.ts";
 import * as tenancy from "../../../packages/db/src/schema/tenancy.ts";
 import { readIntEnv, redactErrorChain, secretUrls } from "../harness/env.ts";
@@ -23,7 +24,7 @@ const dbRequire = createRequire(path.resolve(import.meta.dirname, "../../../pack
 const pgCore = (await import(pathToFileURL(dbRequire.resolve("drizzle-orm/pg-core")).href)) as typeof import("drizzle-orm/pg-core");
 
 type PgTableAny = Parameters<typeof pgCore.getTableConfig>[0];
-const SCHEMA_MODULES: Record<string, unknown>[] = [identity, tenancy];
+const SCHEMA_MODULES: Record<string, unknown>[] = [identity, tenancy, audit];
 
 function allTables(): PgTableAny[] {
   const out: PgTableAny[] = [];
@@ -131,10 +132,10 @@ describe(`identity schema drift (target=${env.target})`, () => {
         `SELECT table_name, data_type, column_default FROM information_schema.columns
           WHERE table_schema = 'public' AND column_name = 'id'`,
       );
-      // `id` sütunu olan her Drizzle tablosu (tenant_settings'in PK'si tenant_id'dir, `id` yoktur).
+      // `id` sütunu olan her Drizzle tablosu (tenant_settings'in PK'si tenant_id'dir, request_rate_limits'in bilesik PK'si vardir; `id` yoktur).
       const withId = allTables().filter((t) => pgCore.getTableConfig(t).columns.some((c) => c.name === "id"));
       expect(ids.rows.length).toBe(withId.length);
-      expect(withId.length).toBe(12);
+      expect(withId.length).toBe(13);
       for (const r of ids.rows) {
         expect(r.data_type, r.table_name).toBe("uuid");
         expect(r.column_default, r.table_name).toBe("gen_random_uuid()");
@@ -277,5 +278,64 @@ describe(`tenancy schema (T-103, target=${env.target})`, () => {
     const byName = new Map(idx.map((i) => [i.indexname, i.indexdef]));
     expect(byName.get("invitations_token_hash_key")).toContain("UNIQUE INDEX");
     expect(byName.get("invitations_active_email_key")).toMatch(/UNIQUE.*\(tenant_id, email_normalized\) WHERE .*accepted_at IS NULL.*revoked_at IS NULL/s);
+  });
+});
+
+describe(`audit schema (T-107, target=${env.target})`, () => {
+  async function query<T extends pg.QueryResultRow>(sql: string, params: unknown[] = []): Promise<T[]> {
+    const client = new pg.Client({ connectionString: env.databaseUrlDirect });
+    try {
+      await client.connect();
+      return (await client.query<T>(sql, params)).rows;
+    } catch (e) {
+      throw new Error(redactErrorChain(e, secretUrls(env)));
+    } finally {
+      await client.end();
+    }
+  }
+
+  it("audit_logs: RLS ENABLE+FORCE, tenant_id NOT NULL uuid, (tenant_id, id) benzersiz; request_rate_limits platform tablosu (RLS yok)", async () => {
+    const cls = await query<{ relname: string; relrowsecurity: boolean; relforcerowsecurity: boolean }>(
+      `SELECT relname, relrowsecurity, relforcerowsecurity FROM pg_class
+        WHERE relnamespace = 'public'::regnamespace AND relname IN ('audit_logs', 'request_rate_limits') ORDER BY 1`,
+    );
+    expect(cls).toEqual([
+      { relname: "audit_logs", relrowsecurity: true, relforcerowsecurity: true },
+      { relname: "request_rate_limits", relrowsecurity: false, relforcerowsecurity: false },
+    ]);
+    const col = await query<{ is_nullable: string; data_type: string }>(
+      `SELECT is_nullable, data_type FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'audit_logs' AND column_name = 'tenant_id'`,
+    );
+    expect(col).toEqual([{ is_nullable: "NO", data_type: "uuid" }]);
+    const uq = await query<{ def: string }>(
+      `SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conrelid = 'public.audit_logs'::regclass AND contype = 'u'`,
+    );
+    expect(uq.map((r) => r.def)).toContain("UNIQUE (tenant_id, id)");
+  });
+
+  it("audit_logs.created_xid xid8 NOT NULL DEFAULT pg_current_xact_id() (I-16); izolasyon politikasi USING + WITH CHECK", async () => {
+    const col = await query<{ udt_name: string; is_nullable: string; column_default: string }>(
+      `SELECT udt_name, is_nullable, column_default FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'audit_logs' AND column_name = 'created_xid'`,
+    );
+    expect(col).toEqual([{ udt_name: "xid8", is_nullable: "NO", column_default: "pg_current_xact_id()" }]);
+    const pol = await query<{ qual: string; with_check: string }>(
+      `SELECT qual, with_check FROM pg_policies WHERE schemaname = 'public' AND tablename = 'audit_logs' AND policyname = 'audit_logs_isolation'`,
+    );
+    expect(pol).toHaveLength(1);
+    expect(pol[0]?.qual).toContain("app.current_tenant_id");
+    expect(pol[0]?.with_check).toContain("app.current_tenant_id");
+  });
+
+  it("request_rate_limits: birincil anahtar (scope, key_hash, window_start); key_hash yalnizca SHA-256 ozeti CHECK'i", async () => {
+    const pk = await query<{ def: string }>(
+      `SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conrelid = 'public.request_rate_limits'::regclass AND contype = 'p'`,
+    );
+    expect(pk).toEqual([{ def: "PRIMARY KEY (scope, key_hash, window_start)" }]);
+    const chk = await query<{ def: string }>(
+      `SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = 'request_rate_limits_key_hash_chk'`,
+    );
+    expect(chk[0]?.def).toContain("[0-9a-f]{64}");
   });
 });

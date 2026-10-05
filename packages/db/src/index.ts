@@ -48,3 +48,7 @@ export type {
   TenantSettings,
   TenantStatus,
 } from "./schema/tenancy.ts";
+// Audit (T-107): `appendAudit` yalnızca withMembership/withSystemTenant/withNewTenant transaction'ında kullanılır.
+export { AUDIT_ACTIONS, AuditError, CHANGE_SUMMARY_MAX_BYTES, REDACTED, appendAudit, maskChangeSummary, recordSecurityEvent } from "./audit.ts";
+export type { AppendedAudit, AuditAction, AuditEntry, JsonValue, SecurityEventInput } from "./audit.ts";
+export type { AuditLog, NewAuditLog, NewRequestRateLimit, RequestRateLimit } from "./schema/audit.ts";
