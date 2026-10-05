@@ -1,8 +1,8 @@
 # STATE (≤80 satır — her görev sonunda Supervisor günceller)
 
-**Oturum kilidi:** session_01C59FRaUynaDdhNGZoRbKsY · 2026-10-05T20:35Z (zamanlanmış oturum: kilit 3 saatten yeniyse ve başka oturumunsa hiçbir şey yapmadan çık; değilse kendi kimliğinle yenile, her push'ta zamanı güncelle)
+**Oturum kilidi:** session_01C59FRaUynaDdhNGZoRbKsY · 2026-10-05T20:50Z (zamanlanmış oturum: kilit 3 saatten yeniyse ve başka oturumunsa hiçbir şey yapmadan çık; değilse kendi kimliğinle yenile, her push'ta zamanı güncelle)
 **Faz:** 0 — Kararlar & iskelet
-**Aktif görev:** #29 Faz 1 planı → `main` (ADR-014/015/016 kabul, güvenlik @8335c6b 0·0·6; CI bekleniyor) ∥ T-101 (`feat/T-101-migrate` → `int/faz1-sema`) ∥ T-008k bekçi sıkılaştırma (#26 → `int/faz0-kapanis`, BLOCKER düzeltmesi) ∥ T-005d Neon rol düzeltmesi (#27 → `main`) ∥ Faz 1 plan 3. tur MINOR'ları (architect, `int/faz1-plan`) ∥ T-109 (#25 → `int/faz1-ui-temel`, CI kuyrukta) ∥ T-110 ui kit (T-109 üstüne). STATE'in güncel kopyası: `int/faz0-kapanis`.
+**Aktif görev:** Birleşmeyi bekleyen (CI/E-02): #25 T-109, #28 T-110, #26 T-008k (0·0·2 @a425180), #27 T-005d düzeltmesi (0·0·5), #29 Faz 1 planı (0·0·6), #30 T-101 (0·0·8; Faz 0 kapısından sonra). Ajanlar: T-102 (+T-101/T-101b birleştirme, güvenlik MAJOR düzeltmesi) ∥ T-101c PgBouncer SCRAM ∥ T-101d koşturucu sertleştirme. T-101b @4bd82c1 0·0·3 (PR T-101 sonrası). STATE'in güncel kopyası: `int/faz0-kapanis`.
 **Son tamamlanan:** #20 `int/faz0-bekciler-2` → `main` (T-008d/e/f/g; bekçiler CI'da taban daldan) · #19 pooler · #13 Fly staging
 **Sonraki adım:** Faz 1 planı güvenlik 3. tur @b400466 BLOCKER 0 · MAJOR 0 · MINOR 8 → MINOR'lar kartlara → ADR-014/015/016 kabul PR'ı (korunan). #25/#26/#27 CI yeşilse birleştir. T-005d (Neon Actions koşusu; iş akışı main'e girince dispatch) → T-005e/f; T-008j; T-004b; T-009b canlı AC-43; sonra Faz 0 kapısı (`pnpm test:ac --phase 0` + check:pilot + JOURNAL kapı raporu) → Faz 1 kart seti (architect).
 
@@ -35,6 +35,8 @@ ADR-001 Next.js + ayrı worker · 002 İngilizce kod/DB, Türkçe UI · 003 Driz
 ## Faz 1 plan takipleri (security-reviewer @8335c6b MINOR; ilgili kart başlamadan küçük docs PR'ı)
 - m1 dolaylı ADMIN: `pg_has_role(current_user,'wms_identity_probe','MEMBER WITH ADMIN OPTION')=false` (T-103/T-105 öncesi) · m2 T-108 yerel/CI'da beklenmeyen ADMIN satırı FAIL · m3 demo bekçi işlevi `search_path` + `proowner`/`prosecdef` assertion · m4 ADR-016 açık risk (reset-password tx paylaşmaz) için Q kaydı + karar (T-117b öncesi) · m5 T-105:26, T-101b:18, ADR-015:29 artıkları
 - T-110 #28 MINOR: href yalnızca uygulama içi yol, Esc yükleniyorken, STACK lucide satırı, odak/48px T-131
+- T-102 MINOR-1 risk kaydı: wms_app security_events'te tenant'tan bağımsız tüm kullanıcıların ip/user_agent/detail'ini okur (kart gereği) — T-113'te sütun/işlevle daraltma değerlendirilir
+- T-005d düz parola yeniden denemesi (Supervisor kararı 2026-10-05): kabul edilen risk — parola koşuya özel, geçici dal silinir; Neon `log_statement`/`pg_stat_statements` metni ve dal silme başarısızsa rolün yaşaması bilinen risk; T-005f Q-06 kaydına işlenir
 - T-101 Faz 0 kapısından önce başlatıldı (Supervisor kararı: zaman kullanımı); birleştirme kapıdan sonra
 
 ## Engeller
