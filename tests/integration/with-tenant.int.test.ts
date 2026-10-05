@@ -13,7 +13,7 @@ import {
   type DbClient,
   type TenantTx,
 } from "../../packages/db/src/client.ts";
-import { APP_ROLE, readIntEnv } from "./harness/env.ts";
+import { APP_ROLE, readIntEnv, redactErrorChain, secretUrls } from "./harness/env.ts";
 import { PROBE_SEED, PROBE_TABLE, PROBE_TENANT_A, PROBE_TENANT_B, applyProbe, dropProbe } from "./fixtures/rls-probe.ts";
 
 const env = readIntEnv(process.env);
@@ -125,7 +125,8 @@ describe(`withTenant (target=${env.target}) — app role via pooler`, () => {
     // Drizzle sorgu hatasını DrizzleQueryError ile sarar; PostgreSQL hatası `cause`'dadır.
     const cause = (err as { cause?: { code?: unknown; message?: unknown } } | undefined)?.cause;
     expect(cause?.code).toBe("42501");
-    expect(String(cause?.message)).toMatch(/row-level security/);
+    // Başarısızlıkta konsola basılan metin tek maskeleme yardımcısından geçer (T-005g, G-09).
+    expect(redactErrorChain(cause?.message, secretUrls(env))).toMatch(/row-level security/);
     expect(await withTenant(createTenantContext(client, PROBE_TENANT_B), payloads)).toEqual(
       expected(PROBE_TENANT_B),
     );

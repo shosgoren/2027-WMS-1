@@ -22,7 +22,7 @@ import {
   rawDb,
   type DbClient,
 } from "../../../packages/db/src/client.ts";
-import { readIntEnv } from "../harness/env.ts";
+import { readIntEnv, redactErrorChain, secretUrls } from "../harness/env.ts";
 import { PROBE_SEED, PROBE_TABLE, PROBE_TENANT_A, PROBE_TENANT_B, applyProbe, dropProbe } from "../fixtures/rls-probe.ts";
 
 /** PostgreSQL `insufficient_privilege` — "new row violates row-level security policy". */
@@ -110,7 +110,12 @@ describe("AC-28 çalışma anı: withTenant dışında ham istemci", () => {
     } catch (e) {
       caught = e;
     }
-    evidence.insert = { rejected: caught !== undefined, sqlstate: sqlstateOf(caught) };
+    // Artefakttaki hata zinciri tek maskeleme yardımcısından geçer (T-005g, G-09).
+    evidence.insert = {
+      rejected: caught !== undefined,
+      sqlstate: sqlstateOf(caught),
+      error: caught === undefined ? null : redactErrorChain(caught, secretUrls(env)),
+    };
     expect(caught, "ham INSERT reddedilmeliydi").toBeDefined();
     expect(sqlstateOf(caught)).toBe(RLS_VIOLATION_SQLSTATE);
     // Satır yazılmadı.
