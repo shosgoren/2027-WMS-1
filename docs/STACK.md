@@ -29,10 +29,11 @@ Kaynak sözdizimi: `<dosya>#<json.yolu>` (package.json alanı) veya `docker-comp
 | Neon pooler türü/sürümü | — | — Q-02 | | ADR-004 |
 | Prepared statement ayarı | — | — Q-04 | | ADR-004 |
 | Kuyruk kütüphanesi | — | — pg-boss seçildi (ADR-005 eki 2026-10-05); sürüm ilk kuyruk kartında kilitlenir (aday 12.36.0) | | ADR-005 |
-| Tailwind CSS | tailwindcss | — ilk kullanan kart | | |
+| Tailwind CSS | tailwindcss | 4.3.3 | apps/web/package.json#dependencies.tailwindcss | T-109 |
+| Tailwind PostCSS eklentisi | @tailwindcss/postcss | 4.3.3 | apps/web/package.json#dependencies.@tailwindcss/postcss | T-109 |
 | Shadcn/Radix, Lucide | — | — ilk kullanan kart | | |
 | TanStack Query / Virtual | @tanstack/* | — ilk kullanan kart | | |
-| next-intl | next-intl | — ilk kullanan kart | | |
+| next-intl | next-intl | 4.14.9 | apps/web/package.json#dependencies.next-intl | T-109, ADR-002 |
 | Zod | zod | — ilk kullanan kart | | |
 
 Sürüm notları (kaynak: kurulu `package.json`/`pnpm-lock.yaml`, 2026-10-05):
