@@ -232,3 +232,86 @@ describe("AC-28 lint: ham DB istemcisi tenant modülünde yasak", () => {
     60_000,
   );
 });
+
+// T-015 eklemeleri (yalnızca ekleme; yukarıdaki vakalar değişmedi): takma adlı çağrı denetiminin yanlış
+// pozitifi (çıplak yol dizesi modül belirteci değildir) ve bekçi yükleyicisinin dar muafiyeti.
+const GUARD_LOADER_PATH = path.join(REPO_ROOT, "scripts/guards/cli.mjs");
+const GUARD_TEST_PATH = path.join(REPO_ROOT, "scripts/guards/__ac28_probe__.test.mjs");
+
+/** Modül belirteci konumunda olmayan yol dizeleri → hata yok. */
+const NON_SPECIFIER_SOURCES: Record<string, string> = {
+  'matchesGlob("packages/db/src/x.ts", …)':
+    'declare function matchesGlob(f: string, g: string): boolean;\n\nexport const m = matchesGlob("packages/db/src/x.ts", "packages/db/src/*.ts");\n',
+  'path.join("packages/db/src", …) (şablon)':
+    'declare function join(...p: string[]): string;\n\nexport const f = (n: string) => join(`packages/db/src/${n}`);\n',
+  'has("node_modules/x")': 'declare function has(p: string): boolean;\n\nexport const h = has("node_modules/postgres");\n',
+};
+
+/** Modül belirteci konumundaki aynı yollar → `no-restricted-syntax` error (tek rapor). */
+const SPECIFIER_PATH_SOURCES: Record<string, string> = {
+  'require("packages/db/src/client.ts")': 'declare const require: (id: string) => unknown;\n\nexport const c = require("packages/db/src/client.ts");\n',
+  'import("../../db/src/client.ts")': 'export async function leak(): Promise<unknown> {\n  return import("../../db/src/client.ts");\n}\n',
+  'r = createRequire(…); r("../../packages/db/src/client.ts")':
+    'import { createRequire } from "node:module";\n\nconst r = createRequire(import.meta.url);\nexport const c = r("../../packages/db/src/client.ts");\n',
+  'load(`../${x}/packages/db/src/client.ts`)':
+    "declare function load(id: string): unknown;\n\nexport const c = (x: string) => load(`../${x}/packages/db/src/client.ts`);\n",
+  'load(`${base}packages/db/src/client.ts`)':
+    "declare function load(id: string): unknown;\n\nexport const c = (base: string) => load(`${base}packages/db/src/client.ts`);\n",
+  'load("/abs/node_modules/postgres")': 'declare function load(id: string): unknown;\n\nexport const c = load("/abs/node_modules/postgres");\n',
+};
+
+describe("AC-28 lint (T-015): yanlış pozitif ve bekçi yükleyicisi muafiyeti", () => {
+  it.each(Object.entries(NON_SPECIFIER_SOURCES))(
+    "@AC-28 modül belirteci olmayan yol dizesi (%s) → hata yok",
+    async (_name, code) => {
+      for (const filePath of [TENANT_MODULE_PATH, GUARD_TEST_PATH]) {
+        const result = await lint(code, filePath);
+        expect(result.messages.filter((m) => m.ruleId === RULE_ID || m.ruleId === SYNTAX_RULE_ID), filePath).toHaveLength(0);
+        expect(result.errorCount, filePath).toBe(0);
+      }
+    },
+    60_000,
+  );
+
+  it.each(Object.entries(SPECIFIER_PATH_SOURCES))(
+    `@AC-28 modül belirteci konumunda packages/db/src veya node_modules yolu (%s) → ${SYNTAX_RULE_ID} error`,
+    async (_name, code) => {
+      const result = await lint(code, TENANT_MODULE_PATH);
+      const hits = result.messages.filter((m) => m.ruleId === SYNTAX_RULE_ID);
+      expect(hits).toHaveLength(1);
+      expect(hits[0]?.severity).toBe(2);
+    },
+    60_000,
+  );
+
+  it(
+    "@AC-28 scripts/guards/cli.mjs: yalnızca import(<ifade>) serbest",
+    async () => {
+      const loader = 'export async function load(file: string): Promise<unknown> {\n  return import(file);\n}\n';
+      const ok = await lint(loader, GUARD_LOADER_PATH);
+      expect(ok.messages.filter((m) => m.ruleId === SYNTAX_RULE_ID)).toHaveLength(0);
+      expect(ok.errorCount).toBe(0);
+      // Aynı içerik başka bir bekçi dosyasında → error (muafiyet dosyaya özgü).
+      const other = await lint(loader, GUARD_TEST_PATH);
+      expect(other.messages.filter((m) => m.ruleId === SYNTAX_RULE_ID)).toHaveLength(1);
+    },
+    60_000,
+  );
+
+  it.each([
+    ['import("@wms/db/internal")', 'export async function leak(): Promise<unknown> {\n  return import("@wms/db/internal");\n}\n', SYNTAX_RULE_ID],
+    ["require(değişken)", "declare const require: (id: string) => unknown;\n\nexport const f = (n: string) => require(n);\n", SYNTAX_RULE_ID],
+    ['createRequire(…)("pg")', 'import { createRequire } from "node:module";\n\nexport const pg = createRequire(import.meta.url)("pg");\n', SYNTAX_RULE_ID],
+    [`${SET_CONFIG} dizesi`, `export const q = "SELECT ${SET_CONFIG}('${TENANT_GUC}', $1, false)";\n`, SYNTAX_RULE_ID],
+    ["statik @wms/db/internal", RAW_CLIENT_SOURCE, RULE_ID],
+  ])(
+    "@AC-28 scripts/guards/cli.mjs içinde de yasak: %s → error",
+    async (_name, code, ruleId) => {
+      const result = await lint(code, GUARD_LOADER_PATH);
+      const hits = result.messages.filter((m) => m.ruleId === ruleId);
+      expect(hits).toHaveLength(1);
+      expect(hits[0]?.severity).toBe(2);
+    },
+    60_000,
+  );
+});

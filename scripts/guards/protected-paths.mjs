@@ -356,8 +356,9 @@ function lockKeyName(key) {
 //   - satır: `anahtar:` (blok açar), `anahtar: değer`, `- değer` (yalnızca skaler dizi öğesi);
 //   - anahtar: düz, '…' ('' kaçışlı) veya "…" (ters bölü yok); `?`, `<<`, `&`, `*`, `!`, `|`, `>`,
 //     `%`, `@`, `` ` ``, `-`, `[`, `{`, `#` ile başlayan düz anahtar yok;
-//   - değer: düz skaler, tırnaklı skaler, tek satırlık akış (`{…}`, `[…]`; tırnak dışında `&`/`*`/` #`
-//     yok); çapa/takma ad/etiket/blok skaler (`|`, `>`), satır sonu yorumu, belge imleri yok;
+//   - değer: düz skaler, tırnaklı skaler, tek satırlık akış (`{…}`, `[…]`; düğüm başında gösterge,
+//     tırnak dışında `&`/`!`/` #` yok — bkz. `checkFlow`); çapa/takma ad/etiket/blok skaler (`|`,
+//     `>`), satır sonu yorumu, belge imleri yok;
 //   - aynı eşlemede yinelenen anahtar yok (tırnaklı/tırnaksız aynı ad dahil); boş blok yok;
 //   - yalnızca tam satır yorum (`# …`) ve boş satır atlanır; `lockfileVersion` 9.x olmalı.
 
@@ -416,32 +417,97 @@ function unquote(s, ln) {
 }
 
 /**
- * Tek satırlık akış koleksiyonu: dengeli parantez, tırnak dışında çapa/takma ad/yorum yok.
+ * Tek satırlık akış koleksiyonu (T-015: düğüm konumlu denetim). YAML'da çapa/takma ad/etiket/blok
+ * göstergeleri (`&`, `*`, `!`, `|`, `>` …) yalnızca bir düğümün **başında** gösterge sayılır; düz
+ * skalerin içindeki `*`, `>`, `|`, `^`, `~`, boşluk sıradan karakterdir (pnpm `engines`:
+ * `{node: 6.* || 8.* || >= 10.*}`). Kabul edilen dil:
+ *   - dengeli `{…}` / `[…]`; en dıştaki kapanıştan sonra metin yok;
+ *   - düğüm: tırnaklı skaler, iç içe akış koleksiyonu veya `PLAIN_FORBIDDEN_START` / `:` ile
+ *     başlamayan düz skaler; boş düğüm (`{a: }`, `[,]`) yok;
+ *   - `anahtar: değer` ayırıcısı (`: `) yalnızca `{…}` içinde ve girdi başına bir kez;
+ *   - tırnaklı skaler/kapanmış koleksiyondan sonra yalnızca boşluk, `,`, `: ` veya kapanış;
+ *   - düz skaler içinde `&`, `!`, tırnak, `` ` `` ve satır sonu yorumu (` #`) yok.
+ * Geri kalan her biçim `LockfileError` (fail-closed).
  * @param {string} raw `{` veya `[` ile başlar
  * @param {number} ln
  */
 function checkFlow(raw, ln) {
-  /** @type {string[]} */
+  /** @type {Array<{ close: "}" | "]", hasKey: boolean }>} */
   const stack = [];
+  /** "node": düğüm başı bekleniyor · "plain": düz skalerin içi · "after": düğüm bitti. */
+  let phase = /** @type {"node" | "plain" | "after"} */ ("node");
+  /** Son belirteç `: ` ayırıcısı mı (değer zorunlu)? */
+  let needValue = false;
+  /** @type {(why: string) => never} */
+  const fail = (why) => {
+    throw new LockfileError(`satır ${ln}: ${why}`);
+  };
+  /** @param {number} i @param {string} ch */
+  const close = (i, ch) => {
+    if (needValue) fail("akış koleksiyonunda boş değer");
+    if (stack.pop()?.close !== ch) fail("dengesiz akış koleksiyonu");
+    if (stack.length === 0 && i !== raw.length - 1) fail("akış koleksiyonundan sonra metin");
+    phase = "after";
+  };
   for (let i = 0; i < raw.length; i++) {
     const ch = raw[i] ?? "";
-    if (ch === "'" || ch === '"') {
-      const q = unquote(raw.slice(i), ln);
-      i = raw.length - q.rest.length - 1;
+    if (phase === "node") {
+      if (ch === " ") continue;
+      if (ch === "'" || ch === '"') {
+        const q = unquote(raw.slice(i), ln);
+        i = raw.length - q.rest.length - 1;
+        phase = "after";
+        needValue = false;
+        continue;
+      }
+      if (ch === "{" || ch === "[") {
+        stack.push({ close: ch === "{" ? "}" : "]", hasKey: false });
+        needValue = false;
+        continue;
+      }
+      if (ch === "}" || ch === "]") {
+        close(i, ch);
+        continue;
+      }
+      if (ch === "," || ch === ":") fail(`akış koleksiyonunda boş düğüm ("${ch}")`);
+      // Düğüm başında çapa, takma ad, etiket, blok skaler, ayrılmış göstergeler: desteklenmez.
+      if (PLAIN_FORBIDDEN_START.test(ch)) fail(`akış koleksiyonunda desteklenmeyen gösterge "${ch}"`);
+      phase = "plain";
+      needValue = false;
       continue;
     }
-    if (ch === "{" || ch === "[") stack.push(ch === "{" ? "}" : "]");
-    else if (ch === "}" || ch === "]") {
-      if (stack.pop() !== ch) throw new LockfileError(`satır ${ln}: dengesiz akış koleksiyonu`);
-      if (stack.length === 0 && i !== raw.length - 1) throw new LockfileError(`satır ${ln}: akış koleksiyonundan sonra metin`);
-    } else if (ch === "&" || ch === "*" || ch === "!" || (ch === "|" && raw[i + 1] !== "|" && raw[i - 1] !== "|")) {
-      // `||` (semver aralığı) dışında `|`, çapa, takma ad, etiket desteklenmez.
-      throw new LockfileError(`satır ${ln}: akış koleksiyonunda desteklenmeyen gösterge "${ch}"`);
-    } else if (ch === "#" && /\s/.test(raw[i - 1] ?? "")) {
-      throw new LockfileError(`satır ${ln}: satır sonu yorumu desteklenmez`);
+    // phase: "plain" | "after"
+    if (ch === ",") {
+      const top = stack[stack.length - 1];
+      if (top !== undefined) top.hasKey = false;
+      phase = "node";
+      continue;
+    }
+    if (ch === "}" || ch === "]") {
+      close(i, ch);
+      continue;
+    }
+    if (ch === ":" && (raw[i + 1] === " " || phase === "after")) {
+      const top = stack[stack.length - 1];
+      if (top === undefined || top.close !== "}" || top.hasKey) fail("akış koleksiyonunda desteklenmeyen eşleme biçimi");
+      if (raw[i + 1] !== " ") fail('akışta ":" sonrası boşluk yok');
+      top.hasKey = true;
+      phase = "node";
+      needValue = true;
+      continue;
+    }
+    if (phase === "after") {
+      if (ch === " ") continue;
+      fail("akış öğesinden sonra beklenmeyen metin");
+    }
+    if (ch === "#" && raw[i - 1] === " ") fail("satır sonu yorumu desteklenmez");
+    // `b:}` / `b:,` YAML'da örtük anahtar olur (belirsiz) → desteklenmez.
+    if (ch === ":" && /^[,}\]]?$/.test(raw[i + 1] ?? "")) fail('akışta değersiz ":" desteklenmez');
+    if (ch === "&" || ch === "!" || ch === "'" || ch === '"' || ch === "`") {
+      fail(`akış koleksiyonunda desteklenmeyen gösterge "${ch}"`);
     }
   }
-  if (stack.length !== 0) throw new LockfileError(`satır ${ln}: kapanmayan akış koleksiyonu`);
+  if (stack.length !== 0) fail("kapanmayan akış koleksiyonu");
 }
 
 /**
