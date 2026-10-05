@@ -33,12 +33,14 @@ Kaynak sözdizimi: `<dosya>#<json.yolu>` (package.json alanı) veya `docker-comp
 | PostgreSQL ana sürümü (Neon) | — | — Q-05 (kullanıcı beyanı 2026-10-05: 17; T-005d doğrular) | | ADR-004 |
 | Neon pooler türü/sürümü | — | — Q-02 | | ADR-004 |
 | Prepared statement ayarı | — | — Q-04 | | ADR-004 |
-| Kuyruk kütüphanesi | — | — pg-boss seçildi (ADR-005 eki 2026-10-05); sürüm ilk kuyruk kartında kilitlenir (aday 12.36.0) | | ADR-005 |
+| Kuyruk kütüphanesi | pg-boss | 12.36.0 | packages/queue-adapter/package.json#dependencies.pg-boss | ADR-005 |
 | Tailwind CSS | tailwindcss | — ilk kullanan kart | | |
 | Shadcn/Radix, Lucide | — | — ilk kullanan kart | | |
 | TanStack Query / Virtual | @tanstack/* | — ilk kullanan kart | | |
 | next-intl | next-intl | — ilk kullanan kart | | |
-| Zod | zod | — ilk kullanan kart | | |
+| Zod | zod | 4.6.5 | packages/shared/package.json#dependencies.zod | |
+| Zod (kuyruk bağdaştırıcısı) | zod | 4.6.5 | packages/queue-adapter/package.json#dependencies.zod | ADR-005 |
+| Drizzle ORM (kuyruk bağdaştırıcısı: `sql`) | drizzle-orm | 0.45.3 | packages/queue-adapter/package.json#dependencies.drizzle-orm | ADR-005 |
 
 Sürüm notları (kaynak: kurulu `package.json`/`pnpm-lock.yaml`, 2026-10-05):
 - **Kapsam kuralı (T-004b):** Workspace'lerin (`pnpm-lock.yaml#importers`) `package.json` dosyalarındaki her doğrudan bağımlılık (`dependencies`, `devDependencies`, `optionalDependencies`; `workspace:` hariç) bu tabloda kaynağıyla kilitli bir satıra sahip olmalıdır; eksikse `node scripts/check-docs.mjs` FAIL verir.
