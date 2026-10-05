@@ -1,6 +1,6 @@
 # STATE (≤80 satır — her görev sonunda Supervisor günceller)
 
-**Oturum kilidi:** session_01C59FRaUynaDdhNGZoRbKsY · 2026-10-05T19:50Z (zamanlanmış oturum: kilit 3 saatten yeniyse ve başka oturumunsa hiçbir şey yapmadan çık; değilse kendi kimliğinle yenile, her push'ta zamanı güncelle)
+**Oturum kilidi:** session_01C59FRaUynaDdhNGZoRbKsY · 2026-10-05T20:15Z (zamanlanmış oturum: kilit 3 saatten yeniyse ve başka oturumunsa hiçbir şey yapmadan çık; değilse kendi kimliğinle yenile, her push'ta zamanı güncelle)
 **Faz:** 0 — Kararlar & iskelet
 **Aktif görev:** T-008k bekçi sıkılaştırma (#26 → `int/faz0-kapanis`) ∥ T-005d Neon rol düzeltmesi (#27 → `main`) ∥ Faz 1 plan 3. tur MINOR'ları (architect, `int/faz1-plan`) ∥ T-109 (#25 → `int/faz1-ui-temel`, CI kuyrukta) ∥ T-110 ui kit (T-109 üstüne). STATE'in güncel kopyası: `int/faz0-kapanis`.
 **Son tamamlanan:** #20 `int/faz0-bekciler-2` → `main` (T-008d/e/f/g; bekçiler CI'da taban daldan) · #19 pooler · #13 Fly staging
@@ -39,6 +39,7 @@ ADR-001 Next.js + ayrı worker · 002 İngilizce kod/DB, Türkçe UI · 003 Driz
 - U-02 Fly.io: kullanıcı 2026-10-05 tamamladığını bildirdi (hesap + kart + `FLY_API_TOKEN` repo sırrı). Doğrulama T-010 ilk dağıtım koşusunda
 - U-03 Resend: kullanıcı 2026-10-05 `RESEND_API_KEY` repo sırrını ekledi; alan adı bildirilmedi → doğrulanmış alan adı olana kadar Resend yalnızca hesap sahibinin adresine `onboarding@resend.dev`'den gönderebilir; diğer alıcılar için davet/şifre bağlantısı ekranda gösterilir (ADR-013, kapalı bayrak). Faz 1 e-posta kartında
 - U-04 Q-07 hukukçu onayı → yalnızca gerçek kişisel veriyle prod için; demo için engel değil
+- E-02 (2026-10-05 19:24Z→): GitHub barındırılan runner kapasitesi — işlerin çoğu "not acquired by Runner of type hosted" ile iptal; bazı işler (verify, secrets) koşuyor → kota/ödeme değil, kullanıcı işi değil. Yalnızca runner'a hiç atanmamış işler yeniden koşturulur; CI yeşil olmadan birleştirme yok. Docs-only int/faz1-plan push'larını grupla (kuyruk yükü).
 - E-01 kapandı: bu ortamda npm/Docker Hub açık.
 
 ## İnceleme takipleri (security-reviewer faz0-iskelet, MINOR — ilgili kartta ele alınır)
