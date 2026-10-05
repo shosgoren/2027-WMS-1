@@ -1,14 +1,14 @@
 # Gitleaks parmak izi muafiyetleri (T-017). KORUNAN DOSYA (check:protected).
 # Yalnızca SENTETİK test değerleri; her giriş gerekçelidir. Kural/yol muafiyeti yoktur.
-# Biçim: <commit>:<dosya>:<kural>:<satır>. Yeni test değerleri çalışma anında birleştirilerek üretilmelidir.
+# Biçim: <commit>:<dosya>:<kural>:<satır>. Gerekçe yorumlarına değer yazılmaz.
 
-# Sentetik test parolası ("Sentetik-Parola-T112-A"), packages/auth/src/auth.test.ts:39
+# Sentetik test değeri, packages/auth/src/auth.test.ts:39
 f1b688fc552a658fde3a9b4581b16cbbacbee5fb:packages/auth/src/auth.test.ts:generic-api-key:39
-# Sentetik test parolası ("pw-one-123456"), tests/integration/auth/auth-core.int.test.ts:22
+# Sentetik test değeri, tests/integration/auth/auth-core.int.test.ts:22
 f1b688fc552a658fde3a9b4581b16cbbacbee5fb:tests/integration/auth/auth-core.int.test.ts:generic-api-key:22
-# Sentetik test parolası, tests/integration/auth/auth-core.int.test.ts:23
+# Sentetik test değeri, tests/integration/auth/auth-core.int.test.ts:23
 f1b688fc552a658fde3a9b4581b16cbbacbee5fb:tests/integration/auth/auth-core.int.test.ts:generic-api-key:23
-# Sentetik örnek JWT (maskeleme testi girdisi), packages/db/src/audit.test.ts:78
+# Sentetik test değeri (örnek JWT), packages/db/src/audit.test.ts:78
 1f60d5ba98d63e9a915cd4e48e57a668c56728c1:packages/db/src/audit.test.ts:jwt:78
-# Sentetik "x-api-key: abc123-sentinel" (maskeleme testi girdisi), packages/db/src/audit.test.ts:282
+# Sentetik test değeri, packages/db/src/audit.test.ts:282
 099a6d4c58e122e008ae4d2efe9ae7af48c36970:packages/db/src/audit.test.ts:generic-api-key:282
