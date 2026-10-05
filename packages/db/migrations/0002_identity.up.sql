@@ -130,7 +130,7 @@ CREATE TABLE public.verifications (
 CREATE INDEX verifications_identifier_idx ON public.verifications (identifier);
 
 -- ---------------------------------------------------------------------------------------------
--- two_factors (twoFactor eklentisi; secret ve backup_codes Better Auth tarafından şifreli yazılır)
+-- two_factors (twoFactor eklentisi; secret ve backup_codes şifreli yazımı T-112'de doğrulanır; düz metin yazıyorsa T-112 BLOCKED)
 -- ---------------------------------------------------------------------------------------------
 CREATE TABLE public.two_factors (
   id                        uuid        NOT NULL DEFAULT gen_random_uuid(),
@@ -150,7 +150,7 @@ CREATE INDEX two_factors_user_id_idx ON public.two_factors (user_id);
 -- ---------------------------------------------------------------------------------------------
 CREATE TABLE public.auth_rate_limits (
   id           uuid    NOT NULL DEFAULT gen_random_uuid(),
-  key_hash     text    NOT NULL,
+  key_hash     text    NOT NULL CHECK (key_hash ~ '^[0-9a-f]{64}$'),   -- SHA-256 hex; düz IP/e-posta reddedilir
   count        integer NOT NULL,
   last_request bigint  NOT NULL,   -- ms cinsinden epoch (Better Auth: number, bigint)
   CONSTRAINT auth_rate_limits_pkey PRIMARY KEY (id),
@@ -185,12 +185,35 @@ END
 $fn$;
 REVOKE ALL ON FUNCTION public.security_events_reject_change() FROM PUBLIC;
 
+-- Sunucu tarafı alanlar (id, occurred_at, created_xid) istemciden alınmaz: rollere bu sütunlarda INSERT
+-- yetkisi verilmez (açık değer = 42501); tetikleyici ise yetkili roller (migration sahibi) için de
+-- occurred_at/created_xid'i sunucu değerine zorlar. (ADR-014 §14 requireRecentAuth ileri tarihli olayla atlatılamaz.)
+CREATE FUNCTION public.security_events_force_server_fields() RETURNS trigger
+  LANGUAGE plpgsql
+  SET search_path = pg_catalog, pg_temp
+AS $fn$
+BEGIN
+  NEW.occurred_at := pg_catalog.now();
+  NEW.created_xid := pg_catalog.pg_current_xact_id();
+  RETURN NEW;
+END
+$fn$;
+REVOKE ALL ON FUNCTION public.security_events_force_server_fields() FROM PUBLIC;
+CREATE TRIGGER security_events_server_fields
+  BEFORE INSERT ON public.security_events
+  FOR EACH ROW EXECUTE FUNCTION public.security_events_force_server_fields();
+
 CREATE TRIGGER security_events_no_update_delete
   BEFORE UPDATE OR DELETE ON public.security_events
   FOR EACH ROW EXECUTE FUNCTION public.security_events_reject_change();
 CREATE TRIGGER security_events_no_truncate
   BEFORE TRUNCATE ON public.security_events
   FOR EACH STATEMENT EXECUTE FUNCTION public.security_events_reject_change();
+-- ENABLE ALWAYS: session_replication_role = replica ile atlatılamaz. Tablo sahibi (migration rolü)
+-- ALTER TABLE ... DISABLE TRIGGER yapabilir: bilinen sınır; sahip rol uygulama rolü değildir.
+ALTER TABLE public.security_events ENABLE ALWAYS TRIGGER security_events_no_update_delete;
+ALTER TABLE public.security_events ENABLE ALWAYS TRIGGER security_events_no_truncate;
+ALTER TABLE public.security_events ENABLE ALWAYS TRIGGER security_events_server_fields;
 
 -- ---------------------------------------------------------------------------------------------
 -- GRANT'lar (tablo başına açık ve en dar; ADR-014 §10, ADR-016 §1)
@@ -201,7 +224,8 @@ REVOKE ALL ON TABLE public.users, public.sessions, public.accounts, public.verif
 
 -- wms_app: users'ta yalnızca dört sütun; Better Auth tablolarında hiçbir yetki.
 GRANT SELECT (id, name, email, email_verified) ON public.users TO wms_app;
-GRANT INSERT, SELECT ON public.security_events TO wms_app;
+GRANT SELECT ON public.security_events TO wms_app;
+GRANT INSERT (user_id, event_type, ip, user_agent, request_id, detail) ON public.security_events TO wms_app;
 
 -- wms_auth: users'ta SELECT, INSERT, DELETE + sütun bazlı UPDATE (id ve invitation_claim_id YOK;
 -- liste Better Auth 1.7.7 update-user/change-email/doğrulama/2FA akışlarının yazdığı sütunlardır).
@@ -209,7 +233,7 @@ GRANT SELECT, INSERT, DELETE ON public.users TO wms_auth;
 GRANT UPDATE (name, image, email, email_verified, updated_at, two_factor_enabled) ON public.users TO wms_auth;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.sessions, public.accounts, public.verifications,
                                         public.two_factors, public.auth_rate_limits TO wms_auth;
-GRANT INSERT ON public.security_events TO wms_auth;
+GRANT INSERT (user_id, event_type, ip, user_agent, request_id, detail) ON public.security_events TO wms_auth;
 
 -- Yetki denetimi: ihlal = RAISE.
 DO $verify$
@@ -238,6 +262,18 @@ BEGIN
   IF pg_catalog.has_table_privilege('wms_app', 'public.security_events', 'UPDATE, DELETE, TRUNCATE')
      OR pg_catalog.has_table_privilege('wms_auth', 'public.security_events', 'SELECT, UPDATE, DELETE, TRUNCATE') THEN
     RAISE EXCEPTION '0002_identity: security_events yetkileri append-only ilkesini aşıyor';
+  END IF;
+  IF pg_catalog.has_column_privilege('wms_app', 'public.security_events', 'id', 'INSERT, UPDATE')
+     OR pg_catalog.has_column_privilege('wms_app', 'public.security_events', 'occurred_at', 'INSERT, UPDATE')
+     OR pg_catalog.has_column_privilege('wms_app', 'public.security_events', 'created_xid', 'INSERT, UPDATE')
+     OR pg_catalog.has_column_privilege('wms_auth', 'public.security_events', 'id', 'INSERT, UPDATE')
+     OR pg_catalog.has_column_privilege('wms_auth', 'public.security_events', 'occurred_at', 'INSERT, UPDATE')
+     OR pg_catalog.has_column_privilege('wms_auth', 'public.security_events', 'created_xid', 'INSERT, UPDATE') THEN
+    RAISE EXCEPTION '0002_identity: security_events sunucu alanlarına (id/occurred_at/created_xid) INSERT yetkisi var';
+  END IF;
+  IF pg_catalog.has_schema_privilege('wms_auth', 'public', 'CREATE')
+     OR pg_catalog.has_database_privilege('wms_auth', pg_catalog.current_database(), 'CREATE, TEMPORARY') THEN
+    RAISE EXCEPTION '0002_identity: wms_auth public şemasında/veritabanında CREATE veya TEMP yetkisi taşıyor';
   END IF;
   IF pg_catalog.has_schema_privilege('wms_auth', 'wms_meta', 'USAGE, CREATE') THEN
     RAISE EXCEPTION '0002_identity: wms_auth wms_meta şemasında yetki taşıyor';

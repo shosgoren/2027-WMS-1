@@ -21,6 +21,7 @@ $guard$;
 
 DROP TABLE public.security_events;
 DROP FUNCTION public.security_events_reject_change();
+DROP FUNCTION public.security_events_force_server_fields();
 DROP TABLE public.auth_rate_limits;
 DROP TABLE public.two_factors;
 DROP TABLE public.verifications;

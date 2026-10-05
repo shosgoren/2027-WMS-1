@@ -129,7 +129,7 @@ describe(`identity grants (target=${env.target})`, () => {
       await auth.query(`INSERT INTO public.accounts (account_id, provider_id, user_id) VALUES ('a', 'credential', $1)`, [id]);
       await auth.query(`INSERT INTO public.two_factors (secret, backup_codes, user_id) VALUES ('s', 'b', $1)`, [id]);
       await auth.query(`INSERT INTO public.verifications (identifier, value, expires_at) VALUES ('i', 'v', now())`);
-      await auth.query(`INSERT INTO public.auth_rate_limits (key_hash, count, last_request) VALUES ($1, 1, 1)`, [randomBytes(8).toString("hex")]);
+      await auth.query(`INSERT INTO public.auth_rate_limits (key_hash, count, last_request) VALUES ($1, 1, 1)`, [randomBytes(32).toString("hex")]);
       await auth.query(`UPDATE public.sessions SET mfa_verified_at = now() WHERE user_id = $1`, [id]);
     } finally {
       await auth.query("ROLLBACK");
@@ -229,6 +229,67 @@ describe(`identity grants (target=${env.target})`, () => {
     for (const row of r.rows) expect(["wms_app", "wms_auth"], row.relname).not.toContain(row.owner);
   });
 
+  it("security_events: wms_app ve wms_auth id/occurred_at/created_xid veremez (ileri tarihli olay ret)", async () => {
+    const app = await open(env.databaseUrl);
+    const auth = await open(authUrl);
+    for (const client of [app, auth]) {
+      for (const col of ["occurred_at", "id", "created_xid"]) {
+        const value = col === "occurred_at" ? "now() + interval '1 day'" : col === "id" ? "gen_random_uuid()" : "pg_current_xact_id()";
+        await expectDenied(client, `INSERT INTO public.security_events (event_type, ${col}) VALUES ('reauth.succeeded', ${value})`);
+      }
+    }
+    // Varsayilanlar calisir; occurred_at sunucu zamani.
+    const owner = await open(env.databaseUrlDirect);
+    await owner.query("BEGIN");
+    try {
+      await owner.query(`INSERT INTO public.security_events (event_type, occurred_at) VALUES ('t102.force', now() + interval '1 day')`);
+      const r = await owner.query<{ forced: boolean }>(
+        `SELECT occurred_at = now() AS forced FROM public.security_events WHERE event_type = 't102.force'`,
+      );
+      expect(r.rows[0]?.forced).toBe(true);
+    } finally {
+      await owner.query("ROLLBACK");
+    }
+  });
+
+  it("security_events: session_replication_role=replica tetikleyiciyi atlatamaz", async () => {
+    const owner = await open(env.databaseUrlDirect);
+    await owner.query("BEGIN");
+    try {
+      await owner.query(`INSERT INTO public.security_events (event_type) VALUES ('t102.replica')`);
+      await owner.query("SET LOCAL session_replication_role = replica");
+      let err: { message?: string } | undefined;
+      try {
+        await owner.query("DELETE FROM public.security_events");
+      } catch (e) {
+        err = e as { message?: string };
+      }
+      expect(err?.message).toContain("append-only");
+    } finally {
+      await owner.query("ROLLBACK");
+    }
+  });
+
+  it("auth_rate_limits.key_hash yalniz 64 hane kucuk harf hex (duz IP/e-posta ret)", async () => {
+    const auth = await open(authUrl);
+    const hex = "a".repeat(64);
+    await expectAllowed(auth, `INSERT INTO public.auth_rate_limits (key_hash, count, last_request) VALUES ('${hex}', 1, 1)`);
+    for (const bad of ["10.0.0.1", "user@example.com", "A".repeat(64), "a".repeat(63)]) {
+      const r = await attempt(auth, `INSERT INTO public.auth_rate_limits (key_hash, count, last_request) VALUES ($1, 1, 1)`, [bad]);
+      expect(r.ok, bad).toBe(false);
+      if (!r.ok) expect(r.code, r.message).toBe("23514");
+    }
+  });
+
+  it("wms_auth: public sema CREATE ve veritabani CREATE/TEMP yetkisi yok", async () => {
+    const admin = await open(env.databaseUrlDirect);
+    const r = await admin.query<{ s: boolean; d: boolean }>(
+      `SELECT has_schema_privilege('wms_auth', 'public', 'CREATE') AS s,
+              has_database_privilege('wms_auth', current_database(), 'CREATE, TEMPORARY') AS d`,
+    );
+    expect(r.rows[0]).toEqual({ s: false, d: false });
+  });
+
   it("security_events tetikleyicisi migration rolunde de UPDATE/DELETE/TRUNCATE'i reddeder", async () => {
     const owner = await open(env.databaseUrlDirect);
     for (const stmt of [
@@ -318,7 +379,7 @@ describe(`0002_identity ileri/geri/ileri (target=${env.target})`, () => {
     } finally {
       await c.end();
     }
-    await expect(migrateDown({ url, to: "0001", wmsEnv: "staging" })).rejects.toThrow();
+    await expect(migrateDown({ url, to: "0001", wmsEnv: "staging" })).rejects.toThrow(/veri kaybettiren geri alma/);
     const check = await connect(url);
     try {
       const r = await check.query<{ n: string }>("SELECT count(*)::text AS n FROM public.security_events");
