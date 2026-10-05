@@ -31,6 +31,7 @@ Kaynak sözdizimi: `<dosya>#<json.yolu>` (package.json alanı) veya `docker-comp
 | Neon pooler türü/sürümü | — | — Q-02 | | ADR-004 |
 | Prepared statement ayarı | — | — Q-04 | | ADR-004 |
 | Kuyruk kütüphanesi | pg-boss | 12.36.0 | packages/queue-adapter/package.json#dependencies.pg-boss | ADR-005 |
+| Worker paketleyici (esbuild; yalnızca derleme) | esbuild | 0.28.2 | apps/worker/package.json#devDependencies.esbuild | ADR-013 |
 | Tailwind CSS | tailwindcss | — ilk kullanan kart | | |
 | Shadcn/Radix, Lucide | — | — ilk kullanan kart | | |
 | TanStack Query / Virtual | @tanstack/* | — ilk kullanan kart | | |
