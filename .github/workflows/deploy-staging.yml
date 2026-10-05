@@ -1,11 +1,20 @@
 # Etkin WMS — staging dağıtımı (T-010 / ADR-013). KORUNAN DOSYA (PROTOCOL §3b).
-# `main`'e her push'ta (birleşme) ve elle (`workflow_dispatch`, yalnızca varsayılan daldaki
-# iş akışı tanımıyla) tek Docker imajını Fly.io `etkin-wms-staging` uygulamasına (fra; süreç
-# grupları web + worker) dağıtır, ardından `/api/health` ve worker durumunu doğrular.
+# Tek Docker imajını Fly.io `etkin-wms-staging` uygulamasına (fra; süreç grupları web + worker)
+# dağıtır, ardından `/api/health` ve worker durumunu doğrular.
+#
+# Tetikleyici: `main`'e push (birleşme) ve `workflow_dispatch`. Dispatch, iş akışı varsayılan dalda
+# olduktan sonra HERHANGİ bir dal seçilerek (o dalın iş akışı tanımıyla) başlatılabilir; bu yüzden iş
+# `if: github.ref == 'refs/heads/main'` ile yalnızca `main` üzerinde koşar. Bilinen risk: GitHub
+# environment + dal kuralı (sırrı yalnızca main'e açma) özel repoda ücretsiz planda yok; repoya yazma
+# yetkisi olan herkes (main'i değiştirebilen) güvenilen taraftır.
 #
 # Sır kapsamı (G-09): FLY_API_TOKEN YALNIZCA "Deploy" adımının env'indedir. Checkout kimlik bilgisi
 # saklamaz; diğer adımlar (kurulum, smoke) sırrı görmez. Smoke, deploy adımının yazdığı
 # `flyctl status --json` dosyasını okur.
+# Token türü: uygulama mevcutsa iş akışı org düzeyinde HİÇBİR komut (orgs list / apps create) koşmaz;
+# uygulama düzeyinde deploy token'ı (`fly tokens create deploy -a etkin-wms-staging`) yeterlidir.
+# Org token'ı yalnızca ilk oluşturma içindir: ilk yeşil koşudan sonra kullanıcı FLY_API_TOKEN'ı
+# uygulama kapsamlı deploy token'la değiştirir (U-06).
 # Üçüncü taraf kodu: action'lar tam commit SHA ile sabit; flyctl resmî sürüm ikilisi SHA-256 ile
 # doğrulanır (superfly/flyctl-actions/setup-flyctl yerine — o action sağlama doğrulaması yapmaz).
 name: deploy-staging
@@ -31,6 +40,7 @@ env:
 jobs:
   deploy:
     name: deploy
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
@@ -59,10 +69,12 @@ jobs:
           tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP/flyctl" flyctl
           echo "$RUNNER_TEMP/flyctl" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/flyctl/flyctl" version
-      # Uygulama yoksa token'ın erişebildiği TEK organizasyonda oluşturulur (idempotent; varsa geçer).
-      # Birden çok organizasyon varsa hangisi olduğu tahmin edilmez → kırmızı.
-      # Ardından yapılandırma doğrulanır, uzak derleyicide (Fly) imaj derlenip dağıtılır.
-      # --ha=false: süreç grubu başına tek makine (ADR-013: en küçük, ölçekleme yok).
+      # 1) Varlık denetimi `flyctl status -a` (uygulama düzeyi token yeterli). Uygulama varsa org
+      #    komutlarına girilmez. Yalnızca hata "bulunamadı" ise (ilk koşu) token'ın erişebildiği TEK
+      #    organizasyonda oluşturulur; birden çok org → tahmin edilmez, kırmızı. Diğer her hata
+      #    (yetki, ağ) kırmızıdır — oluşturma yoluna düşülmez (fail-closed).
+      # 2) Yapılandırma doğrulanır, uzak derleyicide (Fly) imaj derlenip dağıtılır.
+      #    --ha=false: süreç grubu başına tek makine (ADR-013: en küçük, ölçekleme yok).
       - name: Deploy
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
@@ -71,13 +83,17 @@ jobs:
             echo "::error::FLY_API_TOKEN repo sırrı tanımlı değil"
             exit 1
           fi
-          if flyctl status --app "$FLY_APP" > /dev/null 2>&1; then
-            echo "app $FLY_APP mevcut"
-          else
+          if status_err=$(flyctl status --app "$FLY_APP" 2>&1 > /dev/null); then
+            echo "app $FLY_APP mevcut → org komutları atlanır"
+          elif printf '%s' "$status_err" | grep -qiE 'could not find app|not found'; then
             orgs=$(flyctl orgs list --json)
             slug=$(node -e 'const o = JSON.parse(process.argv[1]); const k = Object.keys(o); if (k.length !== 1) { console.error("org sayısı " + k.length + "; tek org bekleniyor"); process.exit(1); } console.log(k[0]);' "$orgs")
             echo "app $FLY_APP yok → oluşturuluyor (org: $slug)"
             flyctl apps create "$FLY_APP" --org "$slug"
+          else
+            echo "::error::flyctl status başarısız (uygulama bulunamadı hatası değil); oluşturma denenmez"
+            printf '%s\n' "$status_err"
+            exit 1
           fi
           flyctl config validate --strict --config "$FLY_CONFIG" --app "$FLY_APP"
           flyctl deploy --remote-only --config "$FLY_CONFIG" --app "$FLY_APP" --ha=false --yes \
