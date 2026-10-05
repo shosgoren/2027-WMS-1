@@ -1,10 +1,10 @@
 # STATE (≤80 satır — her görev sonunda Supervisor günceller)
 
-**Oturum kilidi:** session_01C59FRaUynaDdhNGZoRbKsY · 2026-10-05T16:30Z (zamanlanmış oturum: kilit 3 saatten yeniyse ve başka oturumunsa hiçbir şey yapmadan çık; değilse kendi kimliğinle yenile, her push'ta zamanı güncelle)
+**Oturum kilidi:** session_01C59FRaUynaDdhNGZoRbKsY · 2026-10-05T19:50Z (zamanlanmış oturum: kilit 3 saatten yeniyse ve başka oturumunsa hiçbir şey yapmadan çık; değilse kendi kimliğinle yenile, her push'ta zamanı güncelle)
 **Faz:** 0 — Kararlar & iskelet
-**Aktif görev:** T-005d Neon (../wt-T-005d → `int/faz0-neon`) ∥ T-008j bekçi takipleri ∥ T-004b tip kapsamı + STACK (→ `int/faz0-kapanis`). STATE'in güncel kopyası: `int/faz0-kapanis`.
+**Aktif görev:** T-008k bekçi sıkılaştırma (#26 → `int/faz0-kapanis`) ∥ T-005d Neon rol düzeltmesi (#27 → `main`) ∥ Faz 1 plan 3. tur MINOR'ları (architect, `int/faz1-plan`) ∥ T-109 (#25 → `int/faz1-ui-temel`, CI kuyrukta) ∥ T-110 ui kit (T-109 üstüne). STATE'in güncel kopyası: `int/faz0-kapanis`.
 **Son tamamlanan:** #20 `int/faz0-bekciler-2` → `main` (T-008d/e/f/g; bekçiler CI'da taban daldan) · #19 pooler · #13 Fly staging
-**Sonraki adım:** T-005d (Neon Actions koşusu; iş akışı main'e girince dispatch) → T-005e/f; T-008j; T-004b; T-009b canlı AC-43; sonra Faz 0 kapısı (`pnpm test:ac --phase 0` + check:pilot + JOURNAL kapı raporu) → Faz 1 kart seti (architect).
+**Sonraki adım:** Faz 1 planı güvenlik 3. tur @b400466 BLOCKER 0 · MAJOR 0 · MINOR 8 → MINOR'lar kartlara → ADR-014/015/016 kabul PR'ı (korunan). #25/#26/#27 CI yeşilse birleştir. T-005d (Neon Actions koşusu; iş akışı main'e girince dispatch) → T-005e/f; T-008j; T-004b; T-009b canlı AC-43; sonra Faz 0 kapısı (`pnpm test:ac --phase 0` + check:pilot + JOURNAL kapı raporu) → Faz 1 kart seti (architect).
 
 ## Çalışma biçimi (kullanıcı kararı 2026-10-05 — ADR-012 rev., PROTOCOL §Onay kaynağı)
 - Kullanıcı PR incelemez. Birleştirme kapısı: CI/oturumda `pnpm verify` + `check:all` + `test:int` + ilgili `test:ac` yeşil; risk matrisine göre `security-reviewer` ve `qa-verifier` BLOCKER: 0 → Supervisor PR'ı kendisi birleştirir (`mcp__github__merge_pull_request`). Korunan değişiklikte PR açıklamasında `APPROVED-BY: supervisor (ADR-012 rev.)`.
