@@ -2,15 +2,18 @@
 // Bağlantı gerektirmez (createDbClient tembeldir; Better Auth nesnesi bu testte kurulmaz).
 import { randomBytes } from "node:crypto";
 import { parseOptions } from "@node-rs/argon2";
+import { APIError } from "better-auth/api";
 import { describe, expect, it } from "vitest";
 import {
   ARGON2_PARAMS,
   AuthConfigError,
+  AuthStoreError,
   getAuthService,
   hashPassword,
   readAuthEnv,
   socialProvidersFor,
   maskLogText,
+  maskedDb,
   describeError,
   verifyPassword,
 } from "./index.ts";
@@ -100,6 +103,8 @@ describe("readAuthEnv", () => {
     expect(() => readAuthEnv({ ...staging, NODE_ENV: "test" })).toThrow(/NODE_ENV=test \/ TEST/);
     expect(() => readAuthEnv({ ...VALID, WMS_ENV: "staging" })).toThrow(/https/);
     expect(() => readAuthEnv({ ...VALID, AUTH_DATABASE_URL: VALID.DATABASE_URL })).toThrow(/different database roles/);
+    expect(() => readAuthEnv({ ...VALID, WMS_ENV: "prod" })).toThrow(/WMS_ENV must be one of/);
+    expect(readAuthEnv({ ...VALID, WMS_ENV: "ci" }).production).toBe(false);
   });
 
   it("getAuthService eksik ortamda ilk kullanımda açık hata verir (içe aktarma sırasında değil)", () => {
@@ -142,5 +147,96 @@ describe("maskeli günlükleme (G-09)", () => {
     const e = new Error(`Failed query params: ${rnd()}`, { cause });
     e.name = "DrizzleQueryError";
     expect(describeError(e)).toBe("DrizzleQueryError sqlstate=42501");
+  });
+});
+
+describe("maskedDb (drizzle istemci maskeleyici)", () => {
+  // DrizzleQueryError biçimi: errors.js:9-20 — mesajda sorgu + params, `params`/`query` alanları, cause.
+  class DrizzleQueryError extends Error {
+    readonly query: string;
+    readonly params: unknown[];
+    constructor(query: string, params: unknown[], cause: Error) {
+      super(`Failed query: ${query}\nparams: ${params.join(",")}`);
+      this.query = query;
+      this.params = params;
+      this.cause = cause;
+    }
+  }
+  const secret = rnd();
+  const pgError = Object.assign(new Error("permission denied"), { code: "42501" });
+  const boom = (): DrizzleQueryError => new DrizzleQueryError("select 1", [secret], pgError);
+  interface Chain extends PromiseLike<unknown> {
+    where(): Chain;
+    prepare(): { execute(): Promise<unknown> };
+  }
+  const thenable = (fail: boolean): Chain => ({
+    then: ((f, r) => (fail ? Promise.reject(boom()) : Promise.resolve([1])).then(f, r)) as PromiseLike<unknown>["then"],
+    where: () => thenable(fail),
+    prepare: () => ({ execute: () => (fail ? Promise.reject(boom()) : Promise.resolve([1])) }),
+  });
+  const fakeTx = { execute: () => Promise.reject(boom()) };
+  const fake = {
+    select: () => ({ from: () => thenable(true) }),
+    with: () => ({ select: () => ({ from: () => thenable(true) }) }),
+    execute: () => Promise.reject(boom()),
+    transaction: (cb: (tx: typeof fakeTx) => Promise<unknown>) => cb(fakeTx),
+    query: {},
+    $client: {},
+    _: {},
+  };
+
+  async function captured(p: () => Promise<unknown>): Promise<unknown> {
+    try {
+      await p();
+    } catch (e) {
+      return e;
+    }
+    return undefined;
+  }
+
+  function expectMasked(e: unknown): void {
+    expect(e).toBeInstanceOf(AuthStoreError);
+    const err = e as AuthStoreError;
+    expect(err.name).toBe("AuthStoreError");
+    expect(err.errorName).toBe("DrizzleQueryError");
+    expect(err.sqlstate).toBe("42501");
+    expect(err.cause).toBeUndefined();
+    expect(err.message).not.toContain(secret);
+    expect(err.message).not.toContain("Failed query");
+    expect(JSON.stringify(err)).not.toContain(secret);
+    expect(Object.keys(err)).not.toContain("params");
+    expect(Object.keys(err)).not.toContain("query");
+  }
+
+  it("execute, builder zinciri, prepare().execute() ve with() hataları parametresiz AuthStoreError olur", async () => {
+    const db = maskedDb(fake);
+    expectMasked(await captured(() => Promise.resolve(db.execute())));
+    expectMasked(await captured(() => Promise.resolve(db.select().from())));
+    expectMasked(await captured(async () => db.select().from().where()));
+    expectMasked(await captured(() => db.select().from().where().prepare().execute()));
+    expectMasked(await captured(async () => db.with().select().from()));
+    // catch/finally yolu (QueryPromise.catch then'i hedef üzerinden çağırır)
+    const viaCatch = await Promise.resolve(db.select().from()).catch((e: unknown) => e);
+    expectMasked(viaCatch);
+  });
+
+  it("transaction: tx sorgu hatası maskeli; APIError aynen geçer (geri alım için)", async () => {
+    const db = maskedDb(fake);
+    expectMasked(await captured(() => Promise.resolve(db.transaction((tx) => tx.execute()))));
+    const api = new APIError("BAD_REQUEST", { message: "x", code: "X" });
+    const e = await captured(() => Promise.resolve(db.transaction(() => Promise.reject(api))));
+    expect(e).toBe(api);
+    // Sürücü dışı sıradan hata da sınıf adıyla AuthStoreError olur, mesajı atılır.
+    const plain = await captured(() => Promise.resolve(db.transaction(() => Promise.reject(new TypeError(`leak ${secret}`)))));
+    expect(plain).toBeInstanceOf(AuthStoreError);
+    expect((plain as AuthStoreError).errorName).toBe("TypeError");
+    expect((plain as Error).message).not.toContain(secret);
+  });
+
+  it("query, $client ve _ erişimi fail-closed", () => {
+    const db = maskedDb(fake);
+    expect(() => db.query).toThrow(AuthStoreError);
+    expect(() => db.$client).toThrow(AuthStoreError);
+    expect(() => db._).toThrow(AuthStoreError);
   });
 });

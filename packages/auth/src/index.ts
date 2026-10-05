@@ -88,6 +88,8 @@ function flag(env: EnvSource, name: string): boolean {
   return env[name] === "true";
 }
 
+const KNOWN_WMS_ENV: readonly string[] = ["local", "ci", "staging", "production"];
+
 export function readAuthEnv(env: EnvSource): AuthEnv {
   const missing: string[] = [];
   const need = (name: string): string => {
@@ -116,6 +118,9 @@ export function readAuthEnv(env: EnvSource): AuthEnv {
   }
   if (protocol !== "https:" && protocol !== "http:") {
     throw new AuthConfigError("BETTER_AUTH_URL must use http or https");
+  }
+  if (env.WMS_ENV !== undefined && !KNOWN_WMS_ENV.includes(env.WMS_ENV)) {
+    throw new AuthConfigError(`WMS_ENV must be one of: ${KNOWN_WMS_ENV.join(", ")}`);
   }
   const production =
     env.NODE_ENV === "production" || env.WMS_ENV === "staging" || env.WMS_ENV === "production";
@@ -254,7 +259,9 @@ function sqlState(error: unknown): string {
 
 /** Hata için güvenli özet: sınıf adı + SQLSTATE; mesaj/parametre/neden zinciri yazılmaz. */
 export function describeError(error: unknown): string {
-  const name = error instanceof Error ? error.name : typeof error;
+  let name: string = typeof error;
+  if (error instanceof AuthStoreError) name = error.errorName;
+  else if (error instanceof Error) name = error.name !== "Error" ? error.name : (error.constructor?.name ?? "Error");
   return `${name.slice(0, 64)} sqlstate=${sqlState(error)}`;
 }
 
@@ -343,15 +350,17 @@ export function socialProvidersFor(
 // Sarma noktası: PostgresJsSession'ın tx için yeni oturum üretmesi nedeniyle (postgres-js/session.js:108-139)
 // oturum katmanı değil, `db`/`tx` yüzeyi (builder zinciri + `then`/`catch`/`finally`) proxy'lenir.
 
-/** Yalnızca sorgu/sürücü hatalarını dönüştürür; `APIError` gibi iş hataları aynen geçer (transaction geri alımı). */
-function isDriverError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  return error.name === "PostgresError" || (typeof (error as { params?: unknown }).params !== "undefined" && "query" in error);
-}
-
-function toStoreError(error: unknown): unknown {
-  if (error instanceof AuthStoreError || !isDriverError(error)) return error;
-  return new AuthStoreError(`auth store failure (${describeError(error)})`, sqlState(error));
+/**
+ * `APIError` (Better Auth iş hataları; transaction geri alımı için aynen geçer) dışındaki HER hata
+ * `AuthStoreError`'a çevrilir: sınıf adı korunur, mesaj/cause/params atılır.
+ */
+function toStoreError(error: unknown, boundary = false): unknown {
+  if (error instanceof AuthStoreError || (!boundary && isAPIError(error))) return error;
+  const sqlstate = sqlState(error);
+  const name = (
+    error instanceof Error ? (error.name !== "Error" ? error.name : (error.constructor?.name ?? "Error")) : typeof error
+  ).slice(0, 64);
+  return new AuthStoreError(`auth store failure (${name} sqlstate=${sqlstate})`, sqlstate, name);
 }
 
 function isThenable(v: unknown): v is PromiseLike<unknown> {
@@ -381,6 +390,10 @@ function wrapThenable<T extends object>(target: T): T {
 
 function wrapResult(result: unknown, root: boolean): unknown {
   if (isThenable(result)) return wrapThenable(result);
+  // `.prepare()` sonucu gibi `execute()` taşıyan nesneler de sarılır (thenable değildir).
+  if (typeof result === "object" && result !== null && typeof (result as { execute?: unknown }).execute === "function") {
+    return wrapBuilder(result);
+  }
   // Kök yüzeyde `db.select()` / `db.insert(t)` gibi thenable olmayan oluşturucular da sarılır.
   if (root && typeof result === "object" && result !== null && !Array.isArray(result)) return wrapBuilder(result);
   return result;
@@ -391,15 +404,28 @@ function wrapBuilder<T extends object>(target: T): T {
     get(t, prop) {
       const value: unknown = Reflect.get(t, prop, t);
       if (typeof value !== "function" || prop === "constructor") return value;
-      return (...args: unknown[]): unknown => wrapResult((value as (...a: unknown[]) => unknown).apply(t, args), false);
+      // thenable olmayan oluşturucunun (`db.select()`, `db.with()`) çocukları da kök kuralıyla sarılır.
+      return (...args: unknown[]): unknown => wrapResult((value as (...a: unknown[]) => unknown).apply(t, args), true);
     },
   });
 }
 
-/** Better Auth ve bu paketin kendi sorguları için maskeleyen Drizzle yüzeyi. */
-function maskedDb<T extends object>(db: T): T {
+/**
+ * Better Auth ve bu paketin kendi sorguları için maskeleyen Drizzle yüzeyi.
+ *
+ * Desteklenen yüzey (kurulu `@better-auth/drizzle-adapter` 1.7.7 `dist/index.mjs`: select/insert/update/delete
+ * zinciri `:62-575`, `execute`, `transaction`): `db.select|insert|update|delete|execute|transaction|with` ve
+ * zincirin `then/catch/finally/execute/prepare` sonuçları maskelidir. YASAK (fail-closed, erişimde fırlatır):
+ * `db.query` (yalnızca `joins` açıkken `index.mjs:281-401`; kapalı: `database.joins` varsayılan false),
+ * `db.$client` (ham sürücü maskeyi atlar) ve `db._` (`index.mjs:53,60,290`: yalnızca `schema` verilmediğinde
+ * kullanılır; biz her zaman veririz).
+ */
+export function maskedDb<T extends object>(db: T): T {
   return new Proxy(db, {
     get(t, prop) {
+      if (prop === "query" || prop === "$client" || prop === "_") {
+        throw new AuthStoreError(`auth store: db.${String(prop)} is not available on the masked client`);
+      }
       const value: unknown = Reflect.get(t, prop, t);
       if (typeof value !== "function" || prop === "constructor") return value;
       if (prop === "transaction") {
@@ -419,9 +445,12 @@ export class AuthStoreError extends Error {
   override name = "AuthStoreError";
   /** Yalnızca `describeError` çıktısı (sınıf + SQLSTATE) taşır; `cause` bilerek yok. */
   readonly sqlstate: string;
-  constructor(message: string, sqlstate = "-") {
+  /** Özgün hatanın sınıf adı (ör. `DrizzleQueryError`); mesaj/cause taşınmaz. */
+  readonly errorName: string;
+  constructor(message: string, sqlstate = "-", errorName = "AuthStoreError") {
     super(message);
     this.sqlstate = sqlstate;
+    this.errorName = errorName;
   }
 }
 
@@ -430,7 +459,8 @@ async function masked<T>(fn: () => Promise<T>): Promise<T> {
     return await fn();
   } catch (error) {
     if (error instanceof AuthError || error instanceof AuthConfigError) throw error;
-    throw new AuthStoreError(`auth store failure (${describeError(error)})`, sqlState(error));
+    // Servis sınırında APIError dahil her hata tekdüze, parametresiz AuthStoreError olur.
+    throw toStoreError(error, true);
   }
 }
 

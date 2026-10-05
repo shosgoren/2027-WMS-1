@@ -8,8 +8,8 @@ import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createDbClient } from "../../../packages/db/src/index.ts";
-import { DB_CLIENT_SETTINGS, type DbClient } from "../../../packages/db/src/client.ts";
-import { AuthError, createAuth, readAuthEnv, type AuthService } from "../../../packages/auth/src/index.ts";
+import { DB_CLIENT_SETTINGS, rawDb, type DbClient } from "../../../packages/db/src/client.ts";
+import { AuthError, createAuth, maskedDb, readAuthEnv, type AuthService } from "../../../packages/auth/src/index.ts";
 import { hashPassword } from "../../../packages/auth/src/password.ts";
 import { readAuthDatabaseUrl, readIntEnv, redactErrorChain } from "../harness/env.ts";
 
@@ -467,6 +467,82 @@ describe(`auth çekirdek (target=${env.target})`, () => {
       expect(text).not.toContain(email);
     },
   );
+
+  /** Casuslu, REVOKE'lu senaryo çalıştırıcı; GRANT her durumda `finally`'de geri verilir. */
+  async function withRevoked(table: "accounts" | "users", run: (printed: () => string) => Promise<void>): Promise<string> {
+    const methods = ["log", "info", "warn", "error", "debug"] as const;
+    const spies = methods.map((m) => vi.spyOn(console, m).mockImplementation(() => undefined));
+    const dump = (): string =>
+      spies
+        .flatMap((spy) => spy.mock.calls.map((c) => c.map((a) => (a instanceof Error ? `${a.name} ${a.message} ${a.stack ?? ""} ${String(a.cause ?? "")}` : typeof a === "string" ? a : JSON.stringify(a))).join(" ")))
+        .join("\n");
+    await adm.query(`REVOKE SELECT ON public.${table} FROM wms_auth`);
+    try {
+      await run(dump);
+    } finally {
+      await adm.query(`GRANT SELECT ON public.${table} TO wms_auth`);
+    }
+    const out = dump();
+    spies.forEach((spy) => spy.mockRestore());
+    return out;
+  }
+
+  const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/;
+
+  it("B1 fallback join (a): sign-in includeAccounts → accounts SELECT 42501; günlükte u.id/Failed query/params yok", async () => {
+    const u = await mkUser();
+    const ip = nextIp();
+    let status = 0;
+    const printed = await withRevoked("accounts", async () => {
+      const res = await post2(service, "/sign-in/email", { email: u.email, password: PASSWORD }, ip);
+      status = res.status;
+    });
+    expect(status).toBe(500);
+    expect(printed).toContain("sqlstate=42501");
+    // Yolun gerçekten fallback join olduğunu kanıtla: Better Auth bu iletiyi (yalnızca mesaj) o dalda yazar.
+    expect(printed).toContain("Failed to query fallback join for model account");
+    for (const secret of [u.email, u.id, ip, PASSWORD, "Failed query", "params", "INSERT INTO", "SELECT "]) expect(printed).not.toContain(secret);
+    expect(printed).not.toMatch(UUID_RE);
+  });
+
+  it("B1 fallback join (b): geçerli oturum çerezi + users SELECT 42501 → getPrincipal parametresiz hata", async () => {
+    const u = await mkUser();
+    const { jar } = await signIn(u.email, nextIp());
+    let failure: unknown;
+    const printed = await withRevoked("users", async () => {
+      failure = await service.getPrincipal(headersWith(jar)).then(() => undefined, (e: unknown) => e);
+    });
+    expect(failure).toBeDefined();
+    expect((failure as Error).name).toBe("AuthStoreError");
+    expect((failure as Error).cause).toBeUndefined();
+    expect((failure as Error).message).not.toContain(u.id);
+    expect(printed).toContain("sqlstate=42501");
+    expect(printed).toContain("Failed to query fallback join for model");
+    for (const secret of [u.email, u.id, "Failed query", "params", "INSERT INTO", "SELECT "]) expect(printed).not.toContain(secret);
+    expect(printed).not.toMatch(UUID_RE);
+    // GRANT geri verildi → oturum yeniden çözülür.
+    expect((await service.getPrincipal(headersWith(jar)))?.userId).toBe(u.id);
+  });
+
+  it("maskedDb gerçek DB: transaction içinde APIError aynen yayılır ve işlem geri alınır", async () => {
+    const db = maskedDb(rawDb(authClient));
+    const ident = `rb-${randomBytes(6).toString("hex")}`;
+    // Better Auth `isAPIError` ad tabanlı da tanır (`error?.name === "APIError"`); kütüphane testte import edilemez (lint).
+    const api = Object.assign(new Error("x"), { name: "APIError", status: "BAD_REQUEST" });
+    const err = await db
+      .transaction(async (tx) => {
+        await tx.execute(`INSERT INTO public.verifications (identifier, value, expires_at) VALUES ('${ident}', 'v', now() + interval '1 hour')`);
+        throw api;
+      })
+      .then(() => undefined, (e: unknown) => e);
+    expect(err).toBe(api);
+    const left = await adm.query("SELECT count(*)::int AS n FROM public.verifications WHERE identifier = $1", [ident]);
+    expect(left.rows[0]).toMatchObject({ n: 0 });
+    // Sürücü hatası (yetki): maskeli.
+    const denied = await db.execute("SELECT 1 FROM public.security_events LIMIT 1").then(() => undefined, (e: unknown) => e);
+    expect((denied as Error).name).toBe("AuthStoreError");
+    expect((denied as { sqlstate?: string }).sqlstate).toBe("42501");
+  });
 
   it("M2: olay yazımı başarısız olsa da /sign-out oturumu siler (fail-open yalnızca çıkış); hata günlükleri maskeli", async () => {
     const u = await mkUser();
