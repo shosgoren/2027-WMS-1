@@ -10,7 +10,7 @@
 //   çalışma anında açık hata, değer asla yazılmaz — G-09).
 import { createHash } from "node:crypto";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
-import { APIError, createAuthMiddleware, getIP, getSessionFromCtx } from "better-auth/api";
+import { APIError, createAuthMiddleware, getIP, getSessionFromCtx, isAPIError } from "better-auth/api";
 import { betterAuth } from "better-auth";
 import { nextCookies } from "better-auth/next-js";
 import { twoFactor } from "better-auth/plugins/two-factor";
@@ -66,6 +66,8 @@ export interface AuthEnv {
   readonly databaseUrl: string;
   /** `wms_auth` (AUTH_DATABASE_URL): Better Auth tabloları. */
   readonly authDatabaseUrl: string;
+  /** `NODE_ENV === "production"`: istemci IP başlığı ve https zorunlu. */
+  readonly production: boolean;
   readonly socialEnabled: boolean;
   readonly requireEmailVerification: boolean;
   readonly google: { readonly clientId: string; readonly clientSecret: string } | null;
@@ -114,16 +116,43 @@ export function readAuthEnv(env: EnvSource): AuthEnv {
   if (protocol !== "https:" && protocol !== "http:") {
     throw new AuthConfigError("BETTER_AUTH_URL must use http or https");
   }
+  const production = env.NODE_ENV === "production";
+  if (production && protocol !== "https:") {
+    throw new AuthConfigError("BETTER_AUTH_URL must use https when NODE_ENV=production");
+  }
+  // ADR-014 §8: yalnızca uygulamanın kendi kökeni güvenilir; ortamdan ek köken kabul edilmez.
+  if (nonEmpty(env, "BETTER_AUTH_TRUSTED_ORIGINS") !== undefined) {
+    throw new AuthConfigError("BETTER_AUTH_TRUSTED_ORIGINS is not allowed (ADR-014 section 8)");
+  }
+  // Better Auth `isTest()` (core env-impl.mjs:36) NODE_ENV=test veya TEST (boş/"false" dışı) ile açılır;
+  // üretim/staging'de bu sinyaller kabul edilmez (köken denetimi ayrıca açıkça zorlanır).
+  const testSignal = env.NODE_ENV === "test" || (nonEmpty(env, "TEST") !== undefined && env.TEST !== "false");
+  const deployed = production || env.WMS_ENV === "staging" || env.WMS_ENV === "prod" || env.WMS_ENV === "production";
+  if (deployed && testSignal) {
+    throw new AuthConfigError("NODE_ENV=test / TEST is not allowed in production or staging");
+  }
+  if (dbUser(databaseUrl) === dbUser(authDatabaseUrl)) {
+    throw new AuthConfigError("DATABASE_URL and AUTH_DATABASE_URL must use different database roles (ADR-014 section 10)");
+  }
   return {
     secret,
     baseUrl,
     databaseUrl,
     authDatabaseUrl,
+    production,
     socialEnabled,
     requireEmailVerification: flag(env, "AUTH_REQUIRE_EMAIL_VERIFICATION"),
     google,
     microsoft,
   };
+}
+
+function dbUser(url: string): string {
+  try {
+    return decodeURIComponent(new URL(url).username);
+  } catch {
+    throw new AuthConfigError("DATABASE_URL / AUTH_DATABASE_URL is not a valid URL");
+  }
 }
 
 function provider(env: EnvSource, prefix: string, missing: string[]): { clientId: string; clientSecret: string } | null {
@@ -207,6 +236,44 @@ function sha256Hex(value: string): string {
 
 const EVENT_UA_MAX = 512;
 
+// ---------------------------------------------------------------------------------------------
+// Maskeli günlükleme (G-09, I-12): parametre/belirteç/özet/e-posta/IP loga gitmez.
+// DrizzleQueryError mesajı sorgu parametrelerini içerir → hata için yalnızca sınıf + SQLSTATE + sabit metin.
+// ---------------------------------------------------------------------------------------------
+
+function sqlState(error: unknown): string {
+  let e: unknown = error;
+  for (let i = 0; i < 5 && typeof e === "object" && e !== null; i += 1) {
+    const code = (e as { code?: unknown }).code;
+    if (typeof code === "string" && /^[0-9A-Z]{5}$/.test(code)) return code;
+    e = (e as { cause?: unknown }).cause;
+  }
+  return "-";
+}
+
+/** Hata için güvenli özet: sınıf adı + SQLSTATE; mesaj/parametre/neden zinciri yazılmaz. */
+export function describeError(error: unknown): string {
+  const name = error instanceof Error ? error.name : typeof error;
+  return `${name.slice(0, 64)} sqlstate=${sqlState(error)}`;
+}
+
+/** Serbest metin günlüğü: sorgu/parametre izi varsa sabit metin; e-posta, IP, uzun belirteç/özet maskelenir. */
+export function maskLogText(text: string): string {
+  if (/failed query|\bparams\b/i.test(text)) return "database query failed";
+  return text
+    .replace(/[^\s@]+@[^\s@]+/g, "[email]")
+    .replace(/\b\d{1,3}(?:\.\d{1,3}){3}\b/g, "[ip]")
+    .replace(/[A-Za-z0-9_\-+/=.$,]{24,}/g, "[redacted]")
+    .slice(0, 300);
+}
+
+function logMasked(level: "error" | "warn" | "info", message: string, error?: unknown): void {
+  const line = `[auth] ${maskLogText(message)}${error === undefined ? "" : ` (${describeError(error)})`}`;
+  if (level === "error") console.error(line);
+  else if (level === "warn") console.warn(line);
+  else console.info(line);
+}
+
 type Headerish = Request | Headers | undefined;
 
 function headersOf(source: Headerish): Headers | undefined {
@@ -222,6 +289,7 @@ function headersOf(source: Headerish): Headers | undefined {
  */
 function createRateLimitStorage(client: DbClient) {
   const db = rawDb(client);
+  const PRUNE_PROBABILITY = 0.01;
   const PRUNE_AFTER_MS = 2 * 60 * 60 * 1000; // en uzun kural penceresinin (1 saat) iki katı
   return {
     async consume(key: string, rule: { window: number; max: number }): Promise<{ allowed: boolean; retryAfter: number | null }> {
@@ -240,8 +308,11 @@ function createRateLimitStorage(client: DbClient) {
             RETURNING count`,
       );
       if (rows.length > 0) {
-        // Süresi dolmuş satırların temizliği (yerleşik depolama da izinli istekte siler; rate-limiter:103-108).
-        await db.execute(sql`DELETE FROM public.auth_rate_limits WHERE last_request < ${now - PRUNE_AFTER_MS}`);
+        // Süresi dolmuş satırların temizliği: her istekte değil, olasılıksal (~%1; `last_request` indeksi yok,
+        // migration kapsam dışı). Yerleşik depolama pencere yenilemede siler (rate-limiter:103-108).
+        if (Math.random() < PRUNE_PROBABILITY) {
+          await db.execute(sql`DELETE FROM public.auth_rate_limits WHERE last_request < ${now - PRUNE_AFTER_MS}`);
+        }
         return { allowed: true, retryAfter: null };
       }
       const current = await db.execute<{ last_request: string | number }>(
@@ -261,9 +332,45 @@ export function socialProvidersFor(
   return { google: { ...env.google }, microsoft: { ...env.microsoft } };
 }
 
+// better-call 1.4.0 router.mjs:93, işleyici `APIError` olmayan bir hata fırlatırsa (ör. DrizzleQueryError)
+// `console.error("# SERVER_ERROR: ", error)` yazar ve Better Auth `onAPIError.onError` bunu engellemez
+// (api/index.mjs:195-200 `undefined` döner). Hata mesajı sorgu parametrelerini (e-posta, özet) içerir →
+// bu tek, sabit önekli çağrı maskeli biçime çevrilir. Başka console.error çağrılarına dokunulmaz.
+let installedMask: typeof console.error | undefined;
+
+function installServerErrorMask(): void {
+  // Yalnızca console.error hâlâ BİZİM sarmalayıcımızsa atla (casus/başka sarmalayıcı değiştirmişse yeniden sar).
+  if (installedMask !== undefined && console.error === installedMask) return;
+  const previous = console.error.bind(console);
+  const wrapper = (...args: unknown[]): void => {
+    if (typeof args[0] === "string" && args[0].startsWith("# SERVER_ERROR")) {
+      previous(`[auth] server error (${describeError(args[1])})`);
+      return;
+    }
+    previous(...args);
+  };
+  installedMask = wrapper;
+  console.error = wrapper;
+}
+
+/** Hata sınıfı + SQLSTATE dışında bilgi taşımayan hata (Drizzle `params` sızıntısını önler). */
+export class AuthStoreError extends Error {
+  override name = "AuthStoreError";
+}
+
+async function masked<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (error) {
+    if (error instanceof AuthError || error instanceof AuthConfigError) throw error;
+    throw new AuthStoreError(`auth store failure (${describeError(error)})`);
+  }
+}
+
 /** Better Auth yapılandırmasını kurar ve dar yüzeyi döndürür. */
 export function createAuth(params: CreateAuthParams): AuthService {
   const { client, eventClient, env } = params;
+  installServerErrorMask();
   const baseOrigin = new URL(env.baseUrl).origin;
   const authDb = rawDb(client);
 
@@ -273,24 +380,45 @@ export function createAuth(params: CreateAuthParams): AuthService {
     source: Headerish,
     options: Parameters<typeof getIP>[1],
     detail: Record<string, unknown> = {},
+    failOpen = false,
   ): Promise<void> {
-    const headers = headersOf(source);
-    const ip = headers === undefined ? null : getIP(headers, options);
-    const ua = headers?.get("user-agent") ?? null;
-    await recordSecurityEvent(eventClient, {
-      eventType: type,
-      userId,
-      ip,
-      userAgent: ua === null || ua === "" ? null : ua.slice(0, EVENT_UA_MAX),
-      detail,
-    });
+    try {
+      const headers = headersOf(source);
+      const ip = headers === undefined ? null : getIP(headers, options);
+      const ua = headers?.get("user-agent") ?? null;
+      await recordSecurityEvent(eventClient, {
+        eventType: type,
+        userId,
+        ip,
+        userAgent: ua === null || ua === "" ? null : ua.slice(0, EVENT_UA_MAX),
+        detail,
+      });
+    } catch (error) {
+      // Hata maskeli günlüğe (parametre/e-posta/IP yok). Varsayılan fail-closed: istek 500 olur.
+      logMasked("error", `security event write failed: ${type}`, error);
+      if (!failOpen) throw error;
+    }
   }
+
+  let warnedNoIp = false;
 
   const auth = betterAuth({
     appName: "Etkin WMS",
     baseURL: env.baseUrl,
     secret: env.secret,
     trustedOrigins: [baseOrigin],
+    // B1 (G-09): Better Auth günlükleri ve API hataları maskeli yazılır (parametre/belirteç/e-posta/IP yok).
+    logger: {
+      level: "warn",
+      log: (level, message) => {
+        logMasked(level === "error" ? "error" : level === "warn" ? "warn" : "info", String(message));
+      },
+    },
+    onAPIError: {
+      onError: (error) => {
+        logMasked("error", "auth api error", error);
+      },
+    },
     database: drizzleAdapter(authDb, {
       provider: "pg",
       schema,
@@ -304,6 +432,10 @@ export function createAuth(params: CreateAuthParams): AuthService {
       ipAddress: { ipAddressHeaders: ["fly-client-ip"] },
       useSecureCookies: new URL(env.baseUrl).protocol === "https:",
       defaultCookieAttributes: { httpOnly: true, sameSite: "lax" },
+      // M1: Better Auth `skipOriginCheck` varsayılanı `isTest()` iken true olur (create-context.mjs:211);
+      // her ortamda (vitest dahil) köken ve CSRF denetimi açıkça açık (init-options.d.mts:295, 310).
+      disableOriginCheck: false,
+      disableCSRFCheck: false,
     },
     emailAndPassword: {
       enabled: true,
@@ -359,9 +491,29 @@ export function createAuth(params: CreateAuthParams): AuthService {
       },
     },
     // ADR-014 4. tur BLOCKER-1 (b): `/update-session` ucu kapalı (api/index.mjs:166-168 → 404).
-    disabledPaths: ["/update-session"],
+    // M3: `/verify-password` HTTP'den kapalı (parola doğrulama oracle'ı); sunucu tarafı `auth.api` ile sürer.
+    disabledPaths: ["/update-session", "/verify-password"],
     hooks: {
       before: createAuthMiddleware(async (ctx) => {
+        // MINOR-2: üretimde güvenilir istemci IP'si (Fly-Client-IP) yoksa istek reddedilir; yerelde
+        // Better Auth ortak yerel kovayı kullanır (ilk seferde açık uyarı).
+        // Başlık doğrudan okunur (Better Auth test/dev ortamında yerel adrese düşer; getIP bunu gizlerdi).
+        if (ctx.request !== undefined && (ctx.request.headers.get("fly-client-ip") ?? "").trim() === "") {
+          if (env.production) {
+            throw new APIError("BAD_REQUEST", { message: "CLIENT_IP_REQUIRED", code: "CLIENT_IP_REQUIRED" });
+          }
+          if (!warnedNoIp) {
+            warnedNoIp = true;
+            logMasked("warn", "Fly-Client-IP header missing: using the shared local rate-limit bucket (non-production only)");
+          }
+        }
+        // M4 (ADR-014 §12): "trust device" kapalı — 2FA doğrulama gövdesinde reddedilir.
+        if (
+          (ctx.path === "/two-factor/verify-totp" || ctx.path === "/two-factor/verify-backup-code" || ctx.path === "/two-factor/verify-otp") &&
+          (ctx.body as { trustDevice?: unknown } | undefined)?.trustDevice
+        ) {
+          throw new APIError("BAD_REQUEST", { message: "TRUST_DEVICE_DISABLED", code: "TRUST_DEVICE_DISABLED" });
+        }
         if (ctx.path === "/request-password-reset") {
           // Kullanıcı var/yok ayrımı sızmaması için arama yapılmadan, her istek aynı yanıtla reddedilir.
           throw new APIError("SERVICE_UNAVAILABLE", {
@@ -371,18 +523,21 @@ export function createAuth(params: CreateAuthParams): AuthService {
         }
         if (ctx.path === "/sign-out") {
           const current = await getSessionFromCtx(ctx);
-          await emit(SECURITY_EVENT.logout, current?.user.id ?? null, ctx.request ?? ctx.headers, ctx.context.options);
+          // M2: fail-open YALNIZCA çıkış için — denetim yazımı başarısızsa oturum yine silinir (kullanıcı çıkış
+          // yapabilmeli; kalan oturum güvenlik riski, eksik çıkış olayı değil). Hata maskeli loglanır.
+          await emit(SECURITY_EVENT.logout, current?.user.id ?? null, ctx.request ?? ctx.headers, ctx.context.options, {}, true);
         }
       }),
       after: createAuthMiddleware(async (ctx) => {
-        const failed = ctx.context.returned instanceof APIError;
+        // better-call doğrulama (zod) hataları dahil her API hatası (MINOR-4).
+        const failed = isAPIError(ctx.context.returned);
         const source = ctx.request ?? ctx.headers;
         const options = ctx.context.options;
         switch (ctx.path) {
           case "/sign-in/email": {
             if (failed) {
               const email = typeof ctx.body?.email === "string" ? ctx.body.email : undefined;
-              const known = email === undefined ? null : await ctx.context.internalAdapter.findUserByEmail(email);
+              const known = email === undefined ? null : await ctx.context.internalAdapter.findUserByEmail(email.toLowerCase());
               await emit(SECURITY_EVENT.loginFailed, known?.user.id ?? null, source, options, {
                 reason: (ctx.context.returned as APIError).body?.code ?? "UNKNOWN",
               });
@@ -452,10 +607,17 @@ export function createAuth(params: CreateAuthParams): AuthService {
   });
 
   return {
-    handler: (request) => auth.handler(request),
+    async handler(request) {
+      try {
+        return await auth.handler(request);
+      } catch (error) {
+        logMasked("error", "auth handler failed", error);
+        return Response.json({ code: "INTERNAL_ERROR" }, { status: 500 });
+      }
+    },
 
     async getPrincipal(headers) {
-      const result = await auth.api.getSession({ headers });
+      const result = await masked(() => auth.api.getSession({ headers }));
       if (result === null || result === undefined) return null;
       const { session } = result;
       return {
@@ -466,21 +628,29 @@ export function createAuth(params: CreateAuthParams): AuthService {
       };
     },
 
+    // M5 / T-112b kapısı: bu kontrol `security_events` olaylarına (`reauth.succeeded`) DAYANMAZ; yalnızca
+    // oturum `createdAt` ve DB `now()` kullanır. `reauth.*` yazımının `wms_auth`'a kısıtlanması migration
+    // ister (tetikleyici) ve bu kartta yoktur → olay tabanlı yeniden doğrulama T-112b'ye kadar KAPALI;
+    // `wms_app` ile `reauth.*` sahteciliği DB'de engellenmemiştir (T-112c).
     async requireRecentAuth(principal, maxAgeSec) {
       if (!Number.isFinite(maxAgeSec) || maxAgeSec < 0) {
         throw new AuthConfigError("requireRecentAuth: maxAgeSec must be a non-negative number");
       }
       // Zaman istemciden değil DB saatinden (ADR-014 §14).
-      const rows = await authDb.execute<{ age: string | number }>(
-        sql`SELECT EXTRACT(EPOCH FROM (now() - ${principal.authenticatedAt.toISOString()}::timestamptz)) AS age`,
+      const rows = await masked(() =>
+        authDb.execute<{ age: string | number }>(
+          sql`SELECT EXTRACT(EPOCH FROM (now() - ${principal.authenticatedAt.toISOString()}::timestamptz)) AS age`,
+        ),
       );
       const age = Number(rows[0]?.age);
       if (!Number.isFinite(age) || age > maxAgeSec) throw new AuthError("REAUTH_REQUIRED");
     },
 
     async revokeUserSessions(userId) {
-      const context = await auth.$context;
-      await context.internalAdapter.deleteUserSessions(userId);
+      await masked(async () => {
+        const context = await auth.$context;
+        await context.internalAdapter.deleteUserSessions(userId);
+      });
     },
   };
 }

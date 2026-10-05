@@ -6,7 +6,7 @@
 // - Her senaryo kendi `fly-client-ip` değerini kullanır (IP başına hız sınırı kovaları ayrışır).
 import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createDbClient } from "../../../packages/db/src/index.ts";
 import { DB_CLIENT_SETTINGS, type DbClient } from "../../../packages/db/src/client.ts";
 import { AuthError, createAuth, readAuthEnv, type AuthService } from "../../../packages/auth/src/index.ts";
@@ -19,8 +19,10 @@ const urls = [env.databaseUrl, env.databaseUrlDirect, authUrl];
 
 const BASE = "http://localhost:3000";
 const INSUFFICIENT_PRIVILEGE = "42501";
-const PASSWORD = "Sentetik-Parola-T112-A";
-const WRONG_PASSWORD = "Sentetik-Yanlis-T112-B";
+// Sentetik parolalar çalışma anında üretilir (kaynakta sabit sır benzeri dize yok; gitleaks).
+const PASSWORD = `P${randomBytes(12).toString("hex")}`;
+const SECRET = randomBytes(32).toString("hex");
+const WRONG_PASSWORD = `W${randomBytes(12).toString("hex")}`;
 
 let service: AuthService;
 let authClient: DbClient;
@@ -101,6 +103,20 @@ async function signIn(email: string, ip: string, password = PASSWORD): Promise<{
   return { res, jar: jarFrom(res) };
 }
 
+function newService(client: DbClient, overrides: Record<string, string> = {}, events: DbClient = eventClient): AuthService {
+  return createAuth({
+    client,
+    eventClient: events,
+    env: readAuthEnv({
+      BETTER_AUTH_SECRET: SECRET,
+      BETTER_AUTH_URL: BASE,
+      DATABASE_URL: env.databaseUrl,
+      AUTH_DATABASE_URL: authUrl,
+      ...overrides,
+    }),
+  });
+}
+
 function headersWith(jar: string): Headers {
   return new Headers({ cookie: jar, "fly-client-ip": "203.0.113.250" });
 }
@@ -131,7 +147,7 @@ beforeAll(async () => {
     client: authClient,
     eventClient,
     env: readAuthEnv({
-      BETTER_AUTH_SECRET: randomBytes(32).toString("hex"),
+      BETTER_AUTH_SECRET: SECRET,
       BETTER_AUTH_URL: BASE,
       DATABASE_URL: env.databaseUrl,
       AUTH_DATABASE_URL: authUrl,
@@ -331,4 +347,118 @@ describe(`auth çekirdek (target=${env.target})`, () => {
     }
     await expect(app.query("SELECT password FROM public.accounts LIMIT 1")).rejects.toMatchObject({ code: INSUFFICIENT_PRIVILEGE });
   });
+
+  it("M1: vitest (NODE_ENV=test) altında bile köken denetimi açık — yabancı Origin → 403", async () => {
+    expect(process.env.NODE_ENV).toBe("test");
+    const u = await mkUser();
+    const { jar } = await signIn(u.email, nextIp());
+    const res = await service.handler(
+      new Request(`${BASE}/api/auth/sign-out`, {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: "https://evil.example", cookie: jar, "fly-client-ip": nextIp() },
+        body: "{}",
+      }),
+    );
+    expect(res.status).toBe(403);
+    expect((await service.getPrincipal(headersWith(jar)))?.userId).toBe(u.id);
+  });
+
+  it("M3: /verify-password HTTP'den kapalı (404)", async () => {
+    const u = await mkUser();
+    const { jar } = await signIn(u.email, nextIp());
+    const res = await post("/verify-password", { password: PASSWORD }, nextIp(), jar);
+    expect(res.status).toBe(404);
+  });
+
+  it("M4: verify-totp / verify-backup-code gövdesinde trustDevice → 400", async () => {
+    const ip = nextIp();
+    for (const path of ["/two-factor/verify-totp", "/two-factor/verify-backup-code"]) {
+      const res = await post(path, { code: "000000", trustDevice: true }, ip);
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { code?: string }).code).toBe("TRUST_DEVICE_DISABLED");
+    }
+  });
+
+  it("MINOR-2: üretim yapılandırmasında Fly-Client-IP yoksa istek reddedilir", async () => {
+    const strict = createAuth({
+      client: authClient,
+      eventClient,
+      env: { ...readAuthEnv({ BETTER_AUTH_SECRET: SECRET, BETTER_AUTH_URL: BASE, DATABASE_URL: env.databaseUrl, AUTH_DATABASE_URL: authUrl }), production: true },
+    });
+    const res = await strict.handler(
+      new Request(`${BASE}/api/auth/sign-in/email`, {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: BASE },
+        body: JSON.stringify({ email: "x@example.invalid", password: PASSWORD }),
+      }),
+    );
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { code?: string }).code).toBe("CLIENT_IP_REQUIRED");
+  });
+
+  it("MINOR-3/4: büyük harfli e-posta bilinen kullanıcıya bağlanır; doğrulama hatası da login_failed", async () => {
+    const u = await mkUser();
+    const ip = nextIp();
+    await signIn(u.email.toUpperCase(), ip, WRONG_PASSWORD);
+    await post("/sign-in/email", { email: u.email }, ip); // parola alanı yok → doğrulama hatası
+    const rows = await adm.query<{ user_id: string | null }>("SELECT user_id FROM public.security_events WHERE event_type = 'login_failed' AND ip = $1", [ip]);
+    expect(rows.rows.length).toBe(2);
+    expect(rows.rows.some((r) => r.user_id === u.id)).toBe(true);
+  });
+
+  it("B1: DB hatasında günlükler maskeli (e-posta/IP/belirteç/özet yok)", async () => {
+    // wms_app rolü Better Auth tablolarında yetkisiz → sorgu 42501; Drizzle mesajı parametreleri içerir.
+    const broken = createDbClient({ url: env.databaseUrl, poolMax: 1, prepare: DB_CLIENT_SETTINGS.prepare });
+    const svc = newService(broken);
+    const spies = (["log", "info", "warn", "error", "debug"] as const).map((m) => vi.spyOn(console, m).mockImplementation(() => undefined));
+    const email = `leak-${randomBytes(6).toString("hex")}@example.invalid`;
+    const ip = "198.51.100.77";
+    let status = 0;
+    let body = "";
+    try {
+      const res = await post2(svc, "/sign-in/email", { email, password: PASSWORD }, ip);
+      status = res.status;
+      body = await res.text();
+    } finally {
+      const printed = spies.flatMap((spy) => spy.mock.calls.map((c) => c.map((a) => (a instanceof Error ? `${a.message} ${a.stack ?? ""}` : String(a))).join(" "))).join("\n");
+      spies.forEach((spy) => spy.mockRestore());
+      await broken.close();
+      expect(printed).toContain("sqlstate=");
+      for (const secret of [email, ip, PASSWORD, "params"]) expect(printed).not.toContain(secret);
+      expect(printed).not.toMatch(/[0-9a-f]{40,}/);
+    }
+    expect(status).toBe(500);
+    expect(body).not.toContain(email);
+  });
+
+  it("M2: olay yazımı başarısız olsa da /sign-out oturumu siler (fail-open yalnızca çıkış); hata günlükleri maskeli", async () => {
+    const u = await mkUser();
+    const ok = await signIn(u.email, nextIp()); // normal servisle oturum
+    // Casus ÖNCE kurulur; maskeleyici onun üstüne sarılır → casus yalnızca maskeli çağrıları görür.
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const brokenEvents = createDbClient({ url: authUrl, poolMax: 1, prepare: DB_CLIENT_SETTINGS.prepare }); // wms_auth: RETURNING için SELECT yok
+    const svc = newService(authClient, {}, brokenEvents);
+    const ip = nextIp();
+    // Giriş olayı yazılamaz → fail-closed (500).
+    const login = await post2(svc, "/sign-in/email", { email: u.email, password: PASSWORD }, ip);
+    expect(login.status).toBe(500);
+    const out = await post2(svc, "/sign-out", {}, ip, ok.jar);
+    const printed = spy.mock.calls.map((c) => c.map((a) => (a instanceof Error ? `${a.message}` : String(a))).join(" ")).join("\n");
+    spy.mockRestore();
+    await brokenEvents.close();
+    expect(out.status).toBe(200);
+    expect(await service.getPrincipal(headersWith(ok.jar))).toBeNull();
+    expect(printed).toContain("sqlstate=42501");
+    for (const secret of [u.email, ip, PASSWORD, "Failed query", "params"]) expect(printed).not.toContain(secret);
+  });
 });
+
+function post2(svc: AuthService, path: string, body: unknown, ip: string, cookie?: string): Promise<Response> {
+  return svc.handler(
+    new Request(`${BASE}/api/auth${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: BASE, "fly-client-ip": ip, ...(cookie === undefined ? {} : { cookie }) },
+      body: JSON.stringify(body),
+    }),
+  );
+}
