@@ -57,7 +57,7 @@ describe("eylem listesi", () => {
 });
 
 describe("maskeleme", () => {
-  it.each([
+  it.each([...new Set([
     // Kart ölçütü (alt dize, büyük/küçük harf duyarsız): password|token|secret|totp|code|hash|otp|key
     "password", "newPassword", "TOKEN", "resetToken", "client_secret", "totpSecret", "backupCodes", "passwordHash", "otp",
     "apiKey", "Key", "key", "monkey", "hashtag", "barcode", "postal_code", "sku_code", "code", "otp_code", "OTPCode",
@@ -68,7 +68,7 @@ describe("maskeleme", () => {
     "passphrase", "pwd", "pass", "signature", "private", "privateData", "auth", "pin", "salt", "digest",
     // sid yalnızca ayrı segment olarak
     "sid", "SID", "user_sid", "userSid", "X-Sid",
-  ])("anahtar %s maskelenir", (k) => {
+  ])])("anahtar %s maskelenir", (k) => {
     expect(maskChangeSummary({ [k]: "hassas", ok: "gorunur" }).value).toEqual({ [k]: REDACTED, ok: "gorunur" });
   });
 
@@ -296,19 +296,57 @@ describe("genel anahtar:değer deseni ve JSON dizeleri", () => {
     expect(maskChangeSummary({ msg: v }).value).toEqual({ msg: REDACTED });
   });
 
-  it("JSON dizesi yapısal maskelenir ve yeniden serileştirilir; ayrıştırılamayan dize dize kurallarına düşer", () => {
-    const { value, json } = maskChangeSummary({
-      a: '{"password":"hunter2-sentinel","n":1,"nested":{"apiKey":"k-sentinel","ok":"fine"}}',
-      b: '[{"name":"Authorization","value":"v-sentinel"},{"name":"Accept","values":["x"]}]',
-      c: "[INFO] hello world",
-      d: "{not json} password: zzz-sentinel",
-    });
-    expect(value).toEqual({
-      a: `{"password":"${REDACTED}","n":1,"nested":{"apiKey":"${REDACTED}","ok":"fine"}}`,
-      b: `[{"name":"Authorization","value":"${REDACTED}"},{"name":"Accept","values":["x"]}]`,
+  it("JSON dizesi: sır varsa TÜM dize maskelenir; yoksa ORİJİNAL dize aynen (yeniden serileştirme yok)", () => {
+    const clean = [
+      '{ "a" : 12345678901234567890.12, "b": "x\\u00e9y" }',
+      '{"__proto__":{"x":1},"ok":true}',
+      '[1, 2,   3]',
+      '{"nested":{"list":[{"n":1}]}}',
+    ];
+    for (const c of clean) expect(maskChangeSummary({ v: c }).value).toEqual({ v: c });
+    const secret = [
+      '{"password":"hunter2-sentinel","n":1}',
+      '{"nested":{"apiKey":"k-sentinel","ok":"fine"}}',
+      '[{"name":"Authorization","value":"v-sentinel"}]',
+      '{"msg":"Bearer abcdef0123456789"}',
+      '{"s":"{\\"password\\":\\"x\\"}"}',
+    ];
+    for (const c of secret) expect(maskChangeSummary({ v: c }).value, c).toEqual({ v: REDACTED });
+    expect(maskChangeSummary({ c: "[INFO] hello world", d: "{not json} password: zzz-sentinel" }).value).toEqual({
       c: "[INFO] hello world",
       d: REDACTED,
     });
+  });
+
+  it("JSON dize ayrıştırma bütçesi aşılırsa dize maskelenir, kayıt reddedilmez", () => {
+    const deep = "[".repeat(24) + "]".repeat(24);
+    expect(deep).toHaveLength(48);
+    expect(maskChangeSummary({ v: deep }).value).toEqual({ v: REDACTED });
+    const wide = `[${Array.from({ length: 2000 }, () => "1").join(",")}]`;
+    expect(wide.length).toBeLessThanOrEqual(4096);
+    expect(maskChangeSummary({ v: wide }).value).toEqual({ v: REDACTED });
+    const mild = "[[[[1]]]]";
+    expect(maskChangeSummary({ v: mild }).value).toEqual({ v: mild });
+  });
+
+  it("ayrıştırılamayan kaçışlı JSON ve ağ metni: ters bölü + tırnak, \\uXXXX ad, NBSP ve tam genişlikli ayraç", () => {
+    for (const v of [
+      '{\\"password\\":\\"x-sentinel\\"}',
+      'upstream 400: {\\"password\\":\\"x-sentinel\\"}',
+      "{\\u0070assword: 1-sentinel",
+      "oops \\u0070assword=1-sentinel",
+      "password\u00a0\u00a0: 1-sentinel",
+      "password\uff1a1-sentinel",
+      `password${" ".repeat(500)}: 1-sentinel`,
+    ]) {
+      expect(maskChangeSummary({ m: v }).value, v).toEqual({ m: REDACTED });
+    }
+  });
+
+  it("nesne anahtarına da değer taraması: değer maskelenir, anahtar [REDACTED_KEY_n] olur (çakışmasız)", () => {
+    const k = "Bearer abcdef0123456789-sentinel";
+    const { value, json } = maskChangeSummary({ [k]: "v1", "[REDACTED_KEY_0]": "own", other: "o" });
+    expect(value).toEqual({ "[REDACTED_KEY_1]": REDACTED, "[REDACTED_KEY_0]": REDACTED, other: "o" });
     expect(json).not.toMatch(/sentinel/);
   });
 

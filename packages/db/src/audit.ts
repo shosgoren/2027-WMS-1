@@ -48,8 +48,12 @@ export const REDACTED = "[REDACTED]";
  *    yerde `<ad>["']?\s*[:=]` ve ad duyarlıysa (`x-api-key: …`, `"password":"…"`, `?token=`, `#access_token=`, `sid=`,
  *    `auth[token]=`, yüzde kodlu ad çözülür, 128'den uzun ad fail-closed) TÜM değer maskelenir.
  *  - 4096 karakterden uzun dize değeri FAIL-CLOSED: tamamı `[REDACTED]` (kısmi tarama sınır kesen belirteci kaçırırdı;
- *    uzun düz metin kaybı kabul edilir). `{`/`[` ile başlayan ≤4096 dize JSON.parse edilir, başarılıysa özyinelemeli
- *    (aynı bütçe) maskelenip yeniden serileştirilir; ayrıştırılamazsa yukarıdaki dize kuralları uygulanır.
+ *    uzun düz metin kaybı kabul edilir). `{`/`[` ile başlayan ≤4096 dize JSON.parse edilir; ağaçta duyarlı anahtar/değer
+ *    varsa TÜM dize `[REDACTED]`, yoksa ORİJİNAL dize aynen (yeniden serileştirme yok); ayrıştırma bütçesi (derinlik/
+ *    düğüm) aşılırsa tüm dize maskelenir (kayıt reddedilmez). Ayrıştırılamazsa yukarıdaki dize kuralları uygulanır
+ *    (kaçışlı `{\"password\":…}`, `\uXXXX` kaçışlı ad, NBSP/`：` ayraç/boşluk dahil).
+ *  - Nesne ANAHTARLARINA da değer taraması uygulanır: duyarlı görünen anahtarın değeri maskelenir ve anahtar
+ *    `[REDACTED_KEY_n]` ile değiştirilir.
  *  - Bilinen sınır: kural tabanlı maskeleme heuristiktir; ad taşımayan, desene uymayan çıplak sır (ör. rastgele
  *    hex) yalnızca anahtar adı duyarlıysa maskelenir. Çağıranlar sırları değer olarak `changeSummary`'e koymamalıdır.
  *  - Ad/değer çiftleri: `{ name|key|header|field: <duyarlı>, value|val|content|data: … }`, `[["Authorization","…"]]` ve
@@ -130,10 +134,29 @@ function isNameChar(c: string): boolean {
   );
 }
 
+/** Ad ile ayraç arasında atlanan boşluklar (NBSP, Unicode boşlukları dahil). */
+function isSpaceChar(c: string): boolean {
+  return (
+    c === " " || c === "\t" || c === "\n" || c === "\r" || c === "\u00a0" || c === "\u3000" || c === "\u2028" ||
+    c === "\u2029" || c === "\ufeff" || (c >= "\u2000" && c <= "\u200a")
+  );
+}
+
+/** Ad/değer ayracı: `:`, `=`, tam genişlikli `：` (U+FF1A) ve `＝` (U+FF1D). */
+function isSeparator(c: string): boolean {
+  return c === ":" || c === "=" || c === "\uff1a" || c === "\uff1d";
+}
+
+/** `\uXXXX` kaçışlarını çözer (ayrıştırılamayan dizelerde ad koşusu `\u0070assword` gibi gizlenemesin). */
+function decodeUnicodeEscapes(v: string): string {
+  return v.includes("\\u") ? v.replace(/\\u([0-9a-fA-F]{4})/g, (_m, h: string) => String.fromCharCode(parseInt(h, 16))) : v;
+}
+
 /**
- * Genel `<ad>["']?\s*[:=]` deseni (regex'siz, tek geçiş): dize içinde herhangi bir yerde, adı duyarlı olan bir
- * ad/değer ayracı (`x-api-key: …`, `password: …`, `"password":"…"`, `?token=…`, `#access_token=…`, `sid=…`,
- * `auth[token]=…`). Ad = ayraçtan önceki ad karakterleri koşusu (köşeli parantez içi dahil); 128'den uzun ad → true.
+ * Genel `<ad>[\\]*["']?\s*[:=]` deseni (regex'siz, tek geçiş, doğrusal): dize içinde herhangi bir yerde, adı duyarlı
+ * olan bir ad/değer ayracı (`x-api-key: …`, `password: …`, `"password":"…"`, kaçışlı `{\"password\":…}`, `?token=…`,
+ * `#access_token=…`, `sid=…`, `auth[token]=…`). Ad = ayraçtan önceki ad karakterleri koşusu (köşeli parantez içi
+ * dahil); 128'den uzun ad → true. Ad ile ayraç arasında ters bölü, tırnak ve (sınırsız) boşluk atlanır.
  */
 function hasSensitiveKeyedPair(v: string): boolean {
   const n = v.length;
@@ -146,13 +169,10 @@ function hasSensitiveKeyedPair(v: string): boolean {
     }
     if (runStart >= 0) {
       let j = i;
+      while (j < n && v[j] === "\\") j++;
       if (v[j] === '"' || v[j] === "'") j++;
-      let ws = 0;
-      while (ws < 16 && j < n && (v[j] === " " || v[j] === "\t" || v[j] === "\n" || v[j] === "\r")) {
-        j++;
-        ws++;
-      }
-      if (j < n && (v[j] === ":" || v[j] === "=") && isSensitiveParamName(v.slice(runStart, i))) return true;
+      while (j < n && isSpaceChar(v[j] as string)) j++;
+      if (j < n && isSeparator(v[j] as string) && isSensitiveParamName(v.slice(runStart, i))) return true;
       runStart = -1;
     }
   }
@@ -163,9 +183,10 @@ function hasSensitiveKeyedPair(v: string): boolean {
  * Değerde sır deseni var mı (anahtardan bağımsız). 4096 karakterden uzun dizeler FAIL-CLOSED duyarlı sayılır (tamamı
  * maskelenir; kısmi tarama sınırı kesen belirteci kaçırırdı). JSON dizeleri `maskString` içinde yapısal işlenir.
  */
-export function looksSensitiveValue(v: string): boolean {
-  if (v.length > VALUE_SCAN_LIMIT) return true;
-  if (v.length < 8) return false;
+export function looksSensitiveValue(raw: string): boolean {
+  if (raw.length > VALUE_SCAN_LIMIT) return true;
+  if (raw.length < 8) return false;
+  const v = decodeUnicodeEscapes(raw);
   if (v.toLowerCase().includes("authorization:")) return true;
   if (JWT_RE.test(v) || AUTH_TOKEN_RE.test(v) || USERINFO_URL_RE.test(v)) return true;
   return hasSensitiveKeyedPair(v);
@@ -230,8 +251,23 @@ function spend(b: Budget, bytes: number): void {
   if (b.bytes > b.maxBytes) throw new AuditError(`change_summary exceeds ${b.maxBytes} bytes`);
 }
 
-function maskString(v: string, depth: number, seen: Set<object>, b: Budget): string {
-  // JSON dizesi (`{`/`[` ile başlar, ≤ 4096): ayrıştırılıp aynı bütçeyle yapısal maskelenir ve yeniden serileştirilir.
+/**
+ * Dize içi JSON (`{`/`[` ile başlar, ≤ 4096) ayrıştırılır ve ağaç AYNI maskeleme kurallarıyla (bağımsız bütçe) gezilir:
+ * maskelenecek bir şey bulunursa TÜM dize `[REDACTED]`; bulunmazsa ORİJİNAL dize aynen kalır (yeniden serileştirme
+ * yok: sayı/kaçış/`__proto__` biçimleri bozulmaz). Ayrıştırma bütçesi (derinlik/düğüm) aşılırsa da tüm dize
+ * maskelenir (kayıt reddedilmez; `VALIDATION_FAILED` yalnızca üst düzey yapı bütçesi içindir).
+ */
+function jsonStringHasSecret(v: string, parsed: unknown): boolean {
+  try {
+    const masked = mask(parsed, 0, new Set(), { nodes: 0, bytes: 0, maxBytes: 1 << 20 });
+    return JSON.stringify(masked) !== JSON.stringify(parsed);
+  } catch (e) {
+    if (e instanceof AuditError) return true;
+    throw e;
+  }
+}
+
+function maskString(v: string, b: Budget): string {
   if (v.length <= VALUE_SCAN_LIMIT && (v.startsWith("{") || v.startsWith("["))) {
     let parsed: unknown;
     let ok = false;
@@ -242,8 +278,12 @@ function maskString(v: string, depth: number, seen: Set<object>, b: Budget): str
       ok = false;
     }
     if (ok) {
-      const inner = mask(parsed, depth + 1, seen, b);
-      return JSON.stringify(inner ?? null);
+      if (jsonStringHasSecret(v, parsed)) {
+        spend(b, REDACTED.length + 2);
+        return REDACTED;
+      }
+      spend(b, Buffer.byteLength(JSON.stringify(v), "utf8"));
+      return v;
     }
   }
   if (looksSensitiveValue(v)) {
@@ -266,16 +306,16 @@ function mask(value: unknown, depth: number, seen: Set<object>, b: Budget): Json
     spend(b, 5);
     return value;
   }
-  if (typeof value === "string") return maskString(value, depth, seen, b);
+  if (typeof value === "string") return maskString(value, b);
   if (typeof value === "number") {
     if (!Number.isFinite(value)) throw new AuditError("change_summary contains a non-finite number");
     spend(b, String(value).length);
     return value;
   }
-  if (typeof value === "bigint") return maskString(value.toString(), depth, seen, b);
+  if (typeof value === "bigint") return maskString(value.toString(), b);
   if (value instanceof Date) {
     if (Number.isNaN(value.getTime())) throw new AuditError("change_summary contains an invalid date");
-    return maskString(value.toISOString(), depth, seen, b);
+    return maskString(value.toISOString(), b);
   }
   if (typeof value !== "object") throw new AuditError("change_summary contains a non-JSON value");
   if (seen.has(value)) throw new AuditError("change_summary contains a circular reference");
@@ -305,20 +345,33 @@ function mask(value: unknown, depth: number, seen: Set<object>, b: Budget): Json
       const n = value[f];
       return typeof n === "string" && isSensitiveParamName(n);
     });
-    const out: Record<string, JsonValue> = {};
+    // Null-prototip: `__proto__` gibi anahtarlar sıradan özellik olarak kalır.
+    const out = Object.create(null) as Record<string, JsonValue>;
+    const original = new Set(keys);
+    let redactedKeys = 0;
     for (const k of keys) {
       const v = value[k];
       if (k.length > b.maxBytes) throw new AuditError(`change_summary exceeds ${b.maxBytes} bytes`);
-      spend(b, Buffer.byteLength(JSON.stringify(k), "utf8") + 1);
-      if (isSensitiveKey(k) || (namedSensitive && PAIR_VALUE_FIELDS.has(k.toLowerCase()))) {
+      let outKey = k;
+      let hide = isSensitiveKey(k) || (namedSensitive && PAIR_VALUE_FIELDS.has(k.toLowerCase()));
+      // MINOR-3: anahtar dizesi de değer desenlerine bakılır (ör. `Bearer …` anahtarı): değer maskelenir, anahtar
+      // çakışmasız `[REDACTED_KEY_n]` ile değiştirilir (sır anahtar adı olarak da saklanmaz).
+      if (looksSensitiveValue(k)) {
+        hide = true;
+        do {
+          outKey = `[REDACTED_KEY_${redactedKeys++}]`;
+        } while (original.has(outKey) || Object.hasOwn(out, outKey));
+      }
+      spend(b, Buffer.byteLength(JSON.stringify(outKey), "utf8") + 1);
+      if (hide) {
         if (v !== undefined) {
           spend(b, REDACTED.length + 3);
-          out[k] = REDACTED;
+          out[outKey] = REDACTED;
         }
         continue;
       }
       const m = mask(v, depth + 1, seen, b);
-      if (m !== undefined) out[k] = m;
+      if (m !== undefined) out[outKey] = m;
     }
     return out;
   } finally {
