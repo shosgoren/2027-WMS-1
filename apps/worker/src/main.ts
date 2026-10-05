@@ -1,7 +1,10 @@
 // Worker giriş noktası: `node dist/main.js`. Web'den bağımsız, uzun ömürlü süreç (ADR-001).
 import { createDbClient, withSystemTenant } from "@wms/db";
 import { createJobQueue } from "@wms/queue-adapter";
+import { loadMailConfig } from "@wms/shared/mailer";
+import { createSealer } from "@wms/shared/seal";
 import { JOB_TYPES, type JobHandler, type JobType } from "@wms/shared/queue";
+import { createMailer, createSendEmailHandler } from "./jobs/send-email.js";
 import { createJsonLogger, createLifecycle, EXIT_FAILURE, parseShutdownTimeoutMs } from "./lifecycle.js";
 
 const logger = createJsonLogger();
@@ -25,11 +28,27 @@ const lifecycle = createLifecycle({
 const HANDLERS: { [T in JobType]?: JobHandler<T> } = {};
 // Handler'ı henüz yazılmamış türler açıkça listelenir: bu türden işler tüketici gelene kadar kuyrukta bekler
 // (kaybolmaz, sahte başarıyla tamamlanmaz). Registry'ye yeni tür eklenirse burada karar verilmeden açılış düşer.
-const DEFERRED_JOB_TYPES: readonly JobType[] = ["email.send", "demo.reseed"];
+const DEFERRED_JOB_TYPES: readonly JobType[] = ["demo.reseed"];
 
 const databaseUrl = process.env.DATABASE_URL;
 if (databaseUrl === undefined || databaseUrl.trim() === "") {
   logger.error("invalid configuration", { error: "DATABASE_URL tanımlı değil" });
+  process.exit(EXIT_FAILURE);
+}
+
+// E-posta (T-116): geçersiz MAIL_MODE veya boş/kısa/yer tutucu QUEUE_SEAL_KEY açılışta hata verir (yerel dahil).
+// Hata mesajları değer içermez (G-09).
+try {
+  const mailConfig = loadMailConfig(process.env);
+  HANDLERS["email.send"] = createSendEmailHandler({
+    sealer: createSealer(process.env.QUEUE_SEAL_KEY),
+    config: mailConfig,
+    mailer: createMailer(mailConfig),
+    logger,
+  });
+  logger.info("mail configured", { mode: mailConfig.mode });
+} catch (err) {
+  logger.error("invalid configuration", { error: err instanceof Error ? err.message : String(err) });
   process.exit(EXIT_FAILURE);
 }
 
