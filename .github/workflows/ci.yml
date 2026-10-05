@@ -17,8 +17,9 @@ on:
     branches:
       - main
       - "int/**"
-      # Birleştirilmeyecek negatif kanıt dalları (T-003 kabul ölçütü). PR'a dönüşmedikleri için
-      # pull_request tetiklemez; workflow_dispatch ise iş akışının varsayılan dalda olmasını ister.
+      # Birleştirilmeyecek negatif kanıt dalları (T-003 kabul ölçütü; Supervisor 2026-10-05 kalmasını
+      # onayladı). PR'a dönüşmedikleri için pull_request tetiklemez; workflow_dispatch ise iş akışının
+      # varsayılan dalda olmasını ister. Bekçi/CI değişikliklerinin kırmızı kanıtı da buradan alınır.
       - "ci-probe/**"
 
 concurrency:
@@ -46,13 +47,19 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm verify
+      # upload-artifact gizli (.ile başlayan) yolları varsayılan olarak atlar; include-hidden-files
+      # açmak yerine .artifacts/ gizli olmayan bir geçici dizine kopyalanır.
+      - name: Stage .artifacts
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/verify-artifacts"
+          if [ -d .artifacts ]; then cp -R .artifacts/. "$RUNNER_TEMP/verify-artifacts/"; fi
       - name: Upload .artifacts
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: verify-artifacts
-          path: .artifacts/
-          include-hidden-files: true
+          path: ${{ runner.temp }}/verify-artifacts/
           if-no-files-found: warn
           retention-days: 14
 
@@ -76,16 +83,15 @@ jobs:
       - name: Collect compose logs
         if: failure()
         run: |
-          mkdir -p .artifacts/infra
-          docker compose ps -a > .artifacts/infra/compose-ps.txt 2>&1 || true
-          docker compose logs --no-color --timestamps > .artifacts/infra/compose-logs.txt 2>&1 || true
+          mkdir -p "$RUNNER_TEMP/infra-logs"
+          docker compose ps -a > "$RUNNER_TEMP/infra-logs/compose-ps.txt" 2>&1 || true
+          docker compose logs --no-color --timestamps > "$RUNNER_TEMP/infra-logs/compose-logs.txt" 2>&1 || true
       - name: Upload compose logs
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: infra-compose-logs
-          path: .artifacts/infra/
-          include-hidden-files: true
+          path: ${{ runner.temp }}/infra-logs/
           if-no-files-found: warn
           retention-days: 14
       - name: Compose down
@@ -133,11 +139,95 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       # Eşik (A-öneri, T-003): high ve critical → kırmızı. Tüm çalışma alanı, prod + dev bağımlılıkları.
+      # `pnpm audit --ignore` KULLANILMAZ: pnpm 10.28'de bu bayrak denetim yapmadan 0 döner
+      # (security-reviewer bulgusu). Bunun yerine tek `pnpm audit --json` koşusu aşağıdaki
+      # Node filtresinden geçer; JSON okunamazsa kırmızı.
+      #
+      # Audit istisnası A-36 (Supervisor kararı 2026-10-05) — BİTİŞ 2026-10-19 (dahil):
+      #   GHSA-vfj7-8cjw-p6xm / CVE-2026-93687 (braces <=3.0.3, high, yamalı sürüm yok).
+      #   Yalnızca dev zinciri: apps/web devDependency @next/eslint-plugin-next → fast-glob →
+      #   micromatch → braces. Muafiyet YALNIZCA bu advisory için ve YALNIZCA tüm bulgu
+      #   yolları bu dev zincirindeyse geçerlidir; yol prod'a uzanırsa kırmızı.
+      #   Eşik değişmez; --prod / --ignore-unfixable kullanılmaz.
+      #   Bitiş geçince "A-36 expiry" adımı deps'i kırmızıya çevirir. Uzatma yeni bir Supervisor
+      #   kararıyla değil, KULLANICI kararıyla yapılır (I-17 / ADR-012 — bekçi gevşetme); aksi
+      #   hâlde istisna kaldırılır.
+      - name: Audit exception A-36 expiry
+        run: |
+          expires=2026-10-19
+          today=$(date -u +%F)
+          if [[ "$today" > "$expires" ]]; then
+            echo "::error::audit exception A-36 expired (bitiş $expires, bugün $today) — GHSA-vfj7-8cjw-p6xm"
+            exit 1
+          fi
+          echo "audit exception A-36 geçerli (bitiş $expires, bugün $today)"
       - name: pnpm audit (high, critical)
-        run: pnpm audit --audit-level high
+        run: |
+          set +e
+          pnpm audit --json > "$RUNNER_TEMP/audit.json"
+          set -e
+          node --input-type=module - "$RUNNER_TEMP/audit.json" apps/web/package.json <<'EOF'
+          import { readFileSync } from "node:fs";
+          const [auditPath, webPkgPath] = process.argv.slice(2);
+          // Muafiyetler: advisory → kayıt + izin verilen tek dev zinciri öneki (pnpm yol biçimi).
+          const EXEMPT = {
+            "GHSA-vfj7-8cjw-p6xm": { record: "A-36", devDep: "@next/eslint-plugin-next", prefix: "apps__web>@next/eslint-plugin-next>" },
+          };
+          let report;
+          try {
+            report = JSON.parse(readFileSync(auditPath, "utf8"));
+          } catch (e) {
+            console.error(`audit: FAIL (audit JSON okunamadı: ${e.message})`);
+            process.exit(1);
+          }
+          if (report === null || typeof report.advisories !== "object" || report.advisories === null) {
+            console.error("audit: FAIL (audit JSON'da advisories alanı yok)");
+            process.exit(1);
+          }
+          const webPkg = JSON.parse(readFileSync(webPkgPath, "utf8"));
+          const failures = [];
+          const exempted = [];
+          const seenExempt = new Set();
+          for (const a of Object.values(report.advisories)) {
+            if (a.severity !== "high" && a.severity !== "critical") continue;
+            const id = a.github_advisory_id;
+            const paths = (a.findings ?? []).flatMap((f) => f.paths ?? []);
+            const rule = EXEMPT[id];
+            if (rule !== undefined) {
+              seenExempt.add(id);
+              const devOnly =
+                webPkg.devDependencies?.[rule.devDep] !== undefined &&
+                webPkg.dependencies?.[rule.devDep] === undefined &&
+                webPkg.optionalDependencies?.[rule.devDep] === undefined;
+              const outside = paths.filter((p) => !p.startsWith(rule.prefix));
+              if (devOnly && paths.length > 0 && outside.length === 0) {
+                exempted.push(`${id} (${rule.record}, ${paths.length} yol, yalnızca dev zinciri)`);
+                continue;
+              }
+              failures.push(`${a.severity} ${id} ${a.module_name}: muafiyet ${rule.record} geçersiz — dev zinciri dışı yol: ${outside.join(", ") || (devOnly ? "bulgu yolu yok" : `${rule.devDep} devDependency değil`)}`);
+              continue;
+            }
+            failures.push(`${a.severity} ${id} ${a.module_name}: ${paths.join(", ")}`);
+          }
+          for (const id of Object.keys(EXEMPT)) {
+            if (!seenExempt.has(id)) {
+              console.log(`::warning::${EXEMPT[id].record}: ${id} artık raporlanmıyor — istisna gereksiz, ci.yml'den kaldırın`);
+            }
+          }
+          for (const line of exempted) console.log(`audit: muaf ${line}`);
+          if (failures.length > 0) {
+            console.error(`audit: FAIL (${failures.length} high/critical advisory)`);
+            for (const line of failures) console.error(`  ${line}`);
+            process.exit(1);
+          }
+          console.log(`audit: OK (muafiyet dışı high/critical yok; muaf: ${exempted.length})`);
+          EOF
       # Lisans: çalışma alanı paketlerinin DOĞRUDAN bağımlılıklarından biri GPL/AGPL ise kırmızı.
       # (LGPL bu kurala girmez.) Lisansı belirlenemeyen doğrudan bağımlılık da kırmızıdır.
+      # Install başarısızsa bu adım da başarısız olur (0 doğrudan bağımlılık = FAIL); yanlış yeşil üretmez.
+      # audit kırmızı olsa da lisans sonucu ayrıca raporlanır (iş yine kırmızı kalır).
       - name: License check (direct deps, GPL/AGPL)
+        if: ${{ !cancelled() }}
         run: |
           pnpm ls -r --depth 0 --json > "$RUNNER_TEMP/direct.json"
           pnpm licenses list -r --json > "$RUNNER_TEMP/licenses.json"
@@ -164,6 +254,10 @@ jobs:
                 else if (copyleft.test(license)) bad.push(`${project.name} → ${key}: ${license}`);
               }
             }
+          }
+          if (count === 0) {
+            console.error("licenses: FAIL (doğrudan bağımlılık bulunamadı — install eksik mi?)");
+            process.exit(1);
           }
           if (bad.length > 0) {
             console.error(`licenses: FAIL (${bad.length}/${count} doğrudan bağımlılık)`);
