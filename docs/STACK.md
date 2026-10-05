@@ -18,7 +18,7 @@ Kaynak sözdizimi: `<dosya>#<json.yolu>` (package.json alanı) veya `docker-comp
 | React DOM | react-dom | 19.3.0 | apps/web/package.json#dependencies.react-dom | ADR-001 |
 | React tipleri | @types/react | 19.3.0 | apps/web/package.json#devDependencies.@types/react | ADR-001 |
 | React DOM tipleri | @types/react-dom | 19.3.0 | apps/web/package.json#devDependencies.@types/react-dom | ADR-001 |
-| PostgreSQL (yerel/CI) | postgres | 17.11-trixie | docker-compose.yml#postgres | ADR-004 |
+| PostgreSQL (yerel/CI) | postgres | 18.6-trixie | docker-compose.yml#postgres | ADR-004; digest sha256:5a5a84b19854a9ffaa54082c166ff4ec27473a361e496e5ea167f298f2da9722 |
 | PgBouncer (yerel/CI, transaction mode) | edoburu/pgbouncer | v1.26.0-p0 | docker-compose.yml#pgbouncer | ADR-004 |
 | MinIO (yerel/CI) | alpine/minio | RELEASE.2025-10-15T17-29-55Z | docker-compose.yml#minio | ADR-006 |
 | Mailpit (yerel/CI) | axllent/mailpit | v1.31.4 | docker-compose.yml#mailpit | |
