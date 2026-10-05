@@ -19,7 +19,9 @@
 -- * M9 (ADR-016 §10): tenant is_demo=true ise ip ve user_agent tetikleyicide NULL'a çevrilir (çağıran atlatamaz).
 --   Tetikleyici işlevi SECURITY DEFINER değildir: tenants satırını çağıranın RLS bağlamında okur.
 -- * request_rate_limits platform tablosudur (RLS yok); anahtar yalnızca SHA-256 özetidir (64 onaltılık karakter,
---   CHECK); wms_auth'un bu tabloda yetkisi yoktur.
+--   CHECK); wms_auth'un bu tabloda yetkisi yoktur. NOT (T-127): düz SHA-256 düşük entropili girdide (IPv4) sözlükle
+--   geri çevrilebilir; T-127 anahtarı HMAC-SHA-256 + sunucu sırrı (pepper) ile üretmeyi değerlendirmeli. DB yalnızca
+--   64 onaltılık karakter biçimini zorlar, özetleme yöntemini bilemez.
 -- Koşturucu tek transaction içinde çalıştırır; denetim ihlali = RAISE = hiçbir şey uygulanmaz.
 
 DO $pre$
@@ -56,7 +58,7 @@ CREATE TABLE public.audit_logs (
   CONSTRAINT audit_logs_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants (id),
   CONSTRAINT audit_logs_action_chk CHECK (action ~ '^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$'),
   CONSTRAINT audit_logs_change_summary_chk CHECK (pg_catalog.jsonb_typeof(change_summary) = 'object'
-                                                  AND pg_catalog.length(change_summary::text) <= 16384)
+                                                  AND pg_catalog.octet_length(change_summary::text) <= 16384)
 );
 -- Görüntüleme/export keyset sırası (I-14): (tenant_id, occurred_at DESC, id).
 CREATE INDEX audit_logs_tenant_occurred_idx ON public.audit_logs (tenant_id, occurred_at DESC, id);
@@ -80,7 +82,9 @@ BEGIN
   NEW.occurred_at := pg_catalog.now();
   NEW.created_xid := pg_catalog.pg_current_xact_id();
   -- M9: demo tenant'ta ağ üstverisi tutulmaz. Satır çağıranın RLS bağlamında okunur (SECURITY DEFINER değil).
-  IF EXISTS (SELECT 1 FROM public.tenants t WHERE t.id = NEW.tenant_id AND t.is_demo) THEN
+  -- Fail-closed (MINOR-5): tenant satırı görünmüyorsa (bağlam/RLS) veya demo ise ağ üstverisi yazılmaz; yalnızca
+  -- görünür ve is_demo=false olan tenant'ta yazılır.
+  IF NOT EXISTS (SELECT 1 FROM public.tenants t WHERE t.id = NEW.tenant_id AND NOT t.is_demo) THEN
     NEW.ip := NULL;
     NEW.user_agent := NULL;
   END IF;
@@ -117,7 +121,8 @@ CREATE TABLE public.request_rate_limits (
   window_start timestamptz NOT NULL,
   count        integer     NOT NULL DEFAULT 0,
   CONSTRAINT request_rate_limits_pkey PRIMARY KEY (scope, key_hash, window_start),
-  CONSTRAINT request_rate_limits_scope_chk CHECK (scope <> ''),
+  -- Teknik biçim/uzunluk sınırı (iş kuralı değil; kapsam adları kodda sabittir): küçük harfle başlar, en çok 64 karakter.
+  CONSTRAINT request_rate_limits_scope_chk CHECK (scope ~ '^[a-z][a-z0-9_.:-]{0,63}$'),
   CONSTRAINT request_rate_limits_key_hash_chk CHECK (key_hash ~ '^[0-9a-f]{64}$'),
   CONSTRAINT request_rate_limits_count_chk CHECK (count >= 0)
 );
@@ -172,6 +177,13 @@ BEGIN
      AND pg_catalog.has_any_column_privilege('wms_auth', 'public.request_rate_limits', 'SELECT, INSERT, UPDATE, REFERENCES')
   THEN
     RAISE EXCEPTION '0004_audit: wms_auth request_rate_limits üzerinde yetki taşıyor';
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'wms_auth')
+     AND pg_catalog.has_table_privilege('wms_auth', 'public.audit_logs', 'DELETE, TRUNCATE, TRIGGER')
+     OR EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'wms_auth')
+     AND pg_catalog.has_table_privilege('wms_auth', 'public.request_rate_limits', 'DELETE, TRUNCATE, TRIGGER')
+  THEN
+    RAISE EXCEPTION '0004_audit: wms_auth audit tablolarında DELETE/TRUNCATE/TRIGGER taşıyor';
   END IF;
   IF NOT pg_catalog.has_table_privilege('wms_app', 'public.request_rate_limits', 'SELECT, INSERT, UPDATE, DELETE')
      OR pg_catalog.has_table_privilege('wms_app', 'public.request_rate_limits', 'TRUNCATE, REFERENCES, TRIGGER') THEN

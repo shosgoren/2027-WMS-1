@@ -55,22 +55,84 @@ describe("eylem listesi", () => {
 });
 
 describe("maskeleme", () => {
-  it.each(["password", "newPassword", "TOKEN", "resetToken", "client_secret", "totpSecret", "backupCodes", "passwordHash", "otp", "apiKey", "Key"])(
+  it.each([
+    "password", "newPassword", "TOKEN", "resetToken", "client_secret", "totpSecret", "backupCodes", "passwordHash", "otp",
+    "apiKey", "api_key", "X-API-Key", "apikey", "cookie", "Set-Cookie", "Authorization", "sessionId", "sid", "credentials",
+    "bearer", "jwt", "passphrase", "pwd", "pass", "signature", "privateKey", "OTPCode", "otp_code", "verificationCode",
+    "resetCode", "code", "access-key", "accessToken", "hash",
+  ])(
     "anahtar %s maskelenir",
     (k) => {
       expect(maskChangeSummary({ [k]: "hassas", ok: "gorunur" }).value).toEqual({ [k]: REDACTED, ok: "gorunur" });
     },
   );
 
+  it.each(["barcode", "postal_code", "postalCode", "sku_code", "skuCode", "monkey", "hashtag", "key", "country_code", "passport", "keyword", "entityKey", "description", "email"])(
+    "yanlış pozitif: anahtar %s maskelenmez",
+    (k) => {
+      expect(maskChangeSummary({ [k]: "gorunur-deger" }).value).toEqual({ [k]: "gorunur-deger" });
+    },
+  );
+
+  it("değer taraması: Bearer, Basic (base64 kullanıcı:parola), JWT, URL sorgu parametresi", () => {
+    const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.c2lnbmF0dXJl";
+    const basic = `Basic ${Buffer.from("user:pass-sentinel").toString("base64")}`;
+    const { value, json } = maskChangeSummary({
+      a: "Bearer abcdef0123456789",
+      b: basic,
+      c: jwt,
+      d: "https://x.example.test/cb?token=zzz-sentinel&x=1",
+      e: "https://x.example.test/cb?x=1&password=zzz-sentinel",
+      f: "https://x.example.test/cb?api_key=zzz-sentinel",
+      g: "https://x.example.test/cb?sig=zzz-sentinel",
+      h: "https://x.example.test/cb?key=zzz-sentinel",
+      list: ["fine", `Authorization: Bearer ${jwt}`],
+    });
+    expect(value).toEqual({ a: REDACTED, b: REDACTED, c: REDACTED, d: REDACTED, e: REDACTED, f: REDACTED, g: REDACTED, h: REDACTED, list: ["fine", REDACTED] });
+    expect(json).not.toMatch(/sentinel/);
+  });
+
+  it("değer taraması yanlış pozitifleri: sıradan metin ve zararsız URL maskelenmez", () => {
+    const v = {
+      a: "Basic subscription plan",
+      b: "Basic plan",
+      c: "https://x.example.test/list?page=2&sort=name&monkey=1",
+      d: "bearer",
+      e: "eyJ is not a token",
+      f: "Bearer",
+    };
+    expect(maskChangeSummary(v).value).toEqual(v);
+  });
+
+  it("ad/değer çiftleri: { name, value } ve [[ad, değer]] biçimleri", () => {
+    expect(
+      maskChangeSummary({
+        headers: [
+          { name: "Authorization", value: "plain-sentinel" },
+          { name: "Accept", value: "json" },
+        ],
+        raw: [["Authorization", "plain-sentinel"], ["Accept", "json"]],
+        params: [{ key: "password", value: "plain-sentinel" }],
+      }).value,
+    ).toEqual({
+      headers: [
+        { name: "Authorization", value: REDACTED },
+        { name: "Accept", value: "json" },
+      ],
+      raw: [["Authorization", REDACTED], ["Accept", "json"]],
+      params: [{ key: "password", value: REDACTED }],
+    });
+  });
+
   it("derin nesne ve dizilerde de maskelenir; sır içeren anahtarın tüm alt ağacı değişir", () => {
     const { value } = maskChangeSummary({
       a: { b: [{ token: "x", n: 1 }, { deep: { Secret: "y", keep: true } }] },
-      credentials: { password: { nested: "z" } },
+      settings: { password: { nested: "z" } },
       tokenList: ["a", "b"],
     });
     expect(value).toEqual({
       a: { b: [{ token: REDACTED, n: 1 }, { deep: { Secret: REDACTED, keep: true } }] },
-      credentials: { password: REDACTED },
+      settings: { password: REDACTED },
       tokenList: REDACTED,
     });
   });
@@ -113,6 +175,24 @@ describe("boyut sınırı", () => {
   it("boyut maskelemeden sonra ölçülür; çok baytlı karakterler bayt olarak sayılır", () => {
     expect(() => maskChangeSummary({ password: "x".repeat(20000) })).not.toThrow();
     expect(() => maskChangeSummary({ v: "ğ".repeat(CHANGE_SUMMARY_MAX_BYTES / 2) })).toThrow(AuditError);
+  });
+});
+
+describe("özyineleme bütçesi (erken ret)", () => {
+  it("çok sayıda eleman: tüm ağaç gezilmeden reddedilir", () => {
+    const big = Array.from({ length: 5000 }, (_, i) => i);
+    expect(() => maskChangeSummary({ big })).toThrow(AuditError);
+  });
+
+  it("büyük dize bayt bütçesi aşılınca reddedilir; maskelenen büyük sır reddedilmez", () => {
+    expect(() => maskChangeSummary({ a: "x".repeat(CHANGE_SUMMARY_MAX_BYTES + 1) })).toThrow(/exceeds/);
+    expect(() => maskChangeSummary({ token: "x".repeat(1_000_000), ok: 1 })).not.toThrow();
+  });
+
+  it("çok sayıda küçük anahtar bayt bütçesini aşar", () => {
+    const o: Record<string, string> = {};
+    for (let i = 0; i < 1500; i++) o[`k${i}`] = "vvvvvvvvvv";
+    expect(() => maskChangeSummary(o)).toThrow(AuditError);
   });
 });
 

@@ -314,6 +314,12 @@ describe("request_rate_limits (platform tablosu)", () => {
       await expectCode(r, CHECK_VIOLATION, `key_hash ${bad}`);
     }
     await expectCode(await attempt(appRaw, "TRUNCATE public.request_rate_limits"), INSUFFICIENT_PRIVILEGE, "TRUNCATE");
+    for (const scope of ["", "Login", "1login", "a b", "a".repeat(65)]) {
+      const r = await attempt(appRaw, "INSERT INTO public.request_rate_limits (scope, key_hash, window_start) VALUES ($1, repeat('c', 64), now())", [scope]);
+      await expectCode(r, CHECK_VIOLATION, `scope ${JSON.stringify(scope)}`);
+    }
+    const okScope = await attempt(appRaw, "INSERT INTO public.request_rate_limits (scope, key_hash, window_start) VALUES ('auth.login:ip-1', repeat('c', 64), now())");
+    expect(okScope.ok).toBe(true);
     await expectCode(
       await attempt(appRaw, "INSERT INTO public.request_rate_limits (scope, key_hash, window_start, count) VALUES ('login', repeat('b', 64), now(), -1)"),
       CHECK_VIOLATION,
