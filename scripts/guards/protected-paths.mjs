@@ -45,6 +45,9 @@ export const PROTECTED_GLOBS = Object.freeze([
   "scripts/test-ac/**",
   "scripts/lib/**",
   ".githooks/**",
+  // Gizli bilgi taraması muafiyet listesi (T-017): parmak izi eklemek taramayı susturur
+  ".gitleaksignore",
+  "**/.gitleaksignore",
   // Karantina kaydı
   "tests/QUARANTINE.md",
   // pnpm kancaları (kurulumda kod çalıştırır; T-003 security-reviewer MAJOR)
