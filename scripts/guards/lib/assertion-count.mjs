@@ -21,14 +21,15 @@
 //   - Her AC testi en az bir sabit olmayan assertion içermeli; test gövdesinden çağrılan aynı
 //     dosyadaki adlandırılmış işlevlerin (işlev bildirimi / `const f = () => …`) gövdeleri geçişli
 //     olarak sayılır. İçinde yaprak test olmayan `@AC` describe'ı da assertion'sızdır.
-// Bilinen sınır: test kökleri adla tanınır (`it`, `test`, `describe`, `suite`); takma adlar
-// (`import { it as t }`) izlenmez.
+// Test kökleri (T-008e; T-008d bulgu 4): genel adlar + takma adlar `check:tests` ile aynı yöntemle
+// (`tests.mjs` `collectTestRoots`) çözülür: `import { it as t }`, `import * as v` → `v.it`,
+// `const t2 = test.extend(…)`, `const d = test.describe`, `const { it: t } = await import("vitest")`.
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import ts from "typescript";
 import { TAG_RE } from "../../test-ac/collect.mjs";
 import { AC_BASELINE } from "../protected-paths.mjs";
-import { EXCLUDED_DIRS, isTestFile, listTestFiles } from "../tests.mjs";
+import { collectTestRoots, EXCLUDED_DIRS, isTestFile, listTestFiles } from "../tests.mjs";
 import { DEFAULT_TARGET, fileAtRef, git, GitError, mergeBase } from "./git.mjs";
 import { UsageError } from "./output.mjs";
 
@@ -341,10 +342,29 @@ export function scanSource(text, file) {
     return null;
   };
 
+  // Takma adlar kanonik köke çevrilir (`t` → it, `v.describe` → describe, `d` → test.describe).
+  const roots = collectTestRoots(sf);
+  /**
+   * @param {ts.Expression} expr
+   * @returns {{ root: string | null, members: string[] }}
+   */
+  const resolved = (expr) => {
+    const c = chain(expr);
+    if (c.root === null) return c;
+    const alias = roots.bases.get(c.root);
+    if (alias !== undefined) {
+      const [r = c.root, ...rest] = alias;
+      return { root: r, members: [...rest, ...c.members.filter((m) => m !== "extend")] };
+    }
+    const [first, ...rest] = c.members;
+    if (roots.namespaces.has(c.root) && first !== undefined && (SUITE_ROOTS.has(first) || TEST_ROOTS.has(first))) return { root: first, members: rest };
+    return c;
+  };
+
   /** @param {ts.Node} n */
   const walk = (n) => {
     if (ts.isCallExpression(n)) {
-      const { root, members } = chain(n.expression);
+      const { root, members } = resolved(n.expression);
       const first = n.arguments[0];
       const isSuite =
         root !== null &&
