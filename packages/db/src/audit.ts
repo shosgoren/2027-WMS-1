@@ -36,87 +36,92 @@ export const CHANGE_SUMMARY_MAX_BYTES = 8192;
 export const REDACTED = "[REDACTED]";
 
 /**
- * Maskeleme kuralları (security-reviewer @79b2011 MAJOR-1, MINOR-1). Anahtar adı camelCase/snake_case/kebab-case
- * SEGMENTLERİNE bölünür ve segment eşleşmesi aranır (alt dize DEĞİL): `passwordHash`, `X-API-Key`, `set_cookie`
- * maskelenir; `barcode`, `postal_code`, `sku_code`, `monkey`, `hashtag` maskelenmez.
- *  - Tek başına duyarlı segmentler: aşağıdaki `SENSITIVE_SEGMENTS`.
- *  - `key` yalnızca önceki segment anahtar türünü belirtiyorsa duyarlıdır (`api_key`, `access_key`, `signing_key` …);
- *    çıplak `key` (stok/ürün anahtarı vb.) maskelenmez; `apikey` tek segmenttir ve listededir.
- *  - `code`/`codes`: doğrulama kodu olabilir. Anahtarın TAMAMI `code`/`codes` ise veya önceki segment
- *    otp/totp/verification/reset/auth/backup/recovery/mfa/sms/login/confirmation ise maskelenir; `postal_code`,
- *    `sku_code`, `country_code`, `barcode` değil. Gerekçe: hatalı pozitif (kayıp denetim bilgisi) hatalı negatiften
- *    (sızan tek kullanımlık kod) daha ucuzdur, ama iş alanı kodlarını (posta/ürün) gereksiz silmeyiz.
- *  - DEĞER taraması (anahtardan bağımsız): `Bearer <belirteç>`, base64 `Basic user:pass`, JWT deseni, URL'de duyarlı
- *    sorgu parametresi (`token=`, `password=`, `secret=`, `key=`, `sig=` …) → tüm değer maskelenir.
- *  - Ad/değer çiftleri: `{ name: "password", value: "x" }` ve `[["Authorization", "…"]]` → değer maskelenir.
+ * Maskeleme kuralları (kart madde 3; security-reviewer @1f60d5b BLOCKER/MAJOR; Supervisor kararı).
+ *  - ANAHTAR adı: büyük/küçük harf duyarsız ALT DİZE eşleşmesi `password|token|secret|totp|code|hash|otp|key` (kart
+ *    ölçütü) ve genişletilmiş liste `cookie|authorization|session|credential|bearer|jwt|passphrase|pwd|pass|signature|
+ *    private|auth|pin|salt|digest`; ayrıca `sid` yalnızca ayrı SEGMENT olarak (alt dize `inside`, `side` gibi sözcükleri
+ *    gereksiz yakalardı). FAZLA MASKELEME KABUL EDİLİR (güvenli yön): `barcode`, `postal_code`, `shipping` da maskelenir.
+ *  - 256 karakterden uzun anahtar/ad → maskelenir (fail-closed, ReDoS yok); alt dize taraması doğrusaldır.
+ *  - DEĞER taraması (anahtardan bağımsız, yalnızca ilk 4096 karakter, bütün desenler sınırlı niceleyicili): JWT deseni,
+ *    dize içinde herhangi bir yerde `Authorization:` / `Bearer ` / `Basic ` / `Token ` + belirteç, kullanıcı bilgili URL
+ *    (`şema://kullanıcı:parola@`), duyarlı adlı `ad=değer` (sorgu, URL parçası `#access_token=`, çerez dizesi `sid=`).
+ *  - Ad/değer çiftleri: `{ name|key|header|field: <duyarlı>, value|val|content|data: … }`, `[["Authorization","…"]]` ve
+ *    düz başlık dizisi `[k1, v1, k2, v2]` (çift sıradaki eleman adı duyarlıysa sonraki maskelenir).
  */
-const SENSITIVE_SEGMENTS = new Set([
-  "cookie", "authorization", "session", "sid", "credential", "credentials", "bearer", "jwt", "passphrase", "pwd",
-  "pass", "signature", "sig", "private", "secret", "secrets", "token", "tokens", "password", "passwords", "passwd",
-  "otp", "totp", "hash", "hashes", "apikey",
-]);
-const KEY_QUALIFIERS = new Set(["api", "access", "signing", "encryption", "auth", "master", "client", "secret", "private"]);
-const CODE_QUALIFIERS = new Set(["otp", "totp", "verification", "reset", "auth", "backup", "recovery", "mfa", "sms", "login", "confirmation"]);
+const KEY_SUBSTRINGS = [
+  "password", "token", "secret", "totp", "code", "hash", "otp", "key",
+  "cookie", "authorization", "session", "credential", "bearer", "jwt", "passphrase", "pwd", "pass", "signature",
+  "private", "auth", "pin", "salt", "digest",
+];
+const MAX_NAME_LENGTH = 256;
+const VALUE_SCAN_LIMIT = 4096;
 
-function keySegments(key: string): string[] {
-  return key
-    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
-    .split(/[^A-Za-z0-9]+/)
-    .filter((x) => x !== "")
-    .map((x) => x.toLowerCase());
-}
-
-/** Anahtar adı duyarlı mı (segment eşleşmesi; yukarıdaki kurallar). */
-export function isSensitiveKey(key: string): boolean {
-  const seg = keySegments(key);
-  for (let i = 0; i < seg.length; i++) {
-    const w = seg[i] as string;
-    const prev = i > 0 ? (seg[i - 1] as string) : undefined;
-    if (SENSITIVE_SEGMENTS.has(w)) return true;
-    if (w === "key" && prev !== undefined && KEY_QUALIFIERS.has(prev)) return true;
-    if (w === "code" || w === "codes") {
-      if (seg.length === 1) return true;
-      if (prev !== undefined && CODE_QUALIFIERS.has(prev)) return true;
+/** `sid` ayrı segmenti için doğrusal (regex'siz) parçalayıcı: camel/snake/kebab sınırları. */
+function hasSegment(name: string, segment: string): boolean {
+  const n = name.length;
+  const isUpper = (c: string) => c >= "A" && c <= "Z";
+  const isLower = (c: string) => c >= "a" && c <= "z";
+  const isDigit = (c: string) => c >= "0" && c <= "9";
+  const isAlnum = (c: string) => isUpper(c) || isLower(c) || isDigit(c);
+  let start = -1;
+  const hit = (end: number): boolean => name.slice(start, end).toLowerCase() === segment;
+  for (let i = 0; i < n; i++) {
+    const c = name[i] as string;
+    if (!isAlnum(c)) {
+      if (start >= 0 && hit(i)) return true;
+      start = -1;
+      continue;
+    }
+    if (start < 0) {
+      start = i;
+      continue;
+    }
+    const p = name[i - 1] as string;
+    const split =
+      (isUpper(c) && (isLower(p) || isDigit(p))) || (isUpper(c) && isUpper(p) && i + 1 < n && isLower(name[i + 1] as string));
+    if (split) {
+      if (hit(i)) return true;
+      start = i;
     }
   }
-  return false;
+  return start >= 0 && hit(n);
 }
 
-const JWT_RE = /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*/;
-const BEARER_RE = /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/i;
-const BASIC_RE = /^\s*Basic\s+([A-Za-z0-9+/]{8,}={0,2})\s*$/i;
-const QUERY_PARAM_RE = /[?&;]([^=&#;\s]+)=/g;
+/** Anahtar/ad duyarlı mı (alt dize listesi + `sid` segmenti; çok uzun ad → fail-closed). */
+export function isSensitiveKey(key: string): boolean {
+  if (key.length > MAX_NAME_LENGTH) return true;
+  const lower = key.toLowerCase();
+  for (const sub of KEY_SUBSTRINGS) if (lower.includes(sub)) return true;
+  return hasSegment(key, "sid");
+}
 
+/** Sorgu/çerez/parça parametre adı: anahtar kuralı + `sig`. */
 function isSensitiveParamName(name: string): boolean {
-  const n = decodeURIComponentSafe(name);
-  return isSensitiveKey(n) || /^(key|sig|auth|access_token|id_token|refresh_token)$/i.test(n);
+  return isSensitiveKey(name) || name.toLowerCase().includes("sig");
 }
 
-function decodeURIComponentSafe(v: string): string {
-  try {
-    return decodeURIComponent(v);
-  } catch {
-    return v;
-  }
-}
+const JWT_RE = /eyJ[A-Za-z0-9_-]{5,2000}\.[A-Za-z0-9_-]{5,2000}\.[A-Za-z0-9_-]{0,2000}/;
+const AUTH_TOKEN_RE = /\b(?:Bearer|Basic|Token)[ \t]{1,16}[^\s]{8,}/i;
+const USERINFO_URL_RE = /[A-Za-z][A-Za-z0-9+.-]{0,20}:\/\/[^\s/@:]{1,128}:[^\s/@]{1,128}@/;
+const PARAM_RE = /(?:^|[?&;#\s])([A-Za-z0-9_.%-]{1,128})=/g;
 
-/** Değerde sır deseni var mı (anahtardan bağımsız). */
-export function looksSensitiveValue(v: string): boolean {
+/** Değerde sır deseni var mı (anahtardan bağımsız; yalnızca ilk 4096 karakter taranır). */
+export function looksSensitiveValue(full: string): boolean {
+  const v = full.length > VALUE_SCAN_LIMIT ? full.slice(0, VALUE_SCAN_LIMIT) : full;
   if (v.length < 8) return false;
-  if (JWT_RE.test(v) || BEARER_RE.test(v)) return true;
-  const basic = BASIC_RE.exec(v);
-  if (basic !== null && Buffer.from(basic[1] as string, "base64").toString("utf8").includes(":")) return true;
+  if (v.toLowerCase().includes("authorization:")) return true;
+  if (JWT_RE.test(v) || AUTH_TOKEN_RE.test(v) || USERINFO_URL_RE.test(v)) return true;
   if (v.includes("=")) {
-    for (const m of v.matchAll(QUERY_PARAM_RE)) {
+    for (const m of v.matchAll(PARAM_RE)) {
       if (isSensitiveParamName(m[1] as string)) return true;
     }
   }
   return false;
 }
 
-/** Ad/değer çiftlerinin ad alanları (`{ name: "password", value: "x" }`). */
-const PAIR_NAME_FIELDS = ["name", "key", "header", "field", "param", "parameter"] as const;
+/** Ad/değer çiftlerinin ad ve değer alanları. */
+const PAIR_NAME_FIELDS = ["name", "key", "header", "field"] as const;
+const PAIR_VALUE_FIELDS = new Set(["value", "val", "content", "data"]);
 
 const MAX_DEPTH = 12;
 /** Özyineleme bütçesi (MINOR-3): düğüm sayısı ve ÇIKTI bayt sayısı aşılınca erken ret (tam ağaç gezilmez). */
@@ -213,10 +218,11 @@ function mask(value: unknown, depth: number, seen: Set<object>, b: Budget): Json
   try {
     if (Array.isArray(value)) {
       spend(b, 2);
-      // `[["Authorization", "…"]]` biçimi: ilk eleman duyarlı bir ad ise geri kalan elemanlar maskelenir.
-      const pair = value.length >= 2 && typeof value[0] === "string" && (isSensitiveKey(value[0]) || isSensitiveParamName(value[0]));
+      // Ad/değer dizileri: `[["Authorization","…"]]` (ilk eleman ad) ve düz `[k1, v1, k2, v2]` (çift sırada ad).
+      const nested = value.length >= 2 && typeof value[0] === "string" && isSensitiveParamName(value[0]);
       return value.map((item, i) => {
-        if (pair && i > 0) {
+        const afterName = i > 0 && typeof value[i - 1] === "string" && (i - 1) % 2 === 0 && isSensitiveParamName(value[i - 1] as string);
+        if ((nested && i > 0) || afterName) {
           spend(b, REDACTED.length + 3);
           return REDACTED;
         }
@@ -226,16 +232,20 @@ function mask(value: unknown, depth: number, seen: Set<object>, b: Budget): Json
     }
     if (!isPlainObject(value)) throw new AuditError("change_summary contains a non-plain object");
     spend(b, 2);
+    // MINOR-5: anahtar sayısı bütçeyi aşıyorsa girdiler gezilmeden reddedilir.
+    const keys = Object.keys(value);
+    if (keys.length > MAX_NODES) throw new AuditError("change_summary has too many elements");
     // `{ name: "password", value: "x" }` biçimi.
     const namedSensitive = PAIR_NAME_FIELDS.some((f) => {
       const n = value[f];
-      return typeof n === "string" && (isSensitiveKey(n) || isSensitiveParamName(n));
+      return typeof n === "string" && isSensitiveParamName(n);
     });
     const out: Record<string, JsonValue> = {};
-    for (const [k, v] of Object.entries(value)) {
+    for (const k of keys) {
+      const v = value[k];
       if (k.length > b.maxBytes) throw new AuditError(`change_summary exceeds ${b.maxBytes} bytes`);
       spend(b, Buffer.byteLength(JSON.stringify(k), "utf8") + 1);
-      if (isSensitiveKey(k) || (namedSensitive && k === "value")) {
+      if (isSensitiveKey(k) || (namedSensitive && PAIR_VALUE_FIELDS.has(k.toLowerCase()))) {
         if (v !== undefined) {
           spend(b, REDACTED.length + 3);
           out[k] = REDACTED;

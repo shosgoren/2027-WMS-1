@@ -9,6 +9,8 @@ import {
   CHANGE_SUMMARY_MAX_BYTES,
   REDACTED,
   appendAudit,
+  isSensitiveKey,
+  looksSensitiveValue,
   maskChangeSummary,
   recordSecurityEvent,
   type AuditAction,
@@ -56,82 +58,106 @@ describe("eylem listesi", () => {
 
 describe("maskeleme", () => {
   it.each([
+    // Kart ölçütü (alt dize, büyük/küçük harf duyarsız): password|token|secret|totp|code|hash|otp|key
     "password", "newPassword", "TOKEN", "resetToken", "client_secret", "totpSecret", "backupCodes", "passwordHash", "otp",
-    "apiKey", "api_key", "X-API-Key", "apikey", "cookie", "Set-Cookie", "Authorization", "sessionId", "sid", "credentials",
-    "bearer", "jwt", "passphrase", "pwd", "pass", "signature", "privateKey", "OTPCode", "otp_code", "verificationCode",
-    "resetCode", "code", "access-key", "accessToken", "hash",
-  ])(
-    "anahtar %s maskelenir",
-    (k) => {
-      expect(maskChangeSummary({ [k]: "hassas", ok: "gorunur" }).value).toEqual({ [k]: REDACTED, ok: "gorunur" });
-    },
-  );
+    "apiKey", "Key", "key", "monkey", "hashtag", "barcode", "postal_code", "sku_code", "code", "otp_code", "OTPCode",
+    "verificationCode", "api_key", "X-API-Key", "apikey",
+    // Genişletilmiş liste
+    "cookie", "Set-Cookie", "Authorization", "session", "sessionId", "credential", "credentials", "bearer", "jwt",
+    "passphrase", "pwd", "pass", "signature", "private", "privateData", "auth", "pin", "salt", "digest",
+    // sid yalnızca ayrı segment olarak
+    "sid", "SID", "user_sid", "userSid", "X-Sid",
+  ])("anahtar %s maskelenir", (k) => {
+    expect(maskChangeSummary({ [k]: "hassas", ok: "gorunur" }).value).toEqual({ [k]: REDACTED, ok: "gorunur" });
+  });
 
-  it.each(["barcode", "postal_code", "postalCode", "sku_code", "skuCode", "monkey", "hashtag", "key", "country_code", "passport", "keyword", "entityKey", "description", "email"])(
-    "yanlış pozitif: anahtar %s maskelenmez",
-    (k) => {
-      expect(maskChangeSummary({ [k]: "gorunur-deger" }).value).toEqual({ [k]: "gorunur-deger" });
-    },
-  );
+  it.each(["sidebar", "inside", "residual", "email", "description", "name"])("sid yalnızca segment: %s maskelenmez", (k) => {
+    expect(maskChangeSummary({ [k]: "gorunur-deger" }).value).toEqual({ [k]: "gorunur-deger" });
+  });
 
-  it("değer taraması: Bearer, Basic (base64 kullanıcı:parola), JWT, URL sorgu parametresi", () => {
+  it("256 karakterden uzun anahtar fail-closed maskelenir", () => {
+    const k = "x".repeat(300);
+    expect(maskChangeSummary({ [k]: "v" }).value).toEqual({ [k]: REDACTED });
+  });
+
+  it("değer taraması: Bearer/Token/Basic (her yerde), Authorization:, JWT, userinfo URL, sorgu, parça, çerez dizesi", () => {
     const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.c2lnbmF0dXJl";
-    const basic = `Basic ${Buffer.from("user:pass-sentinel").toString("base64")}`;
-    const { value, json } = maskChangeSummary({
+    const cases: Record<string, string> = {
       a: "Bearer abcdef0123456789",
-      b: basic,
+      b: `Basic ${Buffer.from("user:pass-sentinel").toString("base64")}`,
       c: jwt,
       d: "https://x.example.test/cb?token=zzz-sentinel&x=1",
       e: "https://x.example.test/cb?x=1&password=zzz-sentinel",
       f: "https://x.example.test/cb?api_key=zzz-sentinel",
       g: "https://x.example.test/cb?sig=zzz-sentinel",
       h: "https://x.example.test/cb?key=zzz-sentinel",
-      list: ["fine", `Authorization: Bearer ${jwt}`],
-    });
-    expect(value).toEqual({ a: REDACTED, b: REDACTED, c: REDACTED, d: REDACTED, e: REDACTED, f: REDACTED, g: REDACTED, h: REDACTED, list: ["fine", REDACTED] });
+      i: "https://x.example.test/cb#access_token=zzz-sentinel&state=1",
+      j: "postgres://admin:hunter2-sentinel@db.example.test:5432/x",
+      k: "request failed; Authorization: whatever-sentinel",
+      l: "header sent was Bearer abcdef0123456789 ok",
+      m: "got Token abcdef0123456789 here",
+      n: "sid=abcdef0123456789-sentinel; Path=/",
+      o: "theme=dark; session=abc123-sentinel",
+      p: "prefix text Basic YWJjZGVmZ2hpams= suffix",
+    };
+    const { value, json } = maskChangeSummary({ ...cases, list: ["fine", `Authorization: Bearer ${jwt}`] });
+    const expected: Record<string, unknown> = { list: ["fine", REDACTED] };
+    for (const k of Object.keys(cases)) expected[k] = REDACTED;
+    expect(value).toEqual(expected);
     expect(json).not.toMatch(/sentinel/);
   });
 
-  it("değer taraması yanlış pozitifleri: sıradan metin ve zararsız URL maskelenmez", () => {
+  it("zararsız metin ve URL değer taramasında maskelenmez", () => {
     const v = {
-      a: "Basic subscription plan",
-      b: "Basic plan",
-      c: "https://x.example.test/list?page=2&sort=name&monkey=1",
-      d: "bearer",
-      e: "eyJ is not a token",
-      f: "Bearer",
+      a: "Basic plan",
+      b: "https://x.example.test/list?page=2&sort=name",
+      c: "bearer",
+      d: "eyJ is not a token",
+      e: "Bearer",
+      f: "theme=dark; lang=tr",
     };
     expect(maskChangeSummary(v).value).toEqual(v);
   });
 
-  it("ad/değer çiftleri: { name, value } ve [[ad, değer]] biçimleri", () => {
+  it("ad/değer çiftleri: { name, value|val|content|data }, [[ad, değer]] ve düz [k1, v1, k2, v2] biçimleri", () => {
     expect(
       maskChangeSummary({
         headers: [
           { name: "Authorization", value: "plain-sentinel" },
           { name: "Accept", value: "json" },
+          { header: "X-Token", val: "plain-sentinel" },
+          { field: "cookie", content: "plain-sentinel" },
+          { key: "pwd", data: "plain-sentinel" },
         ],
         raw: [["Authorization", "plain-sentinel"], ["Accept", "json"]],
+        flat: ["Accept", "json", "Set-Cookie", "plain-sentinel", "X-Other", "x"],
         params: [{ key: "password", value: "plain-sentinel" }],
       }).value,
     ).toEqual({
       headers: [
         { name: "Authorization", value: REDACTED },
         { name: "Accept", value: "json" },
+        { header: "X-Token", val: REDACTED },
+        { field: "cookie", content: REDACTED },
+        // `key` alanının kendisi de duyarlı anahtardır (alt dize kuralı): değeri de maskelenir.
+        { key: REDACTED, data: REDACTED },
       ],
       raw: [["Authorization", REDACTED], ["Accept", "json"]],
-      params: [{ key: "password", value: REDACTED }],
+      flat: ["Accept", "json", "Set-Cookie", REDACTED, "X-Other", "x"],
+      params: [{ key: REDACTED, value: REDACTED }],
     });
   });
 
   it("derin nesne ve dizilerde de maskelenir; sır içeren anahtarın tüm alt ağacı değişir", () => {
     const { value } = maskChangeSummary({
       a: { b: [{ token: "x", n: 1 }, { deep: { Secret: "y", keep: true } }] },
+      credentials: { password: { nested: "z" } },
       settings: { password: { nested: "z" } },
       tokenList: ["a", "b"],
     });
     expect(value).toEqual({
       a: { b: [{ token: REDACTED, n: 1 }, { deep: { Secret: REDACTED, keep: true } }] },
+      credentials: REDACTED,
       settings: { password: REDACTED },
       tokenList: REDACTED,
     });
@@ -153,6 +179,48 @@ describe("maskeleme", () => {
     let o: Record<string, unknown> = { v: 1 };
     for (let i = 0; i < 30; i++) o = { n: o };
     expect(() => maskChangeSummary(o)).toThrow(/deeply/);
+  });
+});
+
+describe("ReDoS dayanıklılığı (üst sınır geniş: kırılgan değil)", () => {
+  const LIMIT_MS = 500;
+  const time = (fn: () => void): number => {
+    const t = performance.now();
+    fn();
+    return performance.now() - t;
+  };
+  const inputs: Record<string, string> = {
+    "1 MB eyJ + a": `eyJ${"a".repeat(1_000_000)}`,
+    "1 MB eyJ tekrarı": "eyJ".repeat(350_000),
+    "1 MB eyJaaaa-...": `eyJ${"aaaa-".repeat(200_000)}`,
+    "20000 A": "A".repeat(20_000),
+    "20000 camelCase": "aB".repeat(10_000),
+    "Bearer + boşluk": `Bearer${" ".repeat(20_000)}`,
+    "20000 &": "&".repeat(20_000),
+    "20000 a=": "a=".repeat(10_000),
+    "userinfo": `http://${"a".repeat(20_000)}`,
+  };
+  it.each(Object.keys(inputs))("looksSensitiveValue: %s", (name) => {
+    expect(time(() => looksSensitiveValue(inputs[name] as string))).toBeLessThan(LIMIT_MS);
+  });
+  it.each(["20000 A", "20000 camelCase", "1 MB eyJ + a"])("isSensitiveKey: %s", (name) => {
+    expect(time(() => isSensitiveKey(inputs[name] as string))).toBeLessThan(LIMIT_MS);
+  });
+  it("maskChangeSummary büyük girdiyi hızlı reddeder/maskeler", () => {
+    expect(
+      time(() => {
+        try {
+          maskChangeSummary({ v: inputs["1 MB eyJ + a"] });
+        } catch (e) {
+          expect(e).toBeInstanceOf(AuditError);
+        }
+      }),
+    ).toBeLessThan(LIMIT_MS);
+    expect(
+      time(() => {
+        expect(() => maskChangeSummary({ [inputs["20000 A"] as string]: "v" })).toThrow(AuditError);
+      }),
+    ).toBeLessThan(LIMIT_MS);
   });
 });
 
@@ -187,6 +255,12 @@ describe("özyineleme bütçesi (erken ret)", () => {
   it("büyük dize bayt bütçesi aşılınca reddedilir; maskelenen büyük sır reddedilmez", () => {
     expect(() => maskChangeSummary({ a: "x".repeat(CHANGE_SUMMARY_MAX_BYTES + 1) })).toThrow(/exceeds/);
     expect(() => maskChangeSummary({ token: "x".repeat(1_000_000), ok: 1 })).not.toThrow();
+  });
+
+  it("anahtar sayısı bütçeyi aşarsa girdiler gezilmeden reddedilir", () => {
+    const o: Record<string, number> = {};
+    for (let i = 0; i < 2500; i++) o[`k${i}`] = 1;
+    expect(() => maskChangeSummary(o)).toThrow(/too many elements/);
   });
 
   it("çok sayıda küçük anahtar bayt bütçesini aşar", () => {

@@ -420,6 +420,40 @@ describe(`0004_audit ileri/geri/ileri (target=${env.target})`, () => {
     expect(await tables(url)).toEqual(["audit_logs", "request_rate_limits"]);
   });
 
+  it("MINOR-4: tenant satiri gorunmezse (kisitlayici politika) tetikleyici fail-closed ip/user_agent'i NULL yazar; gorunurken yazar", async () => {
+    const url = await freshUrl();
+    await migrateUp({ url });
+    const tenantId = randomUUID();
+    const c = await connect(url);
+    try {
+      await c.query("BEGIN");
+      await c.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+      await c.query("INSERT INTO public.tenants (id, slug, name) VALUES ($1, $2, 'T107 vis')", [tenantId, `t107-${randomBytes(4).toString("hex")}`]);
+      await c.query("COMMIT");
+
+      const run = async (hide: boolean): Promise<{ ip: string | null; user_agent: string | null }> => {
+        await c.query("BEGIN");
+        try {
+          if (hide) await c.query("CREATE POLICY t107_hide ON public.tenants AS RESTRICTIVE FOR SELECT TO wms_app USING (false)");
+          await c.query("SET LOCAL ROLE wms_app");
+          await c.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+          const seen = await c.query<{ n: string }>("SELECT count(*)::text AS n FROM public.tenants");
+          expect(seen.rows[0]?.n, "tenant gorunurlugu").toBe(hide ? "0" : "1");
+          const r = await c.query<{ ip: string | null; user_agent: string | null }>(
+            "INSERT INTO public.audit_logs (action, ip, user_agent) VALUES ('tenant.created', '203.0.113.9', 'UA') RETURNING ip, user_agent",
+          );
+          return r.rows[0] as { ip: string | null; user_agent: string | null };
+        } finally {
+          await c.query("ROLLBACK");
+        }
+      };
+      expect(await run(true)).toEqual({ ip: null, user_agent: null });
+      expect(await run(false)).toEqual({ ip: "203.0.113.9", user_agent: "UA" });
+    } finally {
+      await c.end();
+    }
+  });
+
   it("audit satiri varken staging geri alma RAISE eder ve veri korunur; ci bayragiyla calisir", async () => {
     const url = await freshUrl();
     await migrateUp({ url });
