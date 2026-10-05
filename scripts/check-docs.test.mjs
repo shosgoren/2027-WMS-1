@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { checkMap, checkStack, composeImage, isRange, readSource, summaryLine } from "./check-docs.mjs";
+import {
+  checkMap,
+  checkStack,
+  checkStackCoverage,
+  composeImage,
+  isRange,
+  lockImporters,
+  readSource,
+  summaryLine,
+} from "./check-docs.mjs";
 
 /**
  * Bellek içi dosya sistemi.
@@ -191,5 +200,100 @@ describe("yardımcılar", () => {
     expect(summaryLine({ ok: true, count: 17, failures: [] }, { ok: false, count: 3, failures: ["x"] })).toBe(
       "check-docs: stack OK (17 satır) · map FAIL (3 yol)",
     );
+  });
+});
+
+describe("checkStackCoverage (T-004b)", () => {
+  const LOCK = [
+    "lockfileVersion: '9.0'",
+    "",
+    "importers:",
+    "",
+    "  .:",
+    "    devDependencies:",
+    "      typescript:",
+    "        specifier: 6.0.3",
+    "        version: 6.0.3",
+    "",
+    "  apps/web:",
+    "    dependencies:",
+    "      next:",
+    "        specifier: 16.3.8",
+    "",
+    "  'packages/db':",
+    "    dependencies: {}",
+    "",
+    "  apps/worker: {}",
+    "",
+    "packages:",
+    "",
+    "  typescript@6.0.3:",
+    "    resolution: {integrity: x}",
+  ].join("\n");
+
+  const COV_FILES = fsOf({
+    "pnpm-lock.yaml": LOCK,
+    "package.json": JSON.stringify({ devDependencies: { typescript: "6.0.3" } }),
+    "apps/web/package.json": JSON.stringify({
+      dependencies: { next: "16.3.8", "@wms/db": "workspace:*" },
+      devDependencies: { "@types/react": "19.3.0" },
+    }),
+    "packages/db/package.json": JSON.stringify({ dependencies: { postgres: "3.4.9" } }),
+    "apps/worker/package.json": JSON.stringify({ name: "w" }),
+  });
+
+  const FULL = [
+    "| TS | typescript | 6.0.3 | package.json#devDependencies.typescript | |",
+    "| Next | next | 16.3.8 | apps/web/package.json#dependencies.next | |",
+    "| React tipleri | @types/react | 19.3.0 | apps/web/package.json#devDependencies.@types/react | |",
+    "| Sürücü | postgres | 3.4.9 | packages/db/package.json#dependencies.postgres | |",
+  ];
+
+  it("lockImporters importers bloğundaki workspace dizinlerini sırayla döndürür; blok yoksa null", () => {
+    expect(lockImporters(LOCK)).toEqual([".", "apps/web", "packages/db", "apps/worker"]);
+    expect(lockImporters("lockfileVersion: '9.0'\npackages:\n  a@1:\n")).toBeNull();
+  });
+
+  it("tüm doğrudan bağımlılıklar kilitliyse OK; workspace: bağımlılıkları sayılmaz", () => {
+    expect(checkStackCoverage(stackMd(FULL), COV_FILES)).toEqual({ ok: true, count: 4, failures: [] });
+  });
+
+  it("STACK'ten silinen doğrudan bağımlılık FAIL", () => {
+    const r = checkStackCoverage(stackMd(FULL.filter((row) => !row.includes("| postgres |"))), COV_FILES);
+    expect(r.ok).toBe(false);
+    expect(r.failures).toEqual([
+      "stack: doğrudan bağımlılık STACK'te kilitli değil: postgres (packages/db/package.json#dependencies.postgres)",
+    ]);
+  });
+
+  it("kilitsiz (—) satır ve yanlış kaynaklı satır kapsamı sağlamaz", () => {
+    const rows = [
+      "| TS | typescript | 6.0.3 | package.json#devDependencies.typescript | |",
+      "| Next | next | — ilk kullanan kart | apps/web/package.json#dependencies.next | |",
+      "| React tipleri | @types/react | 19.3.0 | package.json#devDependencies.@types/react | |",
+      "| Sürücü | postgres | 3.4.9 | packages/db/package.json#dependencies.postgres | |",
+    ];
+    expect(checkStackCoverage(stackMd(rows), COV_FILES).failures).toEqual([
+      "stack: doğrudan bağımlılık STACK'te kilitli değil: next (apps/web/package.json#dependencies.next)",
+      "stack: doğrudan bağımlılık STACK'te kilitli değil: @types/react (apps/web/package.json#devDependencies.@types/react)",
+    ]);
+  });
+
+  it("lockfile yoksa, importers yoksa veya importer package.json okunamazsa FAIL (sessiz atlama yok)", () => {
+    const noLock = fsOf({ "package.json": JSON.stringify({ devDependencies: { typescript: "6.0.3" } }) });
+    expect(checkStackCoverage(stackMd(FULL), noLock)).toEqual({
+      ok: false,
+      count: 0,
+      failures: ["stack: pnpm-lock.yaml okunamadı (doğrudan bağımlılık kapsamı)"],
+    });
+    const noImporters = fsOf({ "pnpm-lock.yaml": "lockfileVersion: '9.0'\n" });
+    expect(checkStackCoverage(stackMd(FULL), noImporters).failures).toEqual([
+      "stack: pnpm-lock.yaml içinde `importers:` bulunamadı",
+    ]);
+    const missingPkg = fsOf({ "pnpm-lock.yaml": "importers:\n  apps/x:\n    dependencies: {}\n" });
+    expect(checkStackCoverage(stackMd(FULL), missingPkg).failures).toEqual([
+      'stack: kapsam: apps/x/package.json okunamadı (pnpm-lock.yaml importer "apps/x")',
+    ]);
+    expect(checkStackCoverage("# STACK\n", COV_FILES).ok).toBe(false);
   });
 });
