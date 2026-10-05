@@ -2,12 +2,12 @@
 // GitHub istemcisi (`lib/github.mjs`, sahte `fetch` yalnızca burada), kipler ve fail-closed davranış.
 // Fixture depolar `lib/testkit.mjs` ile geçici dizinde gerçek git ile kurulur. "… saldırısı" adlı
 // testler security-reviewer'ın (int/faz0-bekciler-1) denediği atlatmanın kendisidir (T-008h).
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { main } from "./cli.mjs";
-import { approvalLine, REASONS } from "./lib/approval.mjs";
+import { approvalLine, REASONS, securityLine } from "./lib/approval.mjs";
 import { gitEnv } from "./lib/git.mjs";
 import { API_VERSION, contextFromEnv, createGitHubClient, GitHubError, toPullInfo } from "./lib/github.mjs";
 import { createReporter, UsageError } from "./lib/output.mjs";
@@ -20,6 +20,8 @@ import {
   classifyChanges,
   contentRules,
   globToRegExp,
+  isLockAlias,
+  LockfileError,
   lockfileGuarded,
   matchesGlob,
   poolerImages,
@@ -32,9 +34,10 @@ afterEach(() => {
   for (const c of cleanups.splice(0)) c();
 });
 
-const SEC0 = "security-reviewer: BLOCKER: 0 · MAJOR: 0 · MINOR: 1";
+/** @param {string} sha raporun incelediği commit (T-008i MINOR 8) */
+const SEC0 = (sha) => securityLine({ blocker: 0, major: 0, minor: 1 }, sha);
 /** @param {string} sha PR head SHA'sı */
-const okBody = (sha) => `Gerekçe.\n\n${approvalLine(sha)}\n${SEC0}\n`;
+const okBody = (sha) => `Gerekçe.\n\n${approvalLine(sha)}\n${SEC0(sha)}\n`;
 const SHA_A = "a".repeat(40);
 
 const COMPOSE = `services:
@@ -46,6 +49,79 @@ const COMPOSE = `services:
   mailpit:
     image: axllent/mailpit:v1.31.4
 `;
+
+/** pnpm-lock v9 örneği: vitest → chai → loupe kapanışı; zod/tslib kapanış dışı. */
+const LOCK = [
+  "lockfileVersion: '9.0'",
+  "",
+  "settings:",
+  "  autoInstallPeers: true",
+  "",
+  "importers:",
+  "",
+  "  .:",
+  "    dependencies:",
+  "      zod:",
+  "        specifier: 4.0.0",
+  "        version: 4.0.0",
+  "    devDependencies:",
+  "      vitest:",
+  "        specifier: 5.0.3",
+  "        version: 5.0.3",
+  "",
+  "  apps/worker: {}",
+  "",
+  "packages:",
+  "",
+  "  '@vitest/runner@5.0.3':",
+  "    resolution: {integrity: sha512-AAA}",
+  "",
+  "  chai@6.3.0:",
+  "    resolution: {integrity: sha512-CHAI}",
+  "    engines: {node: ^22.12.0 || >=24.0.0}",
+  "",
+  "  loupe@3.2.1:",
+  "    resolution: {integrity: sha512-LOUPE}",
+  "",
+  "  tslib@2.8.1:",
+  "    resolution: {integrity: sha512-TSLIB}",
+  "",
+  "  vitest@5.0.3:",
+  "    resolution: {integrity: sha512-BBB}",
+  "    engines: {node: '>=22'}",
+  "    hasBin: true",
+  "    peerDependencies:",
+  "      '@types/node': '*'",
+  "    peerDependenciesMeta:",
+  "      '@types/node':",
+  "        optional: true",
+  "",
+  "  zod@4.0.0:",
+  "    resolution: {integrity: sha512-ZZZ}",
+  "",
+  "snapshots:",
+  "",
+  "  '@vitest/runner@5.0.3': {}",
+  "",
+  "  chai@6.3.0:",
+  "    dependencies:",
+  "      loupe: 3.2.1",
+  "",
+  "  loupe@3.2.1: {}",
+  "",
+  "  tslib@2.8.1: {}",
+  "",
+  "  vitest@5.0.3:",
+  "    dependencies:",
+  "      chai: 6.3.0",
+  "    transitivePeerDependencies:",
+  "      - supports-color",
+  "",
+  "  zod@4.0.0:",
+  "    dependencies:",
+  "      tslib: 2.8.1",
+  "",
+].join("\n");
 
 const ROOT_PKG = {
   name: "@x/root",
@@ -201,6 +277,9 @@ describe("protected-paths: yol kuralları", () => {
     "patches/sub/x.diff",
     "apps/web/patches/pg.patch",
     "vendor/fix.patch",
+    // T-008i MINOR 4: `git apply` yaması her yerde
+    "vendor/fix.diff",
+    "apps/web/x/.y.diff",
     // T-008h m8: AC faz değişikliği
     "docs/PILOT.md",
     // T-008h M7: nokta ile başlayan adlar `**`/`*` altında da
@@ -225,6 +304,8 @@ describe("protected-paths: yol kuralları", () => {
     "xscripts/guards/a.mjs",
     "scripts/guardsx/a.mjs",
     "src/patch.mjs",
+    "src/diff.mjs",
+    "docs/a.diff.md",
   ])(
     "%s yol kuralıyla korunmaz",
     (p) => {
@@ -416,55 +497,97 @@ describe("protected-paths: içerik kuralları", () => {
   });
 
   it("M6: pnpm-lock.yaml'da korunan paketin girdisi/resolution'ı, tarball/git çözümlemesi ve kilit ayarları korunur", () => {
-    const lock = [
-      "lockfileVersion: '9.0'",
-      "",
-      "settings:",
-      "  autoInstallPeers: true",
-      "",
-      "importers:",
-      "  .:",
-      "    devDependencies:",
-      "      vitest:",
-      "        specifier: 5.0.3",
-      "        version: 5.0.3",
-      "",
-      "packages:",
-      "",
-      "  '@vitest/runner@5.0.3':",
-      "    resolution: {integrity: sha512-AAA}",
-      "",
-      "  vitest@5.0.3:",
-      "    resolution: {integrity: sha512-BBB}",
-      "    engines: {node: '>=22'}",
-      "",
-      "  zod@4.0.0:",
-      "    resolution: {integrity: sha512-CCC}",
-      "",
-      "snapshots:",
-      "",
-      "  vitest@5.0.3:",
-      "    dependencies:",
-      "      zod: 4.0.0",
-      "",
-    ].join("\n");
-    expect(lockfileGuarded(lock)).toContain("vitest@5.0.3 resolution: {integrity: sha512-BBB}");
+    const lock = LOCK;
+    expect(lockfileGuarded(lock)).toContain('closure vitest@5.0.3 snapshot={"dependencies":{"chai":"6.3.0"},');
     expect(lockfileGuarded(lock)).not.toContain("zod");
-    // Serbest: korunmayan paketin integrity güncellemesi, snapshot değişikliği.
-    expect(contentRules("pnpm-lock.yaml", lock, lock.replace("sha512-CCC", "sha512-DDD"))).toEqual([]);
-    expect(contentRules("pnpm-lock.yaml", lock, lock.replace("      zod: 4.0.0", "      zod: 4.0.1"))).toEqual([]);
+    // Serbest: kapanış dışındaki paketin integrity/sürüm güncellemesi, ona ait snapshot değişikliği.
+    expect(contentRules("pnpm-lock.yaml", lock, lock.replace("sha512-ZZZ", "sha512-ZZ2"))).toEqual([]);
+    expect(contentRules("pnpm-lock.yaml", lock, lock.replace("      tslib: 2.8.1", "      tslib: 2.8.2").replace("tslib@2.8.1", "tslib@2.8.2").replace("tslib@2.8.1", "tslib@2.8.2"))).toEqual([]);
     for (const [name, after] of /** @type {Array<[string, string]>} */ ([
       ["vitest resolution", lock.replace("sha512-BBB", "sha512-EVIL")],
       ["vitest tarball", lock.replace("{integrity: sha512-BBB}", "{tarball: https://evil.example.invalid/vitest.tgz}")],
       ["@vitest/runner sürüm", lock.replace("'@vitest/runner@5.0.3':", "'@vitest/runner@5.0.4':")],
-      ["korunmayan pakete tarball", lock.replace("{integrity: sha512-CCC}", "{tarball: https://evil.example.invalid/zod.tgz}")],
-      ["korunmayan pakete git", lock.replace("{integrity: sha512-CCC}", "{commit: abc, repo: https://evil.example.invalid/z.git, type: git}")],
-      ["çok satırlı resolution", lock.replace("    resolution: {integrity: sha512-CCC}", "    resolution:\n      tarball: https://evil.example.invalid/z.tgz")],
+      ["korunmayan pakete tarball", lock.replace("{integrity: sha512-ZZZ}", "{tarball: https://evil.example.invalid/zod.tgz}")],
+      ["korunmayan pakete git", lock.replace("{integrity: sha512-ZZZ}", "{commit: abc, repo: https://evil.example.invalid/z.git, type: git}")],
+      ["çok satırlı resolution", lock.replace("    resolution: {integrity: sha512-ZZZ}", "    resolution:\n      tarball: https://evil.example.invalid/z.tgz")],
       ["settings", lock.replace("autoInstallPeers: true", "autoInstallPeers: false")],
       ["patchedDependencies", lock.replace("importers:", "patchedDependencies:\n  vitest: {path: patches/v.patch, hash: x}\n\nimporters:")],
     ])) {
       expect(contentRules("pnpm-lock.yaml", lock, after)[0]?.rule, name).toBe("lockfile");
     }
+  });
+
+  it("T-008i M6 saldırısı: vitest snapshot'ında chai → evil-chai@1.0.0 takma adı + integrity'li packages girdisi → korunur", () => {
+    const evil = LOCK.replace("      chai: 6.3.0", "      chai: evil-chai@1.0.0")
+      .replace("\nsnapshots:\n", "\n  evil-chai@1.0.0:\n    resolution: {integrity: sha512-EVILCHAI}\n\nsnapshots:\n")
+      .concat("\n  evil-chai@1.0.0: {}\n");
+    const hits = contentRules("pnpm-lock.yaml", LOCK, evil);
+    expect(hits.map((h) => h.rule)).toEqual(["lockfile"]);
+    expect(lockfileGuarded(evil)).toContain("alias snapshot vitest@5.0.3 dependencies chai evil-chai@1.0.0");
+    expect(lockfileGuarded(evil)).toContain("closure evil-chai@1.0.0");
+  });
+
+  it.each(/** @type {Array<[string, (l: string) => string]>} */ ([
+    // Kapanış: geçişli düğümün sürümü, integrity'si, eklenmesi/çıkarılması, peer çözümü
+    ["geçişli düğüm sürüm değişimi (chai 6.3.0 → 6.3.1 + yeni girdiler)", (l) => l.replace("      chai: 6.3.0", "      chai: 6.3.1").replace("chai@6.3.0", "chai@6.3.1").replace("chai@6.3.0", "chai@6.3.1")],
+    ["geçişli düğüm integrity (chai)", (l) => l.replace("sha512-CHAI", "sha512-EVIL")],
+    ["iki adım ötedeki düğüm integrity (loupe)", (l) => l.replace("sha512-LOUPE", "sha512-EVIL")],
+    ["geçişli düğüme yeni bağımlılık eklenmesi", (l) => l.replace("  chai@6.3.0:\n    dependencies:\n", "  chai@6.3.0:\n    dependencies:\n      zod: 4.0.0\n")],
+    ["geçişli düğümden bağımlılık çıkarılması", (l) => l.replace("      loupe: 3.2.1\n", "")],
+    ["geçişli düğüme optionalDependencies", (l) => l.replace("  loupe@3.2.1: {}", "  loupe@3.2.1:\n    optionalDependencies:\n      zod: 4.0.0")],
+    ["geçişli düğümün packages girdisi silinir", (l) => l.replace("  loupe@3.2.1:\n    resolution: {integrity: sha512-LOUPE}\n", "")],
+    ["korunan importer specifier", (l) => l.replace("specifier: 5.0.3", "specifier: ^5.0.3")],
+    // Takma ad herhangi bir yerde (kapanış dışında da)
+    ["kapanış dışı snapshot'ta takma ad", (l) => l.replace("      tslib: 2.8.1", "      tslib: evil-tslib@2.8.1")],
+    ["importer'da npm: takma adı", (l) => l.replace("        specifier: 4.0.0\n        version: 4.0.0", "        specifier: npm:evil@4.0.0\n        version: evil@4.0.0")],
+    ["kapsamlı takma ad", (l) => l.replace("      tslib: 2.8.1", "      tslib: '@evil/tslib@2.8.1'")],
+  ]))("T-008i M6: %s → korunur", (_name, edit) => {
+    const after = edit(LOCK);
+    expect(after).not.toBe(LOCK);
+    expect(contentRules("pnpm-lock.yaml", LOCK, after).map((h) => h.rule)).toEqual(["lockfile"]);
+  });
+
+  it.each(/** @type {Array<[string, (l: string) => string]>} */ ([
+    ["sekme", (l) => l.replace("    dependencies:\n      chai", "    dependencies:\n\t  chai")],
+    ["yinelenen snapshot anahtarı (tırnaklı/tırnaksız)", (l) => l.concat("\n  'chai@6.3.0': {}\n")],
+    ["yinelenen bağımlılık anahtarı", (l) => l.replace("      chai: 6.3.0\n", "      chai: 6.3.0\n      chai: 6.3.1\n")],
+    ["satır sonu yorumu", (l) => l.replace("      chai: 6.3.0", "      chai: 6.3.0 # evil-chai@1.0.0")],
+    ["çapa / takma ad", (l) => l.replace("      chai: 6.3.0", "      chai: *evil")],
+    ["etiket", (l) => l.replace("      chai: 6.3.0", "      chai: !!str 6.3.0")],
+    ["blok skaler", (l) => l.replace("      chai: 6.3.0", "      chai: |\n        6.3.0")],
+    ["akış biçimli bağımlılıklar", (l) => l.replace("    dependencies:\n      chai: 6.3.0", "    dependencies: {chai: evil-chai@1.0.0}")],
+    ["akışta takma ad", (l) => l.replace("{integrity: sha512-CHAI}", "{integrity: *a}")],
+    ["birleştirme anahtarı", (l) => l.replace("    dependencies:\n      chai: 6.3.0", "    <<: {dependencies: {chai: evil-chai@1.0.0}}\n    dependencies:\n      chai: 6.3.0")],
+    ["tek olmayan girinti", (l) => l.replace("      chai: 6.3.0", "       chai: 6.3.0")],
+    ["boş blok", (l) => l.replace("    dependencies:\n      chai: 6.3.0\n", "    dependencies:\n")],
+    ["belge imi", (l) => l.concat("\n---\nsnapshots: {}\n")],
+    ["yinelenen üst düzey blok", (l) => l.concat("\nsnapshots:\n  vitest@5.0.3: {}\n")],
+    ["lockfileVersion 6", (l) => l.replace("lockfileVersion: '9.0'", "lockfileVersion: '6.0'")],
+    ["çift tırnakta kaçış", (l) => l.replace("      chai: 6.3.0", '      chai: "6.3.0\\u0000"')],
+  ]))("T-008i M6 fail-closed: %s → ayrıştırılamaz, korunur", (_name, edit) => {
+    const after = edit(LOCK);
+    expect(after).not.toBe(LOCK);
+    expect(() => lockfileGuarded(after)).toThrow(LockfileError);
+    const hits = contentRules("pnpm-lock.yaml", LOCK, after);
+    expect(hits.map((h) => h.rule)).toEqual(["lockfile"]);
+    expect(hits[0]?.reason).toContain("ayrıştırılamadı");
+  });
+
+  it("isLockAlias: takma ad biçimleri", () => {
+    expect(isLockAlias("evil@1.0.0")).toBe(true);
+    expect(isLockAlias("@s/evil@1.0.0(p@1)")).toBe(true);
+    expect(isLockAlias("npm:evil@1")).toBe(true);
+    expect(isLockAlias("1.0.0")).toBe(false);
+    expect(isLockAlias("5.0.3(@types/node@24.19.1)(vite@8.3.2(@types/node@24.19.1))")).toBe(false);
+    expect(isLockAlias("link:../db")).toBe(false);
+  });
+
+  it("deponun gerçek pnpm-lock.yaml'ı ayrıştırılır; kapanış vitest → chai'yi içerir; kendine eşit → korunan değişiklik yok", () => {
+    const real = readFileSync(path.join(import.meta.dirname, "../../pnpm-lock.yaml"), "utf8");
+    const fp = lockfileGuarded(real);
+    expect(fp).toMatch(/^closure chai@\d/m);
+    expect(fp).toMatch(/^closure vitest@\d/m);
+    expect(contentRules("pnpm-lock.yaml", real, real)).toEqual([]);
   });
 
   it("compose: pooler imaj etiketi korunur, diğer imajlar serbest", () => {
@@ -632,7 +755,7 @@ describe("lib/git.mjs ortam sertleştirmesi (T-008h m5)", () => {
     r.git("replace", h, mainSha);
     // Saldırının dayanağı: replace etkin git, HEAD'i taban commit'i olarak görür (boş fark).
     expect(r.git("diff", "--name-only", "main", "HEAD").trim()).toBe("");
-    const res = await check(r, { env: prEnv(r), client: fakeClient({ pulls: [pull({ headSha: h, body: SEC0 })] }).client });
+    const res = await check(r, { env: prEnv(r), client: fakeClient({ pulls: [pull({ headSha: h, body: SEC0(h) })] }).client });
     expect(res.code).toBe(1);
     expect(res.text).toContain(`FAIL ${REASONS.NO_APPROVAL} docs/INVARIANTS.md`);
   });
@@ -725,6 +848,7 @@ describe("check:protected", () => {
   it("push (main): commit'i getiren birleşmiş PR'ın açıklaması okunur", async () => {
     const r = fixture();
     r.write("docs/INVARIANTS.md", "# I2\n").commit("x");
+    const prHead = head(r);
     r.checkout("main").merge("feat/T-100-x", "Merge pull request #7");
     const sha = head(r);
     const parent = r.git("rev-parse", "HEAD^1").trim();
@@ -734,7 +858,7 @@ describe("check:protected", () => {
       GITHUB_SHA: sha,
       GITHUB_REF_NAME: "main",
     };
-    const merged = pull({ headSha: SHA_A, mergedAt: "2026-10-05T10:00:00Z" });
+    const merged = pull({ headSha: prHead, mergedAt: "2026-10-05T10:00:00Z" });
     const other = pull({ number: 8, headSha: SHA_A, baseRef: "int/x", mergedAt: "2026-10-05T09:00:00Z", body: "" });
     expect((await check(r, { env, client: fakeClient({ commitPulls: { [sha]: [other, merged] } }).client })).code).toBe(0);
 
@@ -742,14 +866,104 @@ describe("check:protected", () => {
     expect(none.code).toBe(1);
     expect(none.text).toContain(`FAIL ${REASONS.UNVERIFIABLE} docs/INVARIANTS.md`);
 
-    const unmerged = await check(r, { env, client: fakeClient({ commitPulls: { [sha]: [pull({ headSha: SHA_A })] } }).client });
+    const unmerged = await check(r, { env, client: fakeClient({ commitPulls: { [sha]: [pull({ headSha: prHead })] } }).client });
     expect(unmerged.code).toBe(1);
 
     const bad = await check(r, {
       env,
-      client: fakeClient({ commitPulls: { [sha]: [pull({ headSha: SHA_A, mergedAt: "2026-10-05T10:00:00Z", body: "yok" })] } }).client,
+      client: fakeClient({ commitPulls: { [sha]: [pull({ headSha: prHead, mergedAt: "2026-10-05T10:00:00Z", body: "yok" })] } }).client,
     });
     expect(bad.text).toContain(`FAIL ${REASONS.NO_APPROVAL} docs/INVARIANTS.md`);
+  });
+
+  /**
+   * Push olayı ortamı (HEAD = GITHUB_SHA, before = HEAD^1).
+   * @param {import("./lib/testkit.mjs").TestRepo} r
+   */
+  function pushEnv(r) {
+    return {
+      GITHUB_EVENT_NAME: "push",
+      GITHUB_EVENT_PATH: eventFile({ before: r.git("rev-parse", "HEAD^1").trim() }),
+      GITHUB_SHA: head(r),
+      GITHUB_REF_NAME: "main",
+    };
+  }
+
+  it("MINOR 6 saldırısı: push birleştirme commit'inin HEAD^2'si PR head'i değil → APPROVAL_UNVERIFIABLE", async () => {
+    const r = fixture();
+    r.write("docs/INVARIANTS.md", "# I2\n").commit("x");
+    const prHead = head(r);
+    // Onaylı PR'ın head'i değil, başka bir commit birleştiriliyor.
+    r.write("docs/INVARIANTS.md", "# onaydan sonra gevşetildi\n").commit("y");
+    r.checkout("main").merge("feat/T-100-x", "Merge pull request #7");
+    const merged = pull({ headSha: prHead, mergedAt: "2026-10-05T10:00:00Z" });
+    const res = await check(r, { env: pushEnv(r), client: fakeClient({ commitPulls: { [head(r)]: [merged] } }).client });
+    expect(res.code).toBe(1);
+    expect(res.text).toContain(`FAIL ${REASONS.UNVERIFIABLE} docs/INVARIANTS.md`);
+    expect(res.text).toContain("ikinci ebeveyni");
+  });
+
+  it("MINOR 6 saldırısı: birleştirme commit'ine PR dışı içerik eklenmiş (evil merge) → APPROVAL_UNVERIFIABLE", async () => {
+    const r = fixture();
+    r.write("docs/INVARIANTS.md", "# I2\n").commit("x");
+    const prHead = head(r);
+    r.checkout("main").merge("feat/T-100-x", "Merge pull request #7");
+    r.write("scripts/guards/x.mjs", "export const gevsek = true;\n");
+    r.git("add", "--all");
+    r.git("commit", "--quiet", "--amend", "--no-edit");
+    expect(r.git("rev-parse", "HEAD^2").trim()).toBe(prHead);
+    const merged = pull({ headSha: prHead, mergedAt: "2026-10-05T10:00:00Z" });
+    const res = await check(r, { env: pushEnv(r), client: fakeClient({ commitPulls: { [head(r)]: [merged] } }).client });
+    expect(res.code).toBe(1);
+    expect(res.text).toContain(`FAIL ${REASONS.UNVERIFIABLE} scripts/guards/x.mjs`);
+    expect(res.text).toContain("önizlemesinin ağacı");
+  });
+
+  it("MINOR 6: squash birleştirme — ağaç önizlemeye eşitse OK, PR dışı içerik varsa APPROVAL_UNVERIFIABLE", async () => {
+    const r = fixture();
+    r.write("docs/INVARIANTS.md", "# I2\n").commit("x");
+    const prHead = head(r);
+    r.checkout("main");
+    r.git("merge", "--quiet", "--squash", "feat/T-100-x");
+    r.commit("Squash PR #7");
+    const merged = pull({ headSha: prHead, mergedAt: "2026-10-05T10:00:00Z" });
+    const ok = await check(r, { env: pushEnv(r), client: fakeClient({ commitPulls: { [head(r)]: [merged] } }).client });
+    expect(ok.code).toBe(0);
+
+    r.git("reset", "--quiet", "--hard", "HEAD^1");
+    r.git("merge", "--quiet", "--squash", "feat/T-100-x");
+    r.write("docs/ACCEPTANCE.md", "# gevşetildi\n").commit("Squash PR #7 + ek");
+    const bad = await check(r, { env: pushEnv(r), client: fakeClient({ commitPulls: { [head(r)]: [merged] } }).client });
+    expect(bad.code).toBe(1);
+    expect(bad.text).toContain(`FAIL ${REASONS.UNVERIFIABLE} docs/ACCEPTANCE.md`);
+  });
+
+  it("MINOR 6: PR head commit'i yerelde yoksa (squash, eksik geçmiş) → APPROVAL_UNVERIFIABLE", async () => {
+    const r = fixture();
+    r.write("docs/INVARIANTS.md", "# I2\n").commit("x");
+    r.checkout("main");
+    r.git("merge", "--quiet", "--squash", "feat/T-100-x");
+    r.commit("Squash PR #7");
+    const merged = pull({ headSha: SHA_A, mergedAt: "2026-10-05T10:00:00Z" });
+    const res = await check(r, { env: pushEnv(r), client: fakeClient({ commitPulls: { [head(r)]: [merged] } }).client });
+    expect(res.code).toBe(1);
+    expect(res.text).toContain(`FAIL ${REASONS.UNVERIFIABLE} docs/INVARIANTS.md`);
+    expect(res.text).toContain("yerelde yok");
+  });
+
+  it("MINOR 8: PR kipinde rapor SHA'sından sonra korunan değişiklik → SECURITY_REPORT_STALE; yalnızca korunmayan değişiklik → OK", async () => {
+    const r = fixture();
+    r.write("docs/INVARIANTS.md", "# I2\n").commit("x");
+    const reviewed = head(r);
+    r.write("docs/STATE.md", "# durum\n").commit("supervisor");
+    const body = () => `${approvalLine(head(r))}\n${SEC0(reviewed)}\n`;
+    const fresh = await check(r, { env: prEnv(r), client: fakeClient({ pulls: [pull({ headSha: head(r), body: body() })] }).client });
+    expect(fresh.code).toBe(0);
+    r.write("package.json", JSON.stringify({ ...ROOT_PKG, scripts: { ...ROOT_PKG.scripts, postinstall: "node x" } }, null, 2) + "\n").commit("y");
+    const stale = await check(r, { env: prEnv(r), client: fakeClient({ pulls: [pull({ headSha: head(r), body: body() })] }).client });
+    expect(stale.code).toBe(1);
+    expect(stale.text).toContain(`FAIL ${REASONS.SECURITY_STALE} docs/INVARIANTS.md`);
+    expect(stale.text).toContain("rapordan sonra korunan değişiklik: package.json");
   });
 
   it("push: before ≠ HEAD^1 (birden fazla birleştirme) → APPROVAL_UNVERIFIABLE", async () => {
@@ -782,7 +996,7 @@ describe("check:protected", () => {
     const r = fixture();
     r.write("docs/INVARIANTS.md", "# gevşetildi\n").commit("x");
     r.write("docs/INVARIANTS.md", "# I\n"); // çalışma ağacı tabana eşit
-    const body = { headSha: head(r), body: SEC0 };
+    const body = { headSha: head(r), body: SEC0(head(r)) };
     const ev = await check(r, { env: prEnv(r), client: fakeClient({ pulls: [pull(body)] }).client });
     expect(ev.code).toBe(1);
     expect(ev.text).toContain(`FAIL ${REASONS.NO_APPROVAL} docs/INVARIANTS.md`);
@@ -796,7 +1010,7 @@ describe("check:protected", () => {
     const pkg = { ...ROOT_PKG, scripts: { ...ROOT_PKG.scripts, "precheck:protected": "node -e 0" } };
     r.write("package.json", JSON.stringify(pkg, null, 2) + "\n").commit("x");
     r.write("package.json", JSON.stringify(ROOT_PKG, null, 2) + "\n");
-    const res = await check(r, { env: prEnv(r), client: fakeClient({ pulls: [pull({ headSha: head(r), body: SEC0 })] }).client });
+    const res = await check(r, { env: prEnv(r), client: fakeClient({ pulls: [pull({ headSha: head(r), body: SEC0(head(r)) })] }).client });
     expect(res.code).toBe(1);
     expect(res.text).toContain(`FAIL ${REASONS.NO_APPROVAL} package.json`);
     expect(res.text).toContain("scripts.precheck:protected");
@@ -812,7 +1026,7 @@ describe("check:protected", () => {
   it("M3 saldırısı: PR/CI kipinde --base HEAD (boş fark) yok sayılır → FAIL", async () => {
     const r = fixture();
     r.write("docs/INVARIANTS.md", "# gevşetildi\n").commit("x");
-    const p = pull({ headSha: head(r), body: SEC0 });
+    const p = pull({ headSha: head(r), body: SEC0(head(r)) });
     for (const argv of [["--base", "HEAD"], ["--pr", "7", "--base", "HEAD"], ["--base=feat/T-100-x"]]) {
       const res = await check(r, { argv, env: argv.includes("--pr") ? {} : prEnv(r), client: fakeClient({ pulls: [p] }).client });
       expect(res.code, argv.join(" ")).toBe(1);
@@ -824,7 +1038,7 @@ describe("check:protected", () => {
     const r = fixture();
     r.write("docs/INVARIANTS.md", "# gevşetildi\n").commit("x").publish("feat/T-100-x");
     const env = { ...prEnv(r), GITHUB_BASE_REF: "feat/T-100-x" };
-    const res = await check(r, { env, client: fakeClient({ pulls: [pull({ headSha: head(r), body: SEC0 })] }).client });
+    const res = await check(r, { env, client: fakeClient({ pulls: [pull({ headSha: head(r), body: SEC0(head(r)) })] }).client });
     expect(res.code).toBe(1);
     expect(res.text).toContain(`FAIL ${REASONS.NO_APPROVAL} docs/INVARIANTS.md`);
   });
@@ -855,7 +1069,7 @@ describe("check:protected", () => {
   ])("%s saldırısı: onaysız PR → FAIL PROTECTED_NO_APPROVAL", async (_name, file, content) => {
     const r = fixture();
     r.write(file, content).commit("x");
-    const res = await check(r, { env: prEnv(r), client: fakeClient({ pulls: [pull({ headSha: head(r), body: SEC0 })] }).client });
+    const res = await check(r, { env: prEnv(r), client: fakeClient({ pulls: [pull({ headSha: head(r), body: SEC0(head(r)) })] }).client });
     expect(res.code).toBe(1);
     expect(res.text).toContain(`FAIL ${REASONS.NO_APPROVAL} ${file}`);
   });
@@ -864,7 +1078,7 @@ describe("check:protected", () => {
     for (const k of ["precheck:protected", "preverify", "postinstall", "prepare"]) {
       const r = fixture();
       r.write("package.json", JSON.stringify({ ...ROOT_PKG, scripts: { ...ROOT_PKG.scripts, [k]: "node -e 0" } }, null, 2) + "\n").commit("x");
-      const res = await check(r, { env: prEnv(r), client: fakeClient({ pulls: [pull({ headSha: head(r), body: SEC0 })] }).client });
+      const res = await check(r, { env: prEnv(r), client: fakeClient({ pulls: [pull({ headSha: head(r), body: SEC0(head(r)) })] }).client });
       expect(res.code, k).toBe(1);
       expect(res.text, k).toContain(`FAIL ${REASONS.NO_APPROVAL} package.json`);
     }

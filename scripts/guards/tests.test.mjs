@@ -52,7 +52,8 @@ const FORBIDDEN = /** @type {Array<[string, string, string, number]>} */ ([
   ["playwright test.slow()", `test("a", async () => {\n  test.slow();\n});`, "SKIP", 3],
   ["playwright test.describe.skip", `test.describe.skip("d", () => {});`, "SKIP", 2],
   ["ctx.skip()", `it("a", (ctx) => {\n  ctx.skip();\n});`, "SKIP", 3],
-  ["ayrıştırılmış skip()", `it("a", ({ skip }) => {\n  skip();\n});`, "SKIP", 3],
+  // T-008i MINOR 1: test bağlamından yapı bozulan skip → CONDITIONAL_SKIP (vitest `ctx.skip(koşul)`)
+  ["ayrıştırılmış skip()", `it("a", ({ skip }) => {\n  skip();\n});`, "CONDITIONAL_SKIP", 3],
   ["node:test { skip: true }", `test("a", { skip: true }, () => {});`, "SKIP", 2],
   ["node:test { only: true }", `test("a", { only: true }, () => {});`, "ONLY", 2],
   ["node:test t.todo()", `test("a", (t) => {\n  t.todo("sonra");\n});`, "TODO", 3],
@@ -131,6 +132,48 @@ const EVASIONS = /** @type {Array<[string, string, string[]]>} */ ([
     ["CONDITIONAL_SKIP@4"],
   ],
 ]);
+
+/** T-008i MINOR 1: hesaplanan üye, bağlamdan yapı bozulan skip, dinamik içe aktarım kökleri. */
+const EVASIONS_T008I = /** @type {Array<[string, string, string[]]>} */ ([
+  ["hesaplanan üye: it[\"sk\" + \"ip\"]", `${IMPORT}it["sk" + "ip"]("a", () => {});`, ["SKIP@2"]],
+  ["hesaplanan üye: şablon dize it[`sk${\"ip\"}`]", `${IMPORT}it[\`sk\${"ip"}\`]("a", () => {});`, ["SKIP@2"]],
+  ["hesaplanan üye: yer tutucusuz şablon describe[`only`]", `${IMPORT}describe[\`only\`]("d", () => {});`, ["ONLY@2"]],
+  ["hesaplanan üye: (\"o\" + \"nly\") parantezli", `${IMPORT}test[("o" + "nly")]("a", () => {});`, ["ONLY@2"]],
+  ["hesaplanan üye: değişken it[k] (indirgenemez)", `${IMPORT}const k = "skip";\nit[k]("a", () => {});`, ["SKIP@3"]],
+  ["hesaplanan üye: ad alanı v[k]", `import * as v from "vitest";\nconst k = "it";\nv[k].skip("a", () => {});`, ["SKIP@3"]],
+  ["hesaplanan yapı bozma: const { [\"sk\"+\"ip\"]: s } = it", `${IMPORT}const { ["sk" + "ip"]: s } = it;\ns("a", () => {});`, ["SKIP@2"]],
+  ["hesaplanan yapı bozma: const { [k]: s } = it (indirgenemez)", `${IMPORT}const k = "skip";\nconst { [k]: s } = it;\ns("a", () => {});`, ["SKIP@3"]],
+  ["bağlamdan yeniden adlı skip: ({ skip: s }) => s(koşul)", `${IMPORT}it("a", ({ skip: s }) => {\n  s(process.env.CI === "1");\n  expect(1).toBe(1);\n});`, ["CONDITIONAL_SKIP@3"]],
+  ["bağlamdan gövdede yapı bozma: const { skip } = ctx", `${IMPORT}it("a", (ctx) => {\n  const { skip: later } = ctx;\n  later();\n});`, ["CONDITIONAL_SKIP@4"]],
+  ["bağlamdan atama: const s = ctx.skip", `${IMPORT}test("a", async (ctx) => {\n  const s = ctx["skip"];\n  s();\n});`, ["CONDITIONAL_SKIP@4"]],
+  ["bağlamdan yapı bozma, ifade gövdeli ok", `${IMPORT}it("a", ({ skip: s }) => s());`, ["CONDITIONAL_SKIP@2"]],
+  ["dinamik içe aktarım: const v = await import(\"vitest\"); v.it.skip", `const v = await import("vitest");\nv.it.skip("a", () => {});`, ["SKIP@2"]],
+  ["dinamik içe aktarım: (await import(\"vitest\")).describe.only", `(await import("vitest")).describe.only("d", () => {});`, ["ONLY@1"]],
+  ["dinamik içe aktarım: yapı bozma + takma ad", `const { it: t } = await import("vitest");\nt.skip("a", () => {});`, ["SKIP@2"]],
+  ["dinamik içe aktarım: türetilmiş kök + yapı bozma", `const v = await import("vitest");\nconst { skip } = v.it;\nskip("a", () => {});`, ["SKIP@2", "SKIP@3"]],
+  ["dinamik içe aktarım: .then(({ test }) => test.only(…))", `import("vitest").then(({ test: q }) => {\n  q.only("a", () => {});\n});`, ["ONLY@2"]],
+  ["dinamik içe aktarım: .then((v) => v.xit(…))", `import("vitest").then((v) => v.xit("a", () => {}));`, ["SKIP@1"]],
+  ["require(\"vitest\")", `const v = require("vitest");\nv.test.todo("x");`, ["TODO@2"]],
+]);
+
+describe("scanSource — atlatma denemeleri (T-008i MINOR 1)", () => {
+  it.each(EVASIONS_T008I)("MINOR 1 saldırısı: %s → FAIL", (_name, src, expected) => {
+    expect(codes(src)).toEqual(expected);
+  });
+
+  it("sabit, yasak olmayan hesaplanan üye ve bağlamın başka alanları → OK", () => {
+    const src = [
+      IMPORT.trim(),
+      `it["concurrent"]("a", async () => { expect(1).toBe(1); });`,
+      `test[\`each\`]([1])("b %i", (n) => { expect(n).toBe(1); });`,
+      `it("c", ({ task, expect: e }) => { e(task.name).toBe("c"); });`,
+      `it("d", (ctx) => { const { task } = ctx; expect(task).toBeDefined(); });`,
+      `const v = await import("node:path");`,
+      `v.join("a", "b");`,
+    ].join("\n");
+    expect(codes(src)).toEqual([]);
+  });
+});
 
 describe("scanSource — atlatma denemeleri (T-008h m6)", () => {
   it.each(EVASIONS)("m6 saldırısı: %s → FAIL", (_name, src, expected) => {

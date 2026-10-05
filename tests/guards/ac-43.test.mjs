@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { approvalLine, REASONS } from "../../scripts/guards/lib/approval.mjs";
+import { approvalLine, REASONS, securityLine } from "../../scripts/guards/lib/approval.mjs";
 import { GitHubError } from "../../scripts/guards/lib/github.mjs";
 import { createReporter } from "../../scripts/guards/lib/output.mjs";
 import { createRepo } from "../../scripts/guards/lib/testkit.mjs";
@@ -17,7 +17,12 @@ afterEach(() => {
   for (const c of cleanups.splice(0)) c();
 });
 
-const SEC = (/** @type {number} */ blocker) => `security-reviewer: BLOCKER: ${blocker} · MAJOR: 0 · MINOR: 2`;
+/**
+ * Güvenlik özeti satırı; `sha` raporun incelediği commit (T-008i MINOR 8).
+ * @param {number} blocker
+ * @param {string} sha
+ */
+const SEC = (blocker, sha) => securityLine({ blocker, major: 0, minor: 2 }, sha);
 const CARD = `# T-100: örnek
 **Faz:** 0 · **Ajan:** devops · **Dal:** \`feat/T-100-x\` → \`int/x\`
 **protected: true** (beyan; onay değildir)
@@ -102,7 +107,7 @@ describe("AC-43 onay kaynağı (check:protected)", () => {
 
   it("@AC-43 (c) rapor var ama BLOCKER > 0 → FAIL SECURITY_BLOCKER", async () => {
     const r = fixture();
-    const res = await checkPr(r, `${approvalLine(headOf(r))}\n${SEC(1)}\n`);
+    const res = await checkPr(r, `${approvalLine(headOf(r))}\n${SEC(1, headOf(r))}\n`);
     expect(res.code).toBe(1);
     expect(res.text).toContain(`FAIL ${REASONS.SECURITY_BLOCKER} docs/INVARIANTS.md`);
     expect(res.text).not.toContain(REASONS.NO_APPROVAL);
@@ -111,7 +116,7 @@ describe("AC-43 onay kaynağı (check:protected)", () => {
 
   it("@AC-43 (d) APPROVED-BY satırı yok (rapor BLOCKER 0) → FAIL PROTECTED_NO_APPROVAL", async () => {
     const r = fixture();
-    const res = await checkPr(r, `${SEC(0)}\n`);
+    const res = await checkPr(r, `${SEC(0, headOf(r))}\n`);
     expect(res.code).toBe(1);
     expect(res.text).toContain(`FAIL ${REASONS.NO_APPROVAL} docs/INVARIANTS.md`);
     expect(res.text).not.toContain(REASONS.SECURITY_MISSING);
@@ -122,7 +127,7 @@ describe("AC-43 onay kaynağı (check:protected)", () => {
     const r = fixture();
     const approved = headOf(r);
     r.write("docs/INVARIANTS.md", "# Değişmezler (onaydan sonra yine değişti)\n").commit("onay sonrası push");
-    const res = await checkPr(r, `${approvalLine(approved)}\n${SEC(0)}\n`);
+    const res = await checkPr(r, `${approvalLine(approved)}\n${SEC(0, headOf(r))}\n`);
     expect(res.code).toBe(1);
     expect(res.text).toContain(`FAIL ${REASONS.STALE} docs/INVARIANTS.md`);
     expect(res.text).not.toContain(REASONS.NO_APPROVAL);
@@ -131,7 +136,43 @@ describe("AC-43 onay kaynağı (check:protected)", () => {
 
   it("@AC-43 APPROVED-BY @ head SHA + BLOCKER: 0 rapor özeti birlikte → OK", async () => {
     const r = fixture();
-    const res = await checkPr(r, `Gerekçe: …\n\n${approvalLine(headOf(r))}\n${SEC(0)}\n`);
+    const res = await checkPr(r, `Gerekçe: …\n\n${approvalLine(headOf(r))}\n${SEC(0, headOf(r))}\n`);
+    expect(res.code).toBe(0);
+    expect(res.text).toContain("check:protected OK");
+  });
+
+  it("@AC-43 (f) güvenlik raporu SHA'sından sonra korunan değişiklik → FAIL SECURITY_REPORT_STALE", async () => {
+    const r = fixture();
+    const reviewed = headOf(r);
+    r.write("docs/INVARIANTS.md", "# Değişmezler (incelemeden sonra yine gevşetildi)\n").commit("inceleme sonrası push");
+    const res = await checkPr(r, `${approvalLine(headOf(r))}\n${SEC(0, reviewed)}\n`);
+    expect(res.code).toBe(1);
+    expect(res.text).toContain(`FAIL ${REASONS.SECURITY_STALE} docs/INVARIANTS.md`);
+    expect(res.text).toContain("rapordan sonra korunan değişiklik: docs/INVARIANTS.md");
+    expect(res.text).not.toContain(REASONS.STALE + " ");
+    expect(res.text).not.toContain(REASONS.NO_APPROVAL);
+  });
+
+  it("@AC-43 (f) güvenlik raporu SHA'sı PR head'inin atası değil → FAIL SECURITY_REPORT_STALE", async () => {
+    const r = fixture();
+    const head = headOf(r);
+    r.branch("baska-dal").write("docs/INVARIANTS.md", "# başka dal\n").commit("başka");
+    const other = headOf(r);
+    r.checkout("feat/T-100-x");
+    const res = await checkPr(r, `${approvalLine(head)}\n${SEC(0, other)}\n`);
+    expect(res.code).toBe(1);
+    expect(res.text).toContain(`FAIL ${REASONS.SECURITY_STALE} docs/INVARIANTS.md`);
+    expect(res.text).toContain("atası değil");
+    const missing = await checkPr(r, `${approvalLine(head)}\n${SEC(0, "e".repeat(40))}\n`);
+    expect(missing.code).toBe(1);
+    expect(missing.text).toContain(`FAIL ${REASONS.SECURITY_STALE} docs/INVARIANTS.md`);
+  });
+
+  it("@AC-43 (f) rapordan sonra yalnızca korunmayan Supervisor belgeleri değişti → rapor taze, OK", async () => {
+    const r = fixture();
+    const reviewed = headOf(r);
+    r.writeAll({ "docs/STATE.md": "# durum\n", "docs/tasks/T-100.md": CARD + "\nNot.\n" }).commit("supervisor: STATE + kart");
+    const res = await checkPr(r, `${approvalLine(headOf(r))}\n${SEC(0, reviewed)}\n`);
     expect(res.code).toBe(0);
     expect(res.text).toContain("check:protected OK");
   });

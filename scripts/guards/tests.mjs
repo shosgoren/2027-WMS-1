@@ -5,16 +5,22 @@
 // Neden kodları (her bulgu `dosya:satır`):
 //   SKIP                      it|test|describe|suite üzerinde .skip/.fails/.fail/.fixme/.slow
 //                             zinciri; xit/xtest/xdescribe; gövde içi `test.skip()`, `ctx.skip()`,
-//                             `skip()`; node:test seçeneği `{ skip: … }`
+//                             `skip()`; node:test seçeneği `{ skip: … }`; test kökünde hesaplanan
+//                             üye (T-008i MINOR 1): sabit dizeye indirgenen (`it["sk"+"ip"]`,
+//                             `` it[`sk${"ip"}`] ``) yasak üye kendi koduyla, indirgenemeyen (`it[k]`) SKIP
 //   ONLY                      .only zinciri; fit/fdescribe; `{ only: … }`
 //   TODO                      .todo zinciri; `t.todo()`; `{ todo: … }`
 //   CONDITIONAL_SKIP          .skipIf/.runIf; test/describe gövdesinde `if (<koşul>) return`
 //                             ve koşul process.env / CI / platform okuyor ya da ortamdan türetilmiş
-//                             bir değişkeni okuyor (`const s = !!process.env.X; … if (s) return`)
+//                             bir değişkeni okuyor (`const s = !!process.env.X; … if (s) return`);
+//                             test bağlamından yapı bozulan `skip` çağrısı (`({ skip: s }) => s(…)`,
+//                             `const { skip } = ctx`, `const s = ctx.skip`; T-008i MINOR 1)
 // Test kökleri (T-008h m6): genel adlar (it/test/describe/suite) + `vitest`, `@playwright/test`,
 // `node:test` içe aktarımlarının takma adları (`import { it as t }`, varsayılan, ad alanı
 // `import * as v` → `v.it`), bunlardan türeyen değişkenler (`const t2 = test.extend({…})`,
-// `const c = it.concurrent`) ve yapı bozma (`const { skip } = it` → SKIP).
+// `const c = it.concurrent`) ve yapı bozma (`const { skip } = it` → SKIP). Dinamik içe aktarım
+// (T-008i MINOR 1): `const v = await import("vitest")` / `require("vitest")` ad alanıdır;
+// `(await import("vitest")).it…` zinciri ve `import("vitest").then(({ it }) => …)` kökleri izlenir.
 //   QUARANTINE_NOT_SUPPORTED  yukarıdakilerden biri `@quarantine` etiketli testte. İstisna yok:
 //                             karantina `skip` ile değil, T-008e'de "koşar, kapıyı kırmaz"
 //                             olarak uygulanır (PROTOCOL §Karantina: testler her CI'da koşturulur).
@@ -135,6 +141,9 @@ function chainRoot(expr) {
   }
 }
 
+/** İndirgenemeyen hesaplanan üye yer tutucusu (geçerli tanımlayıcı olamaz). */
+const COMPUTED = "<hesaplanan>";
+
 /**
  * Zincirdeki üye adları (kökten uca).
  * @param {ts.Expression} expr
@@ -150,9 +159,9 @@ function chainMembers(expr) {
       names.unshift(e.name.text);
       e = e.expression;
     } else if (ts.isElementAccessExpression(e)) {
-      if (ts.isStringLiteralLike(e.argumentExpression)) names.unshift(e.argumentExpression.text);
+      names.unshift(constString(e.argumentExpression) ?? COMPUTED);
       e = e.expression;
-    } else if (ts.isCallExpression(e)) e = e.expression;
+    } else if (ts.isCallExpression(e) && !isTestModuleLoad(e)) e = e.expression;
     else if (ts.isTaggedTemplateExpression(e)) e = e.tag;
     else if (ts.isParenthesizedExpression(e) || ts.isNonNullExpression(e) || ts.isAsExpression(e)) e = e.expression;
     else return names;
@@ -160,16 +169,74 @@ function chainMembers(expr) {
 }
 
 /**
- * Üye erişimi düğümünün adı (`a.b` → b, `a["b"]` → b).
+ * Sabit dizeye indirgenebilen ifadenin değeri (dize/sayı sabiti, şablon, `+` birleştirme,
+ * parantez); indirgenemiyorsa `null`.
+ * @param {ts.Expression} e
+ * @returns {string | null}
+ */
+function constString(e) {
+  if (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isNonNullExpression(e) || ts.isSatisfiesExpression(e)) {
+    return constString(e.expression);
+  }
+  if (ts.isStringLiteralLike(e) || ts.isNumericLiteral(e)) return e.text;
+  if (ts.isTemplateExpression(e)) {
+    let s = e.head.text;
+    for (const span of e.templateSpans) {
+      const v = constString(span.expression);
+      if (v === null) return null;
+      s += v + span.literal.text;
+    }
+    return s;
+  }
+  if (ts.isBinaryExpression(e) && e.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+    const l = constString(e.left);
+    const r = constString(e.right);
+    return l === null || r === null ? null : l + r;
+  }
+  return null;
+}
+
+/**
+ * Üye erişimi düğümünün adı (`a.b` → b, `a["b"]` → b, `a["s"+"kip"]` → skip).
  * @param {ts.Node} node
  * @returns {string | null}
  */
 function memberName(node) {
   if (ts.isPropertyAccessExpression(node)) return node.name.text;
-  if (ts.isElementAccessExpression(node) && ts.isStringLiteralLike(node.argumentExpression)) {
-    return node.argumentExpression.text;
-  }
+  if (ts.isElementAccessExpression(node)) return constString(node.argumentExpression);
   return null;
+}
+
+/**
+ * Test modülünün dinamik içe aktarımı / `require`'ı mı (`import("vitest")`, `await import(…)`).
+ * @param {ts.Expression} e
+ * @returns {boolean}
+ */
+function isTestModuleLoad(e) {
+  let x = e;
+  while (ts.isParenthesizedExpression(x) || ts.isAwaitExpression(x) || ts.isAsExpression(x) || ts.isNonNullExpression(x)) x = x.expression;
+  if (!ts.isCallExpression(x)) return false;
+  const callee = x.expression;
+  const dynamic = callee.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(callee) && callee.text === "require");
+  const arg = x.arguments[0];
+  return dynamic && arg !== undefined && ts.isStringLiteralLike(arg) && TEST_MODULES.has(arg.text);
+}
+
+/**
+ * Zincirin tanımlayıcı olmayan tabanı (`(await import("vitest")).it.skip` → `await import(…)`).
+ * @param {ts.Expression} expr
+ * @returns {ts.Expression}
+ */
+function chainBase(expr) {
+  /** @type {ts.Expression} */
+  let e = expr;
+  for (;;) {
+    if (ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e)) e = e.expression;
+    else if (ts.isCallExpression(e) && !isTestModuleLoad(e)) e = e.expression;
+    else if (ts.isTaggedTemplateExpression(e)) e = e.tag;
+    else if (ts.isParenthesizedExpression(e) || ts.isNonNullExpression(e) || ts.isAsExpression(e)) e = e.expression;
+    else return e;
+  }
 }
 
 /**
@@ -225,6 +292,20 @@ function bindingNames(name) {
 }
 
 /**
+ * Yapı bozma öğesinin kaynak özellik adı (`{ a }`, `{ a: b }`, `{ "a": b }`, `{ ["s"+"kip"]: b }`);
+ * indirgenemeyen hesaplanan ad → `null`.
+ * @param {ts.BindingElement} el
+ * @returns {string | null}
+ */
+function bindingProp(el) {
+  const p = el.propertyName;
+  if (p === undefined) return ts.isIdentifier(el.name) ? el.name.text : null;
+  if (ts.isIdentifier(p) || ts.isStringLiteralLike(p) || ts.isNumericLiteral(p)) return p.text;
+  if (ts.isComputedPropertyName(p)) return constString(p.expression);
+  return null;
+}
+
+/**
  * `if (…) return` / `if (…) { …; return }` biçimi.
  * @param {ts.Statement} stmt
  * @returns {stmt is ts.IfStatement}
@@ -275,10 +356,22 @@ export function scanSource(text, file) {
    * @returns {boolean}
    */
   function isTestChain(expr) {
+    const first = chainMembers(expr)[0] ?? "";
+    const nsMember = BASE_NAMES.has(first) || first === COMPUTED;
     const root = chainRoot(expr);
-    if (root === null) return false;
+    if (root === null) return isTestModuleLoad(chainBase(expr)) && nsMember;
     if (bases.has(root.text)) return true;
-    return namespaces.has(root.text) && BASE_NAMES.has(chainMembers(expr)[0] ?? "");
+    return namespaces.has(root.text) && nsMember;
+  }
+
+  /**
+   * İfade bir test modülü ad alanı mı (`v`, `await import("vitest")`).
+   * @param {ts.Expression} expr
+   * @returns {boolean}
+   */
+  function isNamespace(expr) {
+    const e = unwrap(expr);
+    return (ts.isIdentifier(e) && namespaces.has(e.text)) || isTestModuleLoad(e);
   }
 
   /**
@@ -288,7 +381,7 @@ export function scanSource(text, file) {
    */
   function prefixedCode(expr) {
     const root = chainRoot(expr);
-    if (root === null) return undefined;
+    if (root === null) return isTestModuleLoad(chainBase(expr)) ? PREFIXED.get(chainMembers(expr)[0] ?? "") : undefined;
     if (prefixed.has(root.text)) return prefixed.get(root.text);
     if (namespaces.has(root.text)) return PREFIXED.get(chainMembers(expr)[0] ?? "");
     return undefined;
@@ -312,8 +405,38 @@ export function scanSource(text, file) {
         }
       }
     }
+    // import("vitest").then(({ it }) => …) / .then((v) => v.it…)
+    if (ts.isCallExpression(n) && memberName(n.expression) === "then" && (ts.isPropertyAccessExpression(n.expression) || ts.isElementAccessExpression(n.expression)) && isTestModuleLoad(n.expression.expression)) {
+      const fn = n.arguments[0];
+      const param = fn !== undefined && (ts.isArrowFunction(fn) || ts.isFunctionExpression(fn)) ? fn.parameters[0] : undefined;
+      if (param !== undefined && ts.isIdentifier(param.name)) namespaces.add(param.name.text);
+      if (param !== undefined && ts.isObjectBindingPattern(param.name)) moduleBindings(param.name);
+    }
     if (ts.isVariableDeclaration(n) && n.initializer !== undefined) decls.push(n);
     ts.forEachChild(n, collect);
+  }
+
+  /**
+   * Test modülünden yapı bozma (`{ it: t, xit }`) → kökler/önekliler. Değişiklik varsa `true`.
+   * @param {ts.ObjectBindingPattern} pattern
+   * @returns {boolean}
+   */
+  function moduleBindings(pattern) {
+    let changed = false;
+    for (const el of pattern.elements) {
+      const prop = bindingProp(el);
+      if (!ts.isIdentifier(el.name) || prop === null) continue;
+      if (BASE_NAMES.has(prop) && !bases.has(el.name.text)) {
+        bases.add(el.name.text);
+        changed = true;
+      }
+      const code = PREFIXED.get(prop);
+      if (code !== undefined && !prefixed.has(el.name.text)) {
+        prefixed.set(el.name.text, code);
+        changed = true;
+      }
+    }
+    return changed;
   }
   collect(sf);
 
@@ -322,6 +445,11 @@ export function scanSource(text, file) {
     changed = false;
     for (const d of decls) {
       const init = unwrap(/** @type {ts.Expression} */ (d.initializer));
+      // const v = await import("vitest") / require("vitest") → ad alanı
+      if (ts.isIdentifier(d.name) && !namespaces.has(d.name.text) && isTestModuleLoad(init)) {
+        namespaces.add(d.name.text);
+        changed = true;
+      }
       if (ts.isIdentifier(d.name) && !bases.has(d.name.text)) {
         const derivable =
           ts.isIdentifier(init) ||
@@ -335,28 +463,7 @@ export function scanSource(text, file) {
       }
       if (ts.isObjectBindingPattern(d.name)) {
         // `const { it: t } = v` / `const { test } = await import("vitest")`
-        const fromModule =
-          (ts.isIdentifier(init) && namespaces.has(init.text)) ||
-          (ts.isCallExpression(init) &&
-            init.expression.kind === ts.SyntaxKind.ImportKeyword &&
-            init.arguments[0] !== undefined &&
-            ts.isStringLiteralLike(init.arguments[0]) &&
-            TEST_MODULES.has(init.arguments[0].text));
-        if (fromModule) {
-          for (const el of d.name.elements) {
-            if (!ts.isIdentifier(el.name)) continue;
-            const prop = el.propertyName !== undefined && ts.isIdentifier(el.propertyName) ? el.propertyName.text : el.name.text;
-            if (BASE_NAMES.has(prop) && !bases.has(el.name.text)) {
-              bases.add(el.name.text);
-              changed = true;
-            }
-            const code = PREFIXED.get(prop);
-            if (code !== undefined && !prefixed.has(el.name.text)) {
-              prefixed.set(el.name.text, code);
-              changed = true;
-            }
-          }
-        }
+        if (isNamespace(init) && moduleBindings(d.name)) changed = true;
       }
       if (readsEnvironment(init, envVars)) {
         for (const name of bindingNames(d.name)) {
@@ -415,12 +522,81 @@ export function scanSource(text, file) {
   function checkConditionalBody(call, rootName) {
     if (chainMembers(call.expression).some((m) => HOOK_MEMBERS.has(m))) return;
     const fn = [...call.arguments].reverse().find((a) => ts.isArrowFunction(a) || ts.isFunctionExpression(a));
-    if (fn === undefined || !(ts.isArrowFunction(fn) || ts.isFunctionExpression(fn)) || !ts.isBlock(fn.body)) return;
+    if (fn === undefined || !(ts.isArrowFunction(fn) || ts.isFunctionExpression(fn))) return;
+    checkContextSkip(fn, rootName);
+    if (!ts.isBlock(fn.body)) return;
     for (const stmt of fn.body.statements) {
       if (isIfReturn(stmt) && readsEnvironment(stmt.expression, envVars)) {
         report(stmt, "CONDITIONAL_SKIP", `${rootName} gövdesinde ortama bağlı erken dönüş: if (${stmt.expression.getText(sf)}) return`);
       }
     }
+  }
+
+  /** Test bağlamından alınmış `skip` çağrıları (genel `skip()` kuralı bunları yinelemez). */
+  /** @type {Set<ts.Node>} */
+  const contextSkipCalls = new Set();
+
+  /**
+   * Yapı bozma deseninde `skip` öğelerinin yerel adları.
+   * @param {ts.ObjectBindingPattern} pattern
+   * @returns {string[]}
+   */
+  function skipBindings(pattern) {
+    /** @type {string[]} */
+    const out = [];
+    for (const el of pattern.elements) {
+      if (bindingProp(el) === "skip" && ts.isIdentifier(el.name)) out.push(el.name.text);
+    }
+    return out;
+  }
+
+  /**
+   * Test geri çağrısında bağlamdan yapı bozulan / alınan `skip` çağrıları → CONDITIONAL_SKIP
+   * (`({ skip: s }) => s(cond)`, `(ctx) => { const { skip } = ctx; skip() }`, `const s = ctx.skip`).
+   * @param {ts.ArrowFunction | ts.FunctionExpression} fn
+   * @param {string} rootName
+   */
+  function checkContextSkip(fn, rootName) {
+    /** @type {Set<string>} */
+    const ctxNames = new Set();
+    /** @type {Set<string>} */
+    const skipNames = new Set();
+    for (const p of fn.parameters) {
+      if (ts.isIdentifier(p.name)) ctxNames.add(p.name.text);
+      else if (ts.isObjectBindingPattern(p.name)) for (const n of skipBindings(p.name)) skipNames.add(n);
+    }
+    /** @param {ts.Expression} e */
+    const isCtx = (e) => {
+      const x = unwrap(e);
+      return ts.isIdentifier(x) && ctxNames.has(x.text);
+    };
+    /** @param {ts.Node} n */
+    const collectAliases = (n) => {
+      if (ts.isVariableDeclaration(n) && n.initializer !== undefined && isCtx(n.initializer) && ts.isObjectBindingPattern(n.name)) {
+        for (const x of skipBindings(n.name)) skipNames.add(x);
+      }
+      if (ts.isVariableDeclaration(n) && n.initializer !== undefined && ts.isIdentifier(n.name)) {
+        const init = unwrap(n.initializer);
+        if ((ts.isPropertyAccessExpression(init) || ts.isElementAccessExpression(init)) && memberName(init) === "skip" && isCtx(init.expression)) {
+          skipNames.add(n.name.text);
+        }
+      }
+      ts.forEachChild(n, collectAliases);
+    };
+    collectAliases(fn.body);
+    if (skipNames.size === 0) return;
+    /** @param {ts.Node} n */
+    const findCalls = (n) => {
+      if (ts.isCallExpression(n)) {
+        const callee = unwrap(n.expression);
+        if (ts.isIdentifier(callee) && skipNames.has(callee.text)) {
+          contextSkipCalls.add(n);
+          report(n, "CONDITIONAL_SKIP", `${rootName} bağlamından alınan skip çağrısı: ${n.getText(sf)}`);
+        }
+      }
+      ts.forEachChild(n, findCalls);
+    };
+    findCalls(fn.body);
   }
 
   /** @param {ts.Node} node */
@@ -432,16 +608,19 @@ export function scanSource(text, file) {
         report(node, /** @type {string} */ (MODIFIERS.get(member)), `${node.getText(sf)}`);
       }
     }
+    // Hesaplanan üye: it[k] / v[k] (sabit dizeye indirgenemeyen) → SKIP (fail-closed)
+    if (ts.isElementAccessExpression(node) && member === null && (isTestChain(node.expression) || isNamespace(node.expression))) {
+      report(node, "SKIP", `hesaplanan test üyesi (sabit değil): ${node.getText(sf)}`);
+    }
 
     // Yapı bozma: const { skip } = it / const { only: o } = test.concurrent
     if (ts.isVariableDeclaration(node) && ts.isObjectBindingPattern(node.name) && node.initializer !== undefined && isTestChain(unwrap(node.initializer))) {
       for (const el of node.name.elements) {
-        const prop =
-          el.propertyName !== undefined && (ts.isIdentifier(el.propertyName) || ts.isStringLiteralLike(el.propertyName))
-            ? el.propertyName.text
-            : ts.isIdentifier(el.name)
-              ? el.name.text
-              : null;
+        const prop = bindingProp(el);
+        if (prop === null && el.propertyName !== undefined && ts.isComputedPropertyName(el.propertyName)) {
+          report(el, "SKIP", `hesaplanan yapı bozma (sabit değil): const { ${el.getText(sf)} } = ${node.initializer.getText(sf)}`);
+          continue;
+        }
         const code = prop === null ? undefined : MODIFIERS.get(prop);
         if (code !== undefined) report(el, code, `const { ${el.getText(sf)} } = ${node.initializer.getText(sf)}`);
       }
@@ -463,9 +642,10 @@ export function scanSource(text, file) {
           report(node, name === "skip" ? "SKIP" : "TODO", `${callee.getText(sf)}()`);
         }
         // Bağlamdan ayrıştırılmış `skip()`
-        if (ts.isIdentifier(callee) && callee.text === "skip") report(node, "SKIP", "skip()");
+        if (ts.isIdentifier(callee) && callee.text === "skip" && !contextSkipCalls.has(node)) report(node, "SKIP", "skip()");
 
-        if (root !== null && testCall) {
+        if (testCall) {
+          const rootName = root?.text ?? "test";
           // node:test seçenekleri: test("…", { skip: true }, fn)
           for (const arg of node.arguments) {
             if (!ts.isObjectLiteralExpression(arg)) continue;
@@ -474,10 +654,10 @@ export function scanSource(text, file) {
               const code = key === null ? undefined : OPTION_KEYS.get(key);
               if (code === undefined) continue;
               if (ts.isPropertyAssignment(p) && p.initializer.kind === ts.SyntaxKind.FalseKeyword) continue;
-              report(p, code, `${root.text}(…, { ${p.getText(sf)} })`);
+              report(p, code, `${rootName}(…, { ${p.getText(sf)} })`);
             }
           }
-          checkConditionalBody(node, root.text);
+          checkConditionalBody(node, rootName);
         }
       }
     }

@@ -3,7 +3,11 @@
 // ikisi birden bulunmalı:
 //   (a) tam satır:  APPROVED-BY: supervisor (ADR-012 rev.) @ <40 hex PR head SHA>
 //       SHA head'e eşit değilse APPROVAL_STALE (onay son push'tan önce yazılmış; M4)
-//   (b) rapor özeti: security-reviewer: BLOCKER: <n> · MAJOR: <n> · MINOR: <n>   ve n(BLOCKER) == 0
+//   (b) rapor özeti: security-reviewer: BLOCKER: <n> · MAJOR: <n> · MINOR: <n> @ <40 hex SHA>
+//       ve n(BLOCKER) == 0. SHA, raporun incelediği commit'tir (T-008i MINOR 8): PR head'inin atası
+//       (veya kendisi) olmalı ve o commit'ten head'e korunan değişiklik olmamalı; aksi
+//       SECURITY_REPORT_STALE. Tazelik git gerektirir: çağıran `securityFresh` ile verir; verilmezse
+//       yalnızca SHA == head taze sayılır (fail-closed).
 // Karttaki `protected: true` (veya açıklamada geçmesi) hiçbir koşulu karşılamaz.
 // Görünmeyen veya alıntı olan metin sayılmaz (m1, CommonMark): çitli kod bloğu (kapanış: aynı
 // karakter, ≥ uzunluk, bilgi dizesi yok, ≤3 boşluk girinti), 4 boşluk/sekme girintili kod
@@ -26,11 +30,24 @@ export function approvalLine(sha) {
 }
 
 /**
- * Rapor özeti satırı. Ayraç `·` (U+00B7); `|`, `,`, `;` de kabul. Satır sonunda rapor bağlantısı
- * veya açıklama olabilir (boşlukla ayrılmış).
+ * Rapor özeti satırı: `security-reviewer: BLOCKER: n · MAJOR: n · MINOR: n @ <40 hex SHA>`. Ayraç `·`
+ * (U+00B7); `|`, `,`, `;` de kabul. SHA'dan sonra rapor bağlantısı veya açıklama olabilir (boşlukla).
  */
 export const SECURITY_LINE_RE =
-  /^security-reviewer:\s*BLOCKER:\s*(\d+)\s*[·|,;]\s*MAJOR:\s*(\d+)\s*[·|,;]\s*MINOR:\s*(\d+)(?:\s+.*)?$/;
+  /^security-reviewer:\s*BLOCKER:\s*(\d+)\s*[·|,;]\s*MAJOR:\s*(\d+)\s*[·|,;]\s*MINOR:\s*(\d+)\s+@\s+([0-9a-f]{40})(?:\s+.*)?$/;
+
+/** SHA'sız (T-008i öncesi) özet satırı: tanınır ama kabul edilmez (hata iletisi için). */
+const SECURITY_LINE_NO_SHA_RE = /^security-reviewer:\s*BLOCKER:\s*\d+\s*[·|,;]\s*MAJOR:\s*\d+\s*[·|,;]\s*MINOR:\s*\d+(?:\s+(?!@).*)?$/;
+
+/**
+ * Belirli bir commit için rapor özeti satırı.
+ * @param {{ blocker: number, major: number, minor: number }} counts
+ * @param {string} sha raporun incelediği commit
+ * @returns {string}
+ */
+export function securityLine(counts, sha) {
+  return `security-reviewer: BLOCKER: ${counts.blocker} · MAJOR: ${counts.major} · MINOR: ${counts.minor} @ ${sha}`;
+}
 
 /** Neden kodları. */
 export const REASONS = Object.freeze({
@@ -39,10 +56,12 @@ export const REASONS = Object.freeze({
   SECURITY_BLOCKER: "SECURITY_BLOCKER",
   UNVERIFIABLE: "APPROVAL_UNVERIFIABLE",
   STALE: "APPROVAL_STALE",
+  SECURITY_STALE: "SECURITY_REPORT_STALE",
 });
 
 /**
- * @typedef {{ blocker: number, major: number, minor: number, line: string }} SecuritySummary
+ * @typedef {{ blocker: number, major: number, minor: number, sha: string, line: string }} SecuritySummary
+ * @typedef {(sha: string) => string | null} SecurityFreshness rapor SHA'sı taze ise `null`, değilse neden
  * @typedef {{ code: string, message: string }} ApprovalProblem
  * @typedef {{
  *   ok: boolean,
@@ -154,9 +173,11 @@ export function effectiveLines(body) {
  * PR açıklamasını onay kuralına göre değerlendirir.
  * @param {string | null | undefined} body PR açıklaması (`null` = boş açıklama)
  * @param {string} headSha PR'ın head SHA'sı (API'den); onay satırı buna bağlı olmalı
+ * @param {{ securityFresh?: SecurityFreshness }} [opts] rapor SHA'sının tazelik denetimi (git ile;
+ *   `protected.mjs`). Verilmezse yalnızca head'in kendisi taze sayılır.
  * @returns {ApprovalResult}
  */
-export function evaluateApproval(body, headSha) {
+export function evaluateApproval(body, headSha, opts = {}) {
   const lines = effectiveLines(body ?? "");
   const head = headSha.toLowerCase();
   const shas = lines.map((l) => APPROVAL_RE.exec(l)?.[1]).filter((x) => x !== undefined);
@@ -166,8 +187,9 @@ export function evaluateApproval(body, headSha) {
   for (const l of lines) {
     const m = SECURITY_LINE_RE.exec(l);
     if (m === null) continue;
-    security.push({ blocker: Number(m[1]), major: Number(m[2]), minor: Number(m[3]), line: l });
+    security.push({ blocker: Number(m[1]), major: Number(m[2]), minor: Number(m[3]), sha: /** @type {string} */ (m[4]), line: l });
   }
+  const shaless = lines.filter((l) => SECURITY_LINE_NO_SHA_RE.test(l));
   /** @type {ApprovalProblem[]} */
   const problems = [];
   if (!approved && shas.length > 0) {
@@ -181,7 +203,9 @@ export function evaluateApproval(body, headSha) {
   if (security.length === 0) {
     problems.push({
       code: REASONS.SECURITY_MISSING,
-      message: "PR açıklamasında security-reviewer rapor özeti satırı yok (security-reviewer: BLOCKER: <n> · MAJOR: <n> · MINOR: <n>)",
+      message: `PR açıklamasında security-reviewer rapor özeti satırı yok (security-reviewer: BLOCKER: <n> · MAJOR: <n> · MINOR: <n> @ <40 hex SHA>)${
+        shaless.length > 0 ? "; SHA'sız özet satırı kabul edilmez (raporun incelediği commit eklenmeli)" : ""
+      }`,
     });
   } else {
     // Birden fazla özet varsa hepsi BLOCKER: 0 olmalı (çelişkili raporda fail-closed).
@@ -191,6 +215,18 @@ export function evaluateApproval(body, headSha) {
         code: REASONS.SECURITY_BLOCKER,
         message: `security-reviewer BLOCKER sayısı 0 değil (${bad.map((s) => s.blocker).join(", ")})`,
       });
+    }
+    // Her özet taze olmalı (çelişkide fail-closed): SHA head'in atası/kendisi ve aradaki commit'lerde
+    // korunan değişiklik yok.
+    const fresh = opts.securityFresh ?? ((/** @type {string} */ sha) => (sha === head ? null : "rapor SHA'sı PR head SHA'sı değil (tazelik denetlenmedi)"));
+    /** @type {string[]} */
+    const stale = [];
+    for (const sha of new Set(security.map((s) => s.sha))) {
+      const why = sha === head ? null : fresh(sha);
+      if (why !== null) stale.push(`${sha.slice(0, 12)}: ${why}`);
+    }
+    if (stale.length > 0) {
+      problems.push({ code: REASONS.SECURITY_STALE, message: `security-reviewer raporu bayat (${stale.join("; ")}); rapor yenilenmeli` });
     }
   }
   return { ok: problems.length === 0, approved, security, problems };

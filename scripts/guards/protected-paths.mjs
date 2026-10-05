@@ -6,8 +6,8 @@
 //   2. Taban kuralı    — dosya tabanda vardıysa korunur (birleşmiş migration'lar; yeni migration serbest).
 //   3. İçerik kuralı   — yalnızca belirli alan/satır değişirse korunur (tüm `package.json`'larda `scripts`,
 //                        `pnpm`, paket yöneticisi anahtarları ve korunan paketlerin sürümleri; `pnpm-lock.yaml`'da
-//                        korunan paketlerin girdileri/`resolution`'ları ve tarball/git çözümlemeleri; pooler imajı,
-//                        AC tabanı düşüşü, ADR'nin "kabul"e geçmesi).
+//                        korunan paketlerin bağımlılık kapanışı, takma adlar ve tarball/git çözümlemeleri
+//                        (T-008i M6); pooler imajı, AC tabanı düşüşü, ADR'nin "kabul"e geçmesi).
 // Belirsizlikte (ayrıştırılamayan dosya) korunan sayılır (fail-closed).
 // Glob eşlemesi nokta ile başlayan adları da kapsar (`dot: true` eşdeğeri; T-008h M7): Node'un
 // `path.matchesGlob`'u `**`/`*` ile `.x` adlarını eşlemediği için kendi (yalnızca `*`, `**`) eşleyicimiz var.
@@ -61,6 +61,7 @@ export const PROTECTED_GLOBS = Object.freeze([
   "patches/**",
   "**/patches/**",
   "**/*.patch",
+  "**/*.diff",
   // AC faz değişikliği (pilot koşulları; T-008h m8)
   "docs/PILOT.md",
 ]);
@@ -347,62 +348,424 @@ function lockKeyName(key) {
   return at === -1 ? k : k.slice(0, at);
 }
 
-/** `pnpm-lock.yaml`'da metin olarak karşılaştırılan üst düzey bloklar. */
-const LOCK_TOP_BLOCKS = new Set(["lockfileVersion", "settings", "overrides", "patchedDependencies", "pnpmfileChecksum", "packageExtensionsChecksum", "catalogs"]);
+// ---------- pnpm-lock.yaml (v9) dar ayrıştırıcısı (T-008i M6) ----------
+//
+// Yeni bağımlılık yok: YAML'ın yalnızca pnpm'in v9 kilit dosyasında yazdığı alt kümesi kabul edilir,
+// geri kalan her biçim `LockfileError` (→ korunan değişiklik, fail-closed):
+//   - girinti yalnızca boşluk, her düzey tam 2; sekme yok;
+//   - satır: `anahtar:` (blok açar), `anahtar: değer`, `- değer` (yalnızca skaler dizi öğesi);
+//   - anahtar: düz, '…' ('' kaçışlı) veya "…" (ters bölü yok); `?`, `<<`, `&`, `*`, `!`, `|`, `>`,
+//     `%`, `@`, `` ` ``, `-`, `[`, `{`, `#` ile başlayan düz anahtar yok;
+//   - değer: düz skaler, tırnaklı skaler, tek satırlık akış (`{…}`, `[…]`; tırnak dışında `&`/`*`/` #`
+//     yok); çapa/takma ad/etiket/blok skaler (`|`, `>`), satır sonu yorumu, belge imleri yok;
+//   - aynı eşlemede yinelenen anahtar yok (tırnaklı/tırnaksız aynı ad dahil); boş blok yok;
+//   - yalnızca tam satır yorum (`# …`) ve boş satır atlanır; `lockfileVersion` 9.x olmalı.
+
+export class LockfileError extends Error {
+  /** @param {string} message */
+  constructor(message) {
+    super(message);
+    this.name = "LockfileError";
+  }
+}
 
 /**
- * `pnpm-lock.yaml`'ın korunan özeti (T-008h M6), YAML ayrıştırıcısı olmadan satır düzeyinde:
- *   - üst düzey `LOCK_TOP_BLOCKS` blokları (ayarlar, overrides, patchedDependencies, sağlama toplamları);
- *   - `packages:` bölümünde korunan paketlerin (`isGuardedPackage`) anahtar satırı (sürüm dahil) +
- *     `resolution` (çok satırlıysa devamı dahil);
- *   - herhangi bir paketin `integrity` dışı çözümlemesi (`tarball`, `commit`/`repo`, `directory`, `path`).
+ * @typedef {{ kind: "scalar", value: string }
+ *   | { kind: "map", entries: Map<string, LockNode> }
+ *   | { kind: "seq", items: string[] }} LockNode
+ * @typedef {{ kind: "map" | "seq" | null, entries: Map<string, LockNode>, items: string[] }} OpenBlock
+ */
+
+/** Düz (tırnaksız) skaler/anahtarın başında olamayacak YAML göstergeleri. */
+const PLAIN_FORBIDDEN_START = /^[?&*!|>%@`\-[\]{},#'"<]/;
+
+/**
+ * Tek tırnaklı dizgenin kapanış konumu (`''` kaçış). Yoksa -1.
+ * @param {string} s `'` ile başlar
+ * @returns {number}
+ */
+function singleQuoteEnd(s) {
+  for (let i = 1; i < s.length; i++) {
+    if (s[i] !== "'") continue;
+    if (s[i + 1] === "'") {
+      i++;
+      continue;
+    }
+    return i;
+  }
+  return -1;
+}
+
+/**
+ * Tırnaklı dizgeyi açar; tırnak sonrası `rest` döner. Belirsizlikte hata.
+ * @param {string} s `'` veya `"` ile başlar
+ * @param {number} ln
+ * @returns {{ value: string, rest: string }}
+ */
+function unquote(s, ln) {
+  if (s[0] === "'") {
+    const end = singleQuoteEnd(s);
+    if (end === -1) throw new LockfileError(`satır ${ln}: kapanmayan tek tırnak`);
+    return { value: s.slice(1, end).replace(/''/g, "'"), rest: s.slice(end + 1) };
+  }
+  const end = s.indexOf('"', 1);
+  if (end === -1) throw new LockfileError(`satır ${ln}: kapanmayan çift tırnak`);
+  const inner = s.slice(1, end);
+  if (inner.includes("\\")) throw new LockfileError(`satır ${ln}: çift tırnakta kaçış dizisi desteklenmez`);
+  return { value: inner, rest: s.slice(end + 1) };
+}
+
+/**
+ * Tek satırlık akış koleksiyonu: dengeli parantez, tırnak dışında çapa/takma ad/yorum yok.
+ * @param {string} raw `{` veya `[` ile başlar
+ * @param {number} ln
+ */
+function checkFlow(raw, ln) {
+  /** @type {string[]} */
+  const stack = [];
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i] ?? "";
+    if (ch === "'" || ch === '"') {
+      const q = unquote(raw.slice(i), ln);
+      i = raw.length - q.rest.length - 1;
+      continue;
+    }
+    if (ch === "{" || ch === "[") stack.push(ch === "{" ? "}" : "]");
+    else if (ch === "}" || ch === "]") {
+      if (stack.pop() !== ch) throw new LockfileError(`satır ${ln}: dengesiz akış koleksiyonu`);
+      if (stack.length === 0 && i !== raw.length - 1) throw new LockfileError(`satır ${ln}: akış koleksiyonundan sonra metin`);
+    } else if (ch === "&" || ch === "*" || ch === "!" || (ch === "|" && raw[i + 1] !== "|" && raw[i - 1] !== "|")) {
+      // `||` (semver aralığı) dışında `|`, çapa, takma ad, etiket desteklenmez.
+      throw new LockfileError(`satır ${ln}: akış koleksiyonunda desteklenmeyen gösterge "${ch}"`);
+    } else if (ch === "#" && /\s/.test(raw[i - 1] ?? "")) {
+      throw new LockfileError(`satır ${ln}: satır sonu yorumu desteklenmez`);
+    }
+  }
+  if (stack.length !== 0) throw new LockfileError(`satır ${ln}: kapanmayan akış koleksiyonu`);
+}
+
+/**
+ * Değer skaleri. Akış koleksiyonu ham metniyle döner (parmak izinde ham karşılaştırılır).
+ * @param {string} raw kırpılmış, boş değil
+ * @param {number} ln
+ * @returns {string}
+ */
+function parseScalar(raw, ln) {
+  if (raw[0] === "'" || raw[0] === '"') {
+    const q = unquote(raw, ln);
+    if (q.rest.trim() !== "") throw new LockfileError(`satır ${ln}: tırnaktan sonra metin`);
+    return q.value;
+  }
+  if (raw[0] === "{" || raw[0] === "[") {
+    checkFlow(raw, ln);
+    return raw;
+  }
+  if (PLAIN_FORBIDDEN_START.test(raw)) throw new LockfileError(`satır ${ln}: desteklenmeyen değer biçimi "${raw}"`);
+  if (/\s#/.test(raw)) throw new LockfileError(`satır ${ln}: satır sonu yorumu desteklenmez`);
+  if (/:(?:\s|$)/.test(raw)) throw new LockfileError(`satır ${ln}: değerde ": " (iç içe eşleme) desteklenmez`);
+  return raw;
+}
+
+/**
+ * Bir satırı ayrıştırır: dizi öğesi veya anahtar (+ isteğe bağlı değer).
+ * @param {string} c girintisiz içerik
+ * @param {number} ln
+ * @returns {{ item: string } | { key: string, value: string | null }}
+ */
+function parseLine(c, ln) {
+  if (c === "-" || c.startsWith("- ")) {
+    const v = c.slice(1).trim();
+    if (v === "") throw new LockfileError(`satır ${ln}: boş dizi öğesi`);
+    if (/^[^'"{[].*:$/.test(v)) throw new LockfileError(`satır ${ln}: dizi içinde eşleme desteklenmez`);
+    return { item: parseScalar(v, ln) };
+  }
+  /** @type {string} */
+  let key;
+  /** @type {string} */
+  let rest;
+  if (c[0] === "'" || c[0] === '"') {
+    const q = unquote(c, ln);
+    key = q.value;
+    rest = q.rest;
+    if (!rest.startsWith(":")) throw new LockfileError(`satır ${ln}: tırnaklı anahtardan sonra ":" yok`);
+    rest = rest.slice(1);
+    if (rest !== "" && !/^\s/.test(rest)) throw new LockfileError(`satır ${ln}: ":" sonrası boşluk yok`);
+  } else {
+    if (PLAIN_FORBIDDEN_START.test(c)) throw new LockfileError(`satır ${ln}: desteklenmeyen anahtar biçimi "${c}"`);
+    const m = /:(?:\s|$)/.exec(c);
+    if (m === null) throw new LockfileError(`satır ${ln}: anahtar/değer satırı değil "${c}"`);
+    key = c.slice(0, m.index);
+    rest = c.slice(m.index + 1);
+    if (/\s#/.test(key) || key.trim() !== key || key === "") throw new LockfileError(`satır ${ln}: geçersiz anahtar "${key}"`);
+  }
+  if (key === "<<") throw new LockfileError(`satır ${ln}: birleştirme anahtarı desteklenmez`);
+  const v = rest.trim();
+  return { key, value: v === "" ? null : parseScalar(v, ln) };
+}
+
+/**
+ * @param {OpenBlock} b
+ * @param {number} ln
+ * @returns {LockNode}
+ */
+function closeBlock(b, ln) {
+  if (b.kind === null) throw new LockfileError(`satır ${ln}: boş blok (değersiz anahtar) desteklenmez`);
+  return b.kind === "map" ? { kind: "map", entries: b.entries } : { kind: "seq", items: b.items };
+}
+
+/**
+ * pnpm-lock v9 alt kümesini ağaca ayrıştırır (bkz. bölüm başı). Belirsizlik = `LockfileError`.
+ * @param {string} text
+ * @returns {Map<string, LockNode>} üst düzey eşleme
+ */
+export function parseLockYaml(text) {
+  /** @type {OpenBlock} */
+  const root = { kind: "map", entries: new Map(), items: [] };
+  /** @type {Array<{ block: OpenBlock, indent: number, set: (n: LockNode) => void }>} */
+  const stack = [{ block: root, indent: 0, set: () => {} }];
+  const lines = text.split(/\r?\n/);
+  let ln = 0;
+  for (const rawLine of lines) {
+    ln++;
+    const line = rawLine.replace(/ +$/, "");
+    if (line === "") continue;
+    if (line.includes("\t")) throw new LockfileError(`satır ${ln}: sekme karakteri desteklenmez`);
+    const indent = /^ */.exec(line)?.[0].length ?? 0;
+    const c = line.slice(indent);
+    if (c.startsWith("#")) continue;
+    while (stack.length > 1 && (stack[stack.length - 1]?.indent ?? 0) > indent) {
+      const top = /** @type {{ block: OpenBlock, set: (n: LockNode) => void }} */ (stack.pop());
+      top.set(closeBlock(top.block, ln));
+    }
+    const top = /** @type {{ block: OpenBlock, indent: number }} */ (stack[stack.length - 1]);
+    if (top.indent !== indent) throw new LockfileError(`satır ${ln}: beklenmeyen girinti (${indent}, beklenen ${top.indent})`);
+    const p = parseLine(c, ln);
+    const b = top.block;
+    if ("item" in p) {
+      if (b.kind === "map") throw new LockfileError(`satır ${ln}: eşleme içinde dizi öğesi`);
+      b.kind = "seq";
+      b.items.push(p.item);
+      continue;
+    }
+    if (b.kind === "seq") throw new LockfileError(`satır ${ln}: dizi içinde anahtar`);
+    b.kind = "map";
+    if (b.entries.has(p.key)) throw new LockfileError(`satır ${ln}: yinelenen anahtar "${p.key}"`);
+    if (p.value !== null) {
+      b.entries.set(p.key, { kind: "scalar", value: p.value });
+      continue;
+    }
+    /** @type {OpenBlock} */
+    const child = { kind: null, entries: new Map(), items: [] };
+    const key = p.key;
+    const parent = b.entries;
+    parent.set(key, { kind: "scalar", value: "" }); // yer tutucu: yineleme denetimi için
+    stack.push({ block: child, indent: indent + 2, set: (n) => parent.set(key, n) });
+  }
+  while (stack.length > 1) {
+    const top = /** @type {{ block: OpenBlock, set: (n: LockNode) => void }} */ (stack.pop());
+    top.set(closeBlock(top.block, ln));
+  }
+  return root.entries;
+}
+
+/**
+ * Düğümün kararlı metin biçimi (parmak izi için).
+ * @param {LockNode | undefined} n
+ * @returns {string}
+ */
+function canon(n) {
+  if (n === undefined) return "<yok>";
+  /** @param {LockNode} x @returns {unknown} */
+  const plain = (x) =>
+    x.kind === "scalar" ? x.value : x.kind === "seq" ? x.items : Object.fromEntries([...x.entries].map(([k, v]) => [k, plain(v)]));
+  return JSON.stringify(plain(n));
+}
+
+/**
+ * Eşleme düğümü (veya `{}` skaleri) → girdiler. Başka biçim = hata.
+ * @param {LockNode | undefined} n
+ * @param {string} what
+ * @returns {Map<string, LockNode>}
+ */
+function lockMap(n, what) {
+  if (n === undefined) return new Map();
+  if (n.kind === "map") return n.entries;
+  if (n.kind === "scalar" && n.value === "{}") return new Map();
+  throw new LockfileError(`${what}: eşleme bekleniyordu`);
+}
+
+/**
+ * Bağımlılık eşlemesi: ad → skaler değer (blok biçim; `{}` boş). Başka biçim = hata.
+ * @param {LockNode | undefined} n
+ * @param {string} what
+ * @returns {Map<string, string>}
+ */
+function depMap(n, what) {
+  /** @type {Map<string, string>} */
+  const out = new Map();
+  for (const [k, v] of lockMap(n, what)) {
+    if (v.kind !== "scalar" || v.value.startsWith("{") || v.value.startsWith("[")) {
+      throw new LockfileError(`${what}.${k}: skaler sürüm bekleniyordu`);
+    }
+    out.set(k, v.value);
+  }
+  return out;
+}
+
+/** Peer soneki olmadan anahtar (`a@1.0.0(b@2)` → `a@1.0.0`); `packages:` anahtarı. */
+const stripPeers = (/** @type {string} */ k) => (k.includes("(") ? k.slice(0, k.indexOf("(")) : k);
+
+/**
+ * Bağımlılık değeri takma ad mı (`other@1.0.0`, `@s/other@1.0.0(p@1)`, `npm:…`).
+ * @param {string} value
+ * @returns {boolean}
+ */
+export function isLockAlias(value) {
+  return value.startsWith("npm:") || stripPeers(value).indexOf("@", 1) !== -1;
+}
+
+/**
+ * Bağımlılık adı + değeri → snapshot anahtarı (`link:` → `null`, düğüm değil).
+ * @param {string} name
+ * @param {string} value
+ * @returns {string | null}
+ */
+function depKey(name, value) {
+  if (value.startsWith("link:")) return null;
+  return isLockAlias(value) ? value.replace(/^npm:/, "") : `${name}@${value}`;
+}
+
+const SNAPSHOT_DEP_SECTIONS = ["dependencies", "optionalDependencies"];
+const IMPORTER_DEP_SECTIONS = new Set(["dependencies", "devDependencies", "optionalDependencies"]);
+const NON_INTEGRITY_RE = /\b(?:tarball|commit|repo|directory|path|type)\s*:/;
+
+/**
+ * `pnpm-lock.yaml`'ın korunan parmak izi (T-008h M6, T-008i M6). Sıralı satırlar:
+ *   - `importers`/`packages`/`snapshots` dışındaki tüm üst düzey bloklar (ayarlar, overrides,
+ *     patchedDependencies, sağlama toplamları, catalogs, bilinmeyenler) tamamen;
+ *   - importer'larda korunan paket girdileri (`specifier` + `version`) ve bağımlılık dışı alanlar;
+ *   - korunan paketlerin (`isGuardedPackage`) **bağımlılık kapanışı**: kökler (importer'daki korunan
+ *     paketler + adı korunan tüm snapshot/package girdileri) ve `snapshots:` `dependencies`/
+ *     `optionalDependencies` üzerinden geçişli her düğümün snapshot ve `packages:` girdisi tamamen
+ *     (sürüm, peer çözümü, `resolution`/integrity, engines …). Eksik düğüm `<yok>` olarak yazılır;
+ *   - herhangi bir yerdeki takma ad değeri (`x: other@ver`, `npm:` önekli specifier/sürüm);
+ *   - herhangi bir paketin integrity dışı çözümlemesi (`tarball`, `commit`/`repo`, `directory`, `path`).
+ * Desteklenmeyen biçim `LockfileError` fırlatır (çağıran korunan sayar).
  * @param {string | null} text
  * @returns {string}
  */
 export function lockfileGuarded(text) {
   if (text === null) return "";
-  const lines = text.split(/\r?\n/);
+  const top = parseLockYaml(text);
+  const lv = top.get("lockfileVersion");
+  if (lv === undefined || lv.kind !== "scalar" || !/^9\.\d+$/.test(lv.value)) {
+    throw new LockfileError(`lockfileVersion 9.x değil (${canon(lv)}); bu ayrıştırıcı yalnızca v9 içindir`);
+  }
   /** @type {string[]} */
   const out = [];
-  let top = "";
-  let entry = "";
-  let entryGuarded = false;
-  for (let i = 0; i < lines.length; i++) {
-    const l = (lines[i] ?? "").trimEnd();
-    if (l.trim() === "" || l.trim().startsWith("#")) continue;
-    const indent = /^ */.exec(l)?.[0].length ?? 0;
-    if (indent === 0) {
-      top = /^['"]?([^'":]+)/.exec(l)?.[1] ?? l;
-      entry = "";
-      if (LOCK_TOP_BLOCKS.has(top)) out.push(l);
-      continue;
-    }
-    if (LOCK_TOP_BLOCKS.has(top)) {
-      out.push(l);
-      continue;
-    }
-    if (top !== "packages") continue;
-    if (indent === 2) {
-      entry = l.trim().replace(/:\s*(?:\{\})?$/, "");
-      entryGuarded = isGuardedPackage(lockKeyName(entry));
-      if (entryGuarded) out.push(l);
-      continue;
-    }
-    if (indent === 4 && /^resolution\s*:/.test(l.trim())) {
-      /** @type {string[]} */
-      const block = [l.trim()];
-      for (let j = i + 1; j < lines.length; j++) {
-        const n = (lines[j] ?? "").trimEnd();
-        if (n.trim() !== "" && (/^ */.exec(n)?.[0].length ?? 0) <= 4) break;
-        if (n.trim() !== "") block.push(n.trim());
-        i = j;
+  for (const [k, v] of top) {
+    if (k !== "importers" && k !== "packages" && k !== "snapshots") out.push(`top ${k} ${canon(v)}`);
+  }
+  const importers = lockMap(top.get("importers"), "importers");
+  const packages = lockMap(top.get("packages"), "packages");
+  const snapshots = lockMap(top.get("snapshots"), "snapshots");
+
+  /** @type {string[]} */
+  const roots = [];
+  for (const [imp, node] of importers) {
+    for (const [section, sv] of lockMap(node, `importers.${imp}`)) {
+      if (!IMPORTER_DEP_SECTIONS.has(section)) {
+        out.push(`importer ${imp} ${section} ${canon(sv)}`);
+        continue;
       }
-      const res = block.join(" ");
-      const nonIntegrity = /\b(?:tarball|commit|repo|directory|path|type)\s*:/.test(res);
-      if (entryGuarded || nonIntegrity) out.push(`${entry} ${res}`);
+      for (const [name, entry] of lockMap(sv, `importers.${imp}.${section}`)) {
+        const e = lockMap(entry, `importers.${imp}.${section}.${name}`);
+        const spec = e.get("specifier");
+        const ver = e.get("version");
+        if (spec?.kind !== "scalar" || ver?.kind !== "scalar" || e.size !== 2) {
+          throw new LockfileError(`importers.${imp}.${section}.${name}: yalnızca specifier + version bekleniyordu`);
+        }
+        if (spec.value.startsWith("npm:") || isLockAlias(ver.value)) out.push(`alias importer ${imp} ${section} ${name} ${spec.value} ${ver.value}`);
+        if (isGuardedPackage(name)) {
+          out.push(`importer ${imp} ${section} ${name} ${spec.value} ${ver.value}`);
+          const k = depKey(name, ver.value);
+          if (k !== null) roots.push(k);
+        }
+      }
     }
   }
-  return out.join("\n");
+
+  /** @type {Map<string, Map<string, string>>} snapshot anahtarı → bağımlılık adı → değer */
+  const snapDeps = new Map();
+  for (const [key, node] of snapshots) {
+    const fields = lockMap(node, `snapshots.${key}`);
+    /** @type {Map<string, string>} */
+    const deps = new Map();
+    for (const s of SNAPSHOT_DEP_SECTIONS) {
+      for (const [name, value] of depMap(fields.get(s), `snapshots.${key}.${s}`)) {
+        if (isLockAlias(value)) out.push(`alias snapshot ${key} ${s} ${name} ${value}`);
+        deps.set(`${s}:${name}`, value);
+      }
+    }
+    snapDeps.set(key, deps);
+    if (isGuardedPackage(lockKeyName(key))) roots.push(key);
+  }
+  for (const [key, node] of packages) {
+    lockMap(node, `packages.${key}`);
+    if (isGuardedPackage(lockKeyName(key))) out.push(`package ${key} ${canon(node)}`);
+    const res = node.kind === "map" ? node.entries.get("resolution") : undefined;
+    const resText =
+      res === undefined
+        ? ""
+        : res.kind === "scalar"
+          ? res.value
+          : res.kind === "map"
+            ? `{${[...res.entries].map(([k, v]) => `${k}: ${canon(v)}`).join(", ")}}`
+            : canon(res);
+    if (NON_INTEGRITY_RE.test(resText)) out.push(`resolution ${key} ${resText}`);
+  }
+
+  // Bağımlılık kapanışı (geçişli).
+  /** @type {Set<string>} */
+  const seen = new Set();
+  const queue = [...roots];
+  while (queue.length > 0) {
+    const key = /** @type {string} */ (queue.shift());
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(`closure ${key} snapshot=${canon(snapshots.get(key))} package=${canon(packages.get(stripPeers(key)))}`);
+    for (const [sn, value] of snapDeps.get(key) ?? []) {
+      const name = sn.slice(sn.indexOf(":") + 1);
+      const child = depKey(name, value);
+      if (child === null) out.push(`closure-link ${key} ${name} ${value}`);
+      else queue.push(child);
+    }
+  }
+  return out.sort().join("\n");
+}
+
+/**
+ * Kilit dosyasında korunan değişiklik açıklaması; yoksa `null`. Ayrıştırılamayan taraf = korunan.
+ * @param {string | null} before
+ * @param {string | null} after
+ * @returns {string | null}
+ */
+export function lockfileChange(before, after) {
+  /** @type {string[]} */
+  const fp = [];
+  for (const [side, text] of /** @type {Array<[string, string | null]>} */ ([
+    ["taban", before],
+    ["dal", after],
+  ])) {
+    try {
+      fp.push(lockfileGuarded(text));
+    } catch (e) {
+      if (!(e instanceof LockfileError)) throw e;
+      return `pnpm-lock.yaml (${side}) ayrıştırılamadı, korunan sayıldı (fail-closed): ${e.message}`;
+    }
+  }
+  if (fp[0] === fp[1]) return null;
+  return "korunan paketlerin bağımlılık kapanışı, takma ad, tarball/git çözümlemesi veya kilit ayarı değişti";
 }
 
 /**
@@ -477,8 +840,9 @@ export function contentRules(file, before, after) {
       if (fields.length > 0) hits.push({ path: file, rule: "package-json", reason: `korunan alan değişti: ${fields.join(", ")}` });
     }
   }
-  if (matchesAny(file, LOCKFILE_GLOBS) && lockfileGuarded(before) !== lockfileGuarded(after)) {
-    hits.push({ path: file, rule: "lockfile", reason: "korunan paket girdisi/resolution, tarball/git çözümlemesi veya kilit ayarı değişti" });
+  if (matchesAny(file, LOCKFILE_GLOBS)) {
+    const r = lockfileChange(before, after);
+    if (r !== null) hits.push({ path: file, rule: "lockfile", reason: r });
   }
   if (matchesAny(file, COMPOSE_GLOBS) && poolerImages(before) !== poolerImages(after)) {
     hits.push({ path: file, rule: "pooler-image", reason: "pooler imaj etiketi değişti" });
