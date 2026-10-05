@@ -1,7 +1,7 @@
 # Supervisor & Ajan Protokolü
 
 ## 1. Roller
-- **Kullanıcı (Sercan)** yalnızca **Supervisor** ile konuşur. Alt ajanlar kullanıcıya soru sormaz.
+- **Kullanıcı (Sercan)** yalnızca **Supervisor** ile konuşur ve PR incelemez (ADR-012 rev.). Alt ajanlar kullanıcıya soru sormaz.
 - **Supervisor** = ana oturum. Planlar, görev kartı yazar/onaylar, ajan çağırır, sonuç doğrular, `STATE.md`'yi günceller, kullanıcıya rapor verir. **Uygulama kodu yazmaz.** Varsayılan okuması STATE, kart, ajan raporu, `git diff --stat` ve test özetidir; ancak doğrulama için gerektiğinde kodu okur (aşağıdaki §2 adım 4–5). Okuma kararı token değil risk ile verilir.
 - **Alt ajanlar** (`.claude/agents/`): tek görev kartı alır, kartın sınırları içinde çalışır, standart rapor döner.
 
@@ -32,8 +32,8 @@
    | Diğer (UI, rapor görünümü, i18n, metin) | Gerekmez | Uygulayıcının testleri yeterli |
 
    **İnceleme paketi kuralı:** Aynı dikey dilime ait bağlantılı kartlar (örn. migration + domain komutu + API + test) ayrı ayrı değil **tek paket** olarak incelenir. Kartlar ortak bir entegrasyon dalında (`int/<dilim-adı>`) birleşir; inceleme ve bağımsız QA paket tamamlanınca bir kez yapılır; `main`'e paket olarak girer. Paket sınırı: en fazla 5 kart veya 30 değişen dosya (daha büyüğü inceleme kalitesini düşürür). Paket içindeki bir kart BLOCKER alırsa paket `main`'e girmez. Migration içeren paketlerde migration kartı paketin ilk kartıdır.
-6. PR/merge → `STATE.md` güncelle (aktif görev, son tamamlanan, sonraki adım) → `JOURNAL.md`'ye tek satır ekle.
-7. Faz bitince kullanıcıya **faz kapısı raporu** (aşağıda) ve onay iste.
+6. Birleştirme kapısı (§Onay kaynağı) geçince Supervisor PR'ı birleştirir → `STATE.md` güncelle (aktif görev, son tamamlanan, sonraki adım) → `JOURNAL.md`'ye tek satır ekle.
+7. Faz bitince **faz kapısı raporu** (≤25 satır: kartlar, geçen AC'ler, çalıştırılmayan kontroller, bilinen sınırlamalar ve ADR-012 riski) `JOURNAL.md`'ye; kapı AC'leri geçtiyse sonraki faza geç.
 
 ## 3. Paralellik
 - Yalnızca dosya kümeleri ayrık kartlar paralel çalışır; her biri ayrı worktree/dal.
@@ -47,7 +47,7 @@ Ajanların "şunu da aradan çıkarayım" diye kart dışına çıkması, testi 
 | `check:scope` | Kart dışı dosya değişikliği | Daldaki değişen dosyalar, kartın "Dokunulacak dosyalar" listesiyle (glob) karşılaştırılır; fazlası = hata. Kapsam genişletmek kart güncellemesi ister |
 | `check:tests` | Devre dışı testler | `skip`, `only`, `todo`, `xit`, `describe.skip`, koşullu atlama (`if (CI) return`) lint ile yasak. Tek istisna §Karantina kuralına uyan onaylı karantinadır |
 | `check:ac-ratchet` | AC testlerinin silinmesi veya azalması | `tests/.ac-baseline.json`: her `@AC-xx` için test sayısı; azalma = hata. Taban dosyası korunan dosyadır; düşürülmesi §Onay kaynağı kuralına tabidir |
-| `check:protected` | Korunan dosyaların sessizce değişmesi | Korunanlar: `docs/INVARIANTS.md`, `docs/ACCEPTANCE.md`, `docs/spec/16-stock-effects.md`, `packages/db/src/locking.ts`, birleşmiş migration'lar, CI tanımları, lint/tsconfig/test yapılandırması, bekçi betikleri, sürücü/ORM/pooler sürümleri. Değişiklik yalnızca §Onay kaynağı kuralındaki insan onayıyla geçer. Karttaki `protected: true` yalnızca **beyandır** (ajanın niyeti), onay değildir |
+| `check:protected` | Korunan dosyaların sessizce değişmesi | Korunanlar: `docs/INVARIANTS.md`, `docs/ACCEPTANCE.md`, `docs/spec/16-stock-effects.md`, `packages/db/src/locking.ts`, birleşmiş migration'lar, CI tanımları, lint/tsconfig/test yapılandırması, bekçi betikleri, sürücü/ORM/pooler sürümleri. Değişiklik yalnızca §Onay kaynağı kuralındaki onayla geçer. Karttaki `protected: true` yalnızca **beyandır** (ajanın niyeti), onay değildir |
 | `check:assertions` | İçi boşaltılmış testler | `@AC` etiketli test dosyasında assertion sayısı tabana göre azalırsa veya `expect(true)` benzeri sabit assertion varsa hata |
 | `pnpm verify` + `pnpm test:ac` | Kırık kod ve eksik kabul | Önceki bölümler |
 
@@ -56,28 +56,28 @@ Bekçilerin kendisi korunan dosyadır: bir ajanın bekçiyi gevşeterek geçmesi
 ### Karantina kuralı
 Kararsız (flaky) veya geçici olarak çalıştırılamayan bir test ancak şu koşulların **hepsiyle** karantinaya alınabilir; aksi hâlde `check:tests` kırmızıdır:
 1. Testte `@quarantine Q-xx` etiketi ve `tests/QUARANTINE.md`'de kaydı vardır: test adı, neden, sahibi olan kart (T-xxx), **bitiş tarihi** (en fazla 14 gün veya sonraki faz kapısı, hangisi önceyse).
-2. Karantinaya **alındığı PR** §Onay kaynağı kuralıyla insan tarafından onaylanmıştır (kayıt `main`'de bulunur).
+2. Karantinaya **alındığı PR** §Onay kaynağı kuralıyla onaylanmıştır (kayıt `main`'de bulunur).
 3. Test, **o anda kapısı değerlendirilen fazın `@AC` testi değildir.** Kapı AC'si karantinaya alınamaz; kapı AC'si geçmiyorsa kapı kapalıdır.
 4. Bitiş tarihi geçen karantina kaydı CI'ı kırmızıya çevirir: test düzeltilir ya da yeniden onaylanır.
 Karantinadaki testler her CI çalıştırmasında yine koşturulur ve sonucu raporlanır (sessizce yok sayılmaz); yalnızca kapıyı kırmazlar.
 
-### Onay kaynağı (I-17)
-Onay, incelenen değişiklikten **bağımsız** ve ajanın yazamayacağı bir kaynaktan gelmelidir. Ajanın kendi dalında değiştirebildiği hiçbir dosya (kart, ADR, `APPROVALS` listesi, karantina kaydı) onay sayılmaz. Supervisor'ın sohbette "kullanıcı onayladı" demesi de onay sayılmaz; Supervisor bir LLM'dir ve onayı yanlış hatırlayabilir.
-- **Kimlik ayrımı (ADR-012, Faz 0):** Ajanlar GitHub'a **ayrı bir kimlikle** (GitHub App veya makine kullanıcısı) push eder. Bu kimliğin yönetici yetkisi, branch protection'ı aşma (bypass) yetkisi ve korunan yollar için inceleme yetkisi yoktur. İnsan onayı yalnızca kullanıcının kendi hesabından gelir.
-- **Onayın biçimi:** `main` için branch protection: zorunlu durum kontrolleri (`check:all`, `test:ac`), korunan yollar için **CODEOWNERS = kullanıcı** zorunlu inceleme, "yeni commit gelince eski onayları düşür", yöneticiler dahil bypass kapalı. `check:protected` korunan yol değişikliğinde GitHub API'den PR'ın **son commit'ine** ait, CODEOWNERS listesindeki bir insan hesabından gelen onaylı inceleme olup olmadığını doğrular. CODEOWNERS ve onaylayıcı listesi PR'ın kendi dalından değil, **hedef daldan (`main`)** okunur.
-- **İnsan onayı gerektirenler (tek liste):** korunan dosya değişikliği; `tests/.ac-baseline.json` düşürülmesi; yeni test karantinası; AC'nin faz değiştirmesi veya koşullu hâle getirilmesi; `ACCEPTANCE.conditions.json` değişikliği; ADR'nin "kabul" durumuna geçmesi; geri dönüşsüz işlemler.
-- **Akış:** Supervisor korunan değişikliği ayrı ve küçük bir PR'da toplar, kullanıcıya PR bağlantısıyla tek mesaj gönderir (ne değişiyor, neden, risk); kullanıcı GitHub'da inceleyip onaylar. Bu nadir olmalıdır; sık oluyorsa kart tasarımı gözden geçirilir.
-- **Ayrı kimlik kurulamıyorsa** (geçici durum, ADR-012'de yazılır): korunan yol değişikliği içeren PR'ları yalnızca kullanıcı birleştirir; ajan kimliği bu PR'ları birleştiremez ve `check:protected` bunu birleştiren hesap üzerinden doğrular. Bu durumda ajanın kullanıcının kimlik bilgileriyle çalışıp çalışmadığı ADR'de açıkça kayıt altına alınır; çalışıyorsa koruma tam değildir ve bu bilinen risk olarak faz kapısı raporlarında tekrar edilir.
+### Onay kaynağı (I-17) — ADR-012 rev. 2026-10-05
+**Kullanıcı kararı (2026-10-05):** Kullanıcı hiçbir PR'ı incelemez. Onay kaynağı **mekanik kapılar + bağımsız ajan incelemesidir**; Supervisor bu kapılar geçince kendi PR'ını kendisi birleştirir. ADR-001…012 bu kararla kabuldür. Ayrıntı ve bilinen risk: `docs/adr/ADR-012.md`.
+- **Birleştirme kapısı (hepsi zorunlu):** (1) CI'daki zorunlu işler yeşil — `pnpm verify`, `pnpm check:all`, `pnpm test:int`, ilgili `pnpm test:ac` (CI kurulana kadar aynı komutlar oturumda koşturulur, özet satırları PR açıklamasına); (2) risk matrisinin (§2.5) istediği `security-reviewer` ve `qa-verifier` raporları **BLOCKER: 0**, özetleri PR açıklamasında; (3) §2 adım 4'teki rapor doğrulaması tamam. Biri eksikse birleştirilmez.
+- **Korunan değişiklikler** (korunan dosya, `tests/.ac-baseline.json` düşürülmesi, yeni karantina, AC faz değişikliği, `ACCEPTANCE.conditions.json`, ADR kabulü): ayrı ve küçük PR; gerekçe + `security-reviewer` raporu PR açıklamasında; açıklamaya `APPROVED-BY: supervisor (ADR-012 rev.)` satırı eklenir ve `check:protected` insan incelemesi yerine bu satırı ve rapor bağlantısını arar. Bekçiyi gevşetmek (eşik düşürme, kural kapatma, testi atlama) yine yasaktır (G-11); gerekiyorsa iş BLOCKED raporlanır.
+- **Faz kapısı:** kapı AC'leri geçince Supervisor sonraki faza geçer; kapı raporu `JOURNAL.md` + `STATE.md`'ye yazılır.
+- **Hâlâ kullanıcı onayı isteyenler:** gerçek kullanıcı verisi olan ortamda veri kaybettiren migration, ödeme sağlayıcısında canlı ayar, repo/dal silme, gerçek kişisel veriyle prod (Q-07 hukukçu onayı). `main`'e force push yok.
+- Kartlarda geçen "kullanıcı birleştirir / kullanıcı PR onayı / CODEOWNERS onayı" ifadeleri bu kurala göre "birleştirme kapısı geçince Supervisor birleştirir" olarak okunur.
 
 ## 4. Eskalasyon ve durma kuralları
 - Aynı hata için 2 başarısız deneme → ajan durur, "BLOCKED" raporlar. Supervisor bir üst modelle (sonnet→opus) tek deneme yaptırır; yine olmazsa kullanıcıya **tek, çoktan seçmeli** soru.
 - İş kuralı belirsizliği → `Q-xx` kaydı; Supervisor soruları toplar, faz başında veya kapısında **tek mesajda** sorar (her soru için ayrı mesaj yok).
 - Geri dönüşsüz işlem (veri silen migration, prod deploy, force push, ödeme sağlayıcısında canlı ayar) → her zaman kullanıcı onayı.
 
-## 5. Kullanıcıya iletişim (yalnızca şu 3 durumda)
-1. **Faz başlangıcı:** 5–8 satır plan + gereken kararlar.
-2. **Karar/engel:** çoktan seçmeli soru, önerilen seçenek işaretli, etkisi tek cümle.
-3. **Faz kapısı raporu:** tamamlanan kartlar (sayı), geçen AC listesi, çalıştırılmayan kontroller, bilinen sınırlamalar, açık sorular, sonraki faz önerisi. ≤25 satır.
+## 5. Kullanıcıya iletişim (ADR-012 rev. 2026-10-05: yalnızca şu 2 durumda)
+1. **Kullanıcının hesabını gerektiren işler** (barındırma, veritabanı, e-posta sağlayıcısı hesabı, sır girişi, ödeme, hukukçu onayı): **tek mesajda** toplanır; sır değerleri sohbete yazdırılmaz, kullanıcı GitHub repo sırlarına/ortam ayarlarına kendisi girer.
+2. **Proje canlıya çıkınca:** canlı adres + deneme rehberi.
+İş kuralı belirsizlikleri sorulmaz: `A-xx` varsayımıyla ve kapalı bayrakla ilerlenir (G-03). Faz kapısı raporları `JOURNAL.md`'ye yazılır.
 Ara ilerleme görev listesi widget'ında görünür; anlatım yapılmaz.
 
 ## 6. Bağlam (context) yönetimi
