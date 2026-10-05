@@ -5,7 +5,7 @@ Durum: `var` = yol repoda mevcut; `planlı: <kart>` = henüz yok, ilgili kart a�
 |---|---|---|
 | apps/web/ | var | Next.js App Router; şimdilik `app/api/health`. Route grupları (auth) (dashboard) (mobile) (superadmin) ilk kullanan kartta |
 | apps/worker/ | var | Kalıcı worker süreci (yaşam döngüsü); kuyruk ADR-005 (Postgres kuyruğu), henüz iş yok |
-| packages/db/ | planlı: T-005b | Drizzle istemcisi, `withTenant`, şema, migration, RLS testleri |
+| packages/db/ | var | Drizzle istemcisi, `withTenant`, şema, migration, RLS testleri |
 | packages/domain/ | planlı: ilk kullanan kart | İş kuralları ve stok komutları (G-01): identity, inventory, receipts, orders, warehouse, counts, metadata, billing, integrations, reporting |
 | packages/shared/ | planlı: ilk kullanan kart | Zod şemaları, hata kodları, tipler, i18n anahtar tipleri, `JobQueue` arayüzü |
 | packages/queue-adapter/ | planlı: ADR-005 eki | Kuyruk sağlayıcı kütüphanesinin tek import noktası |
