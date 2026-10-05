@@ -26,10 +26,23 @@
 //                             olarak uygulanır (PROTOCOL §Karantina: testler her CI'da koşturulur).
 //   READ_ERROR                test dosyası okunamadı
 // Atlama istisnası yoktur.
+//
+// Karantina (T-008e; PROTOCOL §Karantina kuralı, ayrıntı `lib/quarantine.mjs`): başlığında
+// `@quarantine Q-xx` olan her test/describe için kayıt denetlenir (test yine koşar):
+//   QUARANTINE_UNREGISTERED   kayıt yok / kimliksiz etiket / kayıt başka dosya için
+//   QUARANTINE_NOT_APPROVED   kayıt satırı `origin/main`'de birebir yok (karantinayı ekleyen PR birleşmemiş)
+//   QUARANTINE_GATE_AC        test (veya altındaki test) `currentGatePhase` fazının `@AC` testi
+//   QUARANTINE_EXPIRED        (kayıt satırı) bitiş tarihi geçti (UTC)
+//   QUARANTINE_TOO_LONG       (kayıt satırı) bitiş > eklendiği tarih + 14 gün
+//   QUARANTINE_REGISTRY_INVALID  `tests/QUARANTINE.md` ayrıştırılamadı
+//   WARN QUARANTINE_ACTIVE    kayıt varsa rapor satırı `MEVCUT KARANTİNA: n (süresi dolmuş: m)`
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import ts from "typescript";
+import { loadAcceptance } from "../test-ac/acceptance.mjs";
+import { loadConditions } from "../test-ac/conditions.mjs";
 import { UsageError } from "./lib/output.mjs";
+import { acTagsOf, entryDateFindings, evaluateSite, gateAcIds, loadQuarantine, QUARANTINE_FILE, quarantineSummary } from "./lib/quarantine.mjs";
 
 /** Taramadan hariç tutulan dizin adları (herhangi bir derinlikte). Başka muafiyet yok. */
 export const EXCLUDED_DIRS = Object.freeze(["node_modules", ".artifacts", ".next", "dist", ".git"]);
@@ -322,6 +335,151 @@ function isIfReturn(stmt) {
 }
 
 /**
+ * @typedef {{
+ *   bases: Map<string, string[]>,
+ *   prefixed: Map<string, string>,
+ *   namespaces: Set<string>,
+ * }} TestRoots
+ *   `bases`: test kökü yerel adı → kanonik yol (`it` → ["it"], `t2 = test.extend(…)` → ["test"],
+ *   `d = test.describe` → ["test", "describe"]); `prefixed`: önekli devre dışı yerel ad → neden kodu;
+ *   `namespaces`: test modülü ad alanları (`import * as v from "vitest"`, `const v = await import(…)`).
+ */
+
+/**
+ * İfade bir test kökü zinciri mi (`it`, `t.concurrent`, `v.it.each(…)`).
+ * @param {TestRoots} roots
+ * @param {ts.Expression} expr
+ * @returns {boolean}
+ */
+function isTestChainIn(roots, expr) {
+  const first = chainMembers(expr)[0] ?? "";
+  const nsMember = BASE_NAMES.has(first) || first === COMPUTED;
+  const root = chainRoot(expr);
+  if (root === null) return isTestModuleLoad(chainBase(expr)) && nsMember;
+  if (roots.bases.has(root.text)) return true;
+  return roots.namespaces.has(root.text) && nsMember;
+}
+
+/**
+ * Test kökü zincirinin kanonik yolu (takma adlar çözülmüş; `extend` düşer): `t2.concurrent` →
+ * ["test", "concurrent"], `v.describe.each` → ["describe", "each"]. Test kökü değilse `null`.
+ * @param {TestRoots} roots
+ * @param {ts.Expression} expr
+ * @returns {string[] | null}
+ */
+function canonicalPathIn(roots, expr) {
+  if (!isTestChainIn(roots, expr)) return null;
+  const members = chainMembers(expr).filter((m) => m !== "extend");
+  const root = chainRoot(expr);
+  if (root !== null && roots.bases.has(root.text)) return [...(roots.bases.get(root.text) ?? [root.text]), ...members];
+  return members;
+}
+
+/**
+ * Bir kaynak dosyadaki test kökleri ve takma adları (T-008h m6, T-008i MINOR 1). `check:tests`
+ * ve `lib/assertion-count.mjs` (T-008e; T-008d bulgu 4) aynı çözümlemeyi kullanır.
+ * @param {ts.SourceFile} sf
+ * @returns {TestRoots}
+ */
+export function collectTestRoots(sf) {
+  /** @type {TestRoots} */
+  const roots = {
+    bases: new Map([...BASE_NAMES].map((n) => [n, [n]])),
+    prefixed: new Map(PREFIXED),
+    namespaces: new Set(),
+  };
+  const { bases, prefixed, namespaces } = roots;
+  /** @type {ts.VariableDeclaration[]} */
+  const decls = [];
+
+  /**
+   * Test modülünden yapı bozma (`{ it: t, xit }`) → kökler/önekliler. Değişiklik varsa `true`.
+   * @param {ts.ObjectBindingPattern} pattern
+   * @returns {boolean}
+   */
+  function moduleBindings(pattern) {
+    let changed = false;
+    for (const el of pattern.elements) {
+      const prop = bindingProp(el);
+      if (!ts.isIdentifier(el.name) || prop === null) continue;
+      if (BASE_NAMES.has(prop) && !bases.has(el.name.text)) {
+        bases.set(el.name.text, [prop]);
+        changed = true;
+      }
+      const code = PREFIXED.get(prop);
+      if (code !== undefined && !prefixed.has(el.name.text)) {
+        prefixed.set(el.name.text, code);
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  /** @param {ts.Node} n */
+  function collect(n) {
+    if (ts.isImportDeclaration(n) && ts.isStringLiteral(n.moduleSpecifier) && TEST_MODULES.has(n.moduleSpecifier.text)) {
+      const c = n.importClause;
+      if (c !== undefined) {
+        // Varsayılan içe aktarım: node:test ve @playwright/test'te `test` işlevi.
+        if (c.name !== undefined) bases.set(c.name.text, ["test"]);
+        const nb = c.namedBindings;
+        if (nb !== undefined && ts.isNamespaceImport(nb)) namespaces.add(nb.name.text);
+        if (nb !== undefined && ts.isNamedImports(nb)) {
+          for (const el of nb.elements) {
+            const imported = (el.propertyName ?? el.name).text;
+            if (BASE_NAMES.has(imported)) bases.set(el.name.text, [imported]);
+            const code = PREFIXED.get(imported);
+            if (code !== undefined) prefixed.set(el.name.text, code);
+          }
+        }
+      }
+    }
+    // import("vitest").then(({ it }) => …) / .then((v) => v.it…)
+    if (ts.isCallExpression(n) && memberName(n.expression) === "then" && (ts.isPropertyAccessExpression(n.expression) || ts.isElementAccessExpression(n.expression)) && isTestModuleLoad(n.expression.expression)) {
+      const fn = n.arguments[0];
+      const param = fn !== undefined && (ts.isArrowFunction(fn) || ts.isFunctionExpression(fn)) ? fn.parameters[0] : undefined;
+      if (param !== undefined && ts.isIdentifier(param.name)) namespaces.add(param.name.text);
+      if (param !== undefined && ts.isObjectBindingPattern(param.name)) moduleBindings(param.name);
+    }
+    if (ts.isVariableDeclaration(n) && n.initializer !== undefined) decls.push(n);
+    ts.forEachChild(n, collect);
+  }
+  collect(sf);
+
+  // Türetilmiş kökler: sabit noktaya kadar.
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const d of decls) {
+      const init = unwrap(/** @type {ts.Expression} */ (d.initializer));
+      // const v = await import("vitest") / require("vitest") → ad alanı
+      if (ts.isIdentifier(d.name) && !namespaces.has(d.name.text) && isTestModuleLoad(init)) {
+        namespaces.add(d.name.text);
+        changed = true;
+      }
+      if (ts.isIdentifier(d.name) && !bases.has(d.name.text)) {
+        const derivable =
+          ts.isIdentifier(init) ||
+          ts.isPropertyAccessExpression(init) ||
+          ts.isElementAccessExpression(init) ||
+          (ts.isCallExpression(init) && memberName(init.expression) === "extend");
+        const canon = derivable ? canonicalPathIn(roots, init) : null;
+        if (canon !== null) {
+          bases.set(d.name.text, canon.length > 0 ? canon : [d.name.text]);
+          changed = true;
+        }
+      }
+      if (ts.isObjectBindingPattern(d.name)) {
+        // `const { it: t } = v` / `const { test } = await import("vitest")`
+        const e = unwrap(init);
+        const isNs = (ts.isIdentifier(e) && namespaces.has(e.text)) || isTestModuleLoad(e);
+        if (isNs && moduleBindings(d.name)) changed = true;
+      }
+    }
+  }
+  return roots;
+}
+
+/**
  * Bir kaynak metindeki devre dışı test biçimlerini bulur.
  * @param {string} text
  * @param {string} file uzantı (ScriptKind) ve tanılama için
@@ -337,13 +495,8 @@ export function scanSource(text, file) {
   /** @param {ts.Node} node */
   const lineOf = (node) => sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
 
-  /** Test kökü yerel adları. */
-  const bases = new Set(BASE_NAMES);
-  /** Devre dışı bırakan önekli yerel adlar → neden kodu. */
-  const prefixed = new Map(PREFIXED);
-  /** Test modülü ad alanları (`import * as v from "vitest"`). */
-  /** @type {Set<string>} */
-  const namespaces = new Set();
+  const roots = collectTestRoots(sf);
+  const { prefixed, namespaces } = roots;
   /** Ortamdan türetilmiş değişken adları. */
   /** @type {Set<string>} */
   const envVars = new Set();
@@ -351,18 +504,10 @@ export function scanSource(text, file) {
   const decls = [];
 
   /**
-   * İfade bir test kökü zinciri mi (`it`, `t.concurrent`, `v.it.each(…)`).
    * @param {ts.Expression} expr
    * @returns {boolean}
    */
-  function isTestChain(expr) {
-    const first = chainMembers(expr)[0] ?? "";
-    const nsMember = BASE_NAMES.has(first) || first === COMPUTED;
-    const root = chainRoot(expr);
-    if (root === null) return isTestModuleLoad(chainBase(expr)) && nsMember;
-    if (bases.has(root.text)) return true;
-    return namespaces.has(root.text) && nsMember;
-  }
+  const isTestChain = (expr) => isTestChainIn(roots, expr);
 
   /**
    * İfade bir test modülü ad alanı mı (`v`, `await import("vitest")`).
@@ -388,83 +533,17 @@ export function scanSource(text, file) {
   }
 
   /** @param {ts.Node} n */
-  function collect(n) {
-    if (ts.isImportDeclaration(n) && ts.isStringLiteral(n.moduleSpecifier) && TEST_MODULES.has(n.moduleSpecifier.text)) {
-      const c = n.importClause;
-      if (c !== undefined) {
-        if (c.name !== undefined) bases.add(c.name.text);
-        const nb = c.namedBindings;
-        if (nb !== undefined && ts.isNamespaceImport(nb)) namespaces.add(nb.name.text);
-        if (nb !== undefined && ts.isNamedImports(nb)) {
-          for (const el of nb.elements) {
-            const imported = (el.propertyName ?? el.name).text;
-            if (BASE_NAMES.has(imported)) bases.add(el.name.text);
-            const code = PREFIXED.get(imported);
-            if (code !== undefined) prefixed.set(el.name.text, code);
-          }
-        }
-      }
-    }
-    // import("vitest").then(({ it }) => …) / .then((v) => v.it…)
-    if (ts.isCallExpression(n) && memberName(n.expression) === "then" && (ts.isPropertyAccessExpression(n.expression) || ts.isElementAccessExpression(n.expression)) && isTestModuleLoad(n.expression.expression)) {
-      const fn = n.arguments[0];
-      const param = fn !== undefined && (ts.isArrowFunction(fn) || ts.isFunctionExpression(fn)) ? fn.parameters[0] : undefined;
-      if (param !== undefined && ts.isIdentifier(param.name)) namespaces.add(param.name.text);
-      if (param !== undefined && ts.isObjectBindingPattern(param.name)) moduleBindings(param.name);
-    }
+  function collectDecls(n) {
     if (ts.isVariableDeclaration(n) && n.initializer !== undefined) decls.push(n);
-    ts.forEachChild(n, collect);
+    ts.forEachChild(n, collectDecls);
   }
+  collectDecls(sf);
 
-  /**
-   * Test modülünden yapı bozma (`{ it: t, xit }`) → kökler/önekliler. Değişiklik varsa `true`.
-   * @param {ts.ObjectBindingPattern} pattern
-   * @returns {boolean}
-   */
-  function moduleBindings(pattern) {
-    let changed = false;
-    for (const el of pattern.elements) {
-      const prop = bindingProp(el);
-      if (!ts.isIdentifier(el.name) || prop === null) continue;
-      if (BASE_NAMES.has(prop) && !bases.has(el.name.text)) {
-        bases.add(el.name.text);
-        changed = true;
-      }
-      const code = PREFIXED.get(prop);
-      if (code !== undefined && !prefixed.has(el.name.text)) {
-        prefixed.set(el.name.text, code);
-        changed = true;
-      }
-    }
-    return changed;
-  }
-  collect(sf);
-
-  // Türetilmiş kökler ve ortam bayrakları: sabit noktaya kadar.
+  // Ortam bayrakları: sabit noktaya kadar.
   for (let changed = true; changed; ) {
     changed = false;
     for (const d of decls) {
       const init = unwrap(/** @type {ts.Expression} */ (d.initializer));
-      // const v = await import("vitest") / require("vitest") → ad alanı
-      if (ts.isIdentifier(d.name) && !namespaces.has(d.name.text) && isTestModuleLoad(init)) {
-        namespaces.add(d.name.text);
-        changed = true;
-      }
-      if (ts.isIdentifier(d.name) && !bases.has(d.name.text)) {
-        const derivable =
-          ts.isIdentifier(init) ||
-          ts.isPropertyAccessExpression(init) ||
-          ts.isElementAccessExpression(init) ||
-          (ts.isCallExpression(init) && memberName(init.expression) === "extend");
-        if (derivable && isTestChain(init)) {
-          bases.add(d.name.text);
-          changed = true;
-        }
-      }
-      if (ts.isObjectBindingPattern(d.name)) {
-        // `const { it: t } = v` / `const { test } = await import("vitest")`
-        if (isNamespace(init) && moduleBindings(d.name)) changed = true;
-      }
       if (readsEnvironment(init, envVars)) {
         for (const name of bindingNames(d.name)) {
           if (!envVars.has(name)) {
@@ -668,6 +747,125 @@ export function scanSource(text, file) {
   return findings.sort((a, b) => a.line - b.line || a.code.localeCompare(b.code));
 }
 
+/** Suite kanonik kökleri. */
+const SUITE_NAMES = new Set(["describe", "suite"]);
+
+/**
+ * @typedef {{ file: string, line: number, title: string, acIds: string[] }} QuarantineSite
+ */
+
+/**
+ * Başlığında `@quarantine` olan test/describe çağrıları (T-008e). `title`: tam ad (çevreleyen
+ * describe başlıkları + kendi başlığı); `acIds`: tam addaki ve alt testlerin başlıklarındaki `@AC`
+ * etiketleri. Kökler `collectTestRoots` ile çözülür (takma adlar dahil).
+ * @param {string} text
+ * @param {string} file
+ * @returns {QuarantineSite[]}
+ */
+export function quarantineSites(text, file) {
+  if (!text.includes("@quarantine")) return [];
+  const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, scriptKind(file));
+  const roots = collectTestRoots(sf);
+  /** @type {QuarantineSite[]} */
+  const sites = [];
+  /** @type {string[]} */
+  const stack = [];
+
+  /**
+   * @param {ts.Expression | undefined} arg
+   * @returns {string | null}
+   */
+  const titleOf = (arg) => {
+    if (arg === undefined) return null;
+    const e = unwrap(arg);
+    const c = constString(e);
+    if (c !== null) return c;
+    if (ts.isTemplateExpression(e) || (ts.isBinaryExpression(e) && e.operatorToken.kind === ts.SyntaxKind.PlusToken)) return e.getText(sf);
+    return null;
+  };
+
+  /**
+   * Çağrı altındaki tüm test başlıklarının metni (alt testlerdeki AC etiketleri için).
+   * @param {ts.Node} node
+   * @returns {string}
+   */
+  const innerTitles = (node) => {
+    /** @type {string[]} */
+    const out = [];
+    /** @param {ts.Node} n */
+    const visit = (n) => {
+      if (ts.isCallExpression(n) && canonicalPathIn(roots, n.expression) !== null) out.push(titleOf(n.arguments[0]) ?? "");
+      ts.forEachChild(n, visit);
+    };
+    ts.forEachChild(node, visit);
+    return out.join(" ");
+  };
+
+  /** @param {ts.Node} n */
+  const walk = (n) => {
+    if (ts.isCallExpression(n)) {
+      const canon = canonicalPathIn(roots, n.expression);
+      const title = canon === null ? null : titleOf(n.arguments[0]);
+      if (canon !== null && title !== null) {
+        const first = canon[0] ?? "";
+        const isSuite = SUITE_NAMES.has(first) || canon[1] === "describe";
+        const full = [...stack, title].join(" ");
+        if (title.includes("@quarantine")) {
+          sites.push({
+            file,
+            line: sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1,
+            title: full,
+            acIds: acTagsOf(`${full} ${innerTitles(n)}`),
+          });
+        }
+        if (isSuite) {
+          stack.push(title);
+          ts.forEachChild(n, walk);
+          stack.pop();
+          return;
+        }
+      }
+    }
+    ts.forEachChild(n, walk);
+  };
+  walk(sf);
+  return sites;
+}
+
+/**
+ * Karantina etiketlerini ve kaydı denetler (T-008e).
+ * @param {string} root
+ * @param {QuarantineSite[]} sites
+ * @param {import("./lib/output.mjs").Reporter} out
+ */
+function checkQuarantine(root, sites, out) {
+  const state = loadQuarantine(root);
+  if (state.registry === null && sites.length === 0) return;
+  for (const e of state.registry?.errors ?? []) out.fail("QUARANTINE_REGISTRY_INVALID", `${QUARANTINE_FILE}:${e.line}`, e.message);
+
+  /** @type {Set<string> | null} */
+  let gateAcs = null;
+  /** @type {string | null} */
+  let gateError = null;
+  if (sites.length > 0) {
+    try {
+      const acs = loadAcceptance(root);
+      gateAcs = gateAcIds(acs, [loadConditions(root, acs).currentGatePhase]);
+    } catch (e) {
+      gateError = e instanceof Error ? e.message : String(e);
+    }
+  }
+  for (const site of sites) {
+    for (const f of evaluateSite(site, state, { gateAcs, gateError })) out.fail(f.code, `${site.file}:${site.line}`, f.message);
+  }
+  for (const entry of state.registry?.entries.values() ?? []) {
+    for (const f of entryDateFindings(entry, state.today)) out.fail(f.code, `${QUARANTINE_FILE}:${entry.line}`, f.message);
+  }
+  const summary = quarantineSummary(state);
+  out.detail("quarantine", { count: summary.count, expired: summary.expired, today: state.today, mainRef: state.mainRef, mainError: state.mainError, sites });
+  if (summary.count > 0) out.warn("QUARANTINE_ACTIVE", QUARANTINE_FILE, summary.line);
+}
+
 /**
  * @param {{ root: string, argv: string[], out: import("./lib/output.mjs").Reporter }} ctx
  */
@@ -678,6 +876,8 @@ export function run(ctx) {
 
   const files = listTestFiles(root);
   out.detail("scanned", files);
+  /** @type {QuarantineSite[]} */
+  const sites = [];
   for (const rel of files) {
     /** @type {string} */
     let text;
@@ -688,5 +888,7 @@ export function run(ctx) {
       continue;
     }
     for (const f of scanSource(text, rel)) out.fail(f.code, `${rel}:${f.line}`, f.message);
+    sites.push(...quarantineSites(text, rel));
   }
+  checkQuarantine(root, sites, out);
 }
