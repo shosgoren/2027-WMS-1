@@ -1,10 +1,12 @@
 // T-008c/T-008h `lib/approval.mjs` testleri: PR açıklaması + head SHA → onay kararı (ADR-012 rev.).
 import { describe, expect, it } from "vitest";
-import { APPROVAL_LINE, approvalLine, effectiveLines, evaluateApproval, REASONS } from "./approval.mjs";
+import { APPROVAL_LINE, approvalLine, effectiveLines, evaluateApproval, REASONS, securityLine } from "./approval.mjs";
 
-const SEC0 = "security-reviewer: BLOCKER: 0 · MAJOR: 1 · MINOR: 3";
 const HEAD = "c".repeat(40);
 const OLD = "d".repeat(40);
+const SEC0 = securityLine({ blocker: 0, major: 1, minor: 3 }, HEAD);
+/** @param {number} blocker */
+const SECB = (blocker) => securityLine({ blocker, major: 0, minor: 0 }, HEAD);
 const APPROVED = approvalLine(HEAD);
 
 /**
@@ -22,7 +24,8 @@ describe("evaluateApproval", () => {
     expect(r.ok).toBe(true);
     expect(r.approved).toBe(true);
     expect(r.problems).toEqual([]);
-    expect(r.security).toEqual([{ blocker: 0, major: 1, minor: 3, line: SEC0 }]);
+    expect(r.security).toEqual([{ blocker: 0, major: 1, minor: 3, sha: HEAD, line: SEC0 }]);
+    expect(SEC0).toBe(`security-reviewer: BLOCKER: 0 · MAJOR: 1 · MINOR: 3 @ ${HEAD}`);
   });
 
   it("boş / null açıklama → APPROVED-BY ve rapor eksik", () => {
@@ -43,14 +46,14 @@ describe("evaluateApproval", () => {
   });
 
   it("BLOCKER > 0 → SECURITY_BLOCKER", () => {
-    const r = evaluateApproval(`${APPROVED}\nsecurity-reviewer: BLOCKER: 2 · MAJOR: 0 · MINOR: 0\n`, HEAD);
+    const r = evaluateApproval(`${APPROVED}\n${SECB(2)}\n`, HEAD);
     expect(r.ok).toBe(false);
     expect(r.problems.map((p) => p.code)).toEqual([REASONS.SECURITY_BLOCKER]);
     expect(r.problems[0]?.message).toContain("2");
   });
 
   it("birden fazla rapor özeti: biri BLOCKER > 0 ise kırmızı (çelişkide fail-closed)", () => {
-    expect(codes(`${APPROVED}\n${SEC0}\nsecurity-reviewer: BLOCKER: 1 · MAJOR: 0 · MINOR: 0\n`)).toEqual([
+    expect(codes(`${APPROVED}\n${SEC0}\n${SECB(1)}\n`)).toEqual([
       REASONS.SECURITY_BLOCKER,
     ]);
   });
@@ -79,10 +82,10 @@ describe("evaluateApproval", () => {
   });
 
   it("rapor özeti biçimi: ayraç varyantları ve sonda bağlantı kabul; bozuk biçim yok sayılır", () => {
-    expect(codes(`${APPROVED}\nsecurity-reviewer: BLOCKER: 0 | MAJOR: 0 | MINOR: 0\n`)).toEqual([]);
+    expect(codes(`${APPROVED}\nsecurity-reviewer: BLOCKER: 0 | MAJOR: 0 | MINOR: 0 @ ${HEAD}\n`)).toEqual([]);
     expect(codes(`${APPROVED}\n${SEC0} — https://example.invalid/rapor\n`)).toEqual([]);
     for (const l of [
-      "security-reviewer: BLOCKER: yok · MAJOR: 0 · MINOR: 0",
+      `security-reviewer: BLOCKER: yok · MAJOR: 0 · MINOR: 0 @ ${HEAD}`,
       "security-reviewer: BLOCKER: 0",
       "security-reviewer: BLOCKER: -1 · MAJOR: 0 · MINOR: 0",
       "qa-verifier: BLOCKER: 0 · MAJOR: 0 · MINOR: 0",
@@ -121,7 +124,7 @@ describe("onay head SHA'sına bağlı (T-008h M4)", () => {
   });
 
   it("STALE ile BLOCKER birlikte raporlanır", () => {
-    expect(codes(`${approvalLine(OLD)}\nsecurity-reviewer: BLOCKER: 1 · MAJOR: 0 · MINOR: 0`)).toEqual([
+    expect(codes(`${approvalLine(OLD)}\n${SECB(1)}`)).toEqual([
       REASONS.STALE,
       REASONS.SECURITY_BLOCKER,
     ]);
@@ -178,5 +181,55 @@ describe("gövde ayrıştırma CommonMark'a uygun (T-008h m1)", () => {
 describe("effectiveLines", () => {
   it("kod bloğu/yorum dışındaki kırpılmış satırlar", () => {
     expect(effectiveLines("a\n```\nb\n```\n c <!-- d --> e\n<!--\nf\n--> g\n")).toEqual(["a", "c  e", "", "g", ""]);
+  });
+});
+
+describe("güvenlik özeti SHA'ya bağlı (T-008i MINOR 8)", () => {
+  it("MINOR 8 saldırısı: SHA'sız (eski biçim) özet kabul edilmez → SECURITY_REPORT_MISSING", () => {
+    const r = evaluateApproval(`${APPROVED}\nsecurity-reviewer: BLOCKER: 0 · MAJOR: 0 · MINOR: 0\n`, HEAD);
+    expect(r.problems.map((p) => p.code)).toEqual([REASONS.SECURITY_MISSING]);
+    expect(r.problems[0]?.message).toContain("SHA'sız");
+  });
+
+  it("SHA biçimi birebir: kısa, büyük harf, '@' yok → özet yok sayılır", () => {
+    for (const l of [
+      `security-reviewer: BLOCKER: 0 · MAJOR: 0 · MINOR: 0 @ ${HEAD.slice(0, 12)}`,
+      `security-reviewer: BLOCKER: 0 · MAJOR: 0 · MINOR: 0 @ ${HEAD.toUpperCase()}`,
+      `security-reviewer: BLOCKER: 0 · MAJOR: 0 · MINOR: 0 ${HEAD}`,
+      `security-reviewer: BLOCKER: 0 · MAJOR: 0 · MINOR: 0 @${HEAD}`,
+    ]) {
+      expect(codes(`${APPROVED}\n${l}`), l).toEqual([REASONS.SECURITY_MISSING]);
+    }
+  });
+
+  it("SHA'dan sonra bağlantı kabul", () => {
+    expect(codes(`${APPROVED}\n${SEC0} — https://example.invalid/rapor\n`)).toEqual([]);
+  });
+
+  it("MINOR 8 saldırısı: eski commit için yazılmış rapor, tazelik denetçisi yok → SECURITY_REPORT_STALE (fail-closed)", () => {
+    const r = evaluateApproval(`${APPROVED}\n${securityLine({ blocker: 0, major: 0, minor: 0 }, OLD)}\n`, HEAD);
+    expect(r.ok).toBe(false);
+    expect(r.problems.map((p) => p.code)).toEqual([REASONS.SECURITY_STALE]);
+  });
+
+  it("tazelik denetçisi: null → taze (OK); neden → SECURITY_REPORT_STALE ve neden iletide", () => {
+    const body = `${APPROVED}\n${securityLine({ blocker: 0, major: 0, minor: 0 }, OLD)}\n`;
+    /** @type {string[]} */
+    const asked = [];
+    const ok = evaluateApproval(body, HEAD, { securityFresh: (sha) => (asked.push(sha), null) });
+    expect(ok.problems).toEqual([]);
+    expect(asked).toEqual([OLD]);
+    const bad = evaluateApproval(body, HEAD, { securityFresh: () => "rapordan sonra korunan değişiklik: x" });
+    expect(bad.problems.map((p) => p.code)).toEqual([REASONS.SECURITY_STALE]);
+    expect(bad.problems[0]?.message).toContain("rapordan sonra korunan değişiklik: x");
+  });
+
+  it("head'e eşit SHA denetçiye sorulmaz; biri bayat iki özet → STALE (çelişkide fail-closed)", () => {
+    const body = `${APPROVED}\n${SEC0}\n${securityLine({ blocker: 0, major: 0, minor: 0 }, OLD)}\n`;
+    /** @type {string[]} */
+    const asked = [];
+    const r = evaluateApproval(body, HEAD, { securityFresh: (sha) => (asked.push(sha), "atası değil") });
+    expect(asked).toEqual([OLD]);
+    expect(r.problems.map((p) => p.code)).toEqual([REASONS.SECURITY_STALE]);
   });
 });

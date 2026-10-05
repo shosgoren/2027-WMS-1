@@ -18,11 +18,29 @@
 // içerik HEAD commit'inden okunur; çalışma ağacı (commit'li değişikliği geri alan düzenleme dahil)
 // sayılmaz. `--local`'da commit'ler + indeks + çalışma ağacı + izlenmeyen dosyalar.
 // Onay satırı PR head SHA'sına bağlıdır (`APPROVED-BY: … @ <sha>`; tutmazsa APPROVAL_STALE).
+// Güvenlik özeti raporun incelediği commit'e bağlıdır (`security-reviewer: … @ <sha>`; T-008i MINOR 8):
+// SHA head'in atası/kendisi olmalı ve `sha..head` arasında korunan değişiklik olmamalı (yalnızca
+// korunmayan belgelere — ör. Supervisor'ın `SUPERVISOR_PATHS` kayıtlarına — yapılan commit'ler
+// raporu bayatlatmaz); aksi SECURITY_REPORT_STALE.
+// Push kipinde (T-008i MINOR 6) commit PR'ın kendisi olmalı: birleştirme commit'inde
+// `HEAD^2 == head.sha`, her durumda `HEAD^{tree}` = `git merge-tree HEAD^1 head.sha` önizleme ağacı;
+// aksi APPROVAL_UNVERIFIABLE (onay başka içeriğe taşınamaz).
 // Karttaki `protected: true` beyandır; hiçbir koşulu karşılamaz (okunmaz bile).
 import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { CardError, cardIdFromBranch, loadCard } from "./lib/cards.mjs";
-import { changedFiles, currentBranch, DEFAULT_TARGET, fileAtRef, git, GitError, mergeBase, refExists, repoRoot } from "./lib/git.mjs";
+import {
+  changedFiles,
+  currentBranch,
+  DEFAULT_TARGET,
+  fileAtRef,
+  git,
+  GitError,
+  mergeBase,
+  parseNameStatusZ,
+  refExists,
+  repoRoot,
+} from "./lib/git.mjs";
 import { contextFromEnv, createGitHubClient, GitHubError } from "./lib/github.mjs";
 import { evaluateApproval, REASONS } from "./lib/approval.mjs";
 import { NO_FILE, UsageError } from "./lib/output.mjs";
@@ -118,6 +136,90 @@ function revParse(root, rev) {
 }
 
 /**
+ * Commit nesnesi yerelde var mı (tam SHA).
+ * @param {string} root
+ * @param {string} sha
+ * @returns {boolean}
+ */
+function hasCommit(root, sha) {
+  return /^[0-9a-f]{40}$/.test(sha) && refExists(root, sha);
+}
+
+/**
+ * `from..to` arasındaki korunan değişiklikler (commit'ler; çalışma ağacı yok).
+ * @param {string} root
+ * @param {string} from
+ * @param {string} to
+ * @returns {ProtectedHit[]}
+ */
+function protectedBetween(root, from, to) {
+  const out = git(root, ["diff", "--name-status", "-z", "-M", "--no-relative", "--no-ext-diff", "--no-textconv", from, to, "--"]);
+  return classifyChanges(parseNameStatusZ(out), { before: (f) => fileAtRef(root, from, f), after: (f) => fileAtRef(root, to, f) });
+}
+
+/**
+ * Güvenlik raporu SHA'sının tazelik denetimi (T-008i MINOR 8). `null` = taze.
+ * @param {string} root
+ * @param {string} head PR head SHA'sı
+ * @returns {(sha: string) => string | null}
+ */
+export function securityFreshness(root, head) {
+  return (sha) => {
+    if (sha === head) return null;
+    try {
+      if (!hasCommit(root, sha)) return "commit bu depoda yok (başka dalın/zorla yazılmış geçmişin commit'i olabilir)";
+      if (!hasCommit(root, head)) return "PR head commit'i yerelde yok; tazelik doğrulanamadı";
+      try {
+        git(root, ["merge-base", "--is-ancestor", sha, head]);
+      } catch (e) {
+        if (!(e instanceof GitError)) throw e;
+        return "PR head'inin atası değil";
+      }
+      const hits = protectedBetween(root, sha, head);
+      if (hits.length > 0) return `rapordan sonra korunan değişiklik: ${hits.map((h) => h.path).join(", ")}`;
+      return null;
+    } catch (e) {
+      if (!(e instanceof GitError)) throw e;
+      return `git ile doğrulanamadı (${e.message})`;
+    }
+  };
+}
+
+/**
+ * Push kipinde HEAD'in PR'ın birleştirilmiş hâli olduğunu doğrular (T-008i MINOR 6). `null` = tamam.
+ * @param {string} root
+ * @param {string} prHead PR'ın head SHA'sı (API)
+ * @returns {string | null}
+ */
+export function verifyPushMerge(root, prHead) {
+  try {
+    const parent = revParse(root, "HEAD^1");
+    if (parent === null) return "HEAD'in ebeveyni yok";
+    const second = revParse(root, "HEAD^2");
+    if (second !== null && second !== prHead) {
+      return `birleştirme commit'inin ikinci ebeveyni (${second.slice(0, 12)}) PR head'i (${prHead.slice(0, 12)}) değil`;
+    }
+    if (!hasCommit(root, prHead)) return `PR head commit'i (${prHead.slice(0, 12)}) yerelde yok; birleştirme doğrulanamadı`;
+    /** @type {string} */
+    let preview;
+    try {
+      preview = (git(root, ["merge-tree", "--write-tree", "--no-messages", parent, prHead]).split("\n")[0] ?? "").trim();
+    } catch (e) {
+      if (!(e instanceof GitError)) throw e;
+      return `PR birleştirme önizlemesi üretilemedi (çakışma veya eksik geçmiş): ${e.message}`;
+    }
+    const tree = git(root, ["rev-parse", "HEAD^{tree}"]).trim();
+    if (preview !== tree) {
+      return `HEAD ağacı (${tree.slice(0, 12)}) PR birleştirme önizlemesinin ağacı (${preview.slice(0, 12)}) değil; commit PR dışı içerik taşıyor`;
+    }
+    return null;
+  } catch (e) {
+    if (!(e instanceof GitError)) throw e;
+    return `git ile doğrulanamadı (${e.message})`;
+  }
+}
+
+/**
  * @param {string} root
  * @returns {(file: string) => string | null}
  */
@@ -169,7 +271,10 @@ async function findPull(root, ci, client, known) {
   if (pulls.length !== 1) {
     return { error: `${ci.sha.slice(0, 12)} commit'ini "${ci.branch}" dalına getiren birleşmiş PR ${pulls.length === 0 ? "bulunamadı" : "tekil değil"}` };
   }
-  return { pull: /** @type {PullInfo} */ (pulls[0]) };
+  const pull = /** @type {PullInfo} */ (pulls[0]);
+  const bad = verifyPushMerge(root, pull.headSha.toLowerCase());
+  if (bad !== null) return { error: `push commit'i PR #${pull.number}'in birleştirilmiş hâli değil: ${bad}` };
+  return { pull };
 }
 
 /**
@@ -249,12 +354,14 @@ export async function checkProtected(ctx) {
       failAll(out, hits, REASONS.UNVERIFIABLE, found.error);
       return;
     }
-    const result = evaluateApproval(found.pull.body, found.pull.headSha);
+    const result = evaluateApproval(found.pull.body, found.pull.headSha, {
+      securityFresh: securityFreshness(root, found.pull.headSha.toLowerCase()),
+    });
     out.detail("approval", {
       pr: found.pull.number,
       headSha: found.pull.headSha,
       approved: result.approved,
-      security: result.security.map((s) => ({ blocker: s.blocker, major: s.major, minor: s.minor })),
+      security: result.security.map((s) => ({ blocker: s.blocker, major: s.major, minor: s.minor, sha: s.sha })),
       problems: result.problems.map((p) => p.code),
     });
     for (const p of result.problems) failAll(out, hits, p.code, `PR #${found.pull.number}: ${p.message}`);
