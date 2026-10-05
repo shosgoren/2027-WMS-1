@@ -137,7 +137,10 @@ jobs:
         run: pnpm audit --audit-level high
       # Lisans: çalışma alanı paketlerinin DOĞRUDAN bağımlılıklarından biri GPL/AGPL ise kırmızı.
       # (LGPL bu kurala girmez.) Lisansı belirlenemeyen doğrudan bağımlılık da kırmızıdır.
+      # Önceki adım (install) başarısızsa bu adım da başarısız olur; yanlış yeşil üretmez.
+      # audit kırmızı olsa da lisans sonucu ayrıca raporlanır (iş yine kırmızı kalır).
       - name: License check (direct deps, GPL/AGPL)
+        if: ${{ !cancelled() }}
         run: |
           pnpm ls -r --depth 0 --json > "$RUNNER_TEMP/direct.json"
           pnpm licenses list -r --json > "$RUNNER_TEMP/licenses.json"
