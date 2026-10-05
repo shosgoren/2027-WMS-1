@@ -26,6 +26,11 @@ psql -v ON_ERROR_STOP=1 --no-psqlrc \
 \getenv auth_password WMS_AUTH_PASSWORD
 \getenv migrator POSTGRES_USER
 
+-- Hata yolunda `CREATE ROLE ... PASSWORD '<parola>'` ifadesi sunucu loguna (STATEMENT: satırı)
+-- düşmesin: bu oturumda hata ifadesi günlüğü kapatılır (PANIC = fiilen hiçbir hata). Yalnızca
+-- bu betiğin oturumudur (sunucu ayarı değişmez); süper kullanıcı (bootstrap rolü) ayarlayabilir.
+SET log_min_error_statement = panic;
+
 CREATE ROLE wms_app
   LOGIN
   NOSUPERUSER
