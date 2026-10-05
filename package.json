@@ -8,7 +8,8 @@
   },
   "scripts": {
     "verify": "node scripts/verify.mjs",
-    "infra:smoke": "node scripts/compose-smoke.mjs"
+    "infra:smoke": "node scripts/compose-smoke.mjs",
+    "test:ac": "node scripts/test-ac/cli.mjs"
   },
   "devDependencies": {
     "@types/node": "24.19.1",
