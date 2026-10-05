@@ -25,6 +25,14 @@
 //         (`try { expect(…) } catch {}`); `try … finally` (catch yok) etkilidir;
 //       · await edilmemiş asenkron matcher: `.resolves`/`.rejects` zinciri veya `expect.poll`
 //         doğrudan `await` edilmiyor ya da `return` edilmiyorsa (`Promise.all([...])` içi de sayılmaz).
+//       · T-008k: `const`-yerel sabit koşul (`const f = false; if (f)`); sıfır turlu döngü (`for (x of [])`,
+//         `for (let i = 0; i < 0; …)`) ve boş dizi yineleyicisi (`[].forEach(…)`); zamanlayıcı geri
+//         çağrısı (`setTimeout|setInterval|setImmediate|queueMicrotask|nextTick|requestAnimationFrame`);
+//         await/return edilmeyen `then/catch/finally` geri çağrısı (zincirin en dış çağrısına bakılır;
+//         `Promise.all([...])` argümanı `await` edilirse etkilidir; değişkene atanıp sonradan await
+//         edilen zincir DESTEKLENMEZ → sayılmaz, doğrudan `await` yazın); `finally` içinde `return`
+//         (try/catch'teki hata yutulur); çağrılmayan iç işlev (dosyada adı başka hiçbir yerde geçmeyen
+//         `function f`/`const f = () => …`, ifade deyimi olarak yazılmış işlev; `export`'lular kullanılmış sayılır).
 //     Yerel yardımcı işlev çağrısı da aynı kuralla süzülür (`try { yardimci() } catch {}`).
 //   - Dosya assertion sayısı = `@AC` dosyasındaki tüm sabit olmayan assertion'lar (yardımcı
 //     işlevlerdekiler dahil).
@@ -238,6 +246,230 @@ export function classifyAssertion(call, sf) {
   return { constant: false, reason: "" };
 }
 
+/** `constInitializer` özyineleme sınırı (`const a = b; const b = a`). */
+let constDepth = 0;
+
+/**
+ * Tanımlayıcının en yakın bildirimi tek adlı `const` ise ilk değer ifadesi; aksi halde (let/var,
+ * parametre, bildirim yok, desenle bildirim) `null` (T-008k). Kapsam yürüyüşü: yakın kapsamdan dışa.
+ * @param {ts.Identifier} id
+ * @returns {ts.Expression | null}
+ */
+function constInitializer(id) {
+  if (constDepth > 8) return null;
+  /** @type {ts.Node | undefined} */
+  let n = id.parent;
+  while (n !== undefined) {
+    if (ts.isFunctionLike(n) && n.parameters.some((q) => ts.isIdentifier(q.name) && q.name.text === id.text)) return null;
+    if (ts.isBlock(n) || ts.isSourceFile(n) || ts.isModuleBlock(n) || ts.isCaseClause(n) || ts.isDefaultClause(n)) {
+      for (const st of n.statements) {
+        if (ts.isVariableStatement(st)) {
+          for (const d of st.declarationList.declarations) {
+            if (ts.isIdentifier(d.name) && d.name.text === id.text) {
+              if (!(st.declarationList.flags & ts.NodeFlags.Const) || d.initializer === undefined) return null;
+              return d.initializer;
+            }
+            if (!ts.isIdentifier(d.name) && d.name.getText().includes(id.text)) return null;
+          }
+        } else if ((ts.isFunctionDeclaration(st) || ts.isClassDeclaration(st)) && st.name?.text === id.text) return null;
+      }
+    }
+    n = n.parent;
+  }
+  return null;
+}
+
+/**
+ * Boş dizi sabiti mi (`[]`, ya da ilk değeri `[]` olan yerel `const`).
+ * @param {ts.Expression} expr
+ * @returns {boolean}
+ */
+function isEmptyArray(expr) {
+  let e = unwrap(expr);
+  if (ts.isIdentifier(e)) {
+    const init = constInitializer(e);
+    if (init === null) return false;
+    e = unwrap(init);
+  }
+  return ts.isArrayLiteralExpression(e) && e.elements.length === 0;
+}
+
+/**
+ * `for (let i = A; i <op> B; …)` ilk değerle hiç dönmüyor mu (A, B sayısal sabit).
+ * @param {ts.ForStatement} f
+ * @returns {boolean}
+ */
+function zeroTripFor(f) {
+  const init = f.initializer;
+  const cond = f.condition === undefined ? undefined : unwrap(f.condition);
+  if (init === undefined || cond === undefined || !ts.isVariableDeclarationList(init) || init.declarations.length !== 1) return false;
+  const d = /** @type {ts.VariableDeclaration} */ (init.declarations[0]);
+  if (!ts.isIdentifier(d.name) || d.initializer === undefined || !ts.isBinaryExpression(cond)) return false;
+  const a = unwrap(d.initializer);
+  const l = unwrap(cond.left);
+  const r = unwrap(cond.right);
+  if (!ts.isNumericLiteral(a) || !ts.isIdentifier(l) || l.text !== d.name.text || !ts.isNumericLiteral(r)) return false;
+  const [x, y] = [Number(a.text), Number(r.text)];
+  switch (cond.operatorToken.kind) {
+    case ts.SyntaxKind.LessThanToken:
+      return !(x < y);
+    case ts.SyntaxKind.LessThanEqualsToken:
+      return !(x <= y);
+    case ts.SyntaxKind.GreaterThanToken:
+      return !(x > y);
+    case ts.SyntaxKind.GreaterThanEqualsToken:
+      return !(x >= y);
+    default:
+      return false;
+  }
+}
+
+/** Geri çağırımı en erken sonraki turda (veya hiç) koşan zamanlayıcı çağrıları. */
+const TIMER_CALLS = new Set(["setTimeout", "setInterval", "setImmediate", "queueMicrotask", "requestAnimationFrame", "nextTick"]);
+/** Dizi yineleyicileri (boş dizide geri çağırım hiç koşmaz). */
+const ITERATOR_METHODS = new Set(["forEach", "map", "filter", "some", "every", "find", "findIndex", "findLast", "findLastIndex", "flatMap"]);
+
+/**
+ * @param {ts.Node} n
+ * @returns {n is ts.ArrowFunction | ts.FunctionExpression}
+ */
+function isFunctionValue(n) {
+  return ts.isArrowFunction(n) || ts.isFunctionExpression(n);
+}
+
+/**
+ * Çağrının çağrılan adı (`setTimeout`, `globalThis.setTimeout` → "setTimeout").
+ * @param {ts.CallExpression} call
+ * @returns {string | null}
+ */
+function calleeName(call) {
+  const c = unwrap(call.expression);
+  if (ts.isIdentifier(c)) return c.text;
+  if (ts.isPropertyAccessExpression(c)) return c.name.text;
+  return null;
+}
+
+/** @type {WeakMap<ts.SourceFile, Map<string, number>>} */
+const identifierCounts = new WeakMap();
+
+/**
+ * Dosyada bu adın geçtiği tanımlayıcı sayısı (bildirimin kendisi dahil; üye adları da sayılır → kullanım
+ * varsayımı lehine yanılır, yani etkisiz saymak için kanıt aranır).
+ * @param {ts.Node} node
+ * @param {string} name
+ * @returns {number}
+ */
+function identifierCount(node, name) {
+  const sf = node.getSourceFile();
+  let counts = identifierCounts.get(sf);
+  if (counts === undefined) {
+    const m = new Map();
+    /** @param {ts.Node} n */
+    const visit = (n) => {
+      if (ts.isIdentifier(n)) m.set(n.text, (m.get(n.text) ?? 0) + 1);
+      ts.forEachChild(n, visit);
+    };
+    visit(sf);
+    counts = m;
+    identifierCounts.set(sf, counts);
+  }
+  return counts.get(name) ?? 0;
+}
+
+/**
+ * @param {ts.Node} n
+ * @returns {boolean}
+ */
+function isExported(n) {
+  return ts.canHaveModifiers(n) && (ts.getModifiers(n) ?? []).some((m) => m.kind === ts.SyntaxKind.ExportKeyword || m.kind === ts.SyntaxKind.DefaultKeyword);
+}
+
+/**
+ * `then/catch/finally` zincirinin en dış çağrısı `await`/`return` ediliyor mu (diziye ve
+ * `Promise.all|allSettled|race|any` argümanına sarılı olsa da).
+ * @param {ts.CallExpression} thenCall
+ * @returns {boolean}
+ */
+function chainAwaited(thenCall) {
+  /** @type {ts.Node} */
+  let n = thenCall;
+  for (;;) {
+    const p = n.parent;
+    if (p === undefined) return false;
+    if (ts.isParenthesizedExpression(p) || ts.isAsExpression(p) || ts.isNonNullExpression(p) || ts.isSatisfiesExpression(p)) {
+      n = p;
+    } else if (ts.isPropertyAccessExpression(p) && p.expression === n && ts.isCallExpression(p.parent) && /^(?:then|catch|finally)$/.test(p.name.text)) {
+      n = p.parent;
+    } else if (ts.isArrayLiteralExpression(p) && ts.isCallExpression(p.parent) && /^(?:all|allSettled|race|any)$/.test(calleeName(p.parent) ?? "")) {
+      n = p.parent;
+    } else break;
+  }
+  return awaitedOrReturned(n);
+}
+
+/**
+ * T-008k: `child` düğümünün `p` ebeveyni içinde koşmayacağı kesin/muhtemel biçimler.
+ * @param {ts.Node} child
+ * @param {ts.Node} p
+ * @returns {string | null}
+ */
+function stepReason(child, p) {
+  if (ts.isForOfStatement(p) && child === p.statement && isEmptyArray(p.expression)) return "erişilemeyen kod (boş diziyle sıfır turlu döngü)";
+  if (ts.isForStatement(p) && child === p.statement && zeroTripFor(p)) return "erişilemeyen kod (sıfır turlu for döngüsü)";
+  if (ts.isCallExpression(p) && child !== p.expression && isFunctionValue(unwrap(/** @type {ts.Expression} */ (child)))) {
+    const callee = unwrap(p.expression);
+    const name = calleeName(p);
+    if (name !== null && TIMER_CALLS.has(name)) return "zamanlayıcı geri çağrısı (test bitince koşar; doğrulanmaz)";
+    if (ts.isPropertyAccessExpression(callee)) {
+      if (ITERATOR_METHODS.has(callee.name.text) && isEmptyArray(callee.expression)) return "erişilemeyen kod (boş dizi yineleyicisi)";
+      if (/^(?:then|catch|finally)$/.test(callee.name.text) && !chainAwaited(p)) return "await edilmemiş then/catch/finally geri çağrısı";
+    }
+  }
+  if (ts.isTryStatement(p) && (child === p.tryBlock || child === p.catchClause) && p.finallyBlock !== undefined && returnsInFinally(p.finallyBlock)) {
+    return "yutulan assertion (finally içinde return)";
+  }
+  // Çağrılmayan iç işlev: işlev değeri/bildirimi.
+  if (isFunctionValue(child) || ts.isFunctionDeclaration(child)) {
+    /** @type {ts.Node} */
+    let outer = child;
+    let q = child.parent;
+    while (q !== undefined && (ts.isParenthesizedExpression(q) || ts.isAsExpression(q) || ts.isNonNullExpression(q) || ts.isSatisfiesExpression(q))) {
+      outer = q;
+      q = q.parent;
+    }
+    if (ts.isFunctionDeclaration(child)) {
+      if (child.name !== undefined && !isExported(child) && identifierCount(child, child.name.text) === 1) return "çağrılmayan iç işlev";
+    } else if (q !== undefined && ts.isExpressionStatement(q)) {
+      return "çağrılmayan iç işlev (ifade deyimi)";
+    } else if (q !== undefined && ts.isVariableDeclaration(q) && q.initializer === outer && ts.isIdentifier(q.name)) {
+      const stmt = q.parent?.parent;
+      const exported = stmt !== undefined && ts.isVariableStatement(stmt) && isExported(stmt);
+      if (!exported && identifierCount(q, q.name.text) === 1) return "çağrılmayan iç işlev";
+    }
+  }
+  return null;
+}
+
+/**
+ * `finally` bloğunda (iç işlevler hariç) `return` var mı: bu, try/catch'te fırlayan hatayı yutar.
+ * @param {ts.Block} block
+ * @returns {boolean}
+ */
+function returnsInFinally(block) {
+  let found = false;
+  /** @param {ts.Node} n */
+  const visit = (n) => {
+    if (found || ts.isFunctionLike(n)) return;
+    if (ts.isReturnStatement(n)) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(block);
+  return found;
+}
+
 /**
  * Değeri derleme zamanında belli doğruluk (`true`/`false`); belli değilse `null`.
  * @param {ts.Expression} expr
@@ -257,7 +489,12 @@ export function constantTruthiness(expr) {
   if (ts.isNumericLiteral(e)) return Number(e.text) !== 0;
   if (ts.isBigIntLiteral(e)) return e.text !== "0n";
   if (ts.isStringLiteralLike(e)) return e.text !== "";
-  if (ts.isIdentifier(e)) return e.text === "undefined" || e.text === "NaN" ? false : null;
+  if (ts.isIdentifier(e)) {
+    if (e.text === "undefined" || e.text === "NaN") return false;
+    // T-008k: `const f = false; if (f)` — yerel `const` sabiti (en yakın bildirim; yeniden atanamaz).
+    const init = constInitializer(e);
+    return init === null ? null : constantTruthiness(init);
+  }
   if (ts.isVoidExpression(e)) return false;
   if (ts.isPrefixUnaryExpression(e) && e.operator === ts.SyntaxKind.ExclamationToken) {
     const v = constantTruthiness(e.operand);
@@ -322,6 +559,8 @@ export function ineffectiveReason(call) {
   let child = call;
   let p = call.parent;
   while (p !== undefined) {
+    const extra = stepReason(child, p);
+    if (extra !== null) return extra;
     if (ts.isIfStatement(p) && child !== p.expression) {
       const v = constantTruthiness(p.expression);
       if ((v === false && child === p.thenStatement) || (v === true && child === p.elseStatement)) return "erişilemeyen kod (sabit koşullu dal)";

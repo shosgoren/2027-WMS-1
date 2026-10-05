@@ -1,17 +1,17 @@
 {
   "acTests": {
     "AC-05": 2,
-    "AC-28": 23,
-    "AC-37": 8,
+    "AC-28": 24,
+    "AC-37": 14,
     "AC-43": 12,
     "AC-44": 11
   },
   "acFileAssertions": {
-    "tests/guards/ac-37.test.mjs": 45,
+    "tests/guards/ac-37.test.mjs": 63,
     "tests/guards/ac-43.test.mjs": 37,
     "tests/guards/ac-44.test.mjs": 42,
     "tests/integration/ac/ac-05-pooler-isolation.int.test.ts": 15,
     "tests/integration/ac/ac-28-runtime.int.test.ts": 16,
-    "tests/unit/ac/ac-28-lint.test.ts": 52
+    "tests/unit/ac/ac-28-lint.test.ts": 54
   }
 }

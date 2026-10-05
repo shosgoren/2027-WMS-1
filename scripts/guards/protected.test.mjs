@@ -12,7 +12,7 @@ import { gitEnv } from "./lib/git.mjs";
 import { API_VERSION, contextFromEnv, createGitHubClient, GitHubError, toPullInfo } from "./lib/github.mjs";
 import { createReporter, UsageError } from "./lib/output.mjs";
 import { createRepo } from "./lib/testkit.mjs";
-import { checkProtected, parseProtectedArgs, WARN_LOCAL } from "./protected.mjs";
+import { checkProtected, parseProtectedArgs, securityFreshness, WARN_LOCAL } from "./protected.mjs";
 import {
   acceptedDecisionIds,
   adrAccepted,
@@ -1090,6 +1090,39 @@ describe("check:protected", () => {
     expect(stale.code).toBe(1);
     expect(stale.text).toContain(`FAIL ${REASONS.SECURITY_STALE} docs/INVARIANTS.md`);
     expect(stale.text).toContain("rapordan sonra korunan değişiklik: package.json");
+  });
+
+  it("T-008k madde 8: tabanı birleştirmek raporu bayatlatmaz; PR'ın kendi korunan dosyasına veya başka daldan gelen korunan değişikliğe dokunmak bayatlatır", async () => {
+    const r = fixture();
+    r.write("docs/INVARIANTS.md", "# I2\n").commit("PR: kendi korunan değişikliği");
+    const reviewed = head(r);
+    const body = () => `${approvalLine(head(r))}\n${SEC0(reviewed)}\n`;
+    const run = () => check(r, { env: prEnv(r), client: fakeClient({ pulls: [pull({ headSha: head(r), body: body() })] }).client });
+    // Taban ilerler (korunan yola dokunur) ve PR'a birleştirilir.
+    r.checkout("main").write("scripts/guards/x.mjs", "export const baseSide = 1;\n").commit("taban: korunan değişiklik").publish("main");
+    r.checkout("feat/T-100-x").merge("main", "Merge main into feat");
+    const merged = head(r);
+    // Eski hesap (taban bilgisiz `reviewed..head` farkı) bu birleştirmeyi bayat sayardı; yeni hesap saymaz.
+    expect(securityFreshness(r.dir, merged)(reviewed)).toContain("scripts/guards/x.mjs");
+    expect(securityFreshness(r.dir, merged, "origin/main")(reviewed)).toBeNull();
+    const fresh = await run();
+    expect(fresh.text).not.toContain(REASONS.SECURITY_STALE);
+    expect(fresh.code).toBe(0);
+    // Yanlış pozitif kontrolü: PR kendi korunan dosyasına dokunursa bayat.
+    r.write("docs/INVARIANTS.md", "# I3\n").commit("PR: rapordan sonra kendi korunan dosyası");
+    const own = await run();
+    expect(own.code).toBe(1);
+    expect(own.text).toContain("rapordan sonra korunan değişiklik: docs/INVARIANTS.md");
+    // Saldırı: taban olmayan bir daldan korunan değişiklik getirmek (PR'ın kendi kümesine girer) bayat.
+    const r2 = fixture();
+    r2.write("docs/INVARIANTS.md", "# I2\n").commit("PR");
+    const reviewed2 = head(r2);
+    r2.checkout("main").branch("yan").write("package.json", JSON.stringify({ ...ROOT_PKG, scripts: { ...ROOT_PKG.scripts, postinstall: "node x" } }, null, 2) + "\n").commit("yan dal");
+    r2.checkout("feat/T-100-x").merge("yan", "Merge yan");
+    const stale = securityFreshness(r2.dir, head(r2), "origin/main")(reviewed2);
+    expect(stale).toContain("rapordan sonra korunan değişiklik: package.json");
+    // Taban yoksa fail-closed.
+    expect(securityFreshness(r2.dir, head(r2), "origin/yok")(reviewed2)).toContain("yerelde yok");
   });
 
   it("push: before ≠ HEAD^1 (birden fazla birleştirme) → APPROVAL_UNVERIFIABLE", async () => {

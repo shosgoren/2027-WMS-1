@@ -192,6 +192,28 @@ export function parseVitestSummary(stdout) {
 }
 
 /**
+ * Vitest stdout'unda `Tests …` özet satırı sayısı (T-008k). Gerçek koşuda tam olarak bir tanedir;
+ * 0 (özet yok) veya >1 (başka bir süreç/test sahte özet satırı basmış) güvenilmezdir.
+ * @param {string} stdout
+ * @returns {number}
+ */
+export function countSummaryLines(stdout) {
+  return stdout.replace(ANSI_RE, "").split(/\r?\n/).filter((l) => /^\s*Tests\s+/.test(l)).length;
+}
+
+/**
+ * Rapor ↔ özet denetimi (T-008k): önce "tam olarak bir özet satırı" şartı, sonra sayı eşleşmesi.
+ * @param {TestOutcome[]} outcomes
+ * @param {string} stdout
+ * @returns {string | null} uyuşmazlık açıklaması; `null` = güvenilir
+ */
+export function reportMismatch(outcomes, stdout) {
+  const n = countSummaryLines(stdout);
+  if (n !== 1) return `vitest stdout'unda tam olarak bir "Tests" özet satırı olmalı (bulunan: ${n})`;
+  return summaryMismatch(outcomes, parseVitestSummary(stdout));
+}
+
+/**
  * JSON rapor sonuçları vitest özet satırıyla uyuşuyor mu; uyuşmuyorsa açıklama.
  * Eşleme (vitest 5): JSON `failed` = özet failed; JSON `passed` = özet passed + expected fail;
  * toplam = özet toplamı.
@@ -218,7 +240,10 @@ export function summaryMismatch(outcomes, summary) {
 export function spawnIsolated(bin, args, opts) {
   // `detached` (setsid) spawnSync'te de uygulanır; @types/node yalnızca SpawnOptions'ta tanımlar.
   /** @type {import("node:child_process").SpawnSyncOptionsWithStringEncoding & { detached: boolean }} */
-  const options = { cwd: opts.cwd, env: opts.env, encoding: "utf8", maxBuffer: 256 * 1024 * 1024, detached: true };
+  // `stdio` (T-008k): stdin kapalı; stdout/stderr BU süreçte boru olarak alınır. Vitest işçileri ve
+  // onların torunları boruyu doğrudan devralmaz (vitest işçi çıktısını kendi stdout'una yeniden
+  // basar); yine de boruya sahte satır yazılırsa `reportMismatch` tek-özet-satırı şartıyla yakalar.
+  const options = { cwd: opts.cwd, env: opts.env, encoding: "utf8", maxBuffer: 256 * 1024 * 1024, detached: true, stdio: ["ignore", "pipe", "pipe"] };
   const r = spawnSync(bin, args, options);
   if (typeof r.pid === "number" && r.pid > 0) {
     try {
@@ -280,7 +305,7 @@ export function runKind({ root, kind, files, ids, artifactDir, name, vitestBin, 
   if (!outcomes) {
     return { kind, ok: false, exitCode: r.status, files, error: `vitest JSON raporu okunamadı (çıkış ${r.status}), bkz. ${relLog}`, outcomes: [], log: relLog };
   }
-  const mismatch = summaryMismatch(outcomes, parseVitestSummary(r.stdout ?? ""));
+  const mismatch = reportMismatch(outcomes, r.stdout ?? "");
   if (mismatch !== null) {
     return { kind, ok: false, exitCode: r.status, files, error: `REPORT_MISMATCH: ${mismatch}, bkz. ${relLog}`, outcomes: [], log: relLog };
   }

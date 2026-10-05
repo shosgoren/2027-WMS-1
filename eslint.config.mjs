@@ -113,6 +113,20 @@ const IMPORT_NON_STATIC = {
   message: MSG_NON_STATIC,
 };
 
+/**
+ * T-008k: bekçi yükleyicisinin tek serbest biçimi `import(pathToFileURL(<ifade>).href)`; yalnızca
+ * noktalı `.href` (hesaplanmış `["href"]`, çıplak değişken, `x.href` serbest değildir), tek ve yayılımsız argüman.
+ */
+const IMPORT_PATH_TO_FILE_URL_HREF =
+  "[source.type='MemberExpression'][source.computed=false][source.optional=false][source.property.name='href']" +
+  "[source.object.type='CallExpression'][source.object.optional=false][source.object.callee.type='Identifier']" +
+  "[source.object.callee.name='pathToFileURL'][source.object.arguments.length=1]" +
+  ":not([source.object.arguments.0.type='SpreadElement'])";
+const IMPORT_NON_STATIC_EXCEPT_FILE_URL = {
+  selector: `ImportExpression:not([source.type='Literal'], [source.type='TemplateLiteral'], ${IMPORT_PATH_TO_FILE_URL_HREF})`,
+  message: MSG_NON_STATIC,
+};
+
 /** AC-28 / T-005g Yapılacak 1: dinamik biçimlerde aynı yasaklı küme. */
 const RAW_CLIENT_SYNTAX = [
   // import("…"), import(`…`)
@@ -422,14 +436,14 @@ export default defineConfig(
     // T-015: bekçi giriş noktası `scripts/guards/<ad>.mjs` modülünü `import(pathToFileURL(file).href)`
     // ile yükler; `<ad>` `isGuardName` ile sabit `GUARDS` listesine karşı doğrulanır ve testler
     // (`scope.test.mjs`) `guardsDir` ile geçici dizinden sahte modül yükler — statik harita bunu
-    // karşılayamaz. Muafiyet YALNIZCA bu dosya ve YALNIZCA `import(<ifade>)` seçicisi içindir: aynı
+    // karşılayamaz. Muafiyet YALNIZCA bu dosya ve YALNIZCA `import(pathToFileURL(<ifade>).href)` biçimi içindir (T-008k): aynı
     // dosyada yasaklı küme (statik/dinamik/require), statik olmayan `require` ve tenant ayarı
     // denetimleri aynen geçerlidir (ac-28-lint.test.ts bunu doğrular).
     files: [GUARD_LOADER_FILE],
     rules: {
       "no-restricted-syntax": [
         "error",
-        ...RAW_CLIENT_SYNTAX.filter((s) => s !== IMPORT_NON_STATIC),
+        ...RAW_CLIENT_SYNTAX.map((s) => (s === IMPORT_NON_STATIC ? IMPORT_NON_STATIC_EXCEPT_FILE_URL : s)),
         ...CODE_EXEC_SYNTAX,
         ...TENANT_SETTING_SYNTAX,
       ],

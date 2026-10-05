@@ -285,15 +285,47 @@ describe("AC-28 lint (T-015): yanlış pozitif ve bekçi yükleyicisi muafiyeti"
   );
 
   it(
-    "@AC-28 scripts/guards/cli.mjs: yalnızca import(<ifade>) serbest",
+    "@AC-28 scripts/guards/cli.mjs: yalnızca import(pathToFileURL(<ifade>).href) serbest",
     async () => {
-      const loader = 'export async function load(file: string): Promise<unknown> {\n  return import(file);\n}\n';
+      const loader =
+        'import { pathToFileURL } from "node:url";\n\nexport async function load(file: string): Promise<unknown> {\n  return import(pathToFileURL(file).href);\n}\n';
       const ok = await lint(loader, GUARD_LOADER_PATH);
       expect(ok.messages.filter((m) => m.ruleId === SYNTAX_RULE_ID)).toHaveLength(0);
       expect(ok.errorCount).toBe(0);
       // Aynı içerik başka bir bekçi dosyasında → error (muafiyet dosyaya özgü).
       const other = await lint(loader, GUARD_TEST_PATH);
       expect(other.messages.filter((m) => m.ruleId === SYNTAX_RULE_ID)).toHaveLength(1);
+    },
+    60_000,
+  );
+
+  // T-008k: muafiyet yalnızca `pathToFileURL(x).href`; diğer statik olmayan biçimler cli.mjs'te de error.
+  it.each([
+    ["import(file)", "export async function load(file: string): Promise<unknown> {\n  return import(file);\n}\n"],
+    ["import(x.href)", "export async function load(x: { href: string }): Promise<unknown> {\n  return import(x.href);\n}\n"],
+    [
+      'import(pathToFileURL(x)["href"])',
+      'import { pathToFileURL } from "node:url";\n\nexport async function load(x: string): Promise<unknown> {\n  return import(pathToFileURL(x)["href"]);\n}\n',
+    ],
+    [
+      "import(pathToFileURL(x).pathname)",
+      'import { pathToFileURL } from "node:url";\n\nexport async function load(x: string): Promise<unknown> {\n  return import(pathToFileURL(x).pathname);\n}\n',
+    ],
+    [
+      "import(url.pathToFileURL(x).href)",
+      'import url from "node:url";\n\nexport async function load(x: string): Promise<unknown> {\n  return import(url.pathToFileURL(x).href);\n}\n',
+    ],
+    [
+      "import(pathToFileURL(...xs).href)",
+      'import { pathToFileURL } from "node:url";\n\nexport async function load(xs: string[]): Promise<unknown> {\n  return import(pathToFileURL(...xs).href);\n}\n',
+    ],
+  ])(
+    "@AC-28 T-008k scripts/guards/cli.mjs: %s → error",
+    async (_name, code) => {
+      const result = await lint(code, GUARD_LOADER_PATH);
+      const hits = result.messages.filter((m) => m.ruleId === SYNTAX_RULE_ID);
+      expect(hits).toHaveLength(1);
+      expect(hits[0]?.severity).toBe(2);
     },
     60_000,
   );
