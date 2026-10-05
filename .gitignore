@@ -1,0 +1,8 @@
+node_modules
+.next
+dist
+.artifacts/
+.env
+.env.*
+!.env.example
+apps/web/next-env.d.ts

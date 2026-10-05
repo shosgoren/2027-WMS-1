@@ -1,0 +1,18 @@
+# Değişmez Kurallar (kod, test ve inceleme bu ID'lere referans verir)
+- **I-01 Tenant izolasyonu:** Tenant verisine her erişim doğrulanmış üyelikten gelen tenant bağlamıyla; istemcinin tenant_id'si yalnızca seçim bilgisidir. API, DB, dosya, cache, arama, export, worker aynı sözleşmeye uyar.
+- **I-02 Transaction-local bağlam:** `set_config(..., true)`; aynı transaction/bağlantı dışında tenant sorgusu yok; eksik bağlam = ret.
+- **I-03 RLS rolü:** Uygulama rolü tablo sahibi, superuser veya BYPASSRLS değildir; migration/yedek/silme rolleri ayrıdır.
+- **I-04 Defter kaynaktır:** `stock_ledger` append-only; bakiye ve rezervasyon yalnızca stok komutlarıyla aynı transaction'da güncellenir; doğrudan CRUD yok.
+- **I-05 Negatif stok yasak** (varsayılan); istisna yalnızca tenant politikası + özel yetki + gerekçe + audit; seri tekilliği hiçbir durumda aşılamaz.
+- **I-06 Idempotency:** Stok değiştiren her komut kalıcı idempotency kaydı taşır; aynı anahtar + farklı içerik = ret; tekrar = önceki sonuç.
+- **I-07 Outbox:** Haricî olaylar aynı transaction'da outbox'a yazılır; relay `FOR UPDATE SKIP LOCKED` + jobId = olay kimliği ile yayımlar; her tüketici `processed_events` ile etkiyi tek kez uygular; Redis/kuyruk stok doğruluğunun kaynağı değildir.
+- **I-13 Veriye erişim hakkı:** Görüntüleme, CSV/JSON indirme ve takeout hiçbir paket, ödeme durumu veya feature flag ile kapatılmaz; yalnızca kimlik, yetki ve rate limit uygulanır. Tek istisna kapatma sürecidir (`CLOSING_GRACE`): erişim yalnızca `takeout.talep_et` yetkili kullanıcılara, salt okunur portal üzerinden açık kalır (§12 Kapatma).
+- **I-14 Uzun okuma ana DB'yi kilitlemez:** Büyük export/rapor işleri worker'da, replica veya keyset parçalı kısa transaction'larla çalışır; uzun açık transaction ve OFFSET sayfalama yasak.
+- **I-15 Kilit sırası:** Stok komutları kilitleri yalnızca `acquireStockLocks` ile, önceden bildirilen tam kilit planıyla alır (belge → sayım kilidi → bakiye → rezervasyon → seri; her adımda tekil anahtar artan); kilitsiz toplu stok güncellemesi yasak.
+- **I-17 Onay mekanik kapıdan gelir (ADR-012 rev. 2026-10-05, kullanıcı kararı):** Korunan değişiklik, karantina, AC tabanı düşürme ve AC faz değişikliği yalnızca PROTOCOL §Onay kaynağı birleştirme kapısı geçtiğinde (CI yeşil + `security-reviewer` BLOCKER: 0) ve PR açıklamasında `APPROVED-BY: supervisor (ADR-012 rev.)` satırı ile güvenlik raporu özeti bulunduğunda birleşir. Karttaki `protected: true` ve sohbet beyanı tek başına onay değildir. Bekçi gevşetme hiçbir onayla serbest değildir (G-11). Onayın ajandan bağımsız olmaması bilinen risktir (ADR-012).
+- **I-16 Sequence commit sırası değildir:** Hiçbir kesim noktası, cursor veya "buraya kadar işlendi" işareti sequence/ID büyüklüğüne dayanmaz. Kesit, transaction görünürlüğüyle (`created_xid xid8` + `pg_visible_in_snapshot`) veya açık durum alanıyla belirlenir.
+- **I-08 Ters kayıt:** İşlenmiş belge silinmez/değiştirilmez; ters kayıt kalan ters çevrilmemiş miktarı aşamaz; bağımlı işlemler kontrol edilir.
+- **I-09 Decimal:** Miktar ve dönüşümler decimal; dönüşüm katsayısı belge satırına kopyalanır; float yok.
+- **I-10 Offline = komut:** Offline kayıt sunucu onayı bekleyen komuttur; sunucu güncel yetki/abonelik/stok ile yeniden doğrular; last-write-wins yok.
+- **I-11 Sürümlü metadata:** Belge kullandığı metadata/fiş tipi sürümünü taşır; şema değişikliği eski belgeyi bozmaz; çekirdek stok alanları metadata'ya taşınmaz.
+- **I-12 Audit:** Yetkili işlemler ve destek erişimi audit'e yazılır; işlenmiş audit uygulama kullanıcısınca değiştirilemez; sır/parola loglanmaz.
