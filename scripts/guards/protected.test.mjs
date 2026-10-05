@@ -272,6 +272,12 @@ describe("protected-paths: yol kuralları", () => {
     "scripts/lib/pilot.mjs",
     ".githooks/pre-commit",
     "tests/QUARANTINE.md",
+    // T-017: gitleaks muafiyet listesi
+    ".gitleaksignore",
+    "apps/web/.gitleaksignore",
+    ".gitleaks.toml",
+    "gitleaks.toml",
+    "apps/web/.gitleaks.toml",
     ".pnpmfile.cjs",
     "apps/web/.pnpmfile.mjs",
     // T-008h B1/M5/M6: paket yöneticisi yapılandırmasının tamamı, yamalar
