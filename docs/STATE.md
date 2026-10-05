@@ -2,9 +2,9 @@
 
 **Oturum kilidi:** session_01C59FRaUynaDdhNGZoRbKsY · 2026-10-05T16:30Z (zamanlanmış oturum: kilit 3 saatten yeniyse ve başka oturumunsa hiçbir şey yapmadan çık; değilse kendi kimliğinle yenile, her push'ta zamanı güncelle)
 **Faz:** 0 — Kararlar & iskelet
-**Aktif görev:** `int/faz0-iskelet` paketi (T-002a–d birleşti, verify 29 test OK) → security-reviewer incelemesi → `main`'e PR + birleştirme (STATE'in güncel kopyası bu dalda)
-**Son tamamlanan:** ADR-012 rev. (kullanıcı PR incelemez; Supervisor birleştirir; ADR-001…012 kabul) · ADR-013 barındırma (Fly.io fra + Tigris, dağıtım GitHub Actions'tan)
-**Sonraki adım:** T-002a → T-002b/c/d → `int/faz0-iskelet`'i `main`'e PR + birleştirme kapısı → T-003 CI. Neon/Fly sırları gelince T-005d/e ve dağıtım kartları.
+**Aktif görev:** T-003 CI (worktree ../wt-T-003, `feat/T-003-ci` → `int/faz0-ci`). STATE'in güncel kopyası en son açık `int/*` dalında (şu an `int/faz0-ci`).
+**Son tamamlanan:** PR shosgoren/2027-WMS-1#1 (`int/faz0-iskelet` → `main`, 977ab35): belgeler + T-002a–d; security-reviewer BLOCKER 0
+**Sonraki adım:** T-003 raporu → security-reviewer → `int/faz0-ci` PR + birleştirme. Paralel: T-004 (`int/faz0-docs`) ve T-005a (`int/faz0-pooler`) `main`'den.
 
 ## Çalışma biçimi (kullanıcı kararı 2026-10-05 — ADR-012 rev., PROTOCOL §Onay kaynağı)
 - Kullanıcı PR incelemez. Birleştirme kapısı: CI/oturumda `pnpm verify` + `check:all` + `test:int` + ilgili `test:ac` yeşil; risk matrisine göre `security-reviewer` ve `qa-verifier` BLOCKER: 0 → Supervisor PR'ı kendisi birleştirir (`mcp__github__merge_pull_request`). Korunan değişiklikte PR açıklamasında `APPROVED-BY: supervisor (ADR-012 rev.)`.
