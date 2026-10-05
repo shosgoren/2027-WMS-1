@@ -3,3 +3,20 @@
 export { createDbClient } from "./client.ts";
 export type { TenantContext } from "./client.ts";
 export { withTenant } from "./with-tenant.ts";
+// Kimlik tabloları: yalnızca TİPLER (T-102); tablo nesneleri `@wms/db/internal/schema` alt yolundadır.
+export type {
+  Account,
+  AuthRateLimit,
+  NewAccount,
+  NewAuthRateLimit,
+  NewSecurityEvent,
+  NewSession,
+  NewTwoFactor,
+  NewUser,
+  NewVerification,
+  SecurityEvent,
+  Session,
+  TwoFactor,
+  User,
+  Verification,
+} from "./schema/identity.ts";
