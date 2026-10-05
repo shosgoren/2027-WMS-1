@@ -32,7 +32,7 @@ ADR-001 Next.js + ayrı worker · 002 İngilizce kod/DB, Türkçe UI · 003 Driz
 - [ ] Yeni kart (architect yazacak): T-010 Fly dağıtım hattı (staging otomatik, prod etiketle; `FLY_API_TOKEN`)
 
 ## Engeller / kullanıcı eylemi bekleyenler (2026-10-05 tek mesajla istendi)
-- U-01 Neon: proje (AWS Frankfurt, PG 17) + `NEON_API_KEY` sırrı + `NEON_PROJECT_ID` değişkeni GitHub'da → T-005d
+- U-01 Neon: kullanıcı 2026-10-05 tamamladığını bildirdi (proje etkin-wms, AWS Frankfurt, PG 17; `NEON_API_KEY` sırrı + `NEON_PROJECT_ID` değişkeni). Doğrulama T-005d ilk Actions koşusunda → T-005d
 - U-02 Fly.io: hesap + kart + `FLY_API_TOKEN` sırrı → T-010
 - U-03 (isteğe bağlı) Resend `RESEND_API_KEY` (+ alan adı) → Faz 1 e-posta; yoksa bağlantı ekranda gösterilir
 - U-04 Q-07 hukukçu onayı → yalnızca gerçek kişisel veriyle prod için; demo için engel değil
