@@ -501,15 +501,19 @@ export function parsePsqlSqlstate(stderr) {
  * @param {PsqlTarget} t
  * @param {string} sql
  * @param {Redactor} redactor
+ * @param {number} [timeoutMs]
  * @returns {PsqlResult}
  */
-export function runPsql(t, sql, redactor) {
+export function runPsql(t, sql, redactor, timeoutMs = 120_000) {
   const r = spawnSync("psql", ["-X", "-q", "-A", "-t", "-F", "|", "-v", "ON_ERROR_STOP=1", "-v", "VERBOSITY=verbose"], {
     input: sql,
     encoding: "utf8",
-    timeout: 120_000,
+    timeout: timeoutMs,
     env: {
       PATH: process.env.PATH ?? "",
+      // Çıktı ayrıştırıcıları (SQLSTATE, `Time:`) yerele bağlı olmasın (T-005d PR #31 MINOR-4).
+      LC_ALL: "C",
+      LC_MESSAGES: "C",
       PGHOST: t.host,
       PGUSER: t.user,
       PGPASSWORD: t.password,
@@ -946,7 +950,7 @@ function installedVersion(name) {
 
 /**
  * `pnpm test:int` (neon hedefi) — çıktı satır satır maskelenir; ham satırda sızıntı sayılır.
- * @param {{ mode: "gate" | "diag", prepare: boolean | undefined, databaseUrl: string, databaseUrlDirect: string, testTimeoutMs: number, redactor: Redactor, log: (s: string) => void }} o
+ * @param {{ mode: "gate" | "diag", prepare: boolean | undefined, databaseUrl: string, databaseUrlDirect: string, testTimeoutMs: number, hookTimeoutMs: number, redactor: Redactor, log: (s: string) => void }} o
  */
 async function runIntTests(o) {
   rmSync(INT_ARTIFACT_DIR, { recursive: true, force: true });
@@ -973,10 +977,10 @@ async function runIntTests(o) {
       for (const k of kinds) leakKinds.add(k);
     },
   );
-  o.log(`[spike:neon] ${o.mode} koşusu: testTimeout=${o.testTimeoutMs}ms WMS_INT_TARGET=neon INT_DB_PREPARE=${o.prepare === undefined ? "(yok → üretim ayarı)" : String(o.prepare)}`);
+  o.log(`[spike:neon] ${o.mode} koşusu: testTimeout=${o.testTimeoutMs}ms hookTimeout=${o.hookTimeoutMs}ms WMS_INT_TARGET=neon INT_DB_PREPARE=${o.prepare === undefined ? "(yok → üretim ayarı)" : String(o.prepare)}`);
   const wallStart = performance.now();
   const exitCode = await new Promise((resolve) => {
-    const child = spawn("pnpm", ["test:int", `--testTimeout=${o.testTimeoutMs}`], { cwd: ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn("pnpm", ["test:int", `--testTimeout=${o.testTimeoutMs}`, `--hookTimeout=${o.hookTimeoutMs}`], { cwd: ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (c) => filter.push(c));
@@ -1039,7 +1043,7 @@ function dist(v) {
 }
 
 /** Gecikme ölçümünde tekrar sayıları. */
-export const LATENCY_PROBE = { roundTrips: 30, transactions: 20, connects: 3 };
+export const LATENCY_PROBE = { roundTrips: 30, transactions: 20, connects: 3, stmtsPerTx: 6, budgetMs: 120_000 };
 
 /**
  * withTenant'ın ağ şeklini (BEGIN, 4 sorgu — set_config dahil —, COMMIT = 6 gidiş-dönüş) sürücüsüz taklit eder
@@ -1051,44 +1055,60 @@ export const LATENCY_PROBE = { roundTrips: 30, transactions: 20, connects: 3 };
  * @param {() => number} [now]
  */
 export function measureLatency(t, redactor, now = () => performance.now()) {
+  const started = now();
+  /** @param {string} sql */
+  const run = (sql) => {
+    const left = LATENCY_PROBE.budgetMs - (now() - started);
+    if (left <= 0) return { ok: false, stdout: "", sqlstate: null, error: "ölçüm süre sınırı aşıldı" };
+    return runPsql(t, sql, redactor, Math.ceil(left));
+  };
+  /** @param {{ error: string | null, sqlstate: string | null }} r */
+  const fail = (r) => ({ error: r.error, sqlstate: r.sqlstate });
   /** @type {number[]} */
   const connect = [];
   for (let i = 0; i < LATENCY_PROBE.connects; i++) {
     const t0 = now();
-    const r = runPsql(t, "SELECT 1;\n", redactor);
-    if (!r.ok) return { error: r.error, sqlstate: r.sqlstate };
+    const r = run("SELECT 1;\n");
+    if (!r.ok) return fail(r);
     connect.push(now() - t0);
   }
-  const rt = runPsql(t, `\\timing on\n${"SELECT 1;\n".repeat(LATENCY_PROBE.roundTrips)}`, redactor);
-  if (!rt.ok) return { error: rt.error, sqlstate: rt.sqlstate };
+  const rt = run(`\\timing on\n${"SELECT 1;\n".repeat(LATENCY_PROBE.roundTrips)}`);
+  if (!rt.ok) return fail(rt);
   const roundTrip = parsePsqlTimings(rt.stdout);
+  if (roundTrip.length !== LATENCY_PROBE.roundTrips) {
+    return { error: `ölçüm geçersiz: ${roundTrip.length} Time satırı, beklenen ${LATENCY_PROBE.roundTrips}`, sqlstate: null };
+  }
   const txScript = `BEGIN;\nSELECT 1;\nSELECT 1;\nSELECT 1;\nSELECT 1;\nCOMMIT;\n`;
-  const tx = runPsql(t, `\\timing on\n${txScript.repeat(LATENCY_PROBE.transactions)}`, redactor);
-  if (!tx.ok) return { error: tx.error, sqlstate: tx.sqlstate };
+  const tx = run(`\\timing on\n${txScript.repeat(LATENCY_PROBE.transactions)}`);
+  if (!tx.ok) return fail(tx);
   const all = parsePsqlTimings(tx.stdout);
+  const expected = LATENCY_PROBE.transactions * LATENCY_PROBE.stmtsPerTx;
+  if (all.length !== expected) return { error: `ölçüm geçersiz: ${all.length} Time satırı, beklenen ${expected}`, sqlstate: null };
   /** @type {number[]} */
   const perTx = [];
-  for (let i = 0; i + 6 <= all.length; i += 6) perTx.push(all.slice(i, i + 6).reduce((a, b) => a + b, 0));
-  return { error: null, sqlstate: null, connectMs: dist(connect), roundTripMs: dist(roundTrip), withTenantShapedTxMs: dist(perTx), roundTripsPerTx: 6 };
+  for (let i = 0; i < all.length; i += LATENCY_PROBE.stmtsPerTx) perTx.push(all.slice(i, i + LATENCY_PROBE.stmtsPerTx).reduce((a, b) => a + b, 0));
+  return { error: null, sqlstate: null, connectMs: dist(connect), roundTripMs: dist(roundTrip), withTenantShapedTxMs: dist(perTx), roundTripsPerTx: LATENCY_PROBE.stmtsPerTx };
 }
 
 /** Test zaman aşımı bütçesi sabitleri (Supervisor kararı; G-11: assertion değil, ağ gecikmesiyle orantılı bütçe). */
-export const TEST_TIMEOUT = { defaultMs: 30_000, maxMs: 600_000, calls: 100, stepsPerCall: 6, safety: 3 };
+export const TEST_TIMEOUT = { defaultMs: 30_000, hookDefaultMs: 60_000, maxMs: 600_000, calls: 100, stepsPerCall: 6, safety: 3 };
 
 /**
  * `--testTimeout` değeri: clamp(max(30000, ceil(3 × 600 × adım-RTT_p95_ms)), üst sınır 600000).
  * Ölçüm yok/geçersiz → 30000 (fail-closed: bütçe büyütülmez).
  * @param {{ error?: unknown, roundTripMs?: { p95?: number | null } } | null | undefined} pooledLatency
- * @returns {{ ms: number, measured: boolean, rttP95Ms: number | null, formula: string }}
+ * @returns {{ ms: number, hookMs: number, measured: boolean, rttP95Ms: number | null, formula: string }}
  */
 export function computeTestTimeoutMs(pooledLatency) {
   const formula = `clamp(max(${TEST_TIMEOUT.defaultMs}, ceil(${TEST_TIMEOUT.safety} × ${TEST_TIMEOUT.calls * TEST_TIMEOUT.stepsPerCall} × RTT_p95_ms)), ${TEST_TIMEOUT.maxMs})`;
   const rtt = pooledLatency?.error ? null : (pooledLatency?.roundTripMs?.p95 ?? null);
   if (typeof rtt !== "number" || !Number.isFinite(rtt) || rtt <= 0) {
-    return { ms: TEST_TIMEOUT.defaultMs, measured: false, rttP95Ms: null, formula: `ölçülemedi → ${TEST_TIMEOUT.defaultMs} (varsayılan); ${formula}` };
+    return { ms: TEST_TIMEOUT.defaultMs, hookMs: TEST_TIMEOUT.hookDefaultMs, measured: false, rttP95Ms: null, formula: `ölçülemedi → ${TEST_TIMEOUT.defaultMs} (varsayılan); ${formula}` };
   }
   const raw = Math.ceil(TEST_TIMEOUT.safety * TEST_TIMEOUT.calls * TEST_TIMEOUT.stepsPerCall * rtt);
-  return { ms: Math.min(TEST_TIMEOUT.maxMs, Math.max(TEST_TIMEOUT.defaultMs, raw)), measured: true, rttP95Ms: rtt, formula };
+  const ms = Math.min(TEST_TIMEOUT.maxMs, Math.max(TEST_TIMEOUT.defaultMs, raw));
+  // hookTimeout aynı bütçeyle ölçeklenir (afterAll `client.close()` bekleyen sorguları bekler; PR #31 MINOR-2).
+  return { ms, hookMs: Math.min(TEST_TIMEOUT.maxMs, Math.max(TEST_TIMEOUT.hookDefaultMs, ms)), measured: true, rttP95Ms: rtt, formula };
 }
 
 /**
@@ -1279,7 +1299,7 @@ export async function main(o = {}) {
     say(`[spike:neon] gecikme: ${JSON.stringify(data.latency.pooled)}`);
     say(`[spike:neon] test zaman aşımı: ${data.latency.testTimeout.ms} ms (${data.latency.testTimeout.measured ? `RTT p95 ${data.latency.testTimeout.rttP95Ms} ms` : "ölçülemedi"})`);
 
-    const gate = await runIntTests({ mode: "gate", prepare: undefined, testTimeoutMs: data.latency.testTimeout.ms, databaseUrl, databaseUrlDirect, redactor, log: say });
+    const gate = await runIntTests({ mode: "gate", prepare: undefined, testTimeoutMs: data.latency.testTimeout.ms, hookTimeoutMs: data.latency.testTimeout.hookMs, databaseUrl, databaseUrlDirect, redactor, log: say });
     consoleLeakLines += gate.leakLines;
     data.gate = gate;
     data.migrationRoleWorks =
@@ -1289,7 +1309,7 @@ export async function main(o = {}) {
 
     const production = gate.ac05.pool1?.prepare ?? gate.ac05.pool2?.prepare;
     if (typeof production === "boolean") {
-      const diag = await runIntTests({ mode: "diag", prepare: !production, testTimeoutMs: data.latency.testTimeout.ms, databaseUrl, databaseUrlDirect, redactor, log: say });
+      const diag = await runIntTests({ mode: "diag", prepare: !production, testTimeoutMs: data.latency.testTimeout.ms, hookTimeoutMs: data.latency.testTimeout.hookMs, databaseUrl, databaseUrlDirect, redactor, log: say });
       consoleLeakLines += diag.leakLines;
       data.diag = diag;
     } else {

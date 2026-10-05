@@ -8,6 +8,8 @@ import {
   buildSummary,
   cell,
   computeTestTimeoutMs,
+  measureLatency,
+  LATENCY_PROBE,
   createAppRole,
   createAppRoleSql,
   createLineFilter,
@@ -651,5 +653,29 @@ describe("computeTestTimeoutMs (ölçülen RTT ile orantılı bütçe)", () => {
     expect(computeTestTimeoutMs({ roundTripMs: { p95: 1000 } }).ms).toBe(600000);
     expect(computeTestTimeoutMs({ roundTripMs: { p95: 1 } }).ms).toBe(30000);
     expect(computeTestTimeoutMs({ roundTripMs: { p95: 100 } }).formula).toContain("3 × 600 × RTT_p95_ms");
+  });
+});
+
+describe("computeTestTimeoutMs hookMs ve measureLatency sınırları", () => {
+  it("hookMs: ölçüm yok → 60000; RTT 100 → 180000; RTT 1000 → 600000", () => {
+    expect(computeTestTimeoutMs(null).hookMs).toBe(60000);
+    expect(computeTestTimeoutMs({ roundTripMs: { p95: 1 } }).hookMs).toBe(60000);
+    expect(computeTestTimeoutMs({ roundTripMs: { p95: 100 } }).hookMs).toBe(180000);
+    expect(computeTestTimeoutMs({ roundTripMs: { p95: 1000 } }).hookMs).toBe(600000);
+  });
+
+  it("süre sınırı aşılmışsa psql çalıştırılmadan 'süre sınırı aşıldı' (→ ölçülemedi)", () => {
+    let t = 0;
+    const now = () => (t++ === 0 ? 0 : LATENCY_PROBE.budgetMs + 1);
+    const r = measureLatency({ host: "h", user: "u", password: "p", database: "d" }, createRedactor(), now);
+    expect(r.error).toBe("ölçüm süre sınırı aşıldı");
+    expect(computeTestTimeoutMs(r).ms).toBe(30000);
+    expect(computeTestTimeoutMs(r).measured).toBe(false);
+  });
+
+  it("Time satırı sayısı beklenenle eşleşmiyorsa ölçüm geçersiz sayılır (sabitler 30 ve 120)", () => {
+    expect(LATENCY_PROBE.roundTrips).toBe(30);
+    expect(LATENCY_PROBE.transactions * LATENCY_PROBE.stmtsPerTx).toBe(120);
+    expect(computeTestTimeoutMs({ error: "ölçüm geçersiz: 29 Time satırı, beklenen 30" }).measured).toBe(false);
   });
 });
