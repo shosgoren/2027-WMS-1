@@ -1,10 +1,17 @@
 // `pnpm test:ac` planlama, koşturma ve sonuç değerlendirme (T-007).
 // Fail-closed: etiketli testi olmayan, gerçekten koşmamış, atlanmış veya koşturulamayan AC
-// PASS sayılmaz. Karantina mantığı burada yok (T-008e): karantinalı kapı testi de koşar ve sayılır.
+// PASS sayılmaz.
+// Karantina (T-008e; PROTOCOL §Karantina kuralı, `scripts/guards/lib/quarantine.mjs`): başlığında
+// `@quarantine Q-xx` olan test atlanmaz, normal koşar; sonucu `QUARANTINED_PASS`/`QUARANTINED_FAIL`
+// olarak raporlanır. Kırmızısı yalnızca kayıt geçerliyse (kayıtlı, `origin/main`'de birebir,
+// süresi içinde, ≤14 gün, kapısı değerlendirilen fazın AC'si değil) kapıyı kırmaz → AC durumu
+// `QUARANTINED_FAIL` (engelleyici değil); aksi hâlde normal FAIL.
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { evaluateCondition } from "./conditions.mjs";
+import { loadAcceptance } from "./acceptance.mjs";
+import { evaluateCondition, loadConditions } from "./conditions.mjs";
+import { acTagsOf, evaluateSite, gateAcIds, loadQuarantine, quarantineTags } from "../guards/lib/quarantine.mjs";
 
 /**
  * @typedef {import("./acceptance.mjs").AcceptanceCriterion} AcceptanceCriterion
@@ -13,7 +20,7 @@ import { evaluateCondition } from "./conditions.mjs";
  * @typedef {import("./collect.mjs").TaggedTest} TaggedTest
  * @typedef {import("./collect.mjs").TestKind} TestKind
  * @typedef {{ type: "phase", phase: string } | { type: "ids", ids: string[] } | { type: "ci" }} Mode
- * @typedef {"PASS" | "FAIL" | "NO_TEST" | "SKIPPED" | "CONDITION_UNKNOWN"} Status
+ * @typedef {"PASS" | "FAIL" | "NO_TEST" | "SKIPPED" | "CONDITION_UNKNOWN" | "QUARANTINED_FAIL"} Status
  * @typedef {{
  *   ac: AcceptanceCriterion,
  *   action: "run" | "skip" | "unknown",
@@ -32,6 +39,7 @@ import { evaluateCondition } from "./conditions.mjs";
  *   tests: TestOutcome[],
  * }} AcResult
  * @typedef {{ kind: TestKind, ok: boolean, exitCode: number | null, files: string[], error: string | null, outcomes: TestOutcome[], log: string | null }} RunOutcome
+ * @typedef {(o: TestOutcome) => string | null} QuarantineJudge karantina kaydı geçersizse neden, geçerliyse `null`
  */
 
 /** T-005a'nın entegrasyon yapılandırması (yoksa `.int.test.` dosyaları koşturulamaz → FAIL). */
@@ -221,8 +229,49 @@ export function execute(entries, tagsById, opts) {
     if (!g) continue;
     runs.push(runKind({ ...opts, kind, files: [...g.files].sort(), ids: [...g.ids].sort() }));
   }
-  const results = entries.map((e) => resultFor(e, tagsById.get(e.ac.id) ?? [], runs, opts.mode));
+  const judge = quarantineJudge(opts.root, opts.mode);
+  const results = entries.map((e) => resultFor(e, tagsById.get(e.ac.id) ?? [], runs, opts.mode, judge));
   return { results, runs };
+}
+
+/**
+ * Karantina geçerlilik yargıcı (tembel: kayıt, `main` ve kapı fazı ilk karantinalı testte okunur).
+ * Kapı fazı: `--phase P` → P ve `currentGatePhase`; diğer modlarda `currentGatePhase`.
+ * @param {string} root
+ * @param {Mode} mode
+ * @returns {QuarantineJudge}
+ */
+export function quarantineJudge(root, mode) {
+  /** @type {{ state: import("../guards/lib/quarantine.mjs").QuarantineState, gateAcs: Set<string> | null, gateError: string | null } | null} */
+  let ctx = null;
+  return (o) => {
+    if (ctx === null) {
+      /** @type {Set<string> | null} */
+      let gateAcs = null;
+      /** @type {string | null} */
+      let gateError = null;
+      try {
+        const acs = loadAcceptance(root);
+        const current = loadConditions(root, acs).currentGatePhase;
+        gateAcs = gateAcIds(acs, mode.type === "phase" ? [mode.phase, current] : [current]);
+      } catch (e) {
+        gateError = e instanceof Error ? e.message : String(e);
+      }
+      ctx = { state: loadQuarantine(root), gateAcs, gateError };
+    }
+    const findings = evaluateSite({ file: o.file, title: o.fullName, acIds: acTagsOf(o.fullName) }, ctx.state, { gateAcs: ctx.gateAcs, gateError: ctx.gateError, withDates: true });
+    return findings.length === 0 ? null : findings.map((f) => `${f.code}: ${f.message}`).join("; ");
+  };
+}
+
+/**
+ * Test başlığı karantina etiketi taşıyor mu.
+ * @param {TestOutcome} o
+ * @returns {boolean}
+ */
+function isQuarantined(o) {
+  const t = quarantineTags(o.fullName);
+  return t.ids.length > 0 || t.bare;
 }
 
 /**
@@ -230,9 +279,10 @@ export function execute(entries, tagsById, opts) {
  * @param {TaggedTest[]} tags
  * @param {RunOutcome[]} runs
  * @param {Mode} mode
+ * @param {QuarantineJudge} judge
  * @returns {AcResult}
  */
-function resultFor(e, tags, runs, mode) {
+function resultFor(e, tags, runs, mode, judge) {
   const { ac, condition } = e;
   const phase = ac.fallbackPhase ? `${ac.phase} (koşul yoksa ${ac.fallbackPhase})` : ac.phase;
   const condText = ac.condition ?? null;
@@ -274,11 +324,28 @@ function resultFor(e, tags, runs, mode) {
   const failed = tests.filter((o) => o.status === "failed");
   const skipped = tests.filter((o) => o.status !== "failed" && o.status !== "passed");
   const passed = tests.filter((o) => o.status === "passed");
-  for (const f of failed) problems.push(`başarısız: ${f.file} › ${f.fullName}${f.message ? ` — ${f.message}` : ""}`);
+  /** Karantina rapor satırları (geçerli/geçersiz fark etmeksizin her karantinalı test). */
+  /** @type {string[]} */
+  const quarantine = [];
+  let quarantinedFails = 0;
+  for (const p of passed.filter(isQuarantined)) quarantine.push(`QUARANTINED_PASS ${p.file} › ${p.fullName}`);
+  for (const f of failed) {
+    const msg = `${f.file} › ${f.fullName}${f.message ? ` — ${f.message}` : ""}`;
+    if (!isQuarantined(f)) {
+      problems.push(`başarısız: ${msg}`);
+      continue;
+    }
+    const invalid = judge(f);
+    quarantine.push(`QUARANTINED_FAIL ${msg}${invalid === null ? " (kayıt geçerli; kapıyı kırmaz)" : ""}`);
+    if (invalid === null) quarantinedFails++;
+    else problems.push(`başarısız (karantina geçersiz: ${invalid}): ${msg}`);
+  }
   for (const s of skipped) problems.push(`atlanmış (${s.status}): ${s.file} › ${s.fullName} — skip/todo kabul edilmez`);
-  if (passed.length === 0 && problems.length === 0) problems.push("gerçekten koşan test 0");
-  if (problems.length > 0) return res("FAIL", true, `${problems.join("; ")}${condInfo}`, tests);
-  return res("PASS", false, `${passed.length} test${condInfo}`, tests);
+  if (passed.length === 0 && quarantinedFails === 0 && problems.length === 0) problems.push("gerçekten koşan test 0");
+  const qInfo = quarantine.length > 0 ? ` [karantina: ${quarantine.join("; ")}]` : "";
+  if (problems.length > 0) return res("FAIL", true, `${problems.join("; ")}${qInfo}${condInfo}`, tests);
+  if (quarantinedFails > 0) return res("QUARANTINED_FAIL", false, `${passed.length} test geçti, ${quarantinedFails} karantinalı test başarısız${qInfo}${condInfo}`, tests);
+  return res("PASS", false, `${passed.length} test${qInfo}${condInfo}`, tests);
 }
 
 /**
@@ -298,11 +365,14 @@ export function formatResult(r) {
  */
 export function summarizeResults(results, errors) {
   /** @type {Record<Status, number>} */
-  const counts = { PASS: 0, FAIL: 0, NO_TEST: 0, SKIPPED: 0, CONDITION_UNKNOWN: 0 };
+  const counts = { PASS: 0, FAIL: 0, NO_TEST: 0, SKIPPED: 0, CONDITION_UNKNOWN: 0, QUARANTINED_FAIL: 0 };
   for (const r of results) counts[r.status]++;
   const blocking = results.filter((r) => r.blocking).length + errors.length;
   const ok = blocking === 0;
-  const parts = Object.entries(counts).map(([k, v]) => `${k} ${v}`);
+  // QUARANTINED_FAIL yalnızca varsa gösterilir (T-008e; önceki özet biçimi korunur).
+  const parts = Object.entries(counts)
+    .filter(([k, v]) => k !== "QUARANTINED_FAIL" || v > 0)
+    .map(([k, v]) => `${k} ${v}`);
   const err = errors.length > 0 ? ` · HATA ${errors.length}` : "";
   return { ok, summary: `${results.length} AC · ${parts.join(" · ")}${err} → ${ok ? "OK" : `KIRMIZI (${blocking} engelleyici)`}` };
 }

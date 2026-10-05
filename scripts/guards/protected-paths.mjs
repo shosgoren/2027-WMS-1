@@ -215,9 +215,16 @@ function numericLeaves(v, prefix, out) {
   }
 }
 
+/** Taşıma istisnasının uygulandığı taban bölümü (dosya yolu → assertion sayısı; T-008d). */
+const MOVE_SECTION = "acFileAssertions";
+
 /**
  * AC tabanı düşüşü: tabandaki bir sayısal değer azaldı veya kaldırıldı. Artış/ekleme serbest.
  * Biçim T-008d'de belirlenir; kural biçimden bağımsızdır (tüm sayısal yapraklar).
+ * Taşıma istisnası (T-008e; T-008d bulgu 1): yalnızca `acFileAssertions` (dosya yolu → sayı)
+ * bölümünde, kaldırılan yol önceden olmayan yeni bir yolda **aynı sayıyla** varsa düşüş sayılmaz
+ * (`check:ac-ratchet --update` dosya taşımasında yolu günceller). Her yeni yol tek bir kaldırılan
+ * yolu karşılar; farklı sayı veya başka bölüm (ör. `acTests` AC kimliği değişimi) yine düşüştür.
  * Ayrıştırılamayan taraf = düşüş sayılır (fail-closed). Taban yoksa (ilk oluşturma) düşüş yok.
  * @param {string | null} before
  * @param {string | null} after
@@ -244,12 +251,33 @@ export function baselineLowered(before, after) {
   const am = new Map();
   numericLeaves(b, "", bm);
   numericLeaves(a, "", am);
+  /**
+   * `acFileAssertions` altındaki dosya yolu (düzleştirilmiş anahtar `acFileAssertions.<yol>`);
+   * değilse `null`. Yol, nesnede gerçekten o anahtar olarak bulunmalı.
+   * @param {unknown} root
+   * @param {string} flat
+   * @returns {string | null}
+   */
+  const fileKey = (root, flat) => {
+    if (!flat.startsWith(`${MOVE_SECTION}.`) || root === null || typeof root !== "object") return null;
+    const sec = /** @type {Record<string, unknown>} */ (root)[MOVE_SECTION];
+    const rel = flat.slice(MOVE_SECTION.length + 1);
+    return sec !== null && typeof sec === "object" && Object.hasOwn(sec, rel) && typeof (/** @type {Record<string, unknown>} */ (sec)[rel]) === "number" ? rel : null;
+  };
+  /** Taşıma adayları: tabanda olmayan yeni dosya anahtarları (her biri tek kullanımlık). */
+  const fresh = new Set([...am.keys()].filter((k) => !bm.has(k) && fileKey(a, k) !== null));
   /** @type {string[]} */
   const lowered = [];
   for (const [k, n] of bm) {
     const m = am.get(k);
-    if (m === undefined) lowered.push(`${k}: ${n} → yok`);
-    else if (m < n) lowered.push(`${k}: ${n} → ${m}`);
+    if (m === undefined) {
+      const target = fileKey(b, k) === null ? undefined : [...fresh].find((f) => am.get(f) === n);
+      if (target !== undefined) {
+        fresh.delete(target);
+        continue;
+      }
+      lowered.push(`${k}: ${n} → yok`);
+    } else if (m < n) lowered.push(`${k}: ${n} → ${m}`);
   }
   return lowered.length === 0 ? null : `AC tabanı düştü (${lowered.join(", ")})`;
 }

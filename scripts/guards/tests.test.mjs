@@ -4,8 +4,10 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { main } from "./cli.mjs";
+import { scanSource as acScan } from "./lib/assertion-count.mjs";
+import { daysBetween, parseRegistry, quarantineTags } from "./lib/quarantine.mjs";
 import { createRepo } from "./lib/testkit.mjs";
-import { isTestFile, scanSource } from "./tests.mjs";
+import { isTestFile, quarantineSites, scanSource } from "./tests.mjs";
 
 /** @type {Array<() => void>} */
 const cleanups = [];
@@ -238,18 +240,18 @@ describe("scanSource — yanlış alarm yok", () => {
   });
 });
 
-describe("scanSource — @quarantine istisna değildir", () => {
-  it("@quarantine yorumlu it.skip → QUARANTINE_NOT_SUPPORTED", () => {
+describe("scanSource — karantina etiketi istisna değildir", () => {
+  it("karantina yorumlu it.skip → QUARANTINE_NOT_SUPPORTED", () => {
     const src = IMPORT + `// @quarantine Q-01\nit.skip("kararsız", () => {});\n`;
     expect(codes(src)).toEqual(["QUARANTINE_NOT_SUPPORTED@3"]);
   });
 
-  it("başlıkta @quarantine + gövde içi test.skip() → QUARANTINE_NOT_SUPPORTED", () => {
+  it("başlıkta karantina etiketi + gövde içi test.skip() → QUARANTINE_NOT_SUPPORTED", () => {
     const src = IMPORT + `test("kararsız @quarantine Q-02", () => {\n  test.skip();\n});\n`;
     expect(codes(src)).toEqual(["QUARANTINE_NOT_SUPPORTED@3"]);
   });
 
-  it("atlamasız @quarantine etiketi tek başına bulgu değildir", () => {
+  it("atlamasız karantina etiketi tek başına scanSource bulgusu değildir", () => {
     const src = IMPORT + `// @quarantine Q-03\nit("koşar", () => { expect(1).toBe(1); });\n`;
     expect(codes(src)).toEqual([]);
   });
@@ -326,5 +328,169 @@ describe("pnpm check:tests (uçtan uca, geçici depo)", () => {
     cleanups.push(() => r.cleanup());
     const code = await main(["tests", "--base", "x"], { root: r.dir, log: () => {} });
     expect(code).toBe(2);
+  });
+});
+
+// T-008e: karantina etiketleri ve kayıt. Etiket dizeleri `QT` ile kurulur ki bu dosyanın kendi
+// başlıkları gerçek depoda karantina etiketi sayılmasın.
+const QT = "@" + "quarantine";
+/** `collect.mjs` (regex) bu dosyadaki fixture dizelerini AC etiketi saymasın. */
+const AC = "@" + "AC-";
+
+describe("quarantineSites — etiket yalnızca başlıkta; describe mirası; takma adlar (T-008e)", () => {
+  it("başlıktaki etiket, describe mirası ve alt testlerin AC etiketleri", () => {
+    const src =
+      IMPORT +
+      `it("a ${QT} Q-01 ${AC}50", () => { expect(1).toBe(1); });\n` +
+      `describe("grup ${QT} Q-02", () => {\n  it("iç ${AC}05", () => { expect(1).toBe(1); });\n});\n` +
+      `describe("dış ${AC}07", () => {\n  it("iç ${QT} Q-03", () => { expect(1).toBe(1); });\n});\n` +
+      `// ${QT} Q-04 (yorum etiket değildir)\nit("düz", () => { expect(1).toBe(1); });\n`;
+    expect(quarantineSites(src, "x.test.ts").map((x) => [x.line, x.title, x.acIds])).toEqual([
+      [2, `a ${QT} Q-01 ${AC}50`, ["AC-50"]],
+      [3, `grup ${QT} Q-02`, ["AC-05"]],
+      [7, `dış ${AC}07 iç ${QT} Q-03`, ["AC-07"]],
+    ]);
+  });
+
+  it("takma ad, ad alanı, extend ve test.describe takma adı izlenir", () => {
+    const src =
+      `import { it as t, describe as d } from "vitest";\nimport * as v from "vitest";\nimport { test } from "vitest";\n` +
+      `const tt = test.extend({});\nconst grp = test.describe;\n` +
+      `t("a ${QT} Q-01", () => {});\n` +
+      `v.it("b ${QT} Q-02", () => {});\n` +
+      `tt("c ${QT} Q-03", () => {});\n` +
+      `grp("g ${AC}05", () => {\n  t("iç ${QT} Q-04", () => {});\n});\n` +
+      `d("h ${QT} Q-05", () => {});\n` +
+      `other("x ${QT} Q-06", () => {});\n`;
+    expect(quarantineSites(src, "x.test.ts").map((x) => [x.line, x.title])).toEqual([
+      [6, `a ${QT} Q-01`],
+      [7, `b ${QT} Q-02`],
+      [8, `c ${QT} Q-03`],
+      [10, `g ${AC}05 iç ${QT} Q-04`],
+      [12, `h ${QT} Q-05`],
+    ]);
+  });
+
+  it("quarantineTags: kimlikli, kimliksiz, yinelenen", () => {
+    expect(quarantineTags(`a ${QT} Q-01 ${QT} Q-01 ${QT} Q-12`)).toEqual({ ids: ["Q-01", "Q-12"], bare: false });
+    expect(quarantineTags(`a ${QT}`)).toEqual({ ids: [], bare: true });
+    expect(quarantineTags(`a ${QT}d Q-01`)).toEqual({ ids: [], bare: false });
+    expect(quarantineTags("karantina yok")).toEqual({ ids: [], bare: false });
+  });
+});
+
+describe("assertion-count — takma adlar check:tests ile aynı çözülür (T-008d bulgu 4)", () => {
+  it("import takma adı, ad alanı, extend ve test.describe takma adı altındaki @AC testleri sayılır", () => {
+    const src =
+      `import { it as t, describe as d } from "vitest";\nimport * as v from "vitest";\nimport { test, expect } from "vitest";\n` +
+      `const tt = test.extend({});\nconst grp = test.describe;\n` +
+      `t("a ${AC}01", () => { expect(f()).toBe(1); });\n` +
+      `v.it("b ${AC}01", () => { expect(f()).toBe(1); });\n` +
+      `tt("c ${AC}02", () => { expect(f()).toBe(1); });\n` +
+      `grp("g ${AC}03", () => {\n  t("iç", () => { expect(f()).toBe(1); });\n});\n` +
+      `d("h ${AC}04", () => {\n  v.test("iç boş", () => {});\n});\n`;
+    const r = acScan(src, "x.test.ts");
+    expect(r.tests.map((x) => [x.ids, x.title])).toEqual([
+      [["AC-01"], `a ${AC}01`],
+      [["AC-01"], `b ${AC}01`],
+      [["AC-02"], `c ${AC}02`],
+      [["AC-03"], `g ${AC}03 iç`],
+      [["AC-04"], `h ${AC}04 iç boş`],
+    ]);
+    expect(r.noAssertion.map((x) => x.line)).toEqual([13]);
+  });
+});
+
+describe("parseRegistry — tests/QUARANTINE.md (T-008e)", () => {
+  const H = "| Q | Test adı | Dosya | Neden | Sahip kart | Eklendiği tarih | Bitiş tarihi |\n|---|---|---|---|---|---|---|\n";
+
+  it("boş tablo ve geçerli satır", () => {
+    expect(parseRegistry(`# K\n\n${H}`)).toEqual({ entries: new Map(), errors: [] });
+    const r = parseRegistry(`${H}| Q-01 | kararsız | \`tests/a.test.ts\` | zamanlama | T-100 | 2026-10-01 | 2026-10-15 |\n`);
+    expect(r.errors).toEqual([]);
+    expect(r.entries.get("Q-01")).toEqual({
+      id: "Q-01",
+      test: "kararsız",
+      file: "tests/a.test.ts",
+      reason: "zamanlama",
+      card: "T-100",
+      added: "2026-10-01",
+      end: "2026-10-15",
+      line: 3,
+    });
+  });
+
+  it("bozuk satırlar ve tablo yapısı fail-closed", () => {
+    const rows = [
+      "| Q1 | t | a.ts | n | T-100 | 2026-10-01 | 2026-10-02 |",
+      "| Q-02 |  | a.ts | n | T-100 | 2026-10-01 | 2026-10-02 |",
+      "| Q-03 | t | ../a.ts | n | T-1 | 2026-02-30 | 2026-10-02 |",
+      "| Q-04 | t | a.ts | n | T-100 | 2026-10-05 | 2026-10-01 |",
+      "| Q-05 | t | a.ts | n | T-100 | 2026-10-01 |",
+      "| Q-06 | t | a.ts | n | T-100 | 2026-10-01 | 2026-10-02 |",
+      "| Q-06 | t | a.ts | n | T-100 | 2026-10-01 | 2026-10-02 |",
+    ];
+    const r = parseRegistry(H + rows.join("\n") + "\n");
+    expect([...r.entries.keys()]).toEqual(["Q-06"]);
+    expect(r.errors.map((e) => e.line)).toEqual([3, 4, 5, 6, 7, 9]);
+    expect(r.errors[2]?.message).toContain("depo-göreli yol değil");
+    expect(r.errors[2]?.message).toContain("T-xxx");
+    expect(r.errors[2]?.message).toContain("2026-02-30");
+    expect(r.errors[5]?.message).toContain("Q-06 yinelenmiş");
+    expect(parseRegistry("tablo yok").errors[0]?.message).toContain("bulunan: 0");
+    expect(parseRegistry("| A | B |\n|---|---|\n").errors[0]?.message).toContain("başlık");
+  });
+
+  it("daysBetween UTC takvim günü", () => {
+    expect(daysBetween("2026-10-01", "2026-10-15")).toBe(14);
+    expect(daysBetween("2026-03-28", "2026-03-30")).toBe(2);
+  });
+});
+
+describe("pnpm check:tests — karantina kaydı (uçtan uca, T-008e)", () => {
+  const H = "| Q | Test adı | Dosya | Neden | Sahip kart | Eklendiği tarih | Bitiş tarihi |\n|---|---|---|---|---|---|---|\n";
+
+  it("boş kayıt, etiket yok → OK (rapor satırı basılmaz)", async () => {
+    const r = createRepo({ prefix: "guards-tests-q-" });
+    cleanups.push(() => r.cleanup());
+    r.writeAll({ "tests/QUARANTINE.md": `# K\n\n${H}`, "src/a.test.ts": IMPORT + `it("a", () => { expect(1).toBe(1); });\n` });
+    /** @type {string[]} */
+    const lines = [];
+    expect(await main(["tests"], { root: r.dir, log: (l) => lines.push(l) })).toBe(0);
+    expect(lines).toEqual(["check:tests OK"]);
+  });
+
+  it("bozuk kayıt dosyası → FAIL QUARANTINE_REGISTRY_INVALID; etiket varken kabul dosyası yoksa → QUARANTINE_GATE_AC (fail-closed)", async () => {
+    const r = createRepo({ prefix: "guards-tests-q-" });
+    cleanups.push(() => r.cleanup());
+    r.writeAll({
+      "tests/QUARANTINE.md": `${H}| Q-01 | t | src/a.test.ts | n | T-100 | bozuk | 2026-10-02 |\n`,
+      "src/a.test.ts": IMPORT + `it("a ${QT} Q-01", () => { expect(1).toBe(1); });\n`,
+    });
+    r.commit("init").publish("main");
+    /** @type {string[]} */
+    const lines = [];
+    expect(await main(["tests"], { root: r.dir, log: (l) => lines.push(l) })).toBe(1);
+    const out = lines.join("\n");
+    expect(out).toContain("FAIL QUARANTINE_REGISTRY_INVALID tests/QUARANTINE.md:3");
+    expect(out).toContain("FAIL QUARANTINE_UNREGISTERED src/a.test.ts:2");
+    expect(out).toContain("FAIL QUARANTINE_GATE_AC src/a.test.ts:2 — kapı fazı belirlenemedi");
+  });
+
+  it("origin/main yoksa hiçbir kayıt onaylı sayılmaz → QUARANTINE_NOT_APPROVED", async () => {
+    const r = createRepo({ prefix: "guards-tests-q-" });
+    cleanups.push(() => r.cleanup());
+    const today = new Date().toISOString().slice(0, 10);
+    r.writeAll({
+      "docs/ACCEPTANCE.md": "| ID | Senaryo | Beklenen | Faz |\n|---|---|---|---|\n| AC-50 | s | b | 1 |\n",
+      "docs/ACCEPTANCE.conditions.json": JSON.stringify({ currentGatePhase: "0", passedGates: [], facts: {}, factSources: {}, conditions: {} }),
+      "tests/QUARANTINE.md": `${H}| Q-01 | t | src/a.test.ts | n | T-100 | ${today} | ${today} |\n`,
+      "src/a.test.ts": IMPORT + `it("a ${QT} Q-01", () => { expect(1).toBe(1); });\n`,
+    });
+    r.commit("init");
+    /** @type {string[]} */
+    const lines = [];
+    expect(await main(["tests"], { root: r.dir, log: (l) => lines.push(l) })).toBe(1);
+    expect(lines.join("\n")).toContain("FAIL QUARANTINE_NOT_APPROVED src/a.test.ts:2 — Q-01: origin/main:tests/QUARANTINE.md yok");
   });
 });

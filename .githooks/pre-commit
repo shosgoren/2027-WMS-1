@@ -1,0 +1,10 @@
+#!/bin/sh
+# Commit öncesi kanca (T-008g; PROTOCOL §3b). Kurulum: `pnpm install` → `prepare` →
+# `git config core.hooksPath .githooks`. Bağımlılık yok; yalnızca Node + git.
+# `check:all`'u `check:protected --local` ile koşar: korunan değişiklik burada yalnızca uyarıdır
+# (onay PR açıklamasında, GitHub API'den CI'da doğrulanır).
+# Bu kanca `git commit --no-verify` ile ATLANABİLİR; zorlama CI'dadır (`.github/workflows/guards.yml`,
+# iş `check-all`). Kanca yalnızca erken uyarıdır.
+set -eu
+root=$(git rev-parse --show-toplevel)
+exec node "$root/scripts/guards/cli.mjs" all --local --root "$root"

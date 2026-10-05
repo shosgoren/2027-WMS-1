@@ -360,6 +360,35 @@ describe("protected-paths: içerik kuralları", () => {
     );
   });
 
+  it("AC tabanı: `--update` dosya taşıması (aynı sayı, yeni yol) düşüş değildir; diğer biçimler düşüştür (T-008e)", () => {
+    /** @param {Record<string, number>} acTests @param {Record<string, number>} files */
+    const base = (acTests, files) => JSON.stringify({ acTests, acFileAssertions: files });
+    const before = base({ "AC-43": 12 }, { "tests/guards/ac-43.test.mjs": 37, "tests/x.test.mjs": 5 });
+    // Taşıma: eski yol silinmiş, aynı sayı yeni yolda.
+    expect(baselineLowered(before, base({ "AC-43": 12 }, { "tests/guards/moved/ac-43.test.mjs": 37, "tests/x.test.mjs": 5 }))).toBeNull();
+    // Taşıma + başka dosyada artış serbest.
+    expect(baselineLowered(before, base({ "AC-43": 12 }, { "tests/new.test.mjs": 37, "tests/x.test.mjs": 6 }))).toBeNull();
+    // Yeni yolda farklı (düşük) sayı → düşüş.
+    expect(baselineLowered(before, base({ "AC-43": 12 }, { "tests/new.test.mjs": 36, "tests/x.test.mjs": 5 }))).toContain(
+      "acFileAssertions.tests/guards/ac-43.test.mjs: 37 → yok",
+    );
+    // Yeni yol yok (yalnızca silme) → düşüş.
+    expect(baselineLowered(before, base({ "AC-43": 12 }, { "tests/x.test.mjs": 5 }))).toContain("37 → yok");
+    // Önceden var olan yol taşıma hedefi sayılmaz (aynı sayı olsa bile).
+    const two = base({ "AC-43": 12 }, { "tests/a.test.mjs": 5, "tests/b.test.mjs": 5 });
+    expect(baselineLowered(two, base({ "AC-43": 12 }, { "tests/b.test.mjs": 5 }))).toContain("tests/a.test.mjs: 5 → yok");
+    // Bir yeni yol tek bir eski yolu karşılar.
+    expect(baselineLowered(two, base({ "AC-43": 12 }, { "tests/c.test.mjs": 5 }))).toContain("→ yok");
+    // `acTests` bölümünde istisna yok: AC kimliği "taşınamaz".
+    expect(baselineLowered(before, base({ "AC-99": 12 }, { "tests/guards/ac-43.test.mjs": 37, "tests/x.test.mjs": 5 }))).toContain(
+      "acTests.AC-43: 12 → yok",
+    );
+    // Bölüm dışı yeni anahtar (ör. kök düzeyinde) taşıma hedefi değildir.
+    expect(baselineLowered(before, JSON.stringify({ acTests: { "AC-43": 12 }, acFileAssertions: { "tests/x.test.mjs": 5 }, other: 37 }))).toContain(
+      "37 → yok",
+    );
+  });
+
   it('ADR: durum "kabul"e geçerse korunur; zaten kabul olanın düzenlenmesi serbest', () => {
     const onerildi = "# A\n**Tarih / Durum:** 2026-10-05 · **önerildi**\n";
     const kabul = "# A\n**Tarih / Durum:** 2026-10-05 · **kabul** (ADR-012 rev.)\n";
