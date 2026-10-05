@@ -4,6 +4,7 @@
 //
 // Uygulama rolü bağlantısı YALNIZCA DATABASE_URL'den kurulur; DATABASE_URL_DIRECT (migration rolü)
 // bu dosyada kullanılmaz (T-002d güvenlik notu).
+import { readFileSync } from "node:fs";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { APP_ROLE, AUTH_ROLE, PGBOUNCER_ADMIN_URL_VAR, PROBE_ROLE, parsePoolSize, readAuthDatabaseUrl, readIntEnv, redactUrl } from "./env.ts";
@@ -109,13 +110,26 @@ describe(`harness (target=${env.target}) — auth role via pooler`, () => {
 
   it(`${PROBE_ROLE} is NOLOGIN with no privileged attributes`, async () => {
     const r = await auth.query(
-      `SELECT rolcanlogin, rolsuper, rolbypassrls, rolcreatedb, rolcreaterole
+      `SELECT rolcanlogin, rolsuper, rolbypassrls, rolcreatedb, rolcreaterole, rolreplication
          FROM pg_catalog.pg_roles WHERE rolname = $1`,
       [PROBE_ROLE],
     );
     expect(r.rows).toEqual([
-      { rolcanlogin: false, rolsuper: false, rolbypassrls: false, rolcreatedb: false, rolcreaterole: false },
+      { rolcanlogin: false, rolsuper: false, rolbypassrls: false, rolcreatedb: false, rolcreaterole: false, rolreplication: false },
     ]);
+  });
+
+  it(`no role is a member of ${AUTH_ROLE} (nobody can SET ROLE into or inherit the identity role)`, async () => {
+    const r = await auth.query<{ member: string }>(
+      `SELECT mem.rolname AS member
+         FROM pg_catalog.pg_auth_members m
+         JOIN pg_catalog.pg_roles mem ON mem.oid = m.member
+         JOIN pg_catalog.pg_roles g ON g.oid = m.roleid
+        WHERE g.rolname = $1
+        ORDER BY 1`,
+      [AUTH_ROLE],
+    );
+    expect(r.rows).toEqual([]);
   });
 
   // ADR-015 5. tur eki MINOR-6 kural 1: migration rolü (DATABASE_URL_DIRECT kullanıcısı; yalnızca
@@ -186,3 +200,26 @@ if (env.target === "compose") {
     });
   });
 }
+
+// MAJOR-1 (güvenlik incelemesi): parola argv'ye (/proc/<pid>/cmdline) düşmemeli. Init betiği
+// psql'e parolayı `--set`/`-v` ile vermemeli; `\getenv` ile ortamdan okumalı (yorumlar hariç).
+describe("infra/postgres/init/01-roles.sh — no secret in argv", () => {
+  const script = readFileSync(new URL("../../../infra/postgres/init/01-roles.sh", import.meta.url), "utf8");
+  const code = script
+    .split("\n")
+    .filter((line) => !line.trimStart().startsWith("#"))
+    .join("\n")
+    // satır devamlarını birleştir: çok satırlı psql çağrısı tek komut olarak değerlendirilir
+    .replace(/\\\n/g, " ");
+
+  it("does not pass passwords via psql --set / -v", () => {
+    expect(code).not.toMatch(/--set\b[^\n]*pass/i);
+    expect(code).not.toMatch(/(?:^|\s)-v\s+\w*pass/i);
+    expect(code).not.toMatch(/--set(?:=|\s)\w*pass/i);
+  });
+
+  it("reads both role passwords from the environment with \\getenv", () => {
+    expect(code).toMatch(/^\\getenv\s+app_password\s+WMS_APP_PASSWORD$/m);
+    expect(code).toMatch(/^\\getenv\s+auth_password\s+WMS_AUTH_PASSWORD$/m);
+  });
+});

@@ -15,13 +15,17 @@ set -euo pipefail
 : "${WMS_APP_PASSWORD:?WMS_APP_PASSWORD tanımlı değil (.env)}"
 : "${WMS_AUTH_PASSWORD:?WMS_AUTH_PASSWORD tanımlı değil (.env)}"
 
-# Parola psql değişkeni olarak geçirilir ve :'...' ile SQL literal olarak tırnaklanır;
-# betikte veya komut satırı çıktısında açık metin olarak yer almaz.
+# Parolalar komut satırına (argv; /proc/<pid>/cmdline herkese okunur) GİRMEZ: psql
+# `\getenv` (PostgreSQL 15+) ile süreç ortamından psql değişkenine okunur ve :'...' ile
+# SQL literal olarak tırnaklanır. Betikte ve argv'de açık metin yoktur. Ortam değişkenleri
+# de yalnızca aynı kullanıcı/root tarafından okunabilir (/proc/<pid>/environ 0400).
+# `--set` ile parola geçirmek yasaktır (harness.int.test.ts betiği denetler).
 psql -v ON_ERROR_STOP=1 --no-psqlrc \
-  --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
-  --set app_password="$WMS_APP_PASSWORD" \
-  --set auth_password="$WMS_AUTH_PASSWORD" \
-  --set migrator="$POSTGRES_USER" <<'SQL'
+  --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<'SQL'
+\getenv app_password WMS_APP_PASSWORD
+\getenv auth_password WMS_AUTH_PASSWORD
+\getenv migrator POSTGRES_USER
+
 CREATE ROLE wms_app
   LOGIN
   NOSUPERUSER
@@ -45,7 +49,8 @@ CREATE ROLE wms_identity_probe
   NOSUPERUSER
   NOBYPASSRLS
   NOCREATEDB
-  NOCREATEROLE;
+  NOCREATEROLE
+  NOREPLICATION;
 
 GRANT wms_identity_probe TO :"migrator" WITH ADMIN FALSE, SET TRUE, INHERIT FALSE;
 SQL

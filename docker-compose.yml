@@ -42,6 +42,13 @@ services:
       PGBOUNCER_MAX_PREPARED_STATEMENTS: ${PGBOUNCER_MAX_PREPARED_STATEMENTS:-1000}
     # İmajın kendi entrypoint'i yerine: şablon ini'yi doldur, userlist'i üret, pgbouncer'ı başlat.
     # Üretilen dosyalar yalnızca konteyner içinde /tmp/pgbouncer altındadır (0600).
+    # Bilinen sınırlama (güvenlik incelemesi MAJOR-2, Supervisor ADR notu bekliyor): userlist'te
+    # wms_app/wms_auth parolası açık metindir. PgBouncer 1.26 userlist'te SCRAM verifier'ı
+    # (SCRAM-SHA-256$iter:salt$StoredKey:ServerKey) kabul eder ve istemci SCRAM'ından sunucuya
+    # pass-through yapar (deneyle doğrulandı), ancak imajda (openssl/python/perl yok) verifier
+    # üretecek araç yoktur; pg_authid'den okumak pgbouncer'a süper kullanıcı bağlantısı gerektirir
+    # (reddedildi). Risk sınırı: yalnızca yerel/CI geliştirme ortamı; parolalar .env/CI sırrından (test düzeneğinde her koşuda rastgele),
+    # veri üretim verisi değildir; dosya yalnızca konteyner içinde 0600, repoya/imaja girmez.
     entrypoint:
       - /bin/sh
       - -ec
