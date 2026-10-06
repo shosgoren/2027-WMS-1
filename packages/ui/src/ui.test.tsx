@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ActivityList, Banner, Button, ConfirmDialog, EmptyState, TaskCard, TextField } from "./index.ts";
-import { handleDialogCancel } from "./controls.tsx";
+import { handleDialogCancel, handleDialogClose } from "./controls.tsx";
 
 const icon = <span>i</span>;
 
@@ -104,16 +104,23 @@ describe("TaskCard güvenli bağlantı (T-110b)", () => {
   const unsafe = [
     "https://evil.example", "//evil", "javascript:alert(1)", "data:text/html,x", "/\\evil", "/a\nb", "",
     "/\t/evil", "/..//evil", "/.//evil", "/%2e%2e//evil", "/a/../b",
+    "/%2F%2Fevil", "/%2f/evil", "/a%5Cevil", "/a%5cevil", "/%252F%252Fevil", "/a%25",
   ];
   it.each(unsafe)("güvensiz href %j bağlantı üretmez", (href) => {
     // Çalışma anı savunması: tip kısıtını aşan değer kartı bağlantısız bırakır.
     const html = renderToStaticMarkup(<TaskCard icon={icon} title="K" href={href as `/${string}`} />);
     expect(html).not.toContain("<a");
     expect(html).not.toContain("href=");
-    expect(html).toContain('data-state="active"');
+    expect(html).toContain('data-state="invalid-link"');
+    expect(html).not.toContain('data-state="active"');
+    expect(html).not.toContain("focus-visible");
   });
 
-  it.each(["/files/a..b", "/x?next=../y", "/%2F%2Fevil"])("aynı origin'de kalan yol %j bağlantı olur", (href) => {
+  it("href verilmeyen kart etkin kalır", () => {
+    expect(renderToStaticMarkup(<TaskCard icon={icon} title="K" />)).toContain('data-state="active"');
+  });
+
+  it.each(["/files/a..b", "/x?next=../y", "/x?next=%2Fa", "/a%20b"])("aynı origin'de kalan yol %j bağlantı olur", (href) => {
     expect(renderToStaticMarkup(<TaskCard icon={icon} title="K" href={href as `/${string}`} />)).toContain("<a href=");
   });
 
@@ -121,6 +128,35 @@ describe("TaskCard güvenli bağlantı (T-110b)", () => {
     expect(renderToStaticMarkup(<TaskCard icon={icon} title="K" href="/tasks/count" />)).toContain(
       '<a href="/tasks/count"',
     );
+  });
+});
+
+describe("ConfirmDialog close olayı (T-110c)", () => {
+  it("yükleniyorken kapanırsa onCancel çağrılmaz, dialog yeniden açılır", () => {
+    const el = { open: false, showModal: vi.fn() };
+    const onCancel = vi.fn();
+    handleDialogClose(el, true, onCancel);
+    expect(el.showModal).toHaveBeenCalledTimes(1);
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  it("yüklenmiyorken kapanırsa onCancel bir kez çağrılır, yeniden açılmaz", () => {
+    const el = { open: false, showModal: vi.fn() };
+    const onCancel = vi.fn();
+    handleDialogClose(el, false, onCancel);
+    expect(onCancel).toHaveBeenCalledTimes(1);
+    expect(el.showModal).not.toHaveBeenCalled();
+  });
+
+  it("hâlâ açık ya da DOM'dan ayrılmış dialog için bir şey yapılmaz", () => {
+    const onCancel = vi.fn();
+    const open = { open: true, showModal: vi.fn() };
+    const gone = { open: false, isConnected: false, showModal: vi.fn() };
+    handleDialogClose(open, true, onCancel);
+    handleDialogClose(gone, true, onCancel);
+    expect(open.showModal).not.toHaveBeenCalled();
+    expect(gone.showModal).not.toHaveBeenCalled();
+    expect(onCancel).not.toHaveBeenCalled();
   });
 });
 

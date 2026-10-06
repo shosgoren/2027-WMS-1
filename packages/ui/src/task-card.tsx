@@ -30,13 +30,16 @@ const FOCUS = "focus-visible:outline-3 focus-visible:outline-offset-2 focus-visi
 /**
  * Uygulama içi yol: `/` ile başlar, `//` ile başlamaz; `\`, kontrol karakteri ve `.`/`..` yol
  * parçası (kodlanmış `%2e` dahil) içermez — `/..//evil` tarayıcıda `//evil` yoluna çözülür ve
- * ileride yolu `Location`'a yazan bir yönlendirmede açık yönlendirmeye dönüşebilir.
+ * ileride yolu `Location`'a yazan bir yönlendirmede açık yönlendirmeye dönüşebilir. Yol kısmında
+ * kodlanmış ayraç (`%2f`, `%5c`) ve çift kodlama öncüsü (`%25`) da reddedilir: decode edilince
+ * `//host` veya `\host` üretebilirler. Sorgu/parça kısmı bu kuraldan muaftır (örn. `?next=%2Fa`).
  */
 export function isSafeInternalHref(href: string | undefined): href is `/${string}` {
   if (typeof href !== "string") return false;
   if (!href.startsWith("/") || href.startsWith("//")) return false;
   if (/[\\\u0000-\u001f\u007f]/.test(href)) return false;
   const path = href.split(/[?#]/, 1)[0] ?? "";
+  if (/%(?:2f|5c|25)/i.test(path)) return false;
   return !path.split("/").some((seg) => /^(?:\.|%2e){1,2}$/i.test(seg));
 }
 
@@ -102,14 +105,32 @@ export function TaskCard({ icon, title, description, href, locked, soon, tone = 
       {description ? <span className="break-words text-base text-ink">{description}</span> : null}
     </>
   );
-  const cls = `${BASE} ${FOCUS} ${t.ring} bg-surface`;
-  return isSafeInternalHref(href) ? (
-    <a href={href} data-state="active" className={cls}>
-      {body}
-    </a>
-  ) : (
-    <div data-state="active" className={cls}>
-      {body}
+  if (href === undefined) {
+    return (
+      <div data-state="active" className={`${BASE} ${t.ring} bg-surface`}>
+        {body}
+      </div>
+    );
+  }
+  if (isSafeInternalHref(href)) {
+    return (
+      <a href={href} data-state="active" className={`${BASE} ${FOCUS} ${t.ring} bg-surface`}>
+        {body}
+      </a>
+    );
+  }
+  // Geçersiz bağlantı: etkin görünmez (kesikli çerçeve, soluk metin, odak halkası yok); durum `data-state`te görünür.
+  return (
+    <div
+      role="group"
+      aria-disabled="true"
+      aria-label={title}
+      data-state="invalid-link"
+      className={`${BASE} border-dashed border-border bg-locked-bg text-locked-ink`}
+    >
+      {head(null, "bg-border text-locked-ink")}
+      <span className="break-words text-xl font-bold">{title}</span>
+      {description ? <span className="break-words text-base">{description}</span> : null}
     </div>
   );
 }
