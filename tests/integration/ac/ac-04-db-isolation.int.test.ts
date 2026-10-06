@@ -300,13 +300,28 @@ describe("AC-04 DB — A bağlamında B kimliğiyle erişim (tablo başına)", (
     expect(failures).toEqual([]);
   });
 
+  it("@AC-04 DELETE kontrol kaydı yalnızca gerçekten DELETE yetkisi olan tabloları içerir (kayıt yetkisiz tabloyu gizleyemez)", () => {
+    for (const name of Object.keys(A.deletableControl)) {
+      const t = tables.find((x) => x.name === name);
+      expect(t, `kayıttaki tablo katalogda yok: ${name}`).toBeDefined();
+      expect(t?.canDelete, `${name}: kayıtta ama wms_app DELETE yetkisi yok`).toBe(true);
+    }
+  });
+
   it("@AC-04 DELETE: B satırına 0 satır etkilenir (ya da yetki yok 42501); A'da silebilen tabloda kontrol ≥1", async () => {
     const failures: string[] = [];
     for (const t of tables) {
       const foreign = await attempt(appClient, [setTenant(A.tenantId)], `DELETE FROM public.${q(t.name)} WHERE ${q(t.key)} = $1`, [B.tenantId]);
       if (t.canDelete) {
         if (!foreign.ok || foreign.rowCount !== 0) failures.push(`${t.name}: B satırına DELETE 0 değil: ${fmt(foreign)}`);
-        const own = await attempt(appClient, [setTenant(A.tenantId)], `DELETE FROM public.${q(t.name)} WHERE ${q(t.key)} = $1`, [A.tenantId]);
+        // T-232: FK ile korunan satırı (ör. defter/rezervasyonun bağlandığı document_lines) silmek 23503 verir. Kontrol silmesi, fikstürün
+        // verdiği FK ile korunmayan kayıtlı satıra daraltılır (assertion gücü aynı: ≥1 satır silinmeli); kayıtta olmayan tablo eski genel
+        // `WHERE key = A` kontrolünü korur.
+        const controlId = A.deletableControl[t.name];
+        const own =
+          controlId === undefined
+            ? await attempt(appClient, [setTenant(A.tenantId)], `DELETE FROM public.${q(t.name)} WHERE ${q(t.key)} = $1`, [A.tenantId])
+            : await attempt(appClient, [setTenant(A.tenantId)], `DELETE FROM public.${q(t.name)} WHERE ${q(t.key)} = $1 AND id = $2`, [A.tenantId, controlId]);
         if (!own.ok || own.rowCount < 1) failures.push(`${t.name}: kontrol (A kendi satırı) DELETE ≥1 değil: ${fmt(own)}`);
       } else if (foreign.ok || foreign.code !== INSUFFICIENT_PRIVILEGE) {
         failures.push(`${t.name}: DELETE yetkisi yokken beklenen 42501, gelen ${fmt(foreign)}`);

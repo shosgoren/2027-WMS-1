@@ -40,6 +40,12 @@ export interface TenantWorld {
   ledgerId: string;
   serialLedgerId: string;
   reservationId: string;
+  /**
+   * AC-04 DELETE kontrol satırları (tablo adı → id): FK ile KORUNMAYAN, wms_app'in gerçekten silebildiği satır. Yalnızca silme
+   * kontrolü için zorunlu tablolar: document_lines (defter/rezervasyonun bağlandığı satır silinemez; bu satır başka bir DRAFT
+   * belgeye aittir ve hiçbir defter/rezervasyon ona referans vermez).
+   */
+  deletableControl: Record<string, string>;
 }
 
 export interface WorldRegistry {
@@ -242,6 +248,19 @@ export async function seedWorld(
     await c.query("ROLLBACK");
     throw e;
   }
+  const deletableDocumentId = randomUUID();
+  const deletableLineId = randomUUID();
+  await c.query(
+    `INSERT INTO public.documents (tenant_id, id, kind, type_version_id, warehouse_id, business_date, reason, created_by)
+     VALUES ($1, $2, 'STOCK_IN', $3, $4, '2026-01-16', 'T232 silinebilir kontrol belgesi', $5)`,
+    [tenantId, deletableDocumentId, typeVersionId, warehouseId, ownerUserId],
+  );
+  await c.query(
+    `INSERT INTO public.document_lines
+       (tenant_id, id, document_id, line_no, item_id, unit_id, quantity, conversion_factor, base_quantity, target_location_id)
+     VALUES ($1, $2, $3, 1, $4, $5, 1, 1, 1, $6)`,
+    [tenantId, deletableLineId, deletableDocumentId, itemTwoId, unitId, rootLocationId],
+  );
   const world: TenantWorld = {
     label,
     tenantId,
@@ -272,6 +291,7 @@ export async function seedWorld(
     ledgerId,
     serialLedgerId,
     reservationId,
+    deletableControl: { document_lines: deletableLineId },
   };
   reg.worlds.push(world);
   return world;
