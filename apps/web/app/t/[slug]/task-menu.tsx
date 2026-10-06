@@ -9,7 +9,7 @@ import type { TaskCardTone } from "@wms/ui";
 
 export interface TaskMenuProps {
   readonly slug: string;
-  readonly allowed: { readonly usersManage: boolean; readonly settingsManage: boolean; readonly auditView: boolean };
+  readonly allowed: { readonly usersManage: boolean; readonly settingsManage: boolean; readonly auditView: boolean; readonly stockView: boolean };
 }
 
 function Icon({ children }: { children: ReactNode }) {
@@ -34,6 +34,11 @@ const ICONS = {
   audit: (
     <Icon>
       <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9ZM14 3v6h6M8 13h8M8 17h5" />
+    </Icon>
+  ),
+  items: (
+    <Icon>
+      <path d="M21 8 12 3 3 8m18 0-9 5m9-5v8l-9 5m0-8L3 8m9 5v8M3 8v8l9 5" />
     </Icon>
   ),
   warehouses: (
@@ -85,6 +90,8 @@ export async function TaskMenu({ slug, allowed }: TaskMenuProps) {
     { key: "members", kind: "link", allowed: allowed.usersManage, href: `/t/${encodeURIComponent(slug)}/members` },
     { key: "settings", kind: "link", allowed: allowed.settingsManage, href: `/t/${encodeURIComponent(slug)}/settings` },
     { key: "audit", kind: "link", allowed: allowed.auditView, href: `/t/${encodeURIComponent(slug)}/audit` },
+    // Ürün kartı (T-216): okuma `stock.view`; bayrak yalnızca gösterimdir, sayfa/eylem yetkiyi sunucuda denetler.
+    { key: "items", kind: "link", allowed: allowed.stockView, href: `/t/${encodeURIComponent(slug)}/items` },
     // Okuma `stock.view` (her rol); yazma kilidi hedef sayfada gösterilir, asıl yetki sunucudadır (T-205).
     { key: "warehouses", kind: "link", allowed: true, href: `/t/${encodeURIComponent(slug)}/warehouses` },
     { key: "receive", kind: "warehouse-soon", tone: "accent" },

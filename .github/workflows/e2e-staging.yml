@@ -56,6 +56,17 @@ jobs:
             echo "::${tok}::"
             echo "::endgroup::"
           done
+      # T-247: konsol hataları / pageerror / başarısız istekler (URL + durum; sorgu atılmış, çerez/başlık/gövde yok).
+      # Test, başarısızlıkta tek satırlık `T247-DIAG` yazar (tests/e2e/demo-flow.spec.ts); burada run.log'dan loga basılır.
+      - name: Print Playwright diagnostics (T-247)
+        if: failure()
+        run: |
+          tok="$(openssl rand -hex 16)"
+          echo "::group::T247-DIAG"
+          echo "::stop-commands::${tok}"
+          grep -a '^T247-DIAG ' .artifacts/e2e/run.log || echo "T247-DIAG satırı yok"
+          echo "::${tok}::"
+          echo "::endgroup::"
       - name: Upload .artifacts/e2e
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
