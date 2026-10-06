@@ -54,6 +54,7 @@ Q-49 | Durum değiştiren taşımada (ör. AVAILABLE → QUARANTINE) belge satı
 Q-50 | Stok defteri `reason` için izinli değer kümesi nedir (sabit kod listesi mi, serbest metin mi)? Şimdilik yalnızca boş olmama CHECK'i | T-232 | açık — T-213/T-217 komut katmanı kodları belirleyince CHECK daraltılır
 Q-51 | Stok defteri `actor_user_id` zorunlu mu (sistem/worker hareketleri)? Şimdilik nullable, FK yok | T-232 | açık — 0012 geçmiş yazıcısıyla tutarlı karar T-213'te
 Q-52 | Stok defteri satırı hangi belge durumunda yazılabilir (senkron yol ≤200 satır `posting_job_id`'siz; asenkron yol APPROVED+posting_job_id; ters kayıt belgesi)? DB şimdilik belge durumuna bakmıyor | T-232 inceleme MINOR-5, ADR-018 §2 | açık — T-213/T-217 posting akışıyla DB kuralı (tetikleyici, FOR SHARE) eklenir
+Q-56 | `acquireStockLocks` seri adımı (I-15 adım 6) wms_app'in `serials` üzerinde satır kilidi almasını gerektirir; PostgreSQL bunun için en az bir sütunda UPDATE yetkisi ister (0011 yalnız SELECT/INSERT). Hangi sütuna UPDATE verilecek ve hangi migration (0015)? | T-210 Bulgu 1 | açık — şimdilik seri adımı 42501 ile fail-closed; T-213/T-217 öncesi kapanmalı
 
 ## Varsayımlar
 A-01 | Neon pooler'ı transaction-mode PgBouncer'dır (kullanıcı kararı kaydı, 2026-10-05) — **teyit edildi 2026-10-05, sürüm hariç** (belge + T-005d koşu 3 çoklama gözlemi, https://github.com/shosgoren/2027-WMS-1/actions/runs/37388724069); PgBouncer sürümü gözlenemedi | Neon pooler türünü/kipini değiştirdiğini duyurana veya yeniden spike aksini gösterene kadar | Q-02
@@ -153,3 +154,6 @@ A-94 | `wms_ops` belge tablolarında yetki almaz (0010/0011 deseni; kartın "yal
 A-95 | Belge `reason` (ve kopyalandığı silinemeyen `document_status_history.reason`) serbest metnine kişisel veri girilmez: UI alanında uyarı (T-216/T-226), ≤500 karakter CHECK; KVKK silme yükümlülüğü append-only geçmişle çakışacağından 4P saklama/silme kartı bu sütunu kapsar (anonimleştirme yolu) | 4P saklama kartında karar | T-206 inceleme
 A-96 | CONSUMED/RELEASED rezervasyon sonlanmıştır, değiştirilemez; INSERT yalnızca ACTIVE açar | — | T-232
 A-97 | Seri boyutu yoksa `stock_balances.serial_key` sıfır UUID sentinelidir (tekillik ve CHECK bunun üzerine); gerçek serial_id ile çakışma pratikte imkânsız | — | T-232
+A-110 | `acquireStockLocks` hataları `StockLockError` (`name` + `code`: VERSION_CONFLICT, LOCATION_LOCKED, COUNT_LOCK_ROW_MISSING, NOT_FOUND, VALIDATION_FAILED, INTERNAL); `AppError` eşlemesi T-213'te | — | T-210
+A-111 | Sayım istisnası: `countSessionId` verilirse tüm lokasyonlar COUNTING ve aynı oturumda olmalı, aksi LOCATION_LOCKED; kilit modu FOR UPDATE | 3A sayım akışı | T-210
+A-112 | `wms/stock-sql-guard` lint kuralında `packages/auth/src/index.ts` için yalnız ad alanı (`import * as schema`) istisnası; auth'un yalnız kimlik şemasını import etmesi ayrı takip | Takip kartı | T-210
