@@ -234,11 +234,11 @@ export async function seedWorld(
       itemNoneId,
       unitId,
     ]);
-    // DRAFT ana belgeye ikinci satır (line_no 2): NONE ürün.
+    // DRAFT ana belgeye ikinci satır (line_no 90; diğer testlerin 1-9 aralığıyla çakışmaz): NONE ürün.
     await c.query(
       `INSERT INTO public.document_lines
          (tenant_id, id, document_id, line_no, item_id, unit_id, quantity, conversion_factor, base_quantity, target_location_id)
-       VALUES ($1, $2, $3, 2, $4, $5, 1, 1, 1, $6)`,
+       VALUES ($1, $2, $3, 90, $4, $5, 1, 1, 1, $6)`,
       [tenantId, documentLineNoneId, documentId, itemNoneId, unitId, rootLocationId],
     );
     await c.query(
