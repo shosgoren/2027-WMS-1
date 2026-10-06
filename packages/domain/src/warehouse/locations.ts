@@ -27,7 +27,7 @@ import {
   parseUuid,
   type WarehouseCallParams,
 } from "./warehouses.ts";
-import { assertWarehouseVisible } from "./scope.ts";
+import { assertWarehouseVisible, pgUuidArray, resolveWarehouseScope } from "./scope.ts";
 
 export const LOCATION_KIND_LIST = ["RECEIVING", "STORAGE", "STAGING", "TRANSIT"] as const;
 export type LocationKindValue = (typeof LOCATION_KIND_LIST)[number];
@@ -332,5 +332,42 @@ export async function findLocationByCode(params: WarehouseCallParams, input: { r
            WHERE tenant_id = ${m.tenantId}::uuid AND warehouse_id = ${warehouseId}::uuid AND code = ${code}`,
     );
     return rows[0] === undefined ? null : toRow(rows[0]);
+  });
+}
+
+export const COUNT_WAREHOUSES_MAX = 100;
+
+export interface CountLocationsByWarehouseInput {
+  readonly warehouseIds: readonly string[];
+  /** `getLocationTree` ile aynı tanım: varsayılan yalnızca `ACTIVE` lokasyonlar; `true` ise arşivliler de sayılır. */
+  readonly includeArchived?: boolean;
+}
+
+/**
+ * Depo başına lokasyon sayısı, tek sorgu (`GROUP BY`). En çok {@link COUNT_WAREHOUSES_MAX} kimlik (aşarsa/boşsa/geçersizse `VALIDATION_FAILED`).
+ * Kapsam dışı, başka tenant'ta ya da hiç olmayan depolar sonuçta YOKTUR (hata vermez, varlık sızmaz); görünür ama lokasyonsuz depo `0`.
+ */
+export async function countLocationsByWarehouse(
+  params: WarehouseCallParams,
+  input: CountLocationsByWarehouseInput,
+): Promise<ReadonlyMap<string, number>> {
+  if (!Array.isArray(input.warehouseIds) || input.warehouseIds.length < 1 || input.warehouseIds.length > COUNT_WAREHOUSES_MAX) {
+    throw new AppError("VALIDATION_FAILED");
+  }
+  const ids = [...new Set(input.warehouseIds.map(parseUuid))];
+  const includeArchived = input.includeArchived === true;
+  return runTenantQuery({ ...params, permission: "stock.view" }, async (tx, m) => {
+    const scope = await resolveWarehouseScope(tx, m);
+    const rows = await tx.execute<{ warehouse_id: string; n: string | number }>(
+      sql`SELECT w.id AS warehouse_id, count(l.id) AS n
+            FROM public.warehouses w
+            LEFT JOIN public.locations l
+              ON l.tenant_id = w.tenant_id AND l.warehouse_id = w.id AND (${includeArchived} OR l.status = 'ACTIVE')
+           WHERE w.tenant_id = ${m.tenantId}::uuid
+             AND w.id = ANY(${pgUuidArray(ids)}::uuid[])
+             AND (${scope === null}::boolean OR w.id = ANY(${pgUuidArray(scope ?? [])}::uuid[]))
+           GROUP BY w.id`,
+    );
+    return new Map(rows.map((r) => [r.warehouse_id, Number(r.n)] as const));
   });
 }

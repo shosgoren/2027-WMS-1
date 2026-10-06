@@ -247,3 +247,22 @@ export async function listWarehouses(params: WarehouseCallParams, input: ListWar
     return { items: page, nextAfterCode: rows.length > limit && last !== undefined ? last.code : null };
   });
 }
+
+/**
+ * Tek depo okuyucusu. Görünürlük `listWarehouses` ile birebir aynıdır (aynı izin `stock.view`, aynı kapsam; arşivli depo da döner).
+ * Kapsam dışı, başka tenant'ta ya da hiç olmayan depo AYNI `NOT_FOUND` hatasını verir (varlık sızmaz).
+ */
+export async function getWarehouse(params: WarehouseCallParams, input: { readonly warehouseId: string }): Promise<WarehouseRow> {
+  const warehouseId = parseUuid(input.warehouseId);
+  return runTenantQuery({ ...params, permission: "stock.view" }, async (tx, m) => {
+    await assertWarehouseVisible(tx, m, [warehouseId]);
+    const rows = await tx.execute<WarehouseDbRow>(
+      sql`SELECT id, code, name, status, created_at, archived_at
+            FROM public.warehouses
+           WHERE tenant_id = ${m.tenantId}::uuid AND id = ${warehouseId}::uuid`,
+    );
+    const row = rows[0];
+    if (row === undefined) throw new AppError("NOT_FOUND");
+    return toRow(row);
+  });
+}
