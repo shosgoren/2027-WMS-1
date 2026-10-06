@@ -153,3 +153,9 @@ A-94 | `wms_ops` belge tablolarında yetki almaz (0010/0011 deseni; kartın "yal
 A-95 | Belge `reason` (ve kopyalandığı silinemeyen `document_status_history.reason`) serbest metnine kişisel veri girilmez: UI alanında uyarı (T-216/T-226), ≤500 karakter CHECK; KVKK silme yükümlülüğü append-only geçmişle çakışacağından 4P saklama/silme kartı bu sütunu kapsar (anonimleştirme yolu) | 4P saklama kartında karar | T-206 inceleme
 A-96 | CONSUMED/RELEASED rezervasyon sonlanmıştır, değiştirilemez; INSERT yalnızca ACTIVE açar | — | T-232
 A-97 | Seri boyutu yoksa `stock_balances.serial_key` sıfır UUID sentinelidir (tekillik ve CHECK bunun üzerine); gerçek serial_id ile çakışma pratikte imkânsız | — | T-232
+A-98 | Depo/lokasyon kodu normalizasyonu: kırp + yalnızca ASCII a-z büyütme (Türkçe ı/İ, ß dönüştürülmez; `toLocaleUpperCase` ı→I çevirdiği için kullanılmaz); kod 1–64, ad 1–200 karakter, denetim karakteri yasak | Pilot kod biçimi | T-205
+A-99 | Lokasyon ağacı derinlik sınırı `MAX_LOCATION_DEPTH` = 16 (uygulama savunması; DB yalnız smallint) | Pilot hiyerarşisi | T-205
+A-100 | Sayım kilidi COUNTING iken `archiveLocation` IN_USE döner | — | T-205
+A-101 | Arşivli depoya lokasyon eklenemez; arşivli lokasyonda ad/tür değişmez (VALIDATION_FAILED); zaten arşivli kaydı arşivlemek no-op (denetim satırı yok) | — | T-205
+A-102 | TRANSIT türü lokasyon ebeveyn olamaz (PARENT_INVALID) | — | T-205
+A-103 | `setMembershipWarehouseScopes` boş liste = kapsam satırlarını siler = A-77 gereği tüm depolar (bayrak kapalı; fail-open varsayılan) — bayrak açılmadan Q-23 kararı ve security-reviewer onayı şart | Q-23 | T-205
