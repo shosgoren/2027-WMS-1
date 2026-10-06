@@ -113,6 +113,25 @@ export type {
   Unit,
   UnitConversion,
 } from "./schema/catalog.ts";
+// Stok belgesi tabloları: yalnızca TİPLER (T-206); tablo nesneleri `@wms/db/internal/schema` alt yolundadır.
+export type {
+  DocumentKind,
+  DocumentLine,
+  DocumentStatus,
+  DocumentStatusHistoryRow,
+  DocumentTypeVersion,
+  IdempotencyRecord,
+  IdempotencyStatus,
+  LineStockStatus,
+  NewStockDocument,
+  NewDocumentLine,
+  NewDocumentStatusHistoryRow,
+  NewIdempotencyRecord,
+  NewNumberSequence,
+  NumberSequence,
+  ReversalStatus,
+  StockDocument,
+} from "./schema/documents.ts";
 // Bağlantı hedefi karşılaştırması (connection-target.ts, yan etkisiz): kuyruk kurulum CLI'ı uygulama bağlantısını reddetmek için kullanır.
 export { consumeRateLimit } from "./rate-limit.ts";
 export type { ConsumeRateLimitParams, ConsumeRateLimitResult } from "./rate-limit.ts";

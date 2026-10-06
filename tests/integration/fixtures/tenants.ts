@@ -29,6 +29,11 @@ export interface TenantWorld {
   serialId: string;
   ownerId: string;
   handlingUnitId: string;
+  // T-206: stok belgeleri (DRAFT STOCK_IN belgesi, 1 satır, durum geçmişi, idempotency kaydı; numara serisi).
+  documentId: string;
+  documentLineId: string;
+  statusHistoryId: string;
+  idempotencyRecordId: string;
 }
 
 export interface WorldRegistry {
@@ -171,6 +176,34 @@ export async function seedWorld(
     handlingUnitId,
     rootLocationId,
   ]);
+  // T-206: DRAFT STOCK_IN belgesi (POSTED değil: değişmezlik testleri kendi belgesini işlem içinde kurar), tek satır, ilk durum
+  // geçmişi, IN_PROGRESS idempotency kaydı ve numara serisi. Sistem fiş tipi sürümü migration tohumundan okunur (tenant_id NULL).
+  const documentId = randomUUID();
+  const documentLineId = randomUUID();
+  const statusHistoryId = randomUUID();
+  const idempotencyRecordId = randomUUID();
+  const tv = await c.query<{ id: string }>("SELECT id FROM public.document_type_versions WHERE tenant_id IS NULL AND key = 'STOCK_IN' AND version = 1");
+  const typeVersionId = (tv.rows[0] as { id: string }).id;
+  await c.query(
+    `INSERT INTO public.documents (tenant_id, id, kind, type_version_id, warehouse_id, business_date, reason, created_by)
+     VALUES ($1, $2, 'STOCK_IN', $3, $4, '2026-01-15', 'T206 fikstur', $5)`,
+    [tenantId, documentId, typeVersionId, warehouseId, ownerUserId],
+  );
+  await c.query(
+    `INSERT INTO public.document_lines
+       (tenant_id, id, document_id, line_no, item_id, unit_id, quantity, conversion_factor, base_quantity, target_location_id, lot_id, serial_id)
+     VALUES ($1, $2, $3, 1, $4, $5, 1, 1, 1, $6, $7, $8)`,
+    [tenantId, documentLineId, documentId, itemId, unitId, rootLocationId, lotId, serialId],
+  );
+  await c.query(
+    "INSERT INTO public.document_status_history (tenant_id, id, document_id, from_status, to_status, actor_user_id) VALUES ($1, $2, $3, NULL, 'DRAFT', $4)",
+    [tenantId, statusHistoryId, documentId, ownerUserId],
+  );
+  await c.query(
+    "INSERT INTO public.idempotency_records (tenant_id, id, command_type, client_key, actor_user_id, request_hash) VALUES ($1, $2, 'stock.document.create', $3, $4, $5)",
+    [tenantId, idempotencyRecordId, randomUUID(), ownerUserId, createHash("sha256").update(hex(16)).digest("hex")],
+  );
+  await c.query("INSERT INTO public.number_sequences (tenant_id, document_kind, period) VALUES ($1, 'STOCK_IN', '2026')", [tenantId]);
   const world: TenantWorld = {
     label,
     tenantId,
@@ -192,6 +225,10 @@ export async function seedWorld(
     serialId,
     ownerId,
     handlingUnitId,
+    documentId,
+    documentLineId,
+    statusHistoryId,
+    idempotencyRecordId,
   };
   reg.worlds.push(world);
   return world;
@@ -202,6 +239,7 @@ export async function cleanupRegistry(c: pg.Client, reg: WorldRegistry): Promise
   const tenantIds = reg.worlds.map((w) => w.tenantId);
   const userIds = [...reg.worlds.flatMap((w) => [w.ownerUserId, w.memberUserId]), ...reg.extraUsers];
   if (tenantIds.length > 0) {
+    await cleanupDocuments(c, tenantIds);
     // T-204 tabloları (FK sırası: taşıma birimi [lokasyona bağlı, T-202'den önce] → seri → lot → barkod/dönüşüm → sahip → ürün → birim).
     for (const t of ["handling_units", "serials", "lots", "item_barcodes", "unit_conversions", "inventory_owners", "items", "units"]) {
       await c.query(`DELETE FROM public.${t} WHERE tenant_id = ANY($1::uuid[])`, [tenantIds]);
@@ -222,4 +260,23 @@ export async function cleanupRegistry(c: pg.Client, reg: WorldRegistry): Promise
   }
   reg.worlds.length = 0;
   reg.extraUsers.length = 0;
+}
+
+/**
+ * T-206 tabloları (tek transaction). document_status_history append-only tetikleyicisi (ENABLE ALWAYS DEĞİL, 0012 notu) ve
+ * POSTED silme reddi `session_replication_role = replica` ile atlanır (tablo sahibi + süper kullanıcı; wms_app yapamaz). Replica
+ * modunda FK denetimi de kapalıdır; bu yüzden yalnızca bu tenant'ların satırları ve FK sırasıyla silinir. Hatalar yutulmaz.
+ */
+export async function cleanupDocuments(c: pg.Client, tenantIds: string[]): Promise<void> {
+  await c.query("BEGIN");
+  try {
+    await c.query("SET LOCAL session_replication_role = replica");
+    for (const t of ["idempotency_records", "number_sequences", "document_status_history", "document_lines", "documents"]) {
+      await c.query(`DELETE FROM public.${t} WHERE tenant_id = ANY($1::uuid[])`, [tenantIds]);
+    }
+    await c.query("COMMIT");
+  } catch (e) {
+    await c.query("ROLLBACK");
+    throw e;
+  }
 }
