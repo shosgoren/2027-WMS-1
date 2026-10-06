@@ -1,7 +1,7 @@
 // Denetim kaydı CSV export (T-126; I-13, I-14, I-16). İnce giriş: yetki/kesit/parçalama `@wms/domain` `openAuditExport`'ta.
 // Sıra: routeGuard (IP/kullanıcı sınırı) → `audit.view` + A-39 yeniden doğrulama (yetkisiz/süresi dolmuş çağıran sayaç tüketmez)
 // → kullanıcı başına dakikada 2 export → akış. İstemci slug'ı hiçbir sayaç anahtarı değildir (T-127).
-import { ensureRecentAuth, getAuthService } from "@wms/auth";
+import { ensureRecentAuth, getAuthService } from "../../../../../../lib/auth-service.ts";
 import { getAppDb } from "@wms/db";
 import { openAuditExport, validateAuditFilters, type AuditFilters } from "@wms/domain/audit/audit-query";
 import { runTenantQuery } from "@wms/domain/identity/access";

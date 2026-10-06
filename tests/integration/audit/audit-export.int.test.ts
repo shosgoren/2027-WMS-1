@@ -13,7 +13,7 @@ import { readIntEnv, redactErrorChain } from "../harness/env.ts";
 // Route testi için bağımlılık taklitleri: yalnızca kimlik/oturum ve IP bekçisi; veritabanı, yetki, sayaç ve akış GERÇEK.
 const h = vi.hoisted(() => ({ db: undefined as unknown, principal: null as { userId: string; mfaVerified: boolean } | null, sessionValid: true }));
 vi.mock("../../../packages/db/src/index.ts", async (orig) => ({ ...(await orig<Record<string, unknown>>()), getAppDb: () => h.db }));
-vi.mock("../../../packages/auth/src/index.ts", () => ({
+vi.mock("../../../apps/web/lib/auth-service.ts", () => ({
   ensureRecentAuth: () => Promise.resolve(),
   getAuthService: () => ({ getPrincipal: () => Promise.resolve(h.sessionValid ? h.principal : null) }),
 }));
