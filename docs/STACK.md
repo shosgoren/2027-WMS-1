@@ -30,6 +30,9 @@ Kaynak sözdizimi: `<dosya>#<json.yolu>` (package.json alanı) veya `docker-comp
 | PostgreSQL (Neon) | — | — sağlayıcı yönetir, kilitlenemez; gözlenen 18.6 (proje pg_version 18, Q-05, T-005d koşu 3) | | ADR-004 |
 | Neon pooler | — | — PgBouncer transaction (belge); sürüm gözlenemedi (Q-02 açık) | | ADR-004 |
 | Prepared statement ayarı | — | — `prepare=false` (üretim, T-005d kapı koşusu; Q-04 kapandı); kod kaynağı `packages/db` `DB_CLIENT_SETTINGS` | | ADR-004 |
+| Drizzle ORM (packages/auth, yalnızca `sql` etiketi) | drizzle-orm | 0.45.3 | packages/auth/package.json#dependencies.drizzle-orm | ADR-003 |
+| Better Auth (kimlik katmanı) | better-auth | 1.7.7 | packages/auth/package.json#dependencies.better-auth | ADR-014 |
+| Argon2id parola özeti | @node-rs/argon2 | 2.2.1 | packages/auth/package.json#dependencies.@node-rs/argon2 | ADR-014 |
 | Kuyruk kütüphanesi | — | — pg-boss seçildi (ADR-005 eki 2026-10-05); sürüm ilk kuyruk kartında kilitlenir (aday 12.36.0) | | ADR-005 |
 | Tailwind CSS | tailwindcss | — ilk kullanan kart | | |
 | Shadcn/Radix, Lucide | — | — ilk kullanan kart | | |
