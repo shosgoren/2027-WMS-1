@@ -8,7 +8,8 @@ import { getAppDb } from "@wms/db";
 import { getMembershipSummary } from "@wms/domain/identity/member-queries";
 import { ROLE_KEYS } from "@wms/domain/identity/permissions";
 import { workspaceCreationAllowed } from "@wms/domain/onboarding/workspace";
-import { demoLoginStatus, demoSignInAction } from "./demo-actions.ts";
+import { demoSignInAction } from "./demo-actions.ts";
+import { demoLoginStatus } from "../lib/demo-config.ts";
 
 // Landing (T-122). Oturumlu kullanıcı çalışma alanına ya da `/onboarding`'e gider. Ortam bayrakları istek anında okunur.
 export const dynamic = "force-dynamic";
@@ -52,7 +53,7 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
 
   const t = await getTranslations();
   // A-43: demo yalnızca sunucuda karar verilir; bayraklar yokken bant ve düğmeler HİÇ render edilmez (login ile aynı koşul).
-  const demoState = await demoLoginStatus();
+  const demoState = demoLoginStatus();
   const demo = demoState !== "disabled";
   // A-50 / m11: `SIGNUP_ENABLED` yalnızca local|ci'da etkindir; staging/prod'da düğme çıkmaz.
   const signup = workspaceCreationAllowed(process.env);

@@ -18,7 +18,8 @@ vi.mock("../lib/rate-limit.ts", async (importOriginal) => ({
 }));
 
 import { DEMO_ROLES } from "@wms/domain/demo/seed";
-import { demoLoginStatus, demoSignInAction } from "./demo-actions.ts";
+import { demoSignInAction } from "./demo-actions.ts";
+import { demoLoginStatus } from "../lib/demo-config.ts";
 
 const PASSWORD = "unit-test-demo-password-9f3";
 const ORIGIN = "https://app.example.test";

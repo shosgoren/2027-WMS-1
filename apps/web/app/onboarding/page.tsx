@@ -6,7 +6,8 @@ import { getTranslations } from "next-intl/server";
 import { Banner, Button, TextField } from "@wms/ui";
 import { TEMPLATE_KEYS, getTemplate } from "@wms/domain/onboarding/templates";
 import { slugCandidates, workspaceCreationAllowed } from "@wms/domain/onboarding/workspace";
-import { readWizardDraft, saveWorkspaceNameAction } from "./actions.ts";
+import { saveWorkspaceNameAction } from "./actions.ts";
+import { NAME_MAX, readWizardDraft } from "./draft.ts";
 import { Wizard } from "./wizard.tsx";
 import type { TemplatePreview } from "./wizard.tsx";
 
@@ -20,7 +21,6 @@ export async function generateMetadata(): Promise<Metadata> {
   return { title: t("title") };
 }
 
-const NAME_MAX = 120; // domain `NAME_MAX` ile aynı sınır (yalnızca formda `maxLength`; asıl doğrulama domain'dedir).
 
 function first(v: string | string[] | undefined): string | undefined {
   return Array.isArray(v) ? v[0] : v;
@@ -59,6 +59,7 @@ export default async function OnboardingPage({ searchParams }: { searchParams: P
   const draft = await readWizardDraft();
   const edit = first(query.edit) === "1";
   const invalid = first(query.invalid) === "1";
+  const errorCode = ["FORBIDDEN", "UNAUTHENTICATED", "RATE_LIMITED", "INTERNAL"].find((c) => c === first(query.error))?.toLowerCase();
   const ts = await getTranslations("serverErrors");
 
   if (draft === null || edit) {
@@ -79,6 +80,11 @@ export default async function OnboardingPage({ searchParams }: { searchParams: P
             autoComplete="organization"
             error={invalid ? { reason: ts("validation_failed"), action: ts("validation_failedAction") } : undefined}
           />
+          {errorCode === undefined ? null : (
+            <Banner kind="error">
+              {ts(errorCode)} {ts(`${errorCode}Action`)}
+            </Banner>
+          )}
           <Button type="submit">{t("step1.next")}</Button>
         </form>
       </main>
