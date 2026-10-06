@@ -472,11 +472,16 @@ export function checkWorkerStability(beforeJson, afterJson, recheckJson, group =
     }
     const prior = find(before, rawId);
     const sinceBefore = newEvents(eventsOf(r), eventsOf(prior));
-    const bad = sinceBefore.filter((e) => e.type === "exit" || e.type === "restart").length;
-    const starts = sinceBefore.filter((e) => e.type === "start").length;
+    // `start` olayı iki aşamalıdır: status `starting` (ara aşama, sayılmaz) ve `started` (tamamlanan başlatma, sayılır).
+    // Olay status değerleri kaynakta sabit listeli DEĞİL (fly-go v0.11.2 machine_types.go:296 serbest `Status string`;
+    // flyctl machine/status.go:166-171 ham yazar); değerler deploy #28 gözleminden. Bilinmeyen start status'u fail-closed.
+    const bad =
+      sinceBefore.filter((e) => e.type === "exit" || e.type === "restart").length +
+      sinceBefore.filter((e) => e.type === "start" && e.status !== "starting" && e.status !== "started").length;
+    const starts = sinceBefore.filter((e) => e.type === "start" && e.status === "started").length;
     const between = newEvents(eventsOf(r), eventsOf(m)).filter((e) => ["start", "exit", "restart"].includes(e.type)).length;
-    if (bad > 0) problems.push(`${id}: başlatmadan sonra ${bad} exit/restart olayı`);
-    if (starts > 1) problems.push(`${id}: ${starts} start olayı (çökme döngüsü)`);
+    if (bad > 0) problems.push(`${id}: başlatmadan sonra ${bad} exit/restart/bilinmeyen-start olayı`);
+    if (starts > 1) problems.push(`${id}: ${starts} start/started olayı (çökme döngüsü)`);
     // before'da yok (yeni makine) ya da started değildi → şimdi started: en az bir yeni start olayı ŞART.
     if ((prior === undefined || /** @type {{ state?: unknown }} */ (prior).state !== "started") && /** @type {{ state?: unknown }} */ (m).state === "started" && starts < 1) {
       problems.push(`${id}: önce durmuş, sonra started ama yeni start olayı yok`);
