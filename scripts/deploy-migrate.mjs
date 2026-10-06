@@ -68,7 +68,7 @@ export function assertDirectUri(uri) {
 }
 
 /** `migrate.ts` izin listesi: `sslmode`, `ssl*`, `application_name` (anahtarlar büyük/küçük harf duyarlı). */
-const isAllowedQueryKey = (/** @type {string} */ k) => k === "sslmode" || k.startsWith("ssl") || k === "application_name";
+const isAllowedQueryKey = (/** @type {string} */ k) => /^(?:ssl[a-z_]*|application_name)$/.test(k); // connection-target.ts ile aynı desen
 /** sslmode değerleri: bunlar TLS doğrulamasını düşürür/yoktur → verify-full'a yükseltilir. */
 const UPGRADE_SSLMODES = new Set(["require", "prefer", "allow", "disable"]);
 
@@ -94,7 +94,9 @@ export function normalizeDirectUri(uri) {
   }
   const bad = [...new Set([...u.searchParams.keys()].filter((k) => !isAllowedQueryKey(k)))];
   if (bad.length > 0) {
-    throw new DeployMigrateError(`URI izin listesi dışı sorgu parametresi içeriyor: ${bad.join(", ")} (sessizce silinmez; yalnızca sslmode/ssl*/application_name)`);
+    // Anahtar adı yalnızca güvenli biçimdeyse yazılır (bozuk URI'de parola parçası anahtar adına düşebilir; redactor tanımaz).
+    const shown = bad.map((k) => (/^[a-z_]{1,32}$/.test(k) ? k : "<adsız>"));
+    throw new DeployMigrateError(`URI izin listesi dışı sorgu parametresi içeriyor (${bad.length}): ${shown.join(", ")} (sessizce silinmez; yalnızca sslmode/ssl*/application_name)`);
   }
   const modes = u.searchParams.getAll("sslmode");
   if (modes.length > 1) throw new DeployMigrateError("URI birden çok sslmode içeriyor");
