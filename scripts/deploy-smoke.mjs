@@ -164,6 +164,8 @@ const HIDDEN_MSG = "[msg gizlendi]";
 // ifadeler yeniden üretilir, kalan her satır sayılır ve yazılmaz.
 const RE_TS = /^[0-9T:.+\-Z]{10,40}$/;
 const RE_LEVEL = /^[a-z]{3,10}$/;
+/** Makine durumu/olay sözcükleri (worker-ids özeti). */
+const RE_STATE_WORD = /^[a-z_]{1,20}$/;
 const RE_MSG = /^[a-z0-9 ._:-]{1,80}$/;
 const RE_CODE = /^[A-Z0-9_]{1,64}$/;
 const RE_ERRCLASS = /^[A-Za-z]{1,40}(?:Error|Exception)$/;
@@ -183,13 +185,31 @@ const SYSTEM_PATTERNS = /** @type {const} */ ([
   [/Virtual machine exited abruptly/, "Virtual machine exited abruptly"],
 ]);
 
+// flyctl 0.4.111 `logs` (internal/render/logs.go, HideAllocID+HideRegion): başta boşluk, sonra
+// `<RFC3339 zaman> <sağlayıcı>[<makine>] <bölge> [<düzey>] <alanlar><mesaj>`. ANSI renkleri önce silinir.
+const RE_FLY_PREFIX =
+  /^\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})) ([a-z]{2,12})\[([a-z0-9]{8,20})\] ([a-z]{3}) \[(debug|info|warn|warning|error)\] ?(.*)$/;
+
 /**
  * Tek log satırını izin listesiyle işler. Dönüş: yazılacak güvenli metin ya da `null` (gizlenecek).
+ * Fly öneki sıkı regex'le ayrılır (zaman, makine kimliği, düzey sabit alan olarak yazılır); gövdeye izin listesi
+ * uygulanır. Önek eşleşmezse gövde = satırın tamamı.
  * @param {string} rawLine
  * @returns {string | null}
  */
 export function allowLine(rawLine) {
-  const line = rawLine.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "").trim();
+  const line = rawLine.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "");
+  const pm = RE_FLY_PREFIX.exec(line);
+  if (pm === null) return allowBody(line.trim());
+  const body = allowBody((pm[6] ?? "").trim());
+  return body === null ? null : `${pm[1]} ${pm[3]} [${pm[5]}] ${body}`;
+}
+
+/**
+ * @param {string} line
+ * @returns {string | null}
+ */
+function allowBody(line) {
   if (line === "") return null;
   if (line.startsWith("{")) {
     /** @type {unknown} */
@@ -208,7 +228,9 @@ export function allowLine(rawLine) {
     if (ts !== undefined) out["time"] = ts;
     const level = str(r["level"], RE_LEVEL);
     if (level !== undefined) out["level"] = level;
-    out["msg"] = str(r["msg"], RE_MSG) ?? HIDDEN_MSG;
+    const msg = str(r["msg"], RE_MSG);
+    // ≥8 karakterli ve rakam içeren sözcük (kimlik/anahtar benzeri) varsa msg gizlenir.
+    out["msg"] = msg !== undefined && !msg.split(/\s+/).some((w) => w.length >= 8 && /\d/.test(w)) ? msg : HIDDEN_MSG;
     const err = typeof r["err"] === "object" && r["err"] !== null ? /** @type {Record<string, unknown>} */ (r["err"]) : {};
     const code = str(r["code"], RE_CODE) ?? str(r["errorCode"], RE_CODE) ?? str(err["code"], RE_CODE);
     if (code !== undefined) out["code"] = code;
@@ -276,15 +298,16 @@ export function describeStoppedMachines(statusJson, group = DEFAULTS.group) {
     if (mm["state"] === "started") continue;
     const id = typeof mm["id"] === "string" ? mm["id"] : "";
     if (!/^[a-z0-9]{8,20}$/.test(id)) continue;
-    const summary = [`state=${String(mm["state"])}`];
+    const word = (/** @type {unknown} */ v) => (typeof v === "string" && RE_STATE_WORD.test(v) ? v : "?");
+    const summary = [`state=${word(mm["state"])}`];
     const restart = mm["config"]?.restart?.policy;
-    if (typeof restart === "string") summary.push(`restart_policy=${restart}`);
+    if (typeof restart === "string") summary.push(`restart_policy=${word(restart)}`);
     const guest = mm["config"]?.guest;
     if (guest && typeof guest.memory_mb === "number") summary.push(`memory_mb=${guest.memory_mb}`);
     const events = Array.isArray(mm["events"]) ? /** @type {any[]} */ (mm["events"]).slice(0, 8) : [];
     for (const e of events) {
       const x = e?.request?.exit_event;
-      const parts = [`event=${String(e?.type)}`, `status=${String(e?.status)}`];
+      const parts = [`event=${word(e?.type)}`, `status=${word(e?.status)}`];
       if (x && typeof x === "object") {
         if (typeof x.exit_code === "number") parts.push(`exit_code=${x.exit_code}`);
         if (typeof x.oom_killed === "boolean") parts.push(`oom_killed=${x.oom_killed}`);

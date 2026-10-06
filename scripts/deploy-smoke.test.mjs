@@ -272,6 +272,50 @@ describe("worker teşhisi (T-106c) — izin listesi", () => {
     expect(r.hidden).toBeGreaterThanOrEqual(7);
   });
 
+  it("gerçek flyctl önekiyle (0.4.111 biçimi) aynı kaçaklar yine gizli kalır", () => {
+    const pw = rnd(4);
+    const long = rnd(20);
+    const spaced = `${rnd(3)} ${rnd(3)}`;
+    const enc = encodeURIComponent(`p@ss/${rnd(3)}`);
+    const pre = " 2026-10-06T11:32:00Z app[80e32da6490958] fra [error] ";
+    const bodies = [
+      JSON.stringify({ msg: "queue start failed", detail: JSON.stringify({ password: pw }) }),
+      `{"msg":"boom \\"x","password":"${pw}\\" ${long}"}`,
+      `PASSWORD=${spaced} trailing`,
+      `auth=${pw}`,
+      `postgresql://u:${enc}@h/d`,
+      `connect failed ${pw}`,
+      `##[add-mask]${pw}`,
+      `::add-mask::${pw}`,
+      `# ${long}`,
+    ];
+    const r = run(bodies.map((b) => pre + b));
+    const out = r.lines.join("\n");
+    for (const secret of [pw, long, spaced, enc, ...spaced.split(" ")]) expect(out).not.toContain(secret);
+    for (const l of r.lines) expect(l.startsWith("worker| ")).toBe(true);
+    expect(r.hidden).toBeGreaterThanOrEqual(7);
+  });
+
+  it("önekli eksik env satırı ve önekli sistem satırı görünür", () => {
+    const pre = " 2026-10-06T11:32:00Z app[80e32da6490958] fra [error] ";
+    const a = allowLine(`${pre}{"ts":"2026-10-06T11:32:00.000Z","level":"error","msg":"invalid configuration","service":"worker","error":"DATABASE_URL_WORKER tanımlı değil"}`) ?? "";
+    expect(a.startsWith("2026-10-06T11:32:00Z 80e32da6490958 [error] {")).toBe(true);
+    expect(JSON.parse(a.slice(a.indexOf("{")))).toMatchObject({ msg: "invalid configuration", error: "DATABASE_URL_WORKER tanımlı değil" });
+    expect(allowLine("\u001b[2m2026-10-06T11:32:01Z\u001b[0m runner[80e32da6490958] fra [info] Main child exited normally with code: 1")).toBe(
+      "2026-10-06T11:32:01Z 80e32da6490958 [info] Main child exited normally with code: 1",
+    );
+    expect(allowLine(`${pre}QueueInstallError [QUEUE_SCHEMA_MISSING]: x`)).toBe("2026-10-06T11:32:00Z 80e32da6490958 [error] QueueInstallError [QUEUE_SCHEMA_MISSING]");
+    // önek biçimi bozuksa (makine kimliği geçersiz) önek gövdenin parçası olur ve satır gizlenir
+    expect(allowLine('2026-10-06T11:32:00Z app[x;rm] fra [error] {"msg":"a"}')).toBeNull();
+  });
+
+  it("msg içinde rakamlı uzun sözcük (kimlik/anahtar benzeri) gizlenir", () => {
+    const k = rnd(8);
+    const o = JSON.parse(allowLine(JSON.stringify({ level: "error", msg: `auth failed for ${k}` })) ?? "{}");
+    expect(o.msg).toBe("[msg gizlendi]");
+    expect(JSON.parse(allowLine(JSON.stringify({ level: "info", msg: "queue started 3 jobs" })) ?? "{}").msg).toBe("queue started 3 jobs");
+  });
+
   it("JSON satırı: yalnızca izinli alanlar; fazlalık ve uygunsuz msg elenir", () => {
     const secret = rnd();
     const out = allowLine(
@@ -295,7 +339,7 @@ describe("worker teşhisi (T-106c) — izin listesi", () => {
     expect(allowLine(`QueueInstallError [QUEUE_SCHEMA_MISSING]: ${secret}`)).toBe("QueueInstallError [QUEUE_SCHEMA_MISSING]");
     expect(allowLine(`TypeError: ${secret}`)).toBe("TypeError");
     expect(allowLine(`2026-10-06T11:00:00Z app[80e32da6490958] fra [info] Main child exited normally with code: 1 ${secret}`)).toBe(
-      "Main child exited normally with code: 1",
+      "2026-10-06T11:00:00Z 80e32da6490958 [info] Main child exited normally with code: 1",
     );
     expect(allowLine("Process appears to have been OOM killed!")).toBe("Process appears to have been OOM killed");
     expect(allowLine("Out of memory: Killed process 513 (node)")).toBe("Out of memory");
@@ -334,6 +378,16 @@ describe("describeStoppedMachines (T-106c)", () => {
     expect(text).toContain("oom_killed=false");
     expect(text).toContain("memory_mb=256");
     expect(text).not.toContain("gizli");
+  });
+
+  it("durum/politika/olay sözcükleri izin listesine bağlı", () => {
+    const secret = randomBytes(12).toString("hex");
+    const st = JSON.stringify({ Machines: [{ id: "80e32da6490958", state: `x ${secret}`, config: { metadata: { fly_process_group: "worker" }, restart: { policy: `on-failure ${secret}` } },
+      events: [{ type: `exit ${secret}`, status: "stopped" }] }] });
+    const text = (describeStoppedMachines(st)[0]?.summary ?? []).join("\n");
+    expect(text).not.toContain(secret);
+    expect(text).toContain("state=?");
+    expect(text).toContain("status=stopped");
   });
 
   it("bozuk JSON → boş; güvensiz kimlik atlanır", () => {
