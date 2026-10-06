@@ -7,7 +7,8 @@
 import { defineConfig, devices } from "@playwright/test";
 
 const port = Number(process.env.E2E_PORT ?? "3100");
-const baseURL = process.env.E2E_BASE_URL?.trim() || `https://localhost:${port}`;
+const remoteBaseURL = process.env.E2E_BASE_URL?.trim();
+const baseURL = remoteBaseURL || `https://localhost:${port}`;
 
 export default defineConfig({
   testDir: "tests/e2e",
@@ -24,10 +25,11 @@ export default defineConfig({
   expect: { timeout: 10_000 },
   use: {
     baseURL,
-    // Yerel TLS ters vekili kendinden imzalıdır; staging'in sertifikası geçerlidir ve bu bayrakla zayıflamaz.
-    ignoreHTTPSErrors: true,
+    // Yalnızca yerel TLS ters vekili (kendinden imzalı) için; uzak hedefte (staging) sertifika doğrulaması açık kalır.
+    ignoreHTTPSErrors: !remoteBaseURL,
     locale: "tr-TR",
-    trace: "retain-on-failure",
+    // Uzak hedefte trace kapalı: trace demo oturum çerezini ve ağ trafiğini içerir, artifact olarak saklanır.
+    trace: remoteBaseURL ? "off" : "retain-on-failure",
     screenshot: "only-on-failure",
   },
   projects: [

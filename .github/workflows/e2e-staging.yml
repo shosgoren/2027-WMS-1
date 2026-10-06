@@ -20,6 +20,8 @@ env:
 jobs:
   e2e-staging:
     name: e2e-staging
+    # Yalnızca main'deki iş akışı tanımı staging'e karşı koşar (deploy-staging.yml ile aynı desen).
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:

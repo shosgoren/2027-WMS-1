@@ -7,7 +7,8 @@
 # Bu iş akışı hiçbir repo sırrı kullanmaz (Neon koşusu T-005d'de, ayrı iş akışında).
 # Üçüncü taraf action'lar tam commit SHA ile sabitlenir; etiket yorumdadır.
 # Henüz kartı tamamlanmamış adımlar (check:all → T-008, test:ac → T-007, migration ileri/geri →
-# ilk migration kartı, Playwright → Faz 1) burada YOKTUR; her biri kendi kartında eklenir.
+# ilk migration kartı) burada YOKTUR; her biri kendi kartında eklenir. `e2e` işi (Playwright duman testi) T-131'de
+# eklendi; sabit ad listesine (branch protection) alınması T-009b kararıdır.
 # Yer tutucu/boş yeşil adım eklenmez (G-07). `int` işi (test:int, compose hedefi) T-005a'da eklendi.
 name: ci
 
