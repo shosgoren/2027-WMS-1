@@ -143,60 +143,89 @@ export function appRolesCheckSql() {
 FROM pg_roles r WHERE r.rolname IN (${names}) ORDER BY r.rolname;`;
 }
 
-/** Operasyon rolü katalog sorgusu (parseAppRoles biçimi). */
+/** Operasyon rolü katalog sorgusu: nitelikler (parseAppRoles biçimi) + wms_ops'a kimlerin üye olduğu (`opsmember`). */
 export function opsRoleCheckSql() {
   return `SELECT 'role', r.rolname, r.rolcanlogin, r.rolsuper, r.rolbypassrls, r.rolcreatedb, r.rolcreaterole, r.rolreplication,
  (SELECT count(*) FROM pg_roles g WHERE g.oid <> r.oid AND pg_has_role(r.oid, g.oid, 'MEMBER')),
  (SELECT count(*) FROM pg_shdepend d WHERE d.refclassid = 'pg_authid'::regclass AND d.refobjid = r.oid AND d.deptype = 'o')
-FROM pg_roles r WHERE r.rolname = '${OPS_ROLE}';`;
+FROM pg_roles r WHERE r.rolname = 'wms_ops';
+SELECT 'opsmember', mr.rolname, m.admin_option, m.inherit_option, m.set_option
+FROM pg_auth_members m JOIN pg_roles pr ON pr.oid = m.roleid JOIN pg_roles mr ON mr.oid = m.member
+WHERE pr.rolname = 'wms_ops' ORDER BY 2;`;
 }
 
 /**
- * Operasyon rolü beklentisi: NOLOGIN (LOGIN → sapma), diğer nitelikler yok, üyelik 0, sahip olunan nesne 0.
+ * `opsmember` satırları: wms_ops'a kimlerin üye olduğu (A-67 deseni).
+ * @param {string} stdout
+ * @returns {{ member: string, admin: boolean, inherit: boolean, set: boolean }[]}
+ */
+export function parseOpsMembers(stdout) {
+  return rows(stdout)
+    .filter((c) => c[0] === "opsmember" && c.length >= 5)
+    .map((c) => ({ member: String(c[1]), admin: tf(String(c[2])), inherit: tf(String(c[3])), set: tf(String(c[4])) }));
+}
+
+/**
+ * Operasyon rolü beklentisi: NOLOGIN (LOGIN → sapma), diğer nitelikler yok, kendisi hiçbir role üye değil, sahip olunan
+ * nesne 0; wms_ops'a SET/INHERIT seçenekli üye YOK (yalnızca-ADMIN satırı kabul: Neon CREATEROLE sahibinin kaldırılamayan
+ * örtük ADMIN'i, A-67 gerekçesi; ayrıca raporlanır).
  * @param {ReturnType<typeof parseAppRoles>[number] | undefined} r
+ * @param {ReturnType<typeof parseOpsMembers>} [members]
  * @returns {string[]}
  */
-export function opsRoleDeviations(r) {
+export function opsRoleDeviations(r, members = []) {
   if (!r) return ["missing"];
-  return appRoleDeviations({ ...r, login: true }).concat(r.login ? ["login"] : []);
+  const d = appRoleDeviations({ ...r, login: true }).concat(r.login ? ["login"] : []);
+  for (const m of members) if (m.set || m.inherit) d.push(`granted-to:${m.member}`);
+  return d;
 }
 
 /**
- * wms_ops yoksa NOLOGIN/parolasız yaratır (tek transaction); varsa yalnızca denetler (LOGIN dahil sapma → BLOCKED,
- * hiçbir şey değiştirilmez). Fly'a hiçbir şey yazılmaz. Her zaman SQL ile (A-80; parola yok, A-56 riski yok).
+ * wms_ops yoksa NOLOGIN/parolasız yaratır (tek transaction; `createrole_self_grant` boş → örtük satır yalnızca ADMIN);
+ * varsa yalnızca denetler (LOGIN/üyelik dahil sapma → BLOCKED, hiçbir şey değiştirilmez). Fly'a hiçbir şey yazılmaz.
+ * Her zaman SQL ile (A-80; parola yok, A-56 riski yok).
  * @param {{ psql: PsqlFn }} o
- * @returns {{ status: "OK" | "BLOCKED" | "RED", lines: string[], created: boolean }}
+ * @returns {{ status: "OK" | "BLOCKED" | "RED", lines: string[], created: boolean, adminOnly: string[] }}
  */
 export function ensureOpsRole(o) {
   /** @type {string[]} */
   const lines = [];
   const read = () => {
     const r = o.psql(opsRoleCheckSql());
-    return r.ok ? parseAppRoles(r.stdout).find((x) => x.role === OPS_ROLE) : null;
+    return r.ok
+      ? { role: parseAppRoles(r.stdout).find((x) => x.role === OPS_ROLE), members: parseOpsMembers(r.stdout) }
+      : null;
   };
   const before = read();
-  if (before === null) return { status: "RED", lines: [`${OPS_ROLE}: FAIL (rol katalog sorgusu başarısız)`], created: false };
+  if (before === null) return { status: "RED", lines: [`${OPS_ROLE}: FAIL (rol katalog sorgusu başarısız)`], created: false, adminOnly: [] };
   let created = false;
-  if (before !== undefined) {
-    const d = opsRoleDeviations(before);
+  let state = before;
+  if (before.role !== undefined) {
+    const d = opsRoleDeviations(before.role, before.members);
     if (d.length > 0) {
       lines.push(`${OPS_ROLE}: BLOCKED (mevcut rol sapması: ${d.join(", ")}; hiçbir şey değiştirilmedi)`);
-      return { status: "BLOCKED", lines, created: false };
+      return { status: "BLOCKED", lines, created: false, adminOnly: [] };
     }
   } else {
-    const c = o.psql(`BEGIN;\nCREATE ROLE ${quoteIdent(OPS_ROLE)} NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION;\nCOMMIT;`);
-    if (!c.ok) return { status: "RED", lines: [`${OPS_ROLE}: FAIL (rol yaratılamadı, SQLSTATE ${c.sqlstate ?? "?"})`], created: false };
+    const c = o.psql(`BEGIN;
+SET LOCAL createrole_self_grant = '';
+CREATE ROLE ${quoteIdent(OPS_ROLE)} NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION;
+COMMIT;`);
+    if (!c.ok) return { status: "RED", lines: [`${OPS_ROLE}: FAIL (rol yaratılamadı, SQLSTATE ${c.sqlstate ?? "?"})`], created: false, adminOnly: [] };
     created = true;
     const after = read();
-    const d = after === null ? ["unreadable"] : opsRoleDeviations(after);
-    if (d.length > 0) {
+    const d = after === null ? ["unreadable"] : opsRoleDeviations(after.role, after.members);
+    if (d.length > 0 || after === null) {
       const del = o.psql(`DROP ROLE ${quoteIdent(OPS_ROLE)};`);
       lines.push(`${OPS_ROLE}: BLOCKED (yaratılan rol sapıyor: ${d.join(", ")}; ${del.ok ? "silindi" : "silinemedi, elle silinmeli"})`);
-      return { status: "BLOCKED", lines, created: false };
+      return { status: "BLOCKED", lines, created: false, adminOnly: [] };
     }
+    state = after;
   }
+  const adminOnly = state.members.filter((m) => m.admin && !m.set && !m.inherit).map((m) => m.member);
   lines.push(`${OPS_ROLE}: OK (nologin, nosuperuser, nobypassrls, parolasız${created ? ", bu koşuda yaratıldı" : ""})`);
-  return { status: "OK", lines, created };
+  if (adminOnly.length > 0) lines.push(`${OPS_ROLE}: yalnızca-ADMIN üyeler (kaldırılamayan örtük satır, A-67 gerekçesi): ${adminOnly.join(", ")}`);
+  return { status: "OK", lines, created, adminOnly };
 }
 
 /** Probe rolü + üyelikler + m1 + sahip rol bilgisi. */

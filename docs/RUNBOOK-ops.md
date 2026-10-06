@@ -4,14 +4,15 @@ Kapsam: destek, veri düzeltme, backfill. Bu işler **Neon dal sahibi rolüyle y
 yalnızca NOBYPASSRLS `wms_ops` rolüyle, açık tenant kimliğiyle ve denetim kaydı bırakarak yapılır.
 
 ## Rolün sınırları
-- LOGIN, NOSUPERUSER, NOBYPASSRLS, NOCREATEDB, NOCREATEROLE, NOREPLICATION; hiçbir role üye değil; hiçbir nesnenin sahibi değil; DDL yok.
+- Her ortamda varsayılan NOLOGIN (parolasız); NOSUPERUSER, NOBYPASSRLS, NOCREATEDB, NOCREATEROLE, NOREPLICATION; hiçbir role üye değil; hiçbir nesnenin sahibi değil; DDL yok.
 - Yetkili tablolar (0009_ops_role): `tenants` (SELECT; UPDATE yalnızca `name`, `status`), `tenant_memberships`, `membership_roles`,
   `invitations` (UPDATE yalnızca `expires_at`, `revoked_at`), `tenant_settings`, `audit_logs` (SELECT + INSERT; UPDATE/DELETE yok).
 - **Stok defteri ve bakiye tablolarına yetki yoktur (G-01).** Stok düzeltmesi yalnızca `packages/domain` stok komutlarıyla yapılır; `wms_ops` ile
   defter/bakiye düzeltme girişimi yasaktır ve zaten 42501 ile reddedilir. `users`, `sessions`, `accounts`, `verifications`, `security_events`,
   `request_rate_limits`, `admin_reset_grants` tablolarına yetki yoktur.
 - Tenant bağlamı olmadan hiçbir satır görünmez. Bağlam kurulsa bile, **aynı transaction'da** gerekçeli ve operatör adlı `ops.session_opened`
-  denetim satırı yoksa tablolar boş görünür ve yazılamaz (RESTRICTIVE politika `ops_session_required`).
+  denetim satırı yoksa tablolar boş görünür ve yazılamaz (RESTRICTIVE politika `ops_session_required`). `audit_logs` da aynıdır: oturumsuz
+  okunamaz; yazılan her satır `ops.*` eylemi olmalı ve `actor_user_id`/`on_behalf_of_user_id` boş kalmalıdır (başka kullanıcı adına kayıt yok).
 
 ## Bağlantı bilgisinin yeri
 - `wms_ops` bağlantı URI'si **Fly sırrı DEĞİLDİR** ve uygulama/worker/auth süreçlerinin ortamına girmez (uygulama süreçleri yalnızca
@@ -19,9 +20,14 @@ yalnızca NOBYPASSRLS `wms_ops` rolüyle, açık tenant kimliğiyle ve denetim k
 - Yeri: operasyon işini koşan GitHub Actions işinin sırrı (repo/ortam sırrı `STAGING_DATABASE_URL_OPS`; özel repo ücretsiz planında
   `environment:` koruması yoksa düz repo sırrı ve yalnızca o işin adımına verilir — A-54 sınırı; plan yükselince korumalı ortam).
   Doğrudan (pooler'sız) bağlantı kullanılır; oturum `BEGIN … COMMIT` içindedir.
-- Yerel/CI: `01-roles.sh` rolü **parolasız** yaratır (parolayla girilemez). Yerelde parolayı geçici verin ve işiniz bitince kaldırın:
-  `ALTER ROLE wms_ops PASSWORD '<rastgele>'` (migration rolüyle) … `ALTER ROLE wms_ops PASSWORD NULL`. Parolayı repoya/loga/komut satırı geçmişine yazmayın.
+- Yerel/CI: `01-roles.sh` rolü **NOLOGIN ve parolasız** yaratır. Yerelde geçici açın ve işiniz bitince kapatın (migration rolüyle):
+  `ALTER ROLE wms_ops LOGIN PASSWORD '<rastgele>'` … `ALTER ROLE wms_ops NOLOGIN PASSWORD NULL`. Parolayı repoya/loga/komut satırı geçmişine yazmayın.
 - Staging (A-80): `scripts/provision-staging.mjs` `wms_ops`'u **NOLOGIN ve parolasız** yaratır; Fly'a hiçbir şey yazılmaz. Destek işi için geçici LOGIN + kısa ömürlü parola veren Actions iş akışı **henüz yok (T-105d)**; o zamana kadar staging'de `wms_ops` ile oturum açılamaz.
+
+### Mevcut yerel volume için geçiş (MINOR-5)
+`01-roles.sh` yalnızca boş veri dizininde çalışır; 0009'dan önce kurulmuş yerel/CI volume'unda `wms_ops` yoktur ve `pnpm db:migrate`
+"wms_ops rolü yok" ile durur. Ya `docker compose down -v` (veri silinir) ya da migration rolüyle bir kez:
+`CREATE ROLE wms_ops NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION;` (parolasız), sonra `pnpm db:migrate`.
 
 ## Kullanım adımları (tek tenant, tek transaction)
 1. Gerekçeyi (değişiklik/destek kaydı numarası) ve operatör adını hazırlayın; kişisel veri içeren serbest metin yazmayın.

@@ -15,6 +15,7 @@ import {
   OPS_ROLE,
   opsRoleCheckSql,
   opsRoleDeviations,
+  parseOpsMembers,
   parseAppRoles,
   parseArgs,
   parseFlySecretNames,
@@ -306,6 +307,33 @@ describe("ensureOpsRole / opsRoleDeviations (A-80)", () => {
     expect(opsRoleDeviations(row({ login: "t" }))).toEqual(["login"]);
     expect(opsRoleDeviations(row({ bypass: "t", members: "1", owned: "2", createrole: "t" }))).toEqual(["bypassrls", "createrole", "member-of-role", "owns-objects"]);
     expect(opsRoleDeviations(undefined)).toEqual(["missing"]);
+  });
+  it("örtük ADMIN (Neon CREATEROLE sahibi): yalnızca-ADMIN satırı kabul + raporlanır; SET/INHERIT satırı BLOCKED; yaratma createrole_self_grant boş", () => {
+    const adminRow = "opsmember|neondb_owner|t|f|f";
+    const setRow = "opsmember|neondb_owner|t|t|t";
+    expect(parseOpsMembers(`${roleRow("wms_ops", { login: "f" })}\n${adminRow}`)).toEqual([{ member: "neondb_owner", admin: true, inherit: false, set: false }]);
+    /** @param {string} memberRow */
+    const run = (memberRow) => {
+      /** @type {string[]} */
+      const calls = [];
+      let created = false;
+      const psql = (/** @type {string} */ q) => {
+        calls.push(q);
+        if (q.includes("CREATE ROLE")) created = true;
+        if (q.includes("'role'")) return ok(created ? `${roleRow("wms_ops", { login: "f" })}\n${memberRow}` : "");
+        return ok("");
+      };
+      return { r: ensureOpsRole({ psql }), calls };
+    };
+    const good = run(adminRow);
+    expect(good.r.status).toBe("OK");
+    expect(good.r.adminOnly).toEqual(["neondb_owner"]);
+    expect(good.r.lines.join("\n")).toContain("yalnızca-ADMIN üyeler");
+    expect(good.calls.find((c) => c.includes("CREATE ROLE"))).toMatch(/createrole_self_grant = ''/);
+    const bad = run(setRow);
+    expect(bad.r.status).toBe("BLOCKED");
+    expect(bad.r.lines.join("\n")).toContain("granted-to:neondb_owner");
+    expect(bad.calls.some((c) => c.startsWith("DROP ROLE"))).toBe(true);
   });
   it("yaratılan rol sapıyorsa silinir ve BLOCKED döner", () => {
     /** @type {string[]} */

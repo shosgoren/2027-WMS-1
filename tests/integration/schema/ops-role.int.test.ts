@@ -73,7 +73,7 @@ beforeAll(async () => {
   scratchUrl = urlFor(dbName);
   await migrateUp({ url: scratchUrl });
   admin = await connect(scratchUrl);
-  await admin.query(`ALTER ROLE ${OPS} PASSWORD '${opsPassword}'`);
+  await admin.query(`ALTER ROLE ${OPS} LOGIN PASSWORD '${opsPassword}'`); // varsayılan NOLOGIN (A-80); test süresince geçici LOGIN
   opsUrl = urlFor(dbName, OPS, opsPassword);
   for (const [id, slug] of [[tenantA, "ops-a"], [tenantB, "ops-b"]] as const) {
     await admin.query("INSERT INTO public.tenants (id, slug, name) VALUES ($1, $2, $3)", [id, `${slug}-${id.slice(0, 8)}`, slug]);
@@ -88,7 +88,7 @@ beforeAll(async () => {
 afterAll(async () => {
   try {
     const a = await connect(adminUrl);
-    await a.query(`ALTER ROLE ${OPS} PASSWORD NULL`);
+    await a.query(`ALTER ROLE ${OPS} NOLOGIN PASSWORD NULL`);
   } catch {
     /* kurulum başarısızsa bağlantı olmayabilir */
   }
@@ -206,6 +206,42 @@ describe(`tenant bağlamı ve RLS (target=${env.target})`, () => {
     expect(t.rows[0]?.status).toBe("SUSPENDED");
     const b = await admin.query<{ locale: string }>("SELECT locale FROM public.tenant_settings WHERE tenant_id = $1", [tenantA]);
     expect(b.rows[0]?.locale).toBe("en");
+  });
+
+  it("audit_logs (B-1, I-12): oturumsuz çapraz tenant okuma 0 satır, sahte satır reddi; açık oturumda ops.* dışı/kullanıcı adına sahte kayıt reddi", async () => {
+    // Önceki testte tenantA için ops.session_opened satırı kaldı (admin görür).
+    const seen = await admin.query<{ n: number }>("SELECT count(*)::int AS n FROM public.audit_logs WHERE tenant_id = $1", [tenantA]);
+    expect(seen.rows[0]?.n).toBeGreaterThan(0);
+    for (const t of [tenantA, tenantB]) {
+      const ctx = [`SELECT set_config('app.current_tenant_id', '${t}', true)`];
+      const sel = await attempt(ops, "SELECT 1 FROM public.audit_logs", ctx);
+      expect(sel.ok && sel.rowCount, `okuma ${t}`).toBe(0);
+      const ins = await attempt(ops, "INSERT INTO public.audit_logs (action, reason) VALUES ('ops.sahte', 'x')", ctx);
+      expect(ins.ok, "oturumsuz ops.sahte").toBe(false);
+      if (!ins.ok) expect(ins.code).toBe(INSUFFICIENT_PRIVILEGE);
+      const blank = await attempt(ops, "INSERT INTO public.audit_logs (action, reason, change_summary) VALUES ('ops.session_opened', ' ', '{\"operator\":\"x\"}')", ctx);
+      expect(blank.ok, "boş gerekçeli oturum satırı").toBe(false);
+      const noop = await attempt(ops, "INSERT INTO public.audit_logs (action, reason) VALUES ('ops.session_opened', 'r')", ctx);
+      expect(noop.ok, "operatörsüz oturum satırı").toBe(false);
+    }
+    // Açık oturumda: kendi tenant'ının denetim kayıtları okunur; ops.* kayıt eklenebilir; sahte olanlar reddedilir.
+    const open = [openSql(tenantA, "op-eve", "audit-test")];
+    const own = await attempt(ops, "SELECT 1 FROM public.audit_logs", open);
+    expect(own.ok && own.rowCount).toBeGreaterThan(0);
+    const okIns = await attempt(ops, "INSERT INTO public.audit_logs (action, reason) VALUES ('ops.duzeltme', 'r')", open);
+    expect(okIns.ok && okIns.rowCount).toBe(1);
+    for (const sql of [
+      "INSERT INTO public.audit_logs (action) VALUES ('auth.login')",
+      "INSERT INTO public.audit_logs (action, actor_user_id) VALUES ('ops.duzeltme', gen_random_uuid())",
+      "INSERT INTO public.audit_logs (action, on_behalf_of_user_id) VALUES ('ops.duzeltme', gen_random_uuid())",
+    ]) {
+      const r = await attempt(ops, sql, open);
+      expect(r.ok, sql).toBe(false);
+      if (!r.ok) expect(r.code, `${sql}: ${r.message}`).toBe(INSUFFICIENT_PRIVILEGE);
+    }
+    // Başka tenant'ın kayıtları açık oturumda da görünmez (B oturum açmadan A bağlamında B kaydı yok).
+    const crossRead = await attempt(ops, "SELECT 1 FROM public.audit_logs WHERE tenant_id = $$" + tenantB + "$$::uuid", open);
+    expect(crossRead.ok && crossRead.rowCount).toBe(0);
   });
 
   it("denetim satırı başka tenant içinse o transaction'da hedef tenant satırı yazılamaz", async () => {
@@ -338,6 +374,31 @@ describe(`0009 ileri/geri/ileri (target=${env.target})`, () => {
     } finally {
       await ops.query("ROLLBACK");
     }
+  });
+
+  it("üyelik ön denetimi (M-2): wms_ops'a yalnızca-ADMIN üye kabul; SET/INHERIT seçenekli üye migration'ı reddettirir", async () => {
+    const tmp = `ops_tmp_${randomBytes(4).toString("hex")}`;
+    await admin.end();
+    clients.splice(clients.indexOf(admin), 1);
+    await ops.end();
+    clients.splice(clients.indexOf(ops), 1);
+    const down = await migrateDown({ url: scratchUrl, to: "0008", wmsEnv: "ci" });
+    expect(down.reverted).toEqual(["0009"]);
+    const a = await connect(adminUrl);
+    try {
+      await a.query(`CREATE ROLE ${tmp} NOLOGIN`);
+      await a.query(`GRANT ${OPS} TO ${tmp} WITH ADMIN TRUE, SET FALSE, INHERIT FALSE`);
+      await a.query(`GRANT ${OPS} TO ${tmp} WITH ADMIN TRUE, SET TRUE, INHERIT FALSE`);
+      await expect(migrateUp({ url: scratchUrl })).rejects.toThrow(/SET\/INHERIT/);
+      await a.query(`REVOKE ${OPS} FROM ${tmp}`);
+      await a.query(`GRANT ${OPS} TO ${tmp} WITH ADMIN TRUE, SET FALSE, INHERIT FALSE`);
+      const up = await migrateUp({ url: scratchUrl });
+      expect(up.applied).toEqual(["0009"]);
+    } finally {
+      await a.query(`DROP ROLE IF EXISTS ${tmp}`).catch(() => undefined);
+    }
+    admin = await connect(scratchUrl);
+    ops = await connect(opsUrl);
   });
 
   it("migration koşturucusu wms_ops ile bağlanmayı reddeder (APP_ROLE_NAMES)", async () => {

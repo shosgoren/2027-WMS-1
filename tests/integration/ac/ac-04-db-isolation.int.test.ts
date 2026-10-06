@@ -574,6 +574,7 @@ describe("AC-04 DB — SECURITY DEFINER katalog taraması", () => {
     "wms_probe.invitation_for_account_creation",
     "wms_probe.invitation_preview_for_token", // T-117d migration 0008: salt okunur (ad+rol+süre), yalnızca wms_app EXECUTE
     "wms_probe.invitation_tenant_for_token", // T-117 migration 0006: salt okunur, yalnızca wms_app EXECUTE
+    "wms_probe.ops_session_audited", // T-105c migration 0009: salt okunur denetim kanıtı (özyineleme önlemi), yalnızca wms_ops EXECUTE
   ];
 
   it("@AC-04 prosecdef=true işlevler tam olarak izinli liste; wms_meta'da hiç yok", () => {
@@ -610,6 +611,7 @@ describe("AC-04 DB — SECURITY DEFINER katalog taraması", () => {
       "wms_probe.invitation_for_account_creation": [AUTH_ROLE],
       "wms_probe.invitation_preview_for_token": [APP_ROLE],
       "wms_probe.invitation_tenant_for_token": [APP_ROLE],
+      "wms_probe.ops_session_audited": ["wms_ops"],
       "wms_probe.admin_reset_cleanup_on_membership": [migrator],
     };
     for (const [k, grantees] of Object.entries(expected)) {
