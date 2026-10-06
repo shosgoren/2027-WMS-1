@@ -16,6 +16,29 @@ const PAGE_SIZE = 50;
 /** Kart başına lokasyon sayısı için tek okuma sınırı; aşılırsa "N+" gösterilir (sayım okuyucusu yok: Bulgular). */
 const COUNT_CAP = 100;
 
+/** Eşzamanlı okuma sınırı (bağlantı havuzunu doldurmasın); toplu sayım okuyucusu gelene kadar (Q-57). */
+const COUNT_CONCURRENCY = 4;
+
+/** Girdi sırasını koruyan, en çok `limit` eşzamanlı çalışan basit havuz. İlk hata kalan işleri başlatmaz ve fırlatılır. */
+async function mapLimited<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array<R>(items.length);
+  let next = 0;
+  let failed = false;
+  const worker = async (): Promise<void> => {
+    while (!failed && next < items.length) {
+      const i = next++;
+      try {
+        out[i] = await fn(items[i] as T);
+      } catch (e) {
+        failed = true;
+        throw e;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+
 export async function generateMetadata(): Promise<Metadata> {
   const t = await getTranslations("warehouses");
   return { title: t("title") };
@@ -47,12 +70,10 @@ export default async function WarehousesPage({ params, searchParams }: { params:
     canManage = hasPermission(current.roles, "settings.manage");
     const page = await listWarehouses(call, { includeArchived: true, limit: PAGE_SIZE, ...(after === undefined || after === "" ? {} : { afterCode: after }) });
     nextAfter = page.nextAfterCode;
-    rows = await Promise.all(
-      page.items.map(async (w) => {
-        const tree = await getLocationTree(call, { warehouseId: w.id, limit: COUNT_CAP });
-        return { id: w.id, code: w.code, name: w.name, status: w.status, locationCount: tree.items.length, locationCountCapped: tree.next !== null };
-      }),
-    );
+    rows = await mapLimited(page.items, COUNT_CONCURRENCY, async (w) => {
+      const tree = await getLocationTree(call, { warehouseId: w.id, limit: COUNT_CAP });
+      return { id: w.id, code: w.code, name: w.name, status: w.status, locationCount: tree.items.length, locationCountCapped: tree.next !== null };
+    });
   } catch (e) {
     if (e instanceof AppError) {
       if (e.code === "NOT_FOUND") notFound();
