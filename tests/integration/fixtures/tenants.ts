@@ -297,6 +297,33 @@ export async function seedWorld(
      VALUES ($1, $2, $3, 1, $4, $5, 1, 1, 1, $6)`,
     [tenantId, deletableLineId, deletableDocumentId, itemTwoId, unitId, rootLocationId],
   );
+  // T-301: saha belgeleri (kabul + satır, sipariş + satır, müşteri iadesi + satır). Sentetik; numara tenant başına benzersiz.
+  const receiptId = randomUUID();
+  await c.query("INSERT INTO public.inbound_receipts (tenant_id, id, warehouse_id, number, supplier_ref, created_by) VALUES ($1, $2, $3, $4, 'sentetik-ref', $5)", [
+    tenantId, receiptId, warehouseId, `GR-${hex(4)}`, ownerUserId,
+  ]);
+  await c.query(
+    `INSERT INTO public.inbound_receipt_lines (tenant_id, id, receipt_id, line_no, item_id, unit_id, conversion_factor, expected_quantity)
+     VALUES ($1, $2, $3, 1, $4, $5, 1, 10)`,
+    [tenantId, randomUUID(), receiptId, itemNoneId, unitId],
+  );
+  const salesOrderId = randomUUID();
+  const salesOrderLineId = randomUUID();
+  await c.query("INSERT INTO public.sales_orders (tenant_id, id, number, customer_ref, created_by) VALUES ($1, $2, $3, 'sentetik-musteri', $4)", [
+    tenantId, salesOrderId, `SO-${hex(4)}`, ownerUserId,
+  ]);
+  await c.query(
+    "INSERT INTO public.sales_order_lines (tenant_id, id, order_id, line_no, item_id, requested_quantity) VALUES ($1, $2, $3, 1, $4, 5)",
+    [tenantId, salesOrderLineId, salesOrderId, itemNoneId],
+  );
+  const customerReturnId = randomUUID();
+  await c.query("INSERT INTO public.customer_returns (tenant_id, id, warehouse_id, number, created_by) VALUES ($1, $2, $3, $4, $5)", [
+    tenantId, customerReturnId, warehouseId, `RT-${hex(4)}`, ownerUserId,
+  ]);
+  await c.query(
+    "INSERT INTO public.customer_return_lines (tenant_id, id, return_id, line_no, sales_order_line_id, item_id, quantity) VALUES ($1, $2, $3, 1, $4, $5, 1)",
+    [tenantId, randomUUID(), customerReturnId, salesOrderLineId, itemNoneId],
+  );
   const world: TenantWorld = {
     label,
     tenantId,
@@ -386,7 +413,8 @@ export async function cleanupDocuments(c: pg.Client, tenantIds: string[]): Promi
   await c.query("BEGIN");
   try {
     await c.query("SET LOCAL session_replication_role = replica");
-    for (const t of ["idempotency_records", "number_sequences", "document_status_history", "document_lines", "documents"]) {
+    // T-301 saha belgeleri önce (iade satırı → iade → sipariş satırı → sipariş → kabul satırı → kabul); cleanupDocuments tüm çağıranlarca kullanılır.
+    for (const t of ["customer_return_lines", "customer_returns", "sales_order_lines", "sales_orders", "inbound_receipt_lines", "inbound_receipts", "idempotency_records", "number_sequences", "document_status_history", "document_lines", "documents"]) {
       await c.query(`DELETE FROM public.${t} WHERE tenant_id = ANY($1::uuid[])`, [tenantIds]);
     }
     await c.query("COMMIT");

@@ -111,7 +111,9 @@ export const reservations = pgTable(
     tenantId: uuid("tenant_id").notNull(),
     id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
     stockDimensionId: uuid("stock_dimension_id").notNull(),
-    documentLineId: uuid("document_line_id").notNull(),
+    // T-301 (ADR-017 §7): talep kaynağı belge satırı VEYA sipariş satırı; CHECK tam olarak biri dolu (reservations_source_xor_chk).
+    documentLineId: uuid("document_line_id"),
+    orderLineId: uuid("order_line_id"),
     // Boyutun item_id'sinden tetikleyici türetir (INSERT/UPDATE; istemci veremez) → insert tipinde isteğe bağlı.
     itemId: uuid("item_id").notNull().default(sql`NULL`),
     quantity: numeric("quantity").notNull(),

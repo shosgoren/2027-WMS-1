@@ -79,6 +79,8 @@ export const tenantSettings = pgTable("tenant_settings", {
   terminology: jsonb("terminology").notNull().default(sql`'{}'::jsonb`),
   onboardingStatus: text("onboarding_status").notNull(),
   onboardingSteps: jsonb("onboarding_steps").notNull().default(sql`'[]'::jsonb`),
+  // T-301 (A-06): mal kabulde kalite kontrol varsayılan açık; wms_app yalnızca bu sütunu ek olarak UPDATE eder.
+  receivingQcEnabled: boolean("receiving_qc_enabled").notNull().default(true),
 });
 
 export const adminResetGrants = pgTable(
