@@ -419,6 +419,26 @@ describe("T-206 (c) created_xid zorlama (I-16)", () => {
     });
     expectOk(r);
     if (r.ok) expect(r.rows).toEqual([{ from_status: "DRAFT", to_status: "APPROVED", actor: A.ownerUserId, same_xid: true, same_now: true }]);
+    // Aktör: kullanıcı bağlamı yoksa POSTED geçişinde posting_requested_by (POSTED'da temizlenir) kullanılır.
+    const worker = await inTenant(A.tenantId, async (q) => {
+      const id = randomUUID();
+      await q(...insDoc(A, id));
+      await q("UPDATE public.documents SET status = 'APPROVED', posting_job_id = $2, posting_requested_by = $3 WHERE id = $1", [id, randomUUID(), A.memberUserId]);
+      await q("UPDATE public.documents SET status = 'POSTED', number = $2, posting_job_id = NULL, posting_requested_by = NULL WHERE id = $1", [id, `N-${rnd()}`]);
+      return q("SELECT to_status, actor_user_id::text AS actor FROM public.document_status_history WHERE document_id = $1 AND to_status IN ('APPROVED', 'POSTED') ORDER BY to_status", [id]);
+    });
+    expectOk(worker);
+    if (worker.ok) expect(worker.rows).toEqual([{ to_status: "APPROVED", actor: null }, { to_status: "POSTED", actor: A.memberUserId }]);
+    // Gerekçe: geçişte belge gerekçesi kopyalanır; sonraki geçiş önceki satırı değiştirmez (append-only).
+    const rs = await inTenant(A.tenantId, async (q) => {
+      const id = randomUUID();
+      await q(...insDoc(A, id));
+      await q("UPDATE public.documents SET status = 'APPROVED', reason = 'onay gerekcesi' WHERE id = $1", [id]);
+      await q("UPDATE public.documents SET status = 'CANCELLED', reason = 'iptal gerekcesi' WHERE id = $1", [id]);
+      return q("SELECT to_status, reason FROM public.document_status_history WHERE document_id = $1 ORDER BY to_status", [id]);
+    });
+    expectOk(rs);
+    if (rs.ok) expect(rs.rows).toEqual([{ to_status: "APPROVED", reason: "onay gerekcesi" }, { to_status: "CANCELLED", reason: "iptal gerekcesi" }, { to_status: "DRAFT", reason: null }]);
     // INSERT yolu: yeni belge ilk geçmiş satırını (NULL → DRAFT) üretir; aktör ayarı yoksa NULL.
     const ins = await inTenant(A.tenantId, async (q) => {
       const id = randomUUID();
