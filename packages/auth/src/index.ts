@@ -527,14 +527,67 @@ async function masked<T>(fn: () => Promise<T>): Promise<T> {
 
 const authOptionsByService = new WeakMap<AuthService, BetterAuthOptions>();
 
+/** `inspectAuthOptions` anlık görüntüsü: gizsiz, derin dondurulmuş; canlı yapılandırmayla bağı yoktur. */
+export interface AuthOptionsSnapshot {
+  readonly session?: { readonly additionalFields?: Readonly<Record<string, { readonly input?: boolean }>> };
+  readonly user?: { readonly additionalFields?: Readonly<Record<string, { readonly input?: boolean }>> };
+  readonly disabledPaths?: readonly string[];
+  readonly account?: { readonly accountLinking?: { readonly enabled?: boolean } };
+  readonly advanced?: {
+    readonly disableOriginCheck?: boolean;
+    readonly disableCSRFCheck?: boolean;
+    readonly ipAddress?: { readonly ipAddressHeaders?: readonly string[] };
+  };
+  readonly rateLimit?: { readonly enabled?: boolean };
+  readonly emailAndPassword?: { readonly disableSignUp?: boolean; readonly revokeSessionsOnPasswordReset?: boolean };
+  readonly socialProviders?: Readonly<Record<string, { readonly disableSignUp?: boolean; readonly disableImplicitSignUp?: boolean }>>;
+}
+
+function deepFreeze<T>(value: T): T {
+  if (typeof value === "object" && value !== null && !Object.isFrozen(value)) {
+    for (const v of Object.values(value)) deepFreeze(v);
+    Object.freeze(value);
+  }
+  return value;
+}
+
 /**
- * YALNIZCA test/inceleme: `createAuth` ile kurulan örneğin etkin Better Auth seçenekleri (`auth.options`). Üretim kodu
- * bunu kullanmaz; Better Auth nesnesi dar yüzeyin dışına çıkmaz.
+ * YALNIZCA test/inceleme: etkin Better Auth seçeneklerinin (`auth.options`) politika alanlarının ANLIK GÖRÜNTÜSÜ.
+ * Canlı nesne dışarı çıkmaz: seçilen alanlar açıkça kopyalanır (secret, clientId/clientSecret, adaptör, depolama,
+ * kancalar yok), `structuredClone` ile ayrıştırılır ve derin dondurulur → çağıran canlı yapılandırmayı değiştiremez.
  */
-export function inspectAuthOptions(service: AuthService): BetterAuthOptions {
-  const options = authOptionsByService.get(service);
-  if (options === undefined) throw new AuthConfigError("inspectAuthOptions: service was not created by createAuth");
-  return options;
+export function inspectAuthOptions(service: AuthService): AuthOptionsSnapshot {
+  const live = authOptionsByService.get(service);
+  if (live === undefined) throw new AuthConfigError("inspectAuthOptions: service was not created by createAuth");
+  const fieldInputs = (fields: unknown): Record<string, { input?: boolean }> | undefined => {
+    if (typeof fields !== "object" || fields === null) return undefined;
+    return Object.fromEntries(
+      Object.entries(fields as Record<string, { input?: boolean }>).map(([k, v]) => [k, { input: v.input }]),
+    );
+  };
+  const social: Record<string, { disableSignUp?: boolean; disableImplicitSignUp?: boolean }> = {};
+  for (const [name, cfg] of Object.entries(live.socialProviders ?? {})) {
+    const c = cfg as { disableSignUp?: boolean; disableImplicitSignUp?: boolean };
+    social[name] = { disableSignUp: c.disableSignUp, disableImplicitSignUp: c.disableImplicitSignUp };
+  }
+  const picked = {
+    session: { additionalFields: fieldInputs(live.session?.additionalFields) },
+    user: { additionalFields: fieldInputs(live.user?.additionalFields) },
+    disabledPaths: [...(live.disabledPaths ?? [])],
+    account: { accountLinking: { enabled: live.account?.accountLinking?.enabled } },
+    advanced: {
+      disableOriginCheck: live.advanced?.disableOriginCheck,
+      disableCSRFCheck: live.advanced?.disableCSRFCheck,
+      ipAddress: { ipAddressHeaders: [...(live.advanced?.ipAddress?.ipAddressHeaders ?? [])] },
+    },
+    rateLimit: { enabled: live.rateLimit?.enabled },
+    emailAndPassword: {
+      disableSignUp: live.emailAndPassword?.disableSignUp,
+      revokeSessionsOnPasswordReset: live.emailAndPassword?.revokeSessionsOnPasswordReset,
+    },
+    ...(live.socialProviders === undefined ? {} : { socialProviders: social }),
+  };
+  return deepFreeze(structuredClone(picked)) as AuthOptionsSnapshot;
 }
 
 /** Better Auth yapılandırmasını kurar ve dar yüzeyi döndürür. */

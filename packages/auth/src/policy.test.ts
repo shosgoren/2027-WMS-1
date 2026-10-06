@@ -1,10 +1,10 @@
 // @wms/auth politika birim testleri (T-112b): IP çözümleyici, demo tanıma, mutlak ömür, kural tablosu,
 // ek alan/kapalı uç yapılandırması, davetle hesap açma (sahte bağımlılıklarla). Bağlantı gerektirmez.
 import { randomBytes, randomUUID } from "node:crypto";
-import type { BetterAuthOptions } from "better-auth";
 import { describe, expect, it } from "vitest";
 import { DB_CLIENT_SETTINGS, createDbClient } from "@wms/db/internal";
 import { AuthConfigError, createAuth, inspectAuthOptions, readAuthEnv } from "./index.ts";
+import type { AuthOptionsSnapshot, AuthService } from "./index.ts";
 import {
   DEMO_FORBIDDEN_PATHS,
   EMAIL_RATE_RULES,
@@ -115,11 +115,12 @@ describe("etkin Better Auth yapılandırması (auth.options; ADR-014 4. tur, MAJ
     MICROSOFT_CLIENT_SECRET: rnd(),
     AUTH_SOCIAL_ENABLED: "true",
   };
-  const build = (extra: Record<string, string> = {}): BetterAuthOptions => {
+  const make = (extra: Record<string, string> = {}): AuthService => {
     const e = readAuthEnv({ ...BASE_ENV, ...extra });
     const mk = (url: string) => createDbClient({ url, ...DB_CLIENT_SETTINGS });
-    return inspectAuthOptions(createAuth({ client: mk(e.authDatabaseUrl), eventClient: mk(e.databaseUrl), env: e }));
+    return createAuth({ client: mk(e.authDatabaseUrl), eventClient: mk(e.databaseUrl), env: e });
   };
+  const build = (extra: Record<string, string> = {}): AuthOptionsSnapshot => inspectAuthOptions(make(extra));
 
   it("mfaVerifiedAt / invitationClaimId input:false; /update-session ve /verify-password kapalı", () => {
     const o = build();
@@ -139,8 +140,29 @@ describe("etkin Better Auth yapılandırması (auth.options; ADR-014 4. tur, MAJ
     expect(o.advanced?.ipAddress?.ipAddressHeaders).toEqual(["fly-client-ip"]);
     expect(build({ WMS_ENV: "local", SIGNUP_ENABLED: "true" }).emailAndPassword?.disableSignUp).toBe(false);
   });
-  const gate = (o: BetterAuthOptions, name: "google" | "microsoft"): { disableSignUp?: boolean; disableImplicitSignUp?: boolean } | undefined =>
-    o.socialProviders?.[name] as { disableSignUp?: boolean; disableImplicitSignUp?: boolean } | undefined;
+  const gate = (o: AuthOptionsSnapshot, name: "google" | "microsoft") => o.socialProviders?.[name];
+  it("anlık görüntü: gizsiz, dondurulmuş ve canlı yapılandırmadan ayrık (mutasyon denemesi etkisiz)", () => {
+    const svc = make(social);
+    const snap = inspectAuthOptions(svc);
+    const text = JSON.stringify(snap);
+    for (const v of [social.GOOGLE_CLIENT_ID, social.GOOGLE_CLIENT_SECRET, social.MICROSOFT_CLIENT_ID, social.MICROSOFT_CLIENT_SECRET, BASE_ENV.BETTER_AUTH_SECRET]) expect(text).not.toContain(v);
+    expect(Object.keys(snap)).not.toContain("secret");
+    expect(Object.keys(snap)).not.toContain("database");
+    expect(Object.isFrozen(snap)).toBe(true);
+    expect(Object.isFrozen(snap.disabledPaths)).toBe(true);
+    expect(Object.isFrozen(snap.session?.additionalFields?.mfaVerifiedAt)).toBe(true);
+    // Mutasyon denemesi (dondurulmuş nesne → katı modda TypeError) canlı yapılandırmayı etkilemez.
+    expect(() => {
+      (snap.disabledPaths as string[]).length = 0;
+    }).toThrow(TypeError);
+    expect(() => {
+      (snap.session?.additionalFields?.mfaVerifiedAt as { input?: boolean }).input = true;
+    }).toThrow(TypeError);
+    const again = inspectAuthOptions(svc);
+    expect(again).not.toBe(snap);
+    expect(again.disabledPaths).toContain("/update-session");
+    expect(again.session?.additionalFields?.mfaVerifiedAt?.input).toBe(false);
+  });
   it("sosyal sağlayıcılar: kayıt kapısı kapalıyken disableSignUp (istemci requestSignUp ile aşılamaz) + disableImplicitSignUp", () => {
     const o = build(social);
     for (const name of ["google", "microsoft"] as const) {
