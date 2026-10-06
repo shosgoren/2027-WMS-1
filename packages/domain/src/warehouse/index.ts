@@ -2,6 +2,7 @@
 export {
   archiveWarehouse,
   createWarehouse,
+  getWarehouse,
   listWarehouses,
   normalizeCode,
   normalizeName,
@@ -16,14 +17,17 @@ export {
 } from "./warehouses.ts";
 export {
   MAX_LOCATION_DEPTH,
+  COUNT_WAREHOUSES_MAX,
   archiveLocation,
   childDepth,
+  countLocationsByWarehouse,
   createLocation,
   findLocationByCode,
   getLocationTree,
   renameLocation,
   setLocationKind,
   type ArchiveLocationInput,
+  type CountLocationsByWarehouseInput,
   type CreateLocationInput,
   type GetLocationTreeInput,
   type LocationKindValue,
