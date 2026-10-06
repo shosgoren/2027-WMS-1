@@ -20,8 +20,8 @@
 --   version her başlık UPDATE'inde tetikleyiciyle +1 (istemci değeri yok sayılır; wms_app version'a yazamaz). Tetikleyiciler
 --   migration rolü dahil herkesi bağlar (sahibin DISABLE TRIGGER yapabilmesi bilinen sınır, 0004 emsali).
 -- * created_xid (I-16, ADR-017 §5): document_status_history BEFORE INSERT tetikleyicisi (ENABLE ALWAYS) created_xid ve occurred_at'i
---   sunucu değerine zorlar. wms_app'in tabloda INSERT yetkisi HİÇ yoktur: geçmişi documents AFTER INSERT / AFTER UPDATE OF status
---   tetikleyicisi (SECURITY DEFINER, yalnız OLD/NEW + app.current_user_id'den türetir) yazar (MINOR-3).
+--   sunucu değerine zorlar. geçmişi yalnızca documents AFTER INSERT /
+--   AFTER UPDATE OF status tetikleyicisi yazar; doğrudan INSERT herkes için reddedilir (pg_trigger_depth denetimi, MINOR-3).
 -- * document_status_history append-only: wms_app'e yalnızca SELECT/INSERT; BEFORE UPDATE OR DELETE tetikleyicisi 42501 ile reddeder.
 --   Bu tetikleyici bilerek ENABLE ALWAYS DEĞİLDİR: fikstür temizliği (tablo sahibi + süper kullanıcı) `SET LOCAL
 --   session_replication_role = replica` ile atlayabilsin (0004'ten fark: audit_logs satırı fikstürde yok, burada tohumlanır).
@@ -413,13 +413,15 @@ CREATE TRIGGER document_status_history_no_truncate BEFORE TRUNCATE ON public.doc
   FOR EACH STATEMENT EXECUTE FUNCTION public.document_status_history_reject_change();
 ALTER TABLE public.document_status_history ENABLE ALWAYS TRIGGER document_status_history_no_truncate;
 
--- 2e'. Durum geçmişini YALNIZCA documents tetikleyicisi yazar (MINOR-3): wms_app'in doğrudan INSERT yetkisi yoktur, geçmiş gerçek
---      geçişten sapamaz. SECURITY DEFINER: yazılan her değer yalnızca OLD/NEW'dan ve transaction ayarından (app.current_user_id,
---      withMembership kurar; yoksa NULL) türetilir; çağıran girdisi yoktur. search_path sabit, PUBLIC'ten EXECUTE kapalı.
---      Tenant politikası işlev sahibine de uygular (FORCE): satırın tenant'ı, belge yazımını geçen WITH CHECK ile zaten bağlam tenant'ıdır.
+-- 2e'. Durum geçmişini YALNIZCA documents tetikleyicisi yazar (MINOR-3): geçmiş gerçek geçişten sapamaz. SECURITY DEFINER KULLANILMAZ
+--      (AC-04 bekçisi: her SECURITY DEFINER işlev wms_probe'ta probe sahipli ve izinli listede olmalı; probe'a yazma yetkisi vermek
+--      güvenlik yüzeyini genişletirdi). Bunun yerine SECURITY INVOKER yazıcı + history üzerinde AFTER INSERT denetimi: satır, başka
+--      bir tetikleyicinin içinden (pg_trigger_depth() >= 2) eklenmediyse HERKES için (tablo sahibi dahil) 42501 ile reddedilir.
+--      wms_app'in sütun düzeyi INSERT yetkisi yalnızca bu tetikleyici yolu içindir; doğrudan INSERT ifadesi (derinlik 1) geri alınır.
+--      Denetim AFTER'dır: RLS WITH CHECK ve tekillik hataları önce, kendi hata kodlarıyla görünür. wms_app tetikleyici/işlev
+--      yaratamaz, dolayısıyla derinliği yapay yükseltemez (mevcut tek ek tetikleyici bu yazıcıdır).
 CREATE FUNCTION public.documents_write_status_history() RETURNS trigger
   LANGUAGE plpgsql
-  SECURITY DEFINER
   SET search_path = pg_catalog, pg_temp
 AS $fn$
 BEGIN
@@ -432,6 +434,22 @@ BEGIN
 END
 $fn$;
 REVOKE ALL ON FUNCTION public.documents_write_status_history() FROM PUBLIC;
+CREATE FUNCTION public.document_status_history_require_trigger_path() RETURNS trigger
+  LANGUAGE plpgsql
+  SET search_path = pg_catalog, pg_temp
+AS $fn$
+BEGIN
+  IF pg_catalog.pg_trigger_depth() < 2 THEN
+    RAISE EXCEPTION 'document_status_history: satır yalnızca documents durum tetikleyicisiyle yazılır (doğrudan INSERT reddedildi)'
+      USING ERRCODE = '42501';
+  END IF;
+  RETURN NULL;
+END
+$fn$;
+REVOKE ALL ON FUNCTION public.document_status_history_require_trigger_path() FROM PUBLIC;
+CREATE TRIGGER document_status_history_trigger_path AFTER INSERT ON public.document_status_history
+  FOR EACH ROW EXECUTE FUNCTION public.document_status_history_require_trigger_path();
+ALTER TABLE public.document_status_history ENABLE ALWAYS TRIGGER document_status_history_trigger_path;
 CREATE TRIGGER documents_status_history_ins AFTER INSERT ON public.documents
   FOR EACH ROW EXECUTE FUNCTION public.documents_write_status_history();
 CREATE TRIGGER documents_status_history_upd AFTER UPDATE OF status ON public.documents
@@ -526,8 +544,10 @@ GRANT UPDATE (line_no, item_id, unit_id, quantity, conversion_factor, base_quant
               lot_id, serial_id, stock_status, inventory_owner_id, handling_unit_id, reversed_quantity, reversal_status)
   ON public.document_lines TO wms_app;
 
--- INSERT/UPDATE/DELETE yetkisi YOK: satırı yalnızca documents tetikleyicisi (SECURITY DEFINER) yazar (MINOR-3).
+-- Sütun düzeyi INSERT yalnızca documents tetikleyici yolu içindir (doğrudan INSERT AFTER tetikleyicisiyle 42501, MINOR-3); created_xid/
+-- occurred_at listede YOK. UPDATE/DELETE yetkisi yok.
 GRANT SELECT ON public.document_status_history TO wms_app;
+GRANT INSERT (tenant_id, id, document_id, from_status, to_status, actor_user_id) ON public.document_status_history TO wms_app;
 
 GRANT SELECT ON public.idempotency_records TO wms_app;
 GRANT INSERT (tenant_id, id, command_type, client_key, actor_user_id, request_hash, status, result, error_code, http_status, completed_at)

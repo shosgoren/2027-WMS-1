@@ -399,11 +399,14 @@ describe("T-206 (b) bileşik tenant FK'leri", () => {
 });
 
 describe("T-206 (c) created_xid zorlama (I-16)", () => {
-  it("wms_app durum geçmişine doğrudan INSERT yapamaz (42501, hiçbir sütunda); geçiş tetikleyiciyle sunucu değerleriyle satır üretir", async () => {
-    for (const cols of ["(tenant_id, document_id, to_status) VALUES ($1, $2, 'APPROVED')", "(tenant_id, document_id, to_status, created_xid) VALUES ($1, $2, 'APPROVED', '1'::xid8)", "(tenant_id, document_id, to_status, occurred_at) VALUES ($1, $2, 'APPROVED', '2000-01-01')"]) {
+  it("wms_app durum geçmişine doğrudan INSERT yapamaz (42501); geçiş tetikleyiciyle sunucu değerleriyle satır üretir", async () => {
+    const direct = await one(A.tenantId, "INSERT INTO public.document_status_history (tenant_id, document_id, to_status) VALUES ($1, $2, 'APPROVED')", [A.tenantId, A.documentId]);
+    expectFail(direct, INSUFFICIENT_PRIVILEGE, "doğrudan INSERT (sütun yetkili)");
+    if (!direct.ok) expect(direct.message).toMatch(/yalnızca documents durum tetikleyicisiyle/);
+    for (const cols of ["(tenant_id, document_id, to_status, created_xid) VALUES ($1, $2, 'APPROVED', '1'::xid8)", "(tenant_id, document_id, to_status, occurred_at) VALUES ($1, $2, 'APPROVED', '2000-01-01')"]) {
       expectFail(await one(A.tenantId, `INSERT INTO public.document_status_history ${cols}`, [A.tenantId, A.documentId]), INSUFFICIENT_PRIVILEGE, cols);
     }
-    expectFail(await one(A.tenantId, "INSERT INTO public.document_status_history (tenant_id, document_id, to_status) VALUES ($1, $2, 'DRAFT')", [A.tenantId, B.documentId]), INSUFFICIENT_PRIVILEGE, "B belgesine geçmiş");
+    expectFail(await one(A.tenantId, "INSERT INTO public.document_status_history (tenant_id, document_id, to_status) VALUES ($1, $2, 'DRAFT')", [A.tenantId, B.documentId]), FK_VIOLATION, "B belgesine geçmiş");
     const r = await inTenant(A.tenantId, async (q) => {
       await q("SELECT set_config('app.current_user_id', $1, true)", [A.ownerUserId]);
       await q("UPDATE public.documents SET status = 'APPROVED' WHERE id = $1", [A.documentId]);
@@ -428,12 +431,16 @@ describe("T-206 (c) created_xid zorlama (I-16)", () => {
     expectFail(await one(A.tenantId, "SELECT public.documents_write_status_history()"), INSUFFICIENT_PRIVILEGE, "işlev EXECUTE");
   });
 
-  it("istemcinin (sahip düzeyinde) verdiği created_xid ve occurred_at yok sayılır", async () => {
+  it("sahip düzeyinde bile doğrudan INSERT reddedilir (istemci created_xid/occurred_at hiçbir yoldan girmez); tetikleyici yolu sunucu değerini yazar", async () => {
+    expectFail(
+      await inTx(admin, A.tenantId, async (q) =>
+        q("INSERT INTO public.document_status_history (tenant_id, id, document_id, to_status, created_xid, occurred_at) VALUES ($1, $2, $3, 'APPROVED', '1'::xid8, '2000-01-01')", [A.tenantId, randomUUID(), A.documentId]),
+      ),
+      INSUFFICIENT_PRIVILEGE,
+      "sahip doğrudan INSERT",
+    );
     const r = await inTx(admin, A.tenantId, async (q) => {
-      await q(
-        "INSERT INTO public.document_status_history (tenant_id, id, document_id, to_status, created_xid, occurred_at) VALUES ($1, $2, $3, 'APPROVED', '1'::xid8, '2000-01-01')",
-        [A.tenantId, randomUUID(), A.documentId],
-      );
+      await q("UPDATE public.documents SET status = 'APPROVED' WHERE id = $1", [A.documentId]);
       return q(
         "SELECT (created_xid = pg_current_xact_id()) AS same_xid, (occurred_at > '2020-01-01') AS fresh FROM public.document_status_history WHERE to_status = 'APPROVED' AND document_id = $1",
         [A.documentId],
@@ -722,7 +729,7 @@ describe("T-206 migration 0012 ileri/geri/ileri (geçici veritabanı)", () => {
   it("sistem tohumu varken geri alma serbest; kullanıcı verisi varken ci dışında reddedilir, ci'da geri alınır; tekrar ileri aynı şekli ve tohumu kurar", async () => {
     await withClient(async (c) => {
       expect(await present(c)).toEqual([...NEW_TABLES].sort());
-      expect(await fnCount(c)).toBe(10);
+      expect(await fnCount(c)).toBe(11);
       expect((await c.query("SELECT 1 FROM public.document_type_versions WHERE tenant_id IS NULL")).rowCount).toBe(4);
       const t = randomUUID();
       await c.query("INSERT INTO public.tenants (id, slug, name) VALUES ($1, $2, 'doc')", [t, `doc-${rnd()}`]);
@@ -743,7 +750,7 @@ describe("T-206 migration 0012 ileri/geri/ileri (geçici veritabanı)", () => {
     expect((await migrateUp({ url: scratchUrl })).applied).toEqual([]);
     await withClient(async (c) => {
       expect(await present(c)).toEqual([...NEW_TABLES].sort());
-      expect(await fnCount(c)).toBe(10);
+      expect(await fnCount(c)).toBe(11);
       const rls = await c.query<{ n: number }>("SELECT count(*)::int AS n FROM pg_class WHERE relname = ANY($1::text[]) AND relrowsecurity AND relforcerowsecurity", [[...NEW_TABLES]]);
       expect(rls.rows[0]?.n).toBe(NEW_TABLES.length);
       expect((await c.query("SELECT 1 FROM public.document_type_versions WHERE tenant_id IS NULL")).rowCount).toBe(4);
