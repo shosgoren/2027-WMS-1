@@ -3,7 +3,8 @@
 --
 -- Kimlik olay sınıfı (T-112/T-112b `packages/auth` emit çağrılarından; kart `password.` yazmıştı, kodda `password_*` var,
 -- ikisi de kapsanır): `login_*` (login_succeeded/failed/mfa_pending), `logout`, `password_*` (password_changed/reset),
--- `two_factor_*` (enabled/disabled/failed), ve ileri kullanım için ayrılmış `reauth.*`, `session.*`, `mfa.*`.
+-- `two_factor_*` (enabled/disabled/failed), ve ileri kullanım için ayrılmış `reauth.*`, `session.*`, `mfa.*` ve alt çizgili benzerleri (`reauth_*`, `session_*`, `mfa_*`: kimlik sınıfına benzeyen türler de wms_auth'a
+-- kısıtlanır; mevcut emit çağrılarında bu önekler YOK, grep ile doğrulandı).
 -- `demo.action_forbidden` ve diğer uygulama sınıfı olaylar kısıtsızdır (`wms_app` yazmaya devam eder).
 --
 -- Tetikleyici SECURITY INVOKER: `current_user` = INSERT'i yapan rol. PG18 doğrulaması: BEFORE ROW tetikleyicisi INSERT'i
@@ -18,13 +19,19 @@
 -- (0002 sütun yetkisi) reddedilir; bu yüzden `recordSecurityEvent`'e `returning: false` yolu eklendi (istemci UUID'si
 -- 0002 ilkesini bozardı). Bu migration yetki değiştirmez; bekçi yalnızca durumu doğrular.
 
+-- Tür biçimi DB'de de zorlanır (kod EVENT_TYPE ile aynı): baştaki boşluk, büyük harf, Unicode benzeri harf (Kiril vb.) ile
+-- sınıf denetimi atlatılamaz. NOT VALID + VALIDATE: mevcut satırlar uymuyorsa migration AÇIK hata verir (sessiz kabul yok).
+ALTER TABLE public.security_events
+  ADD CONSTRAINT security_events_event_type_format_chk CHECK (event_type ~ '^[a-z][a-z0-9_.]{0,63}$') NOT VALID;
+ALTER TABLE public.security_events VALIDATE CONSTRAINT security_events_event_type_format_chk;
+
 CREATE FUNCTION public.security_events_restrict_identity_writers() RETURNS trigger
   LANGUAGE plpgsql
   SECURITY INVOKER
   SET search_path = pg_catalog, pg_temp
 AS $fn$
 BEGIN
-  IF pg_catalog.lower(NEW.event_type) ~ '^(login_|logout|password[_.]|two_factor_|reauth\.|session\.|mfa\.)'
+  IF pg_catalog.lower(NEW.event_type) ~ '^(login_|logout|password[_.]|two_factor_|reauth[_.]|session[_.]|mfa[_.])'
      AND current_user::text <> 'wms_auth' THEN
     RAISE EXCEPTION 'security_events: kimlik olayı (%) yalnızca wms_auth tarafından yazılabilir', NEW.event_type
       USING ERRCODE = 'insufficient_privilege';

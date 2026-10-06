@@ -549,20 +549,26 @@ describe(`auth çekirdek (target=${env.target})`, () => {
     // T-112c: olaylar da wms_auth ile yazıldığı için "bozuk olay istemcisi" yok; yalnızca BU kullanıcının olay INSERT'ini
     // 42501 ile reddeden geçici tetikleyici (WHEN user_id = …; paralel dosyaların olaylarını etkilemez).
     const trg = `t112c_fail_${randomBytes(4).toString("hex")}`;
-    await adm.query(
-      `CREATE FUNCTION public.${trg}() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN RAISE EXCEPTION 'test' USING ERRCODE = 'insufficient_privilege'; END $f$`,
-    );
-    await adm.query(`CREATE TRIGGER ${trg} BEFORE INSERT ON public.security_events FOR EACH ROW WHEN (NEW.user_id = '${u.id}'::uuid) EXECUTE FUNCTION public.${trg}()`);
-    const svc = newService(authClient);
     const ip = nextIp();
-    // Giriş olayı yazılamaz → fail-closed (500).
-    const login = await post2(svc, "/sign-in/email", { email: u.email, password: PASSWORD }, ip);
+    let login: Response;
+    let out: Response;
+    let printed: string;
+    try {
+      await adm.query(
+        `CREATE FUNCTION public.${trg}() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN RAISE EXCEPTION 'test' USING ERRCODE = 'insufficient_privilege'; END $f$`,
+      );
+      await adm.query(`CREATE TRIGGER ${trg} BEFORE INSERT ON public.security_events FOR EACH ROW WHEN (NEW.user_id = '${u.id}'::uuid) EXECUTE FUNCTION public.${trg}()`);
+      const svc = newService(authClient);
+      // Giriş olayı yazılamaz → fail-closed (500).
+      login = await post2(svc, "/sign-in/email", { email: u.email, password: PASSWORD }, ip);
+      out = await post2(svc, "/sign-out", {}, ip, ok.jar);
+      printed = spy.mock.calls.map((c) => c.map((a) => (a instanceof Error ? `${a.message}` : String(a))).join(" ")).join("\n");
+    } finally {
+      spy.mockRestore();
+      await adm.query(`DROP TRIGGER IF EXISTS ${trg} ON public.security_events`);
+      await adm.query(`DROP FUNCTION IF EXISTS public.${trg}()`);
+    }
     expect(login.status).toBe(500);
-    const out = await post2(svc, "/sign-out", {}, ip, ok.jar);
-    const printed = spy.mock.calls.map((c) => c.map((a) => (a instanceof Error ? `${a.message}` : String(a))).join(" ")).join("\n");
-    spy.mockRestore();
-    await adm.query(`DROP TRIGGER ${trg} ON public.security_events`);
-    await adm.query(`DROP FUNCTION public.${trg}()`);
     expect(out.status).toBe(200);
     expect(await service.getPrincipal(headersWith(ok.jar))).toBeNull();
     expect(printed).toContain("sqlstate=42501");

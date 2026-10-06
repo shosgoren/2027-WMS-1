@@ -8,7 +8,7 @@
 //   `requireRecentAuth`, `reauthenticate`, `revokeUserSessions`.
 // - Ortam doğrulaması tembeldir (ilk kullanımda): `next build` bu değişkenler olmadan geçer (G-07: eksikse
 //   çalışma anında açık hata, değer asla yazılmaz — G-09).
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { APIError, createAuthMiddleware, getIP, getSessionFromCtx, isAPIError } from "better-auth/api";
 import { betterAuth } from "better-auth";
@@ -224,6 +224,13 @@ export const RATE_LIMIT_RULES = Object.freeze({
 
 /** 2FA: A-41 — 5 hatalı kod → 15 dk kilit (Better Auth `accountLockout`, kullanıcı başına). */
 export const TWO_FACTOR_LOCKOUT = Object.freeze({ enabled: true, maxFailedAttempts: 5, durationSeconds: 15 * 60 });
+
+let dummyHash: Promise<string> | undefined;
+/** Sabit maliyetli sahte doğrulama için süreç başına bir kez üretilen geçerli Argon2id özeti (rastgele parola; saklanmaz). */
+function dummyPasswordHash(): Promise<string> {
+  dummyHash ??= hashPassword(randomBytes(24).toString("hex"));
+  return dummyHash;
+}
 
 /** Yeniden doğrulama olayları (T-112c); yazımı DB'de yalnızca wms_auth'a açık sınıf (`reauth.`). */
 const REAUTH_EVENT = Object.freeze({ succeeded: "reauth.succeeded", failed: "reauth.failed" });
@@ -1062,13 +1069,16 @@ export function createAuth(params: CreateAuthParams): AuthService {
       // eşik aşıldıysa kilitli → parola denenmez); başarıda rezerv geri alınır (refund), başarısızlıkta kalır.
       const verdict = await masked(() => rateStore.consume(failKey, EMAIL_RATE_RULES.failedSignIn));
       const locked = !verdict.allowed;
-      const ok = !locked && row.password !== null && (await verifyPassword({ hash: row.password, password }));
+      // Zamanlama eşitliği: kilitli ya da parolasız hesapta da aynı maliyetli Argon2 doğrulaması çalışır (sonuç yok sayılır).
+      const hash = locked || row.password === null ? await dummyPasswordHash() : row.password;
+      const verified = await verifyPassword({ hash, password });
+      const ok = !locked && row.password !== null && verified;
       if (!ok) {
         await write(REAUTH_EVENT.failed, principal.userId, () => ({ ip, ua }), { locked }, true, demo);
         return fail();
       }
       await masked(() => rateStore.refund(failKey));
-      await write(REAUTH_EVENT.succeeded, principal.userId, () => ({ ip, ua }), {}, false, demo);
+      await write(REAUTH_EVENT.succeeded, principal.userId, () => ({ ip, ua }), { sref: sha256Hex(principal.sessionId) }, false, demo);
     },
 
     async createInvitedAccount(input) {

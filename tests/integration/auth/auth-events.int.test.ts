@@ -2,7 +2,7 @@
 // Gerçek roller (wms_app / wms_auth); tetikleyici BEFORE INSERT + SECURITY INVOKER → `current_user` = INSERT'i yapan rol
 // (PG18 davranışı bu testle doğrulanır: SET ROLE ile `current_user` değişir, `session_user` değişmez).
 // Sentetik parolalar çalışma anında üretilir (G-09).
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { cpSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -40,7 +40,7 @@ const IDENTITY_TYPES = [
   "two_factor_failed",
 ];
 // Kimlik sınıfında OLMAYAN olaylar (uygulama sınıfı; öneklerin tam başta eşleştiğini de sınar).
-const APP_TYPES = ["demo.action_forbidden", "app.check", "relogin_x", "xlogout", "reauthx.test", "sessions.x", "mfa_x"];
+const APP_TYPES = ["demo.action_forbidden", "app.check", "relogin_x", "xlogout", "reauthx.test", "sessions.x", "mfax.test"];
 
 let adm: pg.Client;
 let app: pg.Client;
@@ -112,21 +112,22 @@ describe(`kimlik olayı yazarı kısıtı (target=${env.target})`, () => {
 
   it("tablo sahibi (migrator/süper kullanıcı) kimlik olayı yazamaz; session_replication_role=replica atlatmaz", async () => {
     expect(await code(adm, ins("reauth.succeeded"))).toBe("42501");
-    const r = await code(adm, "SET session_replication_role = replica");
-    if (r === "OK") {
-      try {
-        expect(await code(adm, ins("reauth.succeeded"))).toBe("42501");
-      } finally {
-        await adm.query("SET session_replication_role = DEFAULT");
-      }
+    // Ön koşul AÇIKÇA doğrulanır (tutmazsa test KIRMIZI; sessiz atlama yok): migrator replica rolüne geçebilmeli.
+    expect(await code(adm, "SET session_replication_role = replica"), "ön koşul: migrator session_replication_role ayarlayabilmeli").toBe("OK");
+    try {
+      expect(await code(adm, ins("reauth.succeeded"))).toBe("42501");
+    } finally {
+      await adm.query("SET session_replication_role = DEFAULT");
     }
   });
 
   it("PG18: tetikleyici current_user'a bakar (SET ROLE değişir; SECURITY INVOKER)", async () => {
     const c = await connect(env.databaseUrlDirect);
     try {
-      const canSetRole = (await code(c, "SET ROLE wms_app")) === "OK";
-      if (!canSetRole) return; // sahip rol wms_app'e geçemiyorsa (üyelik yok) bu doğrulama atlanır; app/auth bağlantı testleri yine geçerli
+      // Ön koşullar AÇIKÇA doğrulanır (tutmazsa test KIRMIZI): migrator her iki role geçebilmeli.
+      expect(await code(c, "SET ROLE wms_app"), "ön koşul: migrator SET ROLE wms_app yapabilmeli").toBe("OK");
+      await c.query("RESET ROLE");
+      expect(await code(c, "SET ROLE wms_auth"), "ön koşul: migrator SET ROLE wms_auth yapabilmeli").toBe("OK");
       await c.query("RESET ROLE");
       await c.query("SET ROLE wms_app");
       const who = await c.query<{ cu: string; su: string }>("SELECT current_user AS cu, session_user AS su");
@@ -134,12 +135,28 @@ describe(`kimlik olayı yazarı kısıtı (target=${env.target})`, () => {
       expect(who.rows[0]?.su).not.toBe("wms_app");
       expect(await code(c, ins("login_succeeded"))).toBe("42501");
       await c.query("RESET ROLE");
-      if ((await code(c, "SET ROLE wms_auth")) === "OK") {
-        expect(await code(c, ins("login_succeeded"))).toBe("OK");
-      }
+      await c.query("SET ROLE wms_auth");
+      expect((await c.query<{ cu: string }>("SELECT current_user AS cu")).rows[0]?.cu).toBe("wms_auth");
+      expect(await code(c, ins("login_succeeded"))).toBe("OK");
     } finally {
       await c.query("RESET ROLE").catch(() => undefined);
       await c.end();
+    }
+  });
+
+  it("tür biçimi CHECK (23514): baştaki boşluk, büyük harf (sahip rol dahil), Kiril harfli tür; alt çizgili kimlik benzerleri wms_auth'a kısıtlı", async () => {
+    // Kiril 'е' (U+0435) ile 'reauth.succeeded' benzeri tür: sınıf regex'ine uymaz, biçim CHECK'i reddeder.
+    const cyr = "r\u0435auth.succeeded";
+    for (const c of [app, auth, adm]) {
+      expect(await code(c, ins(" reauth.succeeded"))).toBe("23514");
+      expect(await code(c, ins(cyr))).toBe("23514");
+      expect(await code(c, ins("a".repeat(65)))).toBe("23514");
+      expect(await code(c, ins("1abc"))).toBe("23514");
+    }
+    expect(await code(adm, ins("app.UPPER"))).toBe("23514");
+    for (const t of ["reauth_succeeded", "session_revoked", "mfa_verified"]) {
+      expect(await code(app, ins(t)), `app ${t}`).toBe("42501");
+      expect(await code(auth, ins(t)), `auth ${t}`).toBe("OK");
     }
   });
 
@@ -203,7 +220,9 @@ describe(`reauthenticate → reauth.* olayları wms_auth ile yazılır (target=$
     await expect(service.reauthenticate(principal, WRONG, s.headers)).rejects.toBeInstanceOf(AuthError);
     const ev = await events(s.userId);
     expect(ev.map((e) => e.event_type)).toEqual(["reauth.succeeded", "reauth.failed"]);
-    expect(ev[0]).toMatchObject({ user_agent: "t112c-reauth", detail: {} });
+    // Ham oturum kimliği değil SHA-256 özeti; alan adı maskeleme anahtarlarına takılmaz (`sref`).
+    expect(ev[0]).toMatchObject({ user_agent: "t112c-reauth", detail: { sref: createHash("sha256").update(s.sessionId).digest("hex") } });
+    expect(JSON.stringify(ev)).not.toContain(s.sessionId);
     const dump = JSON.stringify(ev);
     for (const secret of [PASSWORD, WRONG, s.email]) expect(dump).not.toContain(secret);
   });
@@ -217,6 +236,27 @@ describe(`reauthenticate → reauth.* olayları wms_auth ile yazılır (target=$
     const types = (await events(s.userId)).map((e) => e.event_type);
     expect(types).not.toContain("reauth.succeeded");
     expect(types.filter((t) => t === "reauth.failed")).toHaveLength(6);
+  });
+
+  it("parolasız hesapta (yalnızca sosyal) ve kilitli hesapta aynı tekdüze hata; reauth.failed yazılır (sahte doğrulama yolu)", async () => {
+    const s = await mkSession();
+    const principal = await service.getPrincipal(s.headers);
+    if (principal === null) throw new Error("principal expected");
+    await adm.query("UPDATE public.accounts SET password = NULL WHERE user_id = $1", [s.userId]);
+    const err = await service.reauthenticate(principal, PASSWORD, s.headers).then(() => undefined, (e: unknown) => e);
+    expect(err).toBeInstanceOf(AuthError);
+    expect(err).toMatchObject({ code: "UNAUTHENTICATED", reason: "REAUTH_REQUIRED" });
+    expect((await events(s.userId)).map((e) => e.event_type)).toEqual(["reauth.failed"]);
+    // Kilit: 5 rezervasyon doldurulur; doğru parola bile aynı hatayı verir.
+    const t = await mkSession();
+    const p2 = await service.getPrincipal(t.headers);
+    if (p2 === null) throw new Error("principal expected");
+    for (let i = 0; i < 5; i += 1) await expect(service.reauthenticate(p2, WRONG, t.headers)).rejects.toMatchObject({ reason: "REAUTH_REQUIRED" });
+    const locked = await service.reauthenticate(p2, PASSWORD, t.headers).then(() => undefined, (e: unknown) => e);
+    expect(locked).toBeInstanceOf(AuthError);
+    expect(locked).toMatchObject({ code: "UNAUTHENTICATED", reason: "REAUTH_REQUIRED" });
+    const last = (await events(t.userId)).at(-1);
+    expect(last).toMatchObject({ event_type: "reauth.failed", detail: { locked: true } });
   });
 
   it("silinmiş/başkasına ait oturumla yeniden doğrulama reddedilir ve olay yazılmaz", async () => {
