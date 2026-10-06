@@ -19,6 +19,7 @@ import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { AppError } from "@wms/shared/errors";
 import type { AccessTx, TenantAccessParams } from "../identity/access.ts";
+import { hasPermission } from "../identity/permissions.ts";
 import { pgUuidArray } from "../warehouse/scope.ts";
 import { EMPTY_LOCK_PLAN, executeStockCommand, type StockCommandOutcome, type StockCommandParams } from "./command.ts";
 import type { StockCommandResult, StockResultLine } from "./idempotency.ts";
@@ -251,16 +252,64 @@ async function systemTypeVersionId(tx: AccessTx, kind: string): Promise<string> 
   return id;
 }
 
+// A-145 (Supervisor): bir stok belgesinin TÜM satır lokasyonları belgenin deposuna aittir (depolar arası transfer ileride ayrı belge türü;
+// Q kaydı Supervisor'da). Lokasyonların depoları plan'da kapsam denetimine girer; eşitlik apply'da kilit altında denetlenir.
+function lineLocationIds(lines: readonly NormalizedLine[]): string[] {
+  const ids = new Set<string>();
+  for (const l of lines) {
+    if (l.source_location_id !== null) ids.add(l.source_location_id);
+    if (l.target_location_id !== null) ids.add(l.target_location_id);
+  }
+  return [...ids].sort();
+}
+
+/** Salt okuma (kilitsiz): verilen lokasyonların depoları (plan'da kapsam denetimi için). Bulunmayanlar sessizce atlanır; apply NOT_FOUND verir. */
+async function warehousesOfLocations(tx: AccessTx, tenantId: string, locationIds: readonly string[]): Promise<string[]> {
+  if (locationIds.length === 0) return [];
+  const rows = await tx.execute<{ warehouse_id: string }>(
+    sql`SELECT DISTINCT warehouse_id FROM public.locations WHERE tenant_id = ${tenantId}::uuid AND id = ANY(${pgUuidArray(locationIds)}::uuid[])`,
+  );
+  return rows.map((r) => r.warehouse_id);
+}
+
+/**
+ * A-145: her lokasyon belgenin deposunda olmalı. Yok/başka tenant → `NOT_FOUND` (varlık sızdırmaz); başka depo →
+ * `VALIDATION_FAILED`/`LOCATION_WAREHOUSE_MISMATCH`. Lokasyonlar kimliğe göre sıralı `FOR SHARE` okunur (arşivle yarışmaz).
+ */
+export async function assertLocationsInWarehouse(tx: AccessTx, tenantId: string, locationIds: readonly string[], warehouseId: string): Promise<void> {
+  if (locationIds.length === 0) return;
+  const ids = [...new Set(locationIds.map((i) => i.toLowerCase()))].sort();
+  const rows = await tx.execute<{ id: string; warehouse_id: string }>(
+    sql`SELECT id, warehouse_id FROM public.locations
+         WHERE tenant_id = ${tenantId}::uuid AND id = ANY(${pgUuidArray(ids)}::uuid[])
+         ORDER BY id FOR SHARE`,
+  );
+  if (rows.length !== ids.length) throw new AppError("NOT_FOUND");
+  if (rows.some((r) => r.warehouse_id.toLowerCase() !== warehouseId.toLowerCase())) {
+    throw new AppError("VALIDATION_FAILED", { detail: "LOCATION_WAREHOUSE_MISMATCH" });
+  }
+}
+
+async function existingLineLocationIds(tx: AccessTx, tenantId: string, documentId: string): Promise<string[]> {
+  const rows = await tx.execute<{ id: string }>(
+    sql`SELECT source_location_id AS id FROM public.document_lines WHERE tenant_id = ${tenantId}::uuid AND document_id = ${documentId}::uuid AND source_location_id IS NOT NULL
+        UNION
+        SELECT target_location_id FROM public.document_lines WHERE tenant_id = ${tenantId}::uuid AND document_id = ${documentId}::uuid AND target_location_id IS NOT NULL`,
+  );
+  return rows.map((r) => r.id);
+}
+
 const lockOnly = (documentId: string, expectedVersion: number) => ({ ...EMPTY_LOCK_PLAN, document: { id: documentId, expectedVersion } });
 
-async function planFor(tx: AccessTx, tenantId: string, documentId: string, extraWarehouseIds: readonly string[], expectedVersion: number) {
+async function planFor(tx: AccessTx, tenantId: string, documentId: string, extraWarehouseIds: readonly string[], expectedVersion: number, lines?: readonly NormalizedLine[]) {
   // Yalnızca depo kimliği için salt okuma; durum/kural denetimi apply'da KİLİTLİ görüntüde yapılır.
   const rows = await tx.execute<{ warehouse_id: string }>(
     sql`SELECT warehouse_id FROM public.documents WHERE tenant_id = ${tenantId}::uuid AND id = ${documentId}::uuid`,
   );
   const w = rows[0]?.warehouse_id;
   if (w === undefined) throw new AppError("NOT_FOUND");
-  return { warehouseIds: [w, ...extraWarehouseIds], locks: lockOnly(documentId, expectedVersion) };
+  const lineWarehouses = lines === undefined ? [] : await warehousesOfLocations(tx, tenantId, lineLocationIds(lines));
+  return { warehouseIds: [w, ...extraWarehouseIds, ...lineWarehouses], locks: lockOnly(documentId, expectedVersion) };
 }
 
 function run<I, R extends StockCommandResult>(
@@ -314,11 +363,15 @@ export async function createStockDocument(
       commandType: "stock.document.create",
       permission: "document.create",
       input: hashInput,
-      plan: async () => ({ warehouseIds: [warehouseId], locks: EMPTY_LOCK_PLAN }),
+      plan: async (tx, _i, m) => ({
+        warehouseIds: [warehouseId, ...(await warehousesOfLocations(tx, m.tenantId, lineLocationIds(lines)))],
+        locks: EMPTY_LOCK_PLAN,
+      }),
       apply: async (tx, _locked, ctx) => {
         await assertWarehouseActive(tx, ctx.tenantId, warehouseId);
         const date = await assertBusinessDateNotFuture(tx, ctx.tenantId, businessDate);
         await assertItemsActive(tx, ctx.tenantId, lines.map((l) => l.item_id));
+        await assertLocationsInWarehouse(tx, ctx.tenantId, lineLocationIds(lines), warehouseId); // A-145
         const typeVersionId = await systemTypeVersionId(tx, kind);
         const documentId = randomUUID();
         await tx.execute(
@@ -373,7 +426,7 @@ export async function updateDraft(
       commandType: "stock.document.update",
       permission: "document.create",
       input: hashInput,
-      plan: (tx, _i, m) => planFor(tx, m.tenantId, documentId, warehouseId === undefined ? [] : [warehouseId], expectedVersion),
+      plan: (tx, _i, m) => planFor(tx, m.tenantId, documentId, warehouseId === undefined ? [] : [warehouseId], expectedVersion, lines),
       apply: async (tx, locked, ctx) => {
         if (locked.document === undefined) throw new AppError("INTERNAL");
         const header = await readDocumentHeader(tx, ctx.tenantId, documentId); // kilit altında
@@ -382,6 +435,13 @@ export async function updateDraft(
         if (warehouseId !== undefined && warehouseId !== header.warehouseId) await assertWarehouseActive(tx, ctx.tenantId, warehouseId);
         const date = await assertBusinessDateNotFuture(tx, ctx.tenantId, businessDate ?? header.businessDate);
         if (lines !== undefined) await assertItemsActive(tx, ctx.tenantId, lines.map((l) => l.item_id));
+        // A-145: yeni satırların (verilmediyse mevcut satırların) lokasyonları etkin belge deposunda olmalı (depo değişince de).
+        await assertLocationsInWarehouse(
+          tx,
+          ctx.tenantId,
+          lines !== undefined ? lineLocationIds(lines) : await existingLineLocationIds(tx, ctx.tenantId, documentId),
+          warehouseId ?? header.warehouseId,
+        );
         // Başlık ÖNCE (sürüm +1 tetikleyiciyle; kilit zaten bizde), satırlar SONRA.
         await tx.execute(
           sql`UPDATE public.documents
@@ -481,6 +541,9 @@ export async function cancelDocument(
         const header = await readDocumentHeader(tx, ctx.tenantId, documentId);
         assertNotProcessing(header);
         if (header.status !== "DRAFT" && header.status !== "APPROVED") throw documentState();
+        // A-146 (Supervisor): DRAFT → CANCELLED `document.create` (komut izni); APPROVED → CANCELLED ayrıca `document.approve` ister.
+        // Durum ancak kilitli okumadan sonra bilindiğinden ikinci izin burada, güncel üyelik rollerinden denetlenir.
+        if (header.status === "APPROVED" && !hasPermission(ctx.membership.roles, "document.approve")) throw new AppError("FORBIDDEN");
         await tx.execute(
           sql`UPDATE public.documents SET status = 'CANCELLED', reason = ${reason ?? header.reason}
                WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${documentId}::uuid`,

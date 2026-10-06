@@ -37,6 +37,7 @@ export const ERROR_DETAILS = [
   "IDEMPOTENCY_KEY_REQUIRED",
   "WAREHOUSE_OUT_OF_SCOPE",
   "FEATURE_DISABLED",
+  "LOCATION_WAREHOUSE_MISMATCH",
 ] as const;
 export type ErrorDetail = (typeof ERROR_DETAILS)[number];
 
@@ -56,6 +57,7 @@ export const ERROR_DETAIL_CODE: Readonly<Record<ErrorDetail, ErrorCode>> = {
   IDEMPOTENCY_KEY_REQUIRED: "VALIDATION_FAILED",
   WAREHOUSE_OUT_OF_SCOPE: "FORBIDDEN",
   FEATURE_DISABLED: "VALIDATION_FAILED",
+  LOCATION_WAREHOUSE_MISMATCH: "VALIDATION_FAILED",
 };
 
 export const HTTP_STATUS: Readonly<Record<ErrorCode, number>> = {
