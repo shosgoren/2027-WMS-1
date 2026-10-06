@@ -54,6 +54,7 @@ Q-49 | Durum değiştiren taşımada (ör. AVAILABLE → QUARANTINE) belge satı
 Q-50 | Stok defteri `reason` için izinli değer kümesi nedir (sabit kod listesi mi, serbest metin mi)? Şimdilik yalnızca boş olmama CHECK'i | T-232 | açık — T-213/T-217 komut katmanı kodları belirleyince CHECK daraltılır
 Q-51 | Stok defteri `actor_user_id` zorunlu mu (sistem/worker hareketleri)? Şimdilik nullable, FK yok | T-232 | açık — 0012 geçmiş yazıcısıyla tutarlı karar T-213'te
 Q-52 | Stok defteri satırı hangi belge durumunda yazılabilir (senkron yol ≤200 satır `posting_job_id`'siz; asenkron yol APPROVED+posting_job_id; ters kayıt belgesi)? DB şimdilik belge durumuna bakmıyor | T-232 inceleme MINOR-5, ADR-018 §2 | açık — T-213/T-217 posting akışıyla DB kuralı (tetikleyici, FOR SHARE) eklenir
+Q-53 | Negatif bakiyeli (I-05 istisnası) lokasyon/depo arşivlenebilir mi? Şimdilik yalnızca pozitif bakiye IN_USE sayılıyor (kart) | T-205 inceleme MINOR-5 | açık
 
 ## Varsayımlar
 A-01 | Neon pooler'ı transaction-mode PgBouncer'dır (kullanıcı kararı kaydı, 2026-10-05) — **teyit edildi 2026-10-05, sürüm hariç** (belge + T-005d koşu 3 çoklama gözlemi, https://github.com/shosgoren/2027-WMS-1/actions/runs/37388724069); PgBouncer sürümü gözlenemedi | Neon pooler türünü/kipini değiştirdiğini duyurana veya yeniden spike aksini gösterene kadar | Q-02
@@ -153,9 +154,9 @@ A-94 | `wms_ops` belge tablolarında yetki almaz (0010/0011 deseni; kartın "yal
 A-95 | Belge `reason` (ve kopyalandığı silinemeyen `document_status_history.reason`) serbest metnine kişisel veri girilmez: UI alanında uyarı (T-216/T-226), ≤500 karakter CHECK; KVKK silme yükümlülüğü append-only geçmişle çakışacağından 4P saklama/silme kartı bu sütunu kapsar (anonimleştirme yolu) | 4P saklama kartında karar | T-206 inceleme
 A-96 | CONSUMED/RELEASED rezervasyon sonlanmıştır, değiştirilemez; INSERT yalnızca ACTIVE açar | — | T-232
 A-97 | Seri boyutu yoksa `stock_balances.serial_key` sıfır UUID sentinelidir (tekillik ve CHECK bunun üzerine); gerçek serial_id ile çakışma pratikte imkânsız | — | T-232
-A-98 | Depo/lokasyon kodu normalizasyonu: kırp + yalnızca ASCII a-z büyütme (Türkçe ı/İ, ß dönüştürülmez; `toLocaleUpperCase` ı→I çevirdiği için kullanılmaz); kod 1–64, ad 1–200 karakter, denetim karakteri yasak | Pilot kod biçimi | T-205
+A-98 | Depo/lokasyon kodu normalizasyonu: kırp + yalnızca ASCII a-z büyütme (Türkçe ı/İ, ß dönüştürülmez; `toLocaleUpperCase` ı→I çevirdiği için kullanılmaz); kod 1–64, ad 1–200 karakter, denetim karakteri yasak; NFC normalizasyonu uygulanır (I+U+0307 → İ ile aynı kod), birleşik karaktere dönüşemeyen birleştirici işaretler (\p{Mn}) reddedilir | Pilot kod biçimi | T-205
 A-99 | Lokasyon ağacı derinlik sınırı `MAX_LOCATION_DEPTH` = 16 (uygulama savunması; DB yalnız smallint) | Pilot hiyerarşisi | T-205
 A-100 | Sayım kilidi COUNTING iken `archiveLocation` IN_USE döner | — | T-205
 A-101 | Arşivli depoya lokasyon eklenemez; arşivli lokasyonda ad/tür değişmez (VALIDATION_FAILED); zaten arşivli kaydı arşivlemek no-op (denetim satırı yok) | — | T-205
 A-102 | TRANSIT türü lokasyon ebeveyn olamaz (PARENT_INVALID) | — | T-205
-A-103 | `setMembershipWarehouseScopes` boş liste = kapsam satırlarını siler = A-77 gereği tüm depolar (bayrak kapalı; fail-open varsayılan) — bayrak açılmadan Q-23 kararı ve security-reviewer onayı şart | Q-23 | T-205
+A-103 | Depo kapsamı girdisi açıktır: `{ all: true }` (kapsam satırı yok = A-77 tüm depolar) ya da `{ warehouseIds: [...] }`; boş liste VALIDATION_FAILED; demo tenant'ta FORBIDDEN; değişiklik yoksa changed:false, audit yok. Bayrak açılmadan Q-23 kararı ve security-reviewer onayı şart | Q-23 | T-205
