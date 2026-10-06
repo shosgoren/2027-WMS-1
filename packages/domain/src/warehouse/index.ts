@@ -47,3 +47,23 @@ export {
   type SetScopesInput,
   type SetScopesResult,
 } from "./scope.ts";
+export {
+  BULK_LOCATIONS_MAX,
+  IDEMPOTENCY_WINDOW_DAYS,
+  createBulkLocations,
+  planBulkLocations,
+  previewBulkLocations,
+  type BulkCreateResult,
+  type BulkLocationsSpec,
+  type BulkPlan,
+  type BulkPreview,
+  type CreateBulkLocationsInput,
+} from "./bulk-locations.ts";
+export {
+  LOCATION_SEARCH_MAX,
+  getSetupProgress,
+  searchLocations,
+  type LocationSuggestion,
+  type SearchLocationsInput,
+  type SetupProgress,
+} from "./setup-queries.ts";

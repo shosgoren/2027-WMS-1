@@ -5,7 +5,8 @@ import type { TaskCardTone } from "@wms/ui";
 
 // "Ne yapmak istiyorsun?" kart ızgarası (T-122). Sunucu bileşeni: izin kararı çağıran sayfadan (`allowed`) gelir ve yalnızca
 // GÖSTERİMDİR (kilit/bağlantı); asıl yetki hedef sayfa/eylemde sunucuda denetlenir. Faz 1'de olmayan depo işleri
-// tıklanamaz "yakında" kartıdır (sahte işlev yok, G-07).
+// tıklanamaz "yakında" kartıdır (sahte işlev yok, G-07). Telefonda (T-254) ızgara 6 sütun: etkin/kilitli döşemeler 2 sütun
+// (3'er birim), "Yakında" döşemeleri 3 sütun (2'şer birim); daraltılmış görünüm globals.css `.task-grid` kurallarındadır.
 
 export interface TaskMenuProps {
   readonly slug: string;
@@ -53,7 +54,7 @@ export async function TaskMenu({ slug, allowed }: TaskMenuProps) {
   ];
 
   return (
-    <ul aria-label={t("tasksLabel")} className="m-0 grid min-w-0 list-none grid-cols-1 gap-4 p-0 md:grid-cols-2 lg:grid-cols-3">
+    <ul aria-label={t("tasksLabel")} className="task-grid m-0 grid min-w-0 list-none grid-cols-1 gap-4 p-0 md:grid-cols-2 lg:grid-cols-3 phone:grid-cols-6 phone:gap-2">
       {entries.map((e) => {
         const title = t(`tasks.${e.key}.title`);
         const icon = ICONS[e.key];
@@ -66,7 +67,7 @@ export async function TaskMenu({ slug, allowed }: TaskMenuProps) {
           card = <TaskCard icon={icon} title={title} description={t(`tasks.${e.key}.description`)} href={e.href} />;
         }
         return (
-          <li key={e.key} className="flex min-w-0">
+          <li key={e.key} className={`flex min-w-0 ${e.kind === "warehouse-soon" ? "phone:col-span-2" : "phone:col-span-3"}`}>
             {card}
           </li>
         );

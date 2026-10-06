@@ -16,6 +16,19 @@
     "help": {
       "full": "Call for help",
       "short": "Help"
+    },
+    "menu": {
+      "open": "Open menu",
+      "title": "Menu",
+      "close": "Close"
+    },
+    "nav": {
+      "label": "Main navigation",
+      "home": "Home",
+      "scan": "Scan",
+      "tasks": "My tasks",
+      "menu": "Menu",
+      "soon": "Soon"
     }
   },
   "auth": {
@@ -888,7 +901,15 @@
       "tenant_closing": "The workspace is being closed.",
       "tenant_closingAction": "Contact your manager.",
       "internal": "Something went wrong.",
-      "internalAction": "Try again shortly; if it persists, send the error code to support."
+      "internalAction": "Try again shortly; if it persists, send the error code to support.",
+      "validation_failed_code_taken_bulk": "Some codes are already in use.",
+      "validation_failed_code_taken_bulkAction": "Check the conflicting codes in the preview; change the range or zone code.",
+      "validation_failed_document_too_large": "At most 2,000 locations can be created at once.",
+      "validation_failed_document_too_largeAction": "Make the range smaller and try again.",
+      "validation_failed_idempotency_key_required": "The request id is missing.",
+      "validation_failed_idempotency_key_requiredAction": "Reload the page and try again.",
+      "idempotency_mismatch": "This request id was used with different input.",
+      "idempotency_mismatchAction": "Close and reopen the form, then try again."
     }
   },
   "field": {
@@ -943,6 +964,103 @@
       "charsetAction": "Fix the item code or barcode to use ASCII characters.",
       "tooLong": "The barcode does not fit the label width.",
       "tooLongAction": "Shorten the code or barcode."
+    }
+  },
+  "easySetup": {
+    "guide": {
+      "title": "Get started",
+      "intro": "Three steps and you are ready. The next step is below.",
+      "listLabel": "Setup steps",
+      "done": "Done",
+      "todo": "To do",
+      "stepOf": "Step {n}",
+      "next": "Next step",
+      "warehouse": {
+        "title": "Add a warehouse",
+        "hint": "The place where goods are kept. Just type its name.",
+        "action": "Add the warehouse"
+      },
+      "locations": {
+        "title": "Create the racks",
+        "hint": "Enter how many zones, racks and bins; codes are made for you.",
+        "action": "Create the racks",
+        "locked": "Add a warehouse first."
+      },
+      "items": {
+        "title": "Add a product",
+        "hint": "Type the product name; code and unit come ready.",
+        "action": "Add the product"
+      },
+      "allDone": "Setup is complete. You can add a warehouse, racks or products any time."
+    },
+    "code": {
+      "suggested": "Suggested automatically. You can change it.",
+      "custom": "You typed your own code.",
+      "loading": "Preparing the code…",
+      "failed": "Could not get a suggestion; you can type the code yourself."
+    },
+    "form": {
+      "advanced": "Advanced settings",
+      "required": "Required",
+      "defaultWarehouseName": "Main warehouse"
+    },
+    "picker": {
+      "listLabel": "Suggestions",
+      "searching": "Searching…",
+      "none": "No matching record.",
+      "hintType": "Type the first letters; suggestions appear.",
+      "scanLabel": "Scan barcode",
+      "scanManual": "Type it",
+      "scanConfirm": "Find",
+      "scanCancel": "Cancel",
+      "scanPlaceholder": "Scan the barcode",
+      "scanNotFound": "No record found for this barcode.",
+      "scanNotFoundAction": "Check the barcode and scan again.",
+      "scanMany": "This barcode matches more than one record.",
+      "scanManyAction": "Type the code in search to choose.",
+      "selected": "Selected: {name}"
+    },
+    "items": {
+      "searchSuggestLabel": "Product suggestions",
+      "scanLabel": "Find a product by barcode",
+      "unitAuto": "There is no unit yet; the “ADET” unit is created automatically with your first product.",
+      "unitDefaultOption": "ADET · Piece (automatic)"
+    },
+    "bulk": {
+      "open": "Create racks in bulk",
+      "title": "Create the racks",
+      "intro": "Enter the zone, rack and bin ranges. You preview first, then they are created.",
+      "zone": "Zone code",
+      "zoneHint": "Example: A",
+      "rackFrom": "First rack no.",
+      "rackTo": "Last rack no.",
+      "levelFrom": "First bin no.",
+      "levelTo": "Last bin no.",
+      "advanced": "Advanced settings",
+      "parent": "Parent location (optional)",
+      "parentHint": "Leave empty to create under the warehouse.",
+      "parentClear": "Remove parent location",
+      "parentNone": "Under the warehouse",
+      "scanParent": "Scan the location label",
+      "previewTitle": "Preview",
+      "previewLoading": "Preparing the preview…",
+      "previewSummary": "{count} locations will be created: {first} … {last}",
+      "previewOne": "1 location will be created: {first}",
+      "previewListLabel": "Codes to be created",
+      "previewMore": "Only the first {shown} codes are listed.",
+      "conflictsTitle": "{count} codes already exist; they will not be created",
+      "conflictsAction": "Change the range or the zone code.",
+      "conflictsListLabel": "Conflicting codes",
+      "conflictsMore": "Only the first {shown} codes are listed.",
+      "tooMany": "At most {max} locations are created at once.",
+      "tooManyAction": "Make the range smaller.",
+      "invalid": "The range is not valid.",
+      "invalidAction": "Check the zone code (letters/digits) and ranges between 1 and 999, small to large.",
+      "submit": "Create",
+      "submitCount": "Create {count} locations",
+      "cancel": "Cancel",
+      "done": "{count} locations created: {first} … {last}",
+      "doneReplayed": "This request was already processed; {count} locations exist."
     }
   }
 }

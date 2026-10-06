@@ -34,3 +34,12 @@ export async function countLockRowExists(tx: AccessTx, tenantId: string, locatio
   );
   return rows[0] !== undefined;
 }
+
+/** Verilen lokasyonlardan kaçının sayım kilidi satırı var (toplu oluşturmada tek sorgu; salt SELECT). `locationIds` geçerli UUID dizisidir. */
+export async function countLockRowsExisting(tx: AccessTx, tenantId: string, locationIds: readonly string[]): Promise<number> {
+  const literal = `{${locationIds.join(",")}}`;
+  const rows = await tx.execute<{ n: string | number }>(
+    sql`SELECT count(*) AS n FROM public.location_count_locks WHERE tenant_id = ${tenantId}::uuid AND location_id = ANY(${literal}::uuid[])`,
+  );
+  return Number(rows[0]?.n);
+}

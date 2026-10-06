@@ -5,10 +5,13 @@
 // Düzey etiketleri (Bölge/Raf/Göz) şimdilik sabit i18n varsayılanıdır; tenant terminolojisi okuyucusu Bulgular'da.
 import { useTranslations } from "next-intl";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { Banner, Button, ConfirmDialog, EmptyState } from "@wms/ui";
-import { archiveLocationAction, createLocationAction, loadMoreLocationsAction } from "../actions.ts";
+import { BulkBuilder } from "../../easy-setup/bulk-builder.tsx";
+import { PageBody } from "../../easy-setup/sheet.tsx";
+import { SetupGuide, isSetupComplete, useSetupProgress } from "../../easy-setup/setup-guide.tsx";
+import { archiveLocationAction, createLocationAction, getSetupProgressAction, loadMoreLocationsAction, suggestCodeAction } from "../actions.ts";
 import { CreateDialog, ServerErrorBanner } from "../warehouses-view.tsx";
 import type { ServerError } from "../warehouses-view.tsx";
 
@@ -66,7 +69,10 @@ export function LocationTree({
   const t = useTranslations("warehouses.tree");
   const tk = useTranslations("warehouses.kind");
   const tw = useTranslations("warehouses");
+  const tb = useTranslations("easySetup.bulk");
   const router = useRouter();
+  const pathname = usePathname();
+  const params = useSearchParams();
   const base = `/t/${encodeURIComponent(slug)}/warehouses`;
   const returnTo = `${base}/${encodeURIComponent(warehouseId)}`;
 
@@ -80,6 +86,18 @@ export function LocationTree({
   const [error, setError] = useState<{ error: ServerError; scope: "warehouse" | "location" } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const writable = canManage && warehouseActive;
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [version, setVersion] = useState(0);
+  const progress = useSetupProgress(slug, canManage, version);
+  const guide = canManage && progress !== null && !isSetupComplete(progress);
+
+  // Rehberin büyük düğmesi `?bulk=1` ile gelir: oluşturucuyu aç, adresi temizle.
+  useEffect(() => {
+    if (params.get("bulk") === "1" && writable) {
+      setBulkOpen(true);
+      router.replace(pathname);
+    }
+  }, [params, writable, pathname, router]);
 
   // `router.refresh()` sonrası sunucu verisi yeni gelir: yerel (daha fazla yüklenmiş) liste sunucuyla eşitlenir.
   useEffect(() => {
@@ -150,6 +168,7 @@ export function LocationTree({
 
   return (
     <>
+      <PageBody hide={bulkOpen || parent !== undefined}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <Link href={base} className={LINK_CLS}>
@@ -162,6 +181,9 @@ export function LocationTree({
           <Button onClick={() => setParent({ id: null, label: warehouseName })} disabled={!writable} aria-describedby={lockText === null ? undefined : "tree-locked"}>
             {t("addRoot")}
           </Button>
+          <Button variant="secondary" onClick={() => setBulkOpen(true)} disabled={!writable} aria-describedby={lockText === null ? undefined : "tree-locked"}>
+            {tb("open")}
+          </Button>
           {lockText === null ? null : (
             <p id="tree-locked" className="max-w-xs break-words text-sm text-ink-muted">
               {lockText}
@@ -172,10 +194,11 @@ export function LocationTree({
 
       {notice ? <Banner kind="info">{notice}</Banner> : null}
       {error ? <ServerErrorBanner error={error.error} returnTo={returnTo} scope={error.scope} /> : null}
+      {guide && progress !== null ? <SetupGuide slug={slug} progress={progress} /> : null}
 
       <section aria-label={t("label")} className="flex min-w-0 flex-col gap-3">
         {visible.length === 0 ? (
-          <EmptyState title={t("empty")} description={writable ? t("emptyAction") : t("emptyReadOnly")} />
+          guide ? null : <EmptyState title={t("empty")} description={writable ? t("emptyAction") : t("emptyReadOnly")} />
         ) : (
           <ul className="m-0 flex min-w-0 list-none flex-col gap-2 p-0" role="tree" aria-label={t("label")}>
             {visible.map((it) => {
@@ -237,7 +260,24 @@ export function LocationTree({
           </div>
         )}
       </section>
+      </PageBody>
 
+      <BulkBuilder
+        open={bulkOpen}
+        slug={slug}
+        warehouseId={warehouseId}
+        returnTo={returnTo}
+        onClose={() => setBulkOpen(false)}
+        onDone={async (r) => {
+          setBulkOpen(false);
+          setNotice(r.replayed ? tb("doneReplayed", { count: r.created }) : tb("done", { count: r.created, first: r.first, last: r.last }));
+          setVersion((n) => n + 1);
+          // Rehberin 3. adımı: ürün yoksa ürün formuna git.
+          const p = await getSetupProgressAction({ slug });
+          if (p.ok && !p.data.hasItem) router.push(`/t/${encodeURIComponent(slug)}/items?new=1`);
+          else router.refresh();
+        }}
+      />
       <CreateDialog
         open={parent !== undefined}
         title={parent?.id === null || parent === undefined ? t("createRootTitle") : t("createChildTitle")}
@@ -245,8 +285,13 @@ export function LocationTree({
         kinds={KINDS}
         returnTo={returnTo}
         scope="location"
+        suggest={async () => {
+          const r = await suggestCodeAction({ slug, kind: "location", warehouseId });
+          return r.ok ? r.data.code : null;
+        }}
         onClose={() => setParent(undefined)}
         onDone={() => {
+          setVersion((n) => n + 1);
           // Yeni alt lokasyon görünsün: ebeveyn açılır.
           const pid = parent?.id;
           if (pid !== undefined && pid !== null) setExpanded((cur) => new Set(cur).add(pid));
@@ -255,8 +300,8 @@ export function LocationTree({
           router.refresh();
         }}
         submit={async (v) => {
-          const res = await createLocationAction({ slug, warehouseId, parentId: parent?.id ?? null, code: v.code, name: v.name, kind: v.kind });
-          return res.ok ? { ok: true } : { ok: false, error: { code: res.error.code, detail: res.error.detail, requestId: res.error.requestId } };
+          const res = await createLocationAction({ slug, warehouseId, parentId: parent?.id ?? null, code: v.code, name: v.name, kind: v.kind, autoCode: v.autoCode });
+          return res.ok ? { ok: true, data: res.data } : { ok: false, error: { code: res.error.code, detail: res.error.detail, requestId: res.error.requestId } };
         }}
       />
       <ConfirmDialog

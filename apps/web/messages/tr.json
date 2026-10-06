@@ -16,6 +16,19 @@
     "help": {
       "full": "Yardım çağır",
       "short": "Yardım"
+    },
+    "menu": {
+      "open": "Menüyü aç",
+      "title": "Menü",
+      "close": "Kapat"
+    },
+    "nav": {
+      "label": "Ana gezinme",
+      "home": "Ana sayfa",
+      "scan": "Tara",
+      "tasks": "Görevlerim",
+      "menu": "Menü",
+      "soon": "Yakında"
     }
   },
   "auth": {
@@ -888,7 +901,15 @@
       "tenant_closing": "Çalışma alanı kapatılıyor.",
       "tenant_closingAction": "Sorumluna başvur.",
       "internal": "Bir sorun oluştu.",
-      "internalAction": "Biraz sonra yeniden dene; sürerse hata kodunu destek ekibine ilet."
+      "internalAction": "Biraz sonra yeniden dene; sürerse hata kodunu destek ekibine ilet.",
+      "validation_failed_code_taken_bulk": "Bazı kodlar zaten kullanılıyor.",
+      "validation_failed_code_taken_bulkAction": "Önizlemedeki çakışan kodlara bak; aralığı ya da bölge kodunu değiştir.",
+      "validation_failed_document_too_large": "Bir seferde en çok 2.000 lokasyon oluşturulabilir.",
+      "validation_failed_document_too_largeAction": "Aralığı küçültüp yeniden dene.",
+      "validation_failed_idempotency_key_required": "İstek kimliği eksik.",
+      "validation_failed_idempotency_key_requiredAction": "Sayfayı yenileyip yeniden dene.",
+      "idempotency_mismatch": "Bu istek kimliği başka bir girdiyle kullanılmış.",
+      "idempotency_mismatchAction": "Formu kapatıp yeniden aç, sonra yeniden dene."
     }
   },
   "field": {
@@ -943,6 +964,103 @@
       "charsetAction": "Ürün kodunu ya da barkodu ASCII karakterlerle düzelt.",
       "tooLong": "Barkod etiket genişliğine sığmıyor.",
       "tooLongAction": "Kodu ya da barkodu kısalt."
+    }
+  },
+  "easySetup": {
+    "guide": {
+      "title": "Kuruluma başla",
+      "intro": "Üç adımda hazırsın. Sıradaki adım aşağıda.",
+      "listLabel": "Kurulum adımları",
+      "done": "Tamamlandı",
+      "todo": "Yapılacak",
+      "stepOf": "{n}. adım",
+      "next": "Sıradaki adım",
+      "warehouse": {
+        "title": "Depo ekle",
+        "hint": "Malların durduğu yer. Adını yazman yeter.",
+        "action": "Depoyu ekle"
+      },
+      "locations": {
+        "title": "Rafları oluştur",
+        "hint": "Bölge, raf ve göz sayısını yaz; kodlar kendiliğinden çıkar.",
+        "action": "Rafları oluştur",
+        "locked": "Önce depo ekle."
+      },
+      "items": {
+        "title": "Ürün ekle",
+        "hint": "Ürünün adını yaz; kod ve birim hazır gelir.",
+        "action": "Ürünü ekle"
+      },
+      "allDone": "Kurulum tamam. İstediğin zaman yeni depo, raf ya da ürün ekleyebilirsin."
+    },
+    "code": {
+      "suggested": "Otomatik önerildi. İstersen değiştirebilirsin.",
+      "custom": "Kendi kodunu yazdın.",
+      "loading": "Kod hazırlanıyor…",
+      "failed": "Kod önerisi alınamadı; kodu kendin yazabilirsin."
+    },
+    "form": {
+      "advanced": "Gelişmiş ayarlar",
+      "required": "Zorunlu alan",
+      "defaultWarehouseName": "Ana depo"
+    },
+    "picker": {
+      "listLabel": "Öneriler",
+      "searching": "Aranıyor…",
+      "none": "Eşleşen kayıt yok.",
+      "hintType": "İlk harfleri yaz; öneriler çıkar.",
+      "scanLabel": "Barkod okut",
+      "scanManual": "Elle yaz",
+      "scanConfirm": "Bul",
+      "scanCancel": "Vazgeç",
+      "scanPlaceholder": "Barkodu okut",
+      "scanNotFound": "Bu barkodla kayıt bulunamadı.",
+      "scanNotFoundAction": "Barkodu kontrol edip yeniden okut.",
+      "scanMany": "Bu barkod birden çok kayıtla eşleşti.",
+      "scanManyAction": "Aramaya kodu yazarak seç.",
+      "selected": "Seçildi: {name}"
+    },
+    "items": {
+      "searchSuggestLabel": "Ürün önerileri",
+      "scanLabel": "Barkodla ürün bul",
+      "unitAuto": "Henüz birim yok; ilk ürününle “ADET” birimi kendiliğinden oluşturulur.",
+      "unitDefaultOption": "ADET · Adet (otomatik)"
+    },
+    "bulk": {
+      "open": "Toplu raf oluştur",
+      "title": "Rafları oluştur",
+      "intro": "Bölge, raf ve göz aralığını yaz. Önce önizlersin, sonra oluşur.",
+      "zone": "Bölge kodu",
+      "zoneHint": "Örnek: A",
+      "rackFrom": "İlk raf no",
+      "rackTo": "Son raf no",
+      "levelFrom": "İlk göz no",
+      "levelTo": "Son göz no",
+      "advanced": "Gelişmiş ayarlar",
+      "parent": "Üst lokasyon (isteğe bağlı)",
+      "parentHint": "Boş bırakırsan depo altında oluşur.",
+      "parentClear": "Üst lokasyonu kaldır",
+      "parentNone": "Depo altında",
+      "scanParent": "Lokasyon etiketini okut",
+      "previewTitle": "Önizleme",
+      "previewLoading": "Önizleme hazırlanıyor…",
+      "previewSummary": "{count} lokasyon oluşacak: {first} … {last}",
+      "previewOne": "1 lokasyon oluşacak: {first}",
+      "previewListLabel": "Oluşacak kodlar",
+      "previewMore": "Listede yalnızca ilk {shown} kod var.",
+      "conflictsTitle": "{count} kod zaten var; oluşturulmaz",
+      "conflictsAction": "Aralığı ya da bölge kodunu değiştir.",
+      "conflictsListLabel": "Çakışan kodlar",
+      "conflictsMore": "Listede yalnızca ilk {shown} kod var.",
+      "tooMany": "Bir seferde en çok {max} lokasyon oluşturulur.",
+      "tooManyAction": "Aralığı küçült.",
+      "invalid": "Girilen aralık geçersiz.",
+      "invalidAction": "Bölge kodunu (harf/rakam) ve 1–999 arası, küçükten büyüğe aralıkları kontrol et.",
+      "submit": "Oluştur",
+      "submitCount": "{count} lokasyonu oluştur",
+      "cancel": "Vazgeç",
+      "done": "{count} lokasyon oluşturuldu: {first} … {last}",
+      "doneReplayed": "Bu istek zaten işlenmişti; {count} lokasyon var."
     }
   }
 }

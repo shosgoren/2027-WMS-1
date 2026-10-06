@@ -66,8 +66,16 @@ test("yönetim ekranları: Akış/Kokpit x 375/1280 px", async ({ page }) => {
         };
 
         // Görünüm anahtarı: seçili durum aria-pressed + metinle (renk tek taşıyıcı değil).
+        // T-254: telefon genişliğinde anahtar menüdedir; önce menü açılır, aynı düğme kullanılır.
+        const menuButton = page.getByTestId("app-bar-menu");
+        const inMenu = await menuButton.isVisible();
+        if (inMenu) await menuButton.click();
         await page.getByRole("button", { name: view.label, exact: true }).click();
         await expect(page.getByRole("button", { name: view.label, exact: true })).toHaveAttribute("aria-pressed", "true");
+        if (inMenu) {
+          await page.keyboard.press("Escape");
+          await expect(page.getByRole("dialog")).toBeHidden();
+        }
         await expect(page.locator("html")).toHaveAttribute("data-view", view.id);
 
           // Ayarlar.

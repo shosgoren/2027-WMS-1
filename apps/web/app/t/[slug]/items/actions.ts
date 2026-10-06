@@ -6,7 +6,7 @@
 import { headers } from "next/headers";
 import { z } from "zod";
 import { getAppDb } from "@wms/db";
-import { addBarcode, archiveItem, createItem, removeBarcode, setUnitConversion, updateItem } from "@wms/domain/catalog";
+import { addBarcode, archiveItem, createItem, createWithSuggestedCode, ensureDefaultUnit, removeBarcode, searchItems, setUnitConversion, suggestCode, updateItem } from "@wms/domain/catalog";
 import { createProductionGuard, limitVerifiedTenant, type ActionContext } from "../../../../lib/action-guard.ts";
 
 const guardedAction = createProductionGuard(() => headers());
@@ -26,12 +26,17 @@ const createItemSchema = z
     slug: slugSchema,
     code: textSchema,
     name: textSchema,
-    baseUnitId: idSchema,
+    /** Yoksa (tenant'ta hiç birim yok) sunucu varsayılan `ADET` birimini hazırlar (T-250). */
+    baseUnitId: idSchema.optional(),
     quantityScale: z.number().int().min(0).max(6).optional(),
     trackingMode: trackingSchema.optional(),
     pickPolicy: pickSchema.optional(),
+    /** T-250: kod kullanıcı tarafından değiştirilmedi (önerilen kod); çakışmada sıradaki öneriyle yeniden denenir. */
+    autoCode: z.boolean().optional(),
   })
   .strict();
+const suggestItemCodeSchema = z.object({ slug: slugSchema, prefix: z.string().max(16).optional() }).strict();
+const searchItemsSchema = z.object({ slug: slugSchema, q: z.string().max(128), limit: z.number().int().min(1).max(10).optional() }).strict();
 const updateItemSchema = z.object({ slug: slugSchema, itemId: idSchema, name: textSchema.optional(), pickPolicy: pickSchema.optional() }).strict();
 const archiveItemSchema = z.object({ slug: slugSchema, itemId: idSchema }).strict();
 const conversionSchema = z.object({ slug: slugSchema, itemId: idSchema, unitId: idSchema, factor: decimalSchema }).strict();
@@ -51,18 +56,43 @@ async function writeContext(slug: string, ctx: ActionContext) {
 export async function createItemAction(raw: unknown) {
   return guardedAction({ schema: createItemSchema }, async (input, ctx) => {
     const params = await writeContext(input.slug, ctx);
-    const r = await createItem(
-      { ...params, requestId: ctx.requestId },
-      {
-        code: input.code,
-        name: input.name,
-        baseUnitId: input.baseUnitId,
-        ...(input.quantityScale === undefined ? {} : { quantityScale: input.quantityScale }),
-        ...(input.trackingMode === undefined ? {} : { trackingMode: input.trackingMode }),
-        ...(input.pickPolicy === undefined ? {} : { pickPolicy: input.pickPolicy }),
-      },
-    );
+    const baseUnitId = input.baseUnitId ?? (await ensureDefaultUnit({ ...params, requestId: ctx.requestId })).unitId;
+    const create = (code: string) =>
+      createItem(
+        { ...params, requestId: ctx.requestId },
+        {
+          code,
+          name: input.name,
+          baseUnitId,
+          ...(input.quantityScale === undefined ? {} : { quantityScale: input.quantityScale }),
+          ...(input.trackingMode === undefined ? {} : { trackingMode: input.trackingMode }),
+          ...(input.pickPolicy === undefined ? {} : { pickPolicy: input.pickPolicy }),
+        },
+      );
+    if (input.autoCode !== true) {
+      const r = await create(input.code);
+      return { itemId: r.itemId };
+    }
+    const r = await createWithSuggestedCode({ code: input.code, auto: true, suggest: () => suggestCode(params, { kind: "item" }), create });
     return { itemId: r.itemId };
+  })(raw);
+}
+
+/** Sıradaki ürün kodu (T-250): sunucuda hesaplanır, yazımda benzersizlik yine denetlenir. */
+export async function suggestItemCodeAction(raw: unknown) {
+  return guardedAction({ schema: suggestItemCodeSchema }, async (input, ctx) => {
+    const params = await writeContext(input.slug, ctx);
+    return suggestCode(params, { kind: "item", ...(input.prefix === undefined ? {} : { prefix: input.prefix }) });
+  })(raw);
+}
+
+/** Yazdıkça ürün arama (T-250): kod/ad öneki ya da tam barkod; en çok 10 sonuç; okuma izni `stock.view` domain'de. */
+export async function searchItemsAction(raw: unknown) {
+  return guardedAction({ schema: searchItemsSchema }, async (input, ctx) => {
+    const principal = ctx.principal;
+    if (principal === null) throw new Error("unreachable: principal required");
+    const page = await searchItems({ db: getAppDb(), principal, tenantSlug: input.slug }, { q: input.q, status: "ACTIVE", limit: input.limit ?? 8 });
+    return { items: page.items.map((i) => ({ id: i.id, code: i.code, name: i.name })) };
   })(raw);
 }
 
