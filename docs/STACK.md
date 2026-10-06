@@ -46,6 +46,7 @@ Kaynak sözdizimi: `<dosya>#<json.yolu>` (package.json alanı) veya `docker-comp
 | MinIO STS (yalnızca test düzeneği: root olmayan geçici anahtar) | @aws-sdk/client-sts | 3.1146.0 | packages/storage/package.json#devDependencies.@aws-sdk/client-sts | T-125 |
 | Zod | zod | 4.6.5 | packages/shared/package.json#dependencies.zod | |
 | Zod (kuyruk bağdaştırıcısı) | zod | 4.6.5 | packages/queue-adapter/package.json#dependencies.zod | ADR-005 |
+| Zod (web Server Action girdi doğrulaması) | zod | 4.6.5 | apps/web/package.json#dependencies.zod | T-109b |
 | Drizzle ORM (kuyruk bağdaştırıcısı: `sql`) | drizzle-orm | 0.45.3 | packages/queue-adapter/package.json#dependencies.drizzle-orm | ADR-005 |
 | Tailwind CSS | tailwindcss | 4.3.3 | apps/web/package.json#dependencies.tailwindcss | T-109 |
 | Tailwind PostCSS eklentisi | @tailwindcss/postcss | 4.3.3 | apps/web/package.json#dependencies.@tailwindcss/postcss | T-109 |
