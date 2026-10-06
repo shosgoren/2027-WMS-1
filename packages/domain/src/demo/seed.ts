@@ -112,18 +112,18 @@ export interface BootstrapResult {
   readonly written: boolean;
 }
 
+/** İş yolu: tenant kimliği YALNIZCA `DEMO_TENANT_ID` (dışarıdan verilemez; MINOR-3). */
+export function bootstrapDemoOwner(db: AccessDbClient, input: { readonly ownerUserId: string }): Promise<BootstrapResult> {
+  return bootstrapOwnerInTenant(db, input.ownerUserId, DEMO_TENANT_ID);
+}
+
 /**
  * Demo tenant'ta demo yöneticisinin ACTIVE `TENANT_ADMIN` üyeliği ve (ACTIVE sahip yoksa) sahipliği yoksa kurar.
  * `withSystemTenant(.., 'demo.bootstrap', ..)`: tenant satırı okunur; `slug='demo' AND is_demo=true` değilse HATA (fail-closed).
  * Yazımlar `ON CONFLICT DO NOTHING` (eşzamanlı iki çağrıda tek üyelik/rol/audit); sahip ve yönetici üyeliği zaten varsa
- * HİÇBİR ŞEY yazılmaz. `tenantId` yalnızca testin `is_demo=false` kimliği denemesi içindir; iş yolu varsayılanı kullanır.
+ * HİÇBİR ŞEY yazılmaz. `bootstrapOwnerInTenant` YALNIZCA testler içindir (`is_demo=false` kimliği denemesi); iş kodu `bootstrapDemoOwner` çağırır.
  */
-export async function bootstrapDemoOwner(
-  db: AccessDbClient,
-  input: { readonly ownerUserId: string; readonly tenantId?: string },
-): Promise<BootstrapResult> {
-  const tenantId = input.tenantId ?? DEMO_TENANT_ID;
-  const ownerUserId = input.ownerUserId;
+export async function bootstrapOwnerInTenant(db: AccessDbClient, ownerUserId: string, tenantId: string): Promise<BootstrapResult> {
   try {
     return await withSystemTenant(db, tenantId, DEMO_BOOTSTRAP_REASON, async (tx): Promise<BootstrapResult> => {
       const tenantRows = await tx.execute<{ slug: string; is_demo: boolean }>(
@@ -156,6 +156,7 @@ export async function bootstrapDemoOwner(
 
       let written = false;
       let grantedOwner = false;
+      let versionBumped = false;
       const inserted = await tx.execute<{ id: string }>(
         sql`INSERT INTO public.tenant_memberships (tenant_id, user_id, status, is_owner)
             VALUES (${tenantId}::uuid, ${ownerUserId}::uuid, 'ACTIVE', ${s.ownerCount === 0})
@@ -181,6 +182,7 @@ export async function bootstrapDemoOwner(
                  WHERE tenant_id = ${tenantId}::uuid AND id = ${membershipId}::uuid`,
           );
           written = true;
+          versionBumped = true; // UPDATE roles_version'ı zaten artırdı
         }
       }
       const role = await tx.execute<{ id: string }>(
@@ -189,7 +191,16 @@ export async function bootstrapDemoOwner(
             ON CONFLICT (tenant_id, membership_id, role_key) DO NOTHING
             RETURNING id`,
       );
-      if (role.length > 0) written = true;
+      if (role.length > 0) {
+        written = true;
+        // Var olan ACTIVE üyeliğe rol eklendi: M4 gereği roles_version artar (yeni satırda 0 kalır).
+        if (inserted.length === 0 && !versionBumped) {
+          await tx.execute(
+            sql`UPDATE public.tenant_memberships SET roles_version = roles_version + 1
+                 WHERE tenant_id = ${tenantId}::uuid AND id = ${membershipId}::uuid`,
+          );
+        }
+      }
       if (!written) return { written: false };
       await appendAudit(tx, {
         action: "member.role_changed",
@@ -407,7 +418,7 @@ export async function repairDemoSettings(db: AccessDbClient, adminUserId: string
     name: DEMO_TENANT_NAME,
     locale: template.locale,
     timeZone: template.timeZone,
-  });
+  }, { reason: DEMO_RESEED_REASON });
   const expectedSteps = template.steps.map((key) => ({ key, status: "DONE" }));
   const templateChanged = await withMembership(
     { client: db, userId: adminUserId, tenantId: DEMO_TENANT_ID, permission: (roles) => hasPermission(roles, "settings.manage") },
