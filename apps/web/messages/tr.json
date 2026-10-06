@@ -255,6 +255,64 @@
     },
     "demoLocked": "Demo hesabında bu işlem kapalı."
   },
+  "errors": {
+    "validation_failed": "Girilen bilgiler geçersiz.",
+    "validation_failedAction": "Alanları kontrol edip yeniden dene.",
+    "unauthenticated": "Oturumun yok ya da sona erdi.",
+    "unauthenticatedAction": "Giriş yapıp yeniden dene.",
+    "forbidden": "Bu işlem için yetkin yok.",
+    "forbiddenAction": "Çalışma alanı yöneticine sor.",
+    "tenant_suspended": "Bu çalışma alanı askıda.",
+    "tenant_suspendedAction": "Destekle iletişime geç.",
+    "tenant_closing": "Bu çalışma alanı kapatılıyor.",
+    "tenant_closingAction": "Verini dışa aktarman gerekiyorsa destekle iletişime geç.",
+    "not_found": "Kayıt bulunamadı.",
+    "not_foundAction": "Sayfayı yenileyip yeniden dene.",
+    "version_conflict": "Kayıt aynı anda başka bir işlemle değişti.",
+    "version_conflictAction": "Sayfayı yenileyip yeniden dene.",
+    "rate_limited": "Çok fazla deneme yapıldı.",
+    "rate_limitedAction": "Biraz bekleyip yeniden dene.",
+    "internal": "İşlem şu an tamamlanamadı.",
+    "internalAction": "Biraz sonra yeniden dene; sürerse destek koduyla yöneticine haber ver.",
+    "insufficient_stock": "Bu lokasyonda yeterli kullanılabilir stok yok.",
+    "insufficient_stockAction": "Miktarı azalt veya başka lokasyon seç.",
+    "tracking_violation": "Bu ürünün takip kuralına uymayan bir lot veya seri girildi.",
+    "tracking_violationAction": "Ürünün takip modunu kontrol edip lot/seri bilgisini düzelt.",
+    "location_locked": "Bu lokasyon sayım nedeniyle kilitli.",
+    "location_lockedAction": "Sayım bitince yeniden dene veya başka lokasyon seç.",
+    "reversal_blocked": "Bu işlem ters çevrilemez; stok bu arada kullanılmış.",
+    "reversal_blockedAction": "Önce ilgili stoğu geri getir ya da kısmi ters kayıt yap.",
+    "idempotency_mismatch": "Aynı istek anahtarı farklı bilgilerle kullanıldı.",
+    "idempotency_mismatchAction": "Formu yeniden aç ve işlemi yeni bir istek olarak gönder.",
+    "count_lock_row_missing": "İşlem tamamlanamadı.",
+    "count_lock_row_missingAction": "Biraz sonra yeniden dene; sürerse destek koduyla yöneticine haber ver.",
+    "forbidden_mfa_required": "Yönetici işlemleri için iki adımlı doğrulama gerekli.",
+    "forbidden_mfa_requiredAction": "Önce iki adımlı doğrulamayı kur, sonra işlemi yinele.",
+    "unauthenticated_recent_auth_required": "Bu işlem için kimliğini yeniden doğrulaman gerekiyor.",
+    "unauthenticated_recent_auth_requiredAction": "Yeniden giriş yapıp işlemi yinele.",
+    "validation_failed_code_taken": "Bu kod zaten kullanılıyor.",
+    "validation_failed_code_takenAction": "Başka bir kod yaz.",
+    "validation_failed_in_use": "Kayıt kullanımda olduğu için bu değişiklik yapılamaz.",
+    "validation_failed_in_useAction": "Önce stoğu boşalt veya bağlı kayıtları arşivle, sonra yeniden dene.",
+    "validation_failed_parent_invalid": "Seçilen üst lokasyon uygun değil.",
+    "validation_failed_parent_invalidAction": "Aynı depodaki aktif bir üst lokasyon seç.",
+    "validation_failed_handling_unit_cycle": "Taşıma birimleri birbirinin içine döngü oluşturacak şekilde yerleştirilemez.",
+    "validation_failed_handling_unit_cycleAction": "Başka bir üst taşıma birimi seç.",
+    "validation_failed_barcode_ambiguous": "Bu barkod birden fazla ürün veya birimle eşleşiyor.",
+    "validation_failed_barcode_ambiguousAction": "Ürünü listeden elle seç.",
+    "validation_failed_unit_conversion_invalid": "Birim dönüşüm katsayısı geçersiz.",
+    "validation_failed_unit_conversion_invalidAction": "Sıfırdan büyük ve en çok 6 ondalıklı bir katsayı gir.",
+    "validation_failed_quantity_scale": "Miktar, ürünün izin verdiği ondalık basamak sayısını aşıyor.",
+    "validation_failed_quantity_scaleAction": "Miktarı ürünün hassasiyetine göre düzelt.",
+    "validation_failed_document_too_large": "Belgede izin verilen en fazla satır sayısı aşıldı.",
+    "validation_failed_document_too_largeAction": "Belgeyi birkaç belgeye böl.",
+    "validation_failed_document_state": "Belgenin durumu bu işleme uygun değil.",
+    "validation_failed_document_stateAction": "Sayfayı yenileyip belgenin güncel durumunu kontrol et.",
+    "validation_failed_idempotency_key_required": "İstek anahtarı eksik.",
+    "validation_failed_idempotency_key_requiredAction": "Sayfayı yenileyip işlemi yeniden gönder.",
+    "forbidden_warehouse_out_of_scope": "Bu depo senin çalışma kapsamının dışında.",
+    "forbidden_warehouse_out_of_scopeAction": "Erişim gerekiyorsa çalışma alanı yöneticinden depoyu kapsamına eklemesini iste."
+  },
   "serverErrors": {
     "code": "Hata kodu: {code}",
     "supportCode": "Destek kodu: {code}",
@@ -427,6 +485,56 @@
     },
     "audit": {
       "exported": "Denetim kaydını dışa aktardın."
+    },
+    "warehouse": {
+      "created": "Bir depo oluşturdun.",
+      "updated": "Bir depoyu güncelledin.",
+      "archived": "Bir depoyu arşivledin."
+    },
+    "location": {
+      "created": "Bir lokasyon oluşturdun.",
+      "updated": "Bir lokasyonu güncelledin.",
+      "archived": "Bir lokasyonu arşivledin."
+    },
+    "warehouse_scope": {
+      "changed": "Bir üyenin depo kapsamını değiştirdin."
+    },
+    "unit": {
+      "created": "Bir birim oluşturdun.",
+      "updated": "Bir birimi güncelledin."
+    },
+    "item": {
+      "created": "Bir ürün oluşturdun.",
+      "updated": "Bir ürünü güncelledin.",
+      "archived": "Bir ürünü arşivledin."
+    },
+    "item_barcode": {
+      "added": "Bir ürüne barkod ekledin.",
+      "removed": "Bir üründen barkod kaldırdın."
+    },
+    "unit_conversion": {
+      "set": "Bir ürünün birim dönüşümünü ayarladın."
+    },
+    "lot": {
+      "created": "Bir lot oluşturdun."
+    },
+    "serial": {
+      "registered": "Bir seri numarası kaydettin."
+    },
+    "handling_unit": {
+      "created": "Bir taşıma birimi oluşturdun.",
+      "changed": "Bir taşıma birimini değiştirdin."
+    },
+    "stock_document": {
+      "created": "Bir stok belgesi oluşturdun.",
+      "approved": "Bir stok belgesini onayladın.",
+      "posted": "Bir stok belgesini işledin.",
+      "cancelled": "Bir stok belgesini iptal ettin.",
+      "reversed": "Bir stok belgesini ters çevirdin."
+    },
+    "reservation": {
+      "created": "Stok rezerve ettin.",
+      "released": "Bir rezervasyonu serbest bıraktın."
     },
     "other": "Bir işlem yaptın."
   },

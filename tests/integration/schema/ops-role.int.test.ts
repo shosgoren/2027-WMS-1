@@ -3,6 +3,7 @@
 // Her test geçici bir veritabanında koşar (tam migration kümesi); rol küme düzeyindedir, parola teste özgü rastgele
 // değerdir ve sonunda silinir. Kalıcı veri bırakılmaz.
 import { randomBytes, randomUUID } from "node:crypto";
+import { readdirSync } from "node:fs";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { MIGRATIONS_DIR, migrateDown, migrateUp } from "../../../packages/db/src/migrate.ts";
@@ -11,6 +12,15 @@ import { readIntEnv, redactErrorChain } from "../harness/env.ts";
 const env = readIntEnv(process.env);
 const OPS = "wms_ops";
 const INSUFFICIENT_PRIVILEGE = "42501";
+
+// 0009 ve sonrası: to:0008 geri almada ters, yeniden uygulamada düz sırayla beklenir (migration dizininden türetilir;
+// yeni migration eklenince test kırılmaz, assertion tam eşitliktir).
+const EXPECTED_UP = readdirSync(MIGRATIONS_DIR)
+  .filter((f) => /^\d{4}_.+\.up\.sql$/.test(f))
+  .map((f) => f.slice(0, 4))
+  .filter((v) => v >= "0009")
+  .sort();
+const EXPECTED_DOWN = [...EXPECTED_UP].reverse();
 
 const opsPassword = randomBytes(24).toString("hex");
 const dbName = `wms_ops_${randomBytes(5).toString("hex")}`;
@@ -363,14 +373,14 @@ describe(`0009 ileri/geri/ileri (target=${env.target})`, () => {
     clients.splice(clients.indexOf(ops), 1);
 
     const down = await migrateDown({ url: scratchUrl, to: "0008", wmsEnv: "ci" });
-    expect(down.reverted).toEqual(["0009"]);
+    expect(down.reverted).toEqual(EXPECTED_DOWN);
     admin = await connect(scratchUrl);
     expect(await shape()).toEqual({ fns: [], pols: 0, ops: 0 });
     const role = await admin.query("SELECT 1 FROM pg_roles WHERE rolname = $1", [OPS]);
     expect(role.rowCount).toBe(1);
 
     const up = await migrateUp({ url: scratchUrl });
-    expect(up.applied).toEqual(["0009"]);
+    expect(up.applied).toEqual(EXPECTED_UP);
     expect(await shape()).toEqual({ fns: ["ops_open_session", "ops_session_audited"], pols: 5, ops: 3 });
     expect((await migrateUp({ url: scratchUrl })).applied).toEqual([]);
 
@@ -392,7 +402,7 @@ describe(`0009 ileri/geri/ileri (target=${env.target})`, () => {
     await ops.end();
     clients.splice(clients.indexOf(ops), 1);
     const down = await migrateDown({ url: scratchUrl, to: "0008", wmsEnv: "ci" });
-    expect(down.reverted).toEqual(["0009"]);
+    expect(down.reverted).toEqual(EXPECTED_DOWN);
     const a = await connect(adminUrl);
     try {
       // A-67 koşulu: ADMIN-only satırı yalnızca BYPASSRLS+CREATEROLE (süper kullanıcı olmayan) sahip rol taşıyabilir.
@@ -407,7 +417,7 @@ describe(`0009 ileri/geri/ileri (target=${env.target})`, () => {
       await expect(migrateUp({ url: scratchUrl })).rejects.toThrow(/yetkisiz üye/);
       await a.query(`REVOKE ${OPS} FROM wms_app`);
       const up = await migrateUp({ url: scratchUrl });
-      expect(up.applied).toEqual(["0009"]);
+      expect(up.applied).toEqual(EXPECTED_UP);
     } finally {
       // Assertion düşse de wms_app'te wms_ops ADMIN'i kalmasın (küme geneli rol; sonraki dosyaları kirletmez).
       await a.query(`REVOKE ${OPS} FROM wms_app`).catch(() => undefined);

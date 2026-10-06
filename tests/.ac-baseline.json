@@ -1,6 +1,6 @@
 {
   "acTests": {
-    "AC-04": 56,
+    "AC-04": 75,
     "AC-05": 2,
     "AC-18": 9,
     "AC-28": 59,
@@ -20,6 +20,8 @@
     "tests/integration/ac/ac-18-membership-db.int.test.ts": 21,
     "tests/integration/ac/ac-28-runtime.int.test.ts": 16,
     "tests/integration/audit-immutability.int.test.ts": 43,
+    "tests/integration/schema/documents-qa.int.test.ts": 27,
+    "tests/integration/schema/phase2-catalog-qa.int.test.ts": 49,
     "tests/unit/ac/ac-28-lint.test.ts": 119
   }
 }

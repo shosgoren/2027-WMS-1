@@ -76,6 +76,62 @@ export type {
 export { AUDIT_ACTIONS, AuditError, CHANGE_SUMMARY_MAX_BYTES, REDACTED, appendAudit, isSensitiveKey, looksSensitiveValue, maskChangeSummary, recordSecurityEvent } from "./audit.ts";
 export type { AppendedAudit, AuditAction, AuditEntry, JsonValue, SecurityEventInput } from "./audit.ts";
 export type { AuditLog, NewAuditLog, NewRequestRateLimit, RequestRateLimit } from "./schema/audit.ts";
+// Depo/lokasyon tabloları: yalnızca TİPLER (T-202); tablo nesneleri `@wms/db/internal/schema` alt yolundadır.
+export type {
+  CountLockStatus,
+  Location,
+  LocationCountLock,
+  LocationKind,
+  MembershipWarehouseScope,
+  NewLocation,
+  NewMembershipWarehouseScope,
+  NewWarehouse,
+  Warehouse,
+  WarehouseStatus,
+} from "./schema/warehouse.ts";
+// Katalog/izlenebilirlik tabloları: yalnızca TİPLER (T-204); tablo nesneleri `@wms/db/internal/schema` alt yolundadır.
+export type {
+  CatalogStatus,
+  HandlingUnit,
+  HandlingUnitKind,
+  HandlingUnitStatus,
+  InventoryOwner,
+  Item,
+  ItemBarcode,
+  Lot,
+  NewHandlingUnit,
+  NewInventoryOwner,
+  NewItem,
+  NewItemBarcode,
+  NewLot,
+  NewSerial,
+  NewUnit,
+  NewUnitConversion,
+  PickPolicy,
+  Serial,
+  TrackingMode,
+  Unit,
+  UnitConversion,
+} from "./schema/catalog.ts";
+// Stok belgesi tabloları: yalnızca TİPLER (T-206); tablo nesneleri `@wms/db/internal/schema` alt yolundadır.
+export type {
+  DocumentKind,
+  DocumentLine,
+  DocumentStatus,
+  DocumentStatusHistoryRow,
+  DocumentTypeVersion,
+  IdempotencyRecord,
+  IdempotencyStatus,
+  LineStockStatus,
+  NewStockDocument,
+  NewDocumentLine,
+  NewDocumentStatusHistoryRow,
+  NewIdempotencyRecord,
+  NewNumberSequence,
+  NumberSequence,
+  ReversalStatus,
+  StockDocument,
+} from "./schema/documents.ts";
 // Bağlantı hedefi karşılaştırması (connection-target.ts, yan etkisiz): kuyruk kurulum CLI'ı uygulama bağlantısını reddetmek için kullanır.
 export { consumeRateLimit } from "./rate-limit.ts";
 export type { ConsumeRateLimitParams, ConsumeRateLimitResult } from "./rate-limit.ts";

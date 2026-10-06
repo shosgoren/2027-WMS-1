@@ -24,6 +24,7 @@ const IMAGE = "postgres:18.6-trixie";
 const MIGRATOR = "wms_ns_migrator";
 const INFRA = "wms_ns_infra";
 const PROBE = "wms_identity_probe";
+const OPS = "wms_ops";
 
 let container: StartedTestContainer | undefined;
 let superUrl = "";
@@ -111,6 +112,8 @@ beforeAll(async () => {
     await c.query("CREATE ROLE wms_auth LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION");
     await c.query(`CREATE ROLE ${PROBE} NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION`);
     await c.query(`CREATE ROLE ${INFRA} NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION`);
+    // wms_ops: 0009 önkoşulu (01-roles.sh / staging ile aynı: NOLOGIN, parolasız, üyelik yok; A-80).
+    await c.query(`CREATE ROLE ${OPS} NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION`);
     await c.query(`CREATE ROLE ${MIGRATOR} LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD '${migratorPassword}'`);
   });
 }, 300_000);
@@ -434,5 +437,236 @@ describe("0006_invitation_accept — süper kullanıcı olmayan migrator", () =>
     });
     expect((await migrateUp({ url: u, dir: thru6() })).applied).toEqual(["0006"]);
     await expectFunction(u);
+  });
+});
+
+// 0007–0012 (T-234; T-209 QA MINOR): 0001–0012 ileri → 0012..0010 geri → ileri; dolu tablo down bekçileri.
+describe("0007–0012 — süper kullanıcı olmayan migrator", () => {
+  let thru12Dir: string | undefined;
+  const thru12 = (): string => (thru12Dir ??= copyMigrations("0012"));
+  const ALL = ["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012"];
+
+  /** Şema parmak izi: sütun, RLS bayrağı, politika, kısıt, dizin, işlev (sahip + ACL) özetleri (migrator katalogundan). */
+  async function schemaDigest(u: string): Promise<Record<string, string>> {
+    return withClient(u, async (c) => {
+      const q = async (sql: string): Promise<string> => (await c.query<{ d: string }>(sql)).rows[0]?.d ?? "";
+      const nsp = `n.nspname IN ('public', 'wms_probe', 'wms_meta')`;
+      return {
+        columns: await q(
+          `SELECT md5(coalesce(string_agg(concat_ws('|', table_schema, table_name, column_name, ordinal_position, data_type, is_nullable, coalesce(column_default, '')), E'\\n' ORDER BY table_schema, table_name, ordinal_position), '')) AS d
+             FROM information_schema.columns WHERE table_schema IN ('public', 'wms_probe', 'wms_meta')`,
+        ),
+        rls: await q(
+          `SELECT md5(coalesce(string_agg(format('%I.%I:%s:%s', n.nspname, c.relname, c.relrowsecurity, c.relforcerowsecurity), ',' ORDER BY n.nspname, c.relname), '')) AS d
+             FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind = 'r' AND ${nsp}`,
+        ),
+        policies: await q(
+          `SELECT md5(coalesce(string_agg(concat_ws('|', schemaname, tablename, policyname, permissive, roles::text, cmd, qual, with_check), ',' ORDER BY schemaname, tablename, policyname), '')) AS d FROM pg_policies`,
+        ),
+        constraints: await q(
+          `SELECT md5(coalesce(string_agg(concat_ws('|', n.nspname, cl.relname, co.conname, pg_get_constraintdef(co.oid)), ',' ORDER BY n.nspname, cl.relname, co.conname), '')) AS d
+             FROM pg_constraint co JOIN pg_class cl ON cl.oid = co.conrelid JOIN pg_namespace n ON n.oid = cl.relnamespace WHERE ${nsp}`,
+        ),
+        indexes: await q(`SELECT md5(coalesce(string_agg(indexdef, ',' ORDER BY indexname), '')) AS d FROM pg_indexes WHERE schemaname IN ('public', 'wms_probe')`),
+        functions: await q(
+          `SELECT md5(coalesce(string_agg(concat_ws('|', n.nspname, p.oid::regprocedure::text, p.proowner::regrole::text, p.prosecdef, p.proconfig::text, p.proacl::text, md5(p.prosrc)), ',' ORDER BY n.nspname, p.oid::regprocedure::text), '')) AS d
+             FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname IN ('public', 'wms_probe')`,
+        ),
+        triggers: await q(
+          `SELECT md5(coalesce(string_agg(concat_ws('|', t.tgrelid::regclass::text, t.tgname, t.tgenabled, t.tgfoid::regprocedure::text), ',' ORDER BY t.tgrelid::regclass::text, t.tgname), '')) AS d
+             FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE NOT t.tgisinternal AND ${nsp}`,
+        ),
+        columnAcl: await q(
+          `SELECT md5(coalesce(string_agg(concat_ws('|', n.nspname, c.relname, a.attname, x.grantee::regrole::text, x.privilege_type, x.is_grantable), ',' ORDER BY n.nspname, c.relname, a.attname, x.grantee::regrole::text, x.privilege_type), '')) AS d
+             FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+             CROSS JOIN LATERAL aclexplode(a.attacl) x WHERE a.attacl IS NOT NULL AND NOT a.attisdropped AND ${nsp}`,
+        ),
+        tableAcl: await q(
+          `SELECT md5(coalesce(string_agg(concat_ws('|', n.nspname, c.relname, c.relowner::regrole::text, c.relacl::text), ',' ORDER BY n.nspname, c.relname), '')) AS d
+             FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind = 'r' AND ${nsp}`,
+        ),
+      };
+    });
+  }
+
+  it("ileri (0001–0012) → 0012..0010 geri (to 0009) → ileri; şema parmak izi ilk ileri koşuyla eşit; süper kullanıcı yok", async () => {
+    await setProbeMemberships(STANDARD_GRANT);
+    const u = await freshDatabase();
+    expect((await migrateUp({ url: u, dir: thru12() })).applied).toEqual(ALL);
+    const before = await schemaDigest(u);
+    expect(Object.values(before).every((d) => d.length === 32)).toBe(true);
+    await withClient(u, async (c) => {
+      const r = await c.query<{ su: boolean; byp: boolean }>(
+        "SELECT rolsuper AS su, rolbypassrls AS byp FROM pg_roles WHERE rolname = current_user",
+      );
+      expect(r.rows).toEqual([{ su: false, byp: false }]);
+    });
+
+    expect((await migrateDown({ url: u, dir: thru12(), to: "0009", wmsEnv: "ci" })).reverted).toEqual(["0012", "0011", "0010"]);
+    const mid = await schemaDigest(u);
+    expect(mid).not.toEqual(before);
+    await withClient(u, async (c) => {
+      const gone = await c.query(`SELECT 1 FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relname IN ('warehouses', 'items', 'documents')`);
+      expect(gone.rows).toEqual([]);
+    });
+
+    expect((await migrateUp({ url: u, dir: thru12() })).applied).toEqual(["0010", "0011", "0012"]);
+    expect(await schemaDigest(u)).toEqual(before);
+  });
+
+  it("negatif kontrol: tek tetikleyici ALWAYS yerine ENABLE yapılırsa parmak izi değişir; geri alınca eşitlenir", async () => {
+    await setProbeMemberships(STANDARD_GRANT);
+    const u = await freshDatabase();
+    expect((await migrateUp({ url: u, dir: thru12() })).applied).toEqual(ALL);
+    const base = await schemaDigest(u);
+    const trg = async (): Promise<string[]> =>
+      withClient(u, async (c) => (await c.query<{ e: string }>(
+        `SELECT tgenabled AS e FROM pg_trigger WHERE tgname = 'document_type_versions_immutable' AND tgrelid = 'public.document_type_versions'::regclass`,
+      )).rows.map((r) => r.e));
+    expect(await trg()).toEqual(["A"]);
+    await withClient(u, (c) => c.query("ALTER TABLE public.document_type_versions ENABLE TRIGGER document_type_versions_immutable"));
+    expect(await trg()).toEqual(["O"]);
+    const changed = await schemaDigest(u);
+    expect(changed.triggers).not.toBe(base.triggers);
+    expect({ ...changed, triggers: base.triggers }).toEqual(base);
+    await withClient(u, (c) => c.query("ALTER TABLE public.document_type_versions ENABLE ALWAYS TRIGGER document_type_versions_immutable"));
+    expect(await schemaDigest(u)).toEqual(base);
+  });
+
+  it("sütun ACL parmak izi gerçek veri taşır; tek sütun yetkisi REVOKE edilirse yalnızca columnAcl değişir; GRANT ile eşitlenir", async () => {
+    await setProbeMemberships(STANDARD_GRANT);
+    const u = await freshDatabase();
+    expect((await migrateUp({ url: u, dir: thru12() })).applied).toEqual(ALL);
+    const base = await schemaDigest(u);
+    await withClient(u, async (c) => {
+      // Boş-küme md5'i değil; 0010/0011/0012'nin sütun GRANT'ları katalogda gerçekten var.
+      const empty = await c.query<{ d: string }>("SELECT md5('') AS d");
+      expect(base.columnAcl).not.toBe(empty.rows[0]?.d);
+      const n = await c.query<{ n: string; hist: string }>(
+        `SELECT count(*)::text AS n,
+                count(*) FILTER (WHERE c.relname = 'document_status_history' AND a.attname = 'reason' AND x.grantee = 'wms_app'::regrole AND x.privilege_type = 'INSERT')::text AS hist
+           FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace ns ON ns.oid = c.relnamespace
+           CROSS JOIN LATERAL aclexplode(a.attacl) x WHERE a.attacl IS NOT NULL AND NOT a.attisdropped AND ns.nspname = 'public'`,
+      );
+      expect(Number(n.rows[0]?.n)).toBeGreaterThan(20);
+      expect(n.rows[0]?.hist).toBe("1");
+      await c.query("REVOKE INSERT (reason) ON public.document_status_history FROM wms_app");
+    });
+    const changed = await schemaDigest(u);
+    expect(changed.columnAcl).not.toBe(base.columnAcl);
+    expect({ ...changed, columnAcl: base.columnAcl }).toEqual(base);
+    await withClient(u, (c) => c.query("GRANT INSERT (reason) ON public.document_status_history TO wms_app"));
+    expect(await schemaDigest(u)).toEqual(base);
+  });
+
+  it("0010 (T-235): FORCE RLS altındaki sahip A bağlamında B anahtarlı locations INSERT eder: row_security_active true, 42501 'row-level security policy'", async () => {
+    await setProbeMemberships(STANDARD_GRANT);
+    const u = await freshDatabase();
+    expect((await migrateUp({ url: u, dir: thru12() })).applied).toEqual(ALL);
+    const tenantA = randomUUID();
+    const tenantB = randomUUID();
+    await withClient(u, async (c) => {
+      for (const t of [tenantA, tenantB]) {
+        await c.query("BEGIN");
+        await c.query("SELECT set_config('app.current_tenant_id', $1, true)", [t]);
+        await c.query("INSERT INTO public.tenants (id, slug, name) VALUES ($1, $2, 'NS Loc')", [t, `ns-${randomBytes(4).toString("hex")}`]);
+        await c.query("INSERT INTO public.warehouses (tenant_id, code, name) VALUES ($1, 'NS-W', 'NS Depo')", [t]);
+        await c.query("COMMIT");
+      }
+      await c.query("BEGIN");
+      await c.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantA]);
+      const active = await c.query<{ a: boolean }>("SELECT row_security_active('public.locations') AS a");
+      expect(active.rows).toEqual([{ a: true }]);
+      const wh = await c.query<{ id: string }>("SELECT id FROM public.warehouses");
+      expect(wh.rows).toHaveLength(1);
+      let err: (Error & { code?: string }) | undefined;
+      try {
+        await c.query(
+          "INSERT INTO public.locations (tenant_id, warehouse_id, code, name, depth, kind) VALUES ($1, $2, 'NS-L', 'NS Konum', 0, 'STORAGE')",
+          [tenantB, (wh.rows[0] as { id: string }).id],
+        );
+      } catch (e) {
+        err = e as Error & { code?: string };
+      }
+      await c.query("ROLLBACK");
+      expect(err?.code).toBe("42501");
+      expect(err?.message).toContain("row-level security policy");
+    });
+  });
+
+  // Her bekçi testi: tenant bağlamında tek kalıcı satır; staging down RAISE eder, satır yerinde kalır; ci down geçer.
+  async function guardCase(opts: { target: string; fail: string; down: RegExp; table: string; insert: string; keep: string }): Promise<void> {
+    await setProbeMemberships(STANDARD_GRANT);
+    const u = await freshDatabase();
+    expect((await migrateUp({ url: u, dir: thru12() })).applied).toEqual(ALL);
+    const tenantId = randomUUID();
+    await withClient(u, async (c) => {
+      await c.query("BEGIN");
+      await c.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+      await c.query("INSERT INTO public.tenants (id, slug, name) VALUES ($1, $2, 'NS Guard')", [tenantId, `ns-${randomBytes(4).toString("hex")}`]);
+      await c.query(opts.insert, [tenantId]);
+      await c.query("COMMIT");
+      // Önkoşul: FORCE RLS altında bağlamsız sahip satırı GÖRMEZ (testin anlamı).
+      const blind = await c.query<{ n: string }>(`SELECT count(*)::text AS n FROM public.${opts.table}`);
+      expect(blind.rows[0]?.n, "bağlamsız FORCE RLS sahibi satır görmemeli").toBe("0");
+    });
+    const before = await schemaDigest(u);
+
+    await expect(migrateDown({ url: u, dir: thru12(), to: opts.target, wmsEnv: "staging" })).rejects.toThrow(opts.down);
+
+    await withClient(u, async (c) => {
+      // Bekçi RAISE etti: koşturucu migration başına transaction açar; bekçili migration (ve altındakiler) defterde durur.
+      const ledger = await c.query<{ version: string }>("SELECT version FROM wms_meta.schema_migrations ORDER BY version");
+      expect(ledger.rows.map((r) => r.version).filter((v) => v <= opts.fail)).toEqual(ALL.filter((v) => v <= opts.fail));
+      // Tablo, FORCE RLS ve satır yerinde.
+      const force = await c.query<{ relforcerowsecurity: boolean; relrowsecurity: boolean }>(
+        `SELECT relforcerowsecurity, relrowsecurity FROM pg_class WHERE oid = 'public.${opts.table}'::regclass`,
+      );
+      expect(force.rows).toEqual([{ relforcerowsecurity: true, relrowsecurity: true }]);
+      await c.query("BEGIN");
+      await c.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+      const kept = await c.query<{ n: string }>(`SELECT count(*)::text AS n FROM public.${opts.table} WHERE ${opts.keep}`);
+      await c.query("ROLLBACK");
+      expect(kept.rows[0]?.n).toBe("1");
+    });
+
+    // Bayraklı ortam (ci): aynı dolu veritabanında geri alma çalışır; tekrar ileri hatasız.
+    const down = await migrateDown({ url: u, dir: thru12(), to: opts.target, wmsEnv: "ci" });
+    expect(down.reverted.length).toBeGreaterThan(0);
+    expect((await migrateUp({ url: u, dir: thru12() })).applied).toEqual(ALL.filter((v) => v > opts.target));
+    expect(await schemaDigest(u)).toEqual(before);
+  }
+
+  it("0010: dolu warehouses ile staging geri alma RAISE eder, veri yerinde; ci bayrağıyla geçer", async () => {
+    await guardCase({
+      target: "0009",
+      fail: "0010",
+      down: /0010_warehouses_locations down:.*warehouses.*satır var/,
+      table: "warehouses",
+      insert: "INSERT INTO public.warehouses (tenant_id, code, name) VALUES ($1, 'NS-W1', 'NS Depo')",
+      keep: "code = 'NS-W1'",
+    });
+  });
+
+  it("0011: dolu units ile staging geri alma RAISE eder, veri yerinde; ci bayrağıyla geçer", async () => {
+    await guardCase({
+      target: "0010",
+      fail: "0011",
+      down: /0011_catalog_traceability down:.*units.*satır var/,
+      table: "units",
+      insert: "INSERT INTO public.units (tenant_id, code, name) VALUES ($1, 'NS-U1', 'NS Birim')",
+      keep: "code = 'NS-U1'",
+    });
+  });
+
+  it("0012: dolu number_sequences ile staging geri alma RAISE eder, veri yerinde; ci bayrağıyla geçer", async () => {
+    await guardCase({
+      target: "0011",
+      fail: "0012",
+      down: /0012_stock_documents down:.*number_sequences.*satır var/,
+      table: "number_sequences",
+      insert: "INSERT INTO public.number_sequences (tenant_id, document_kind, period) VALUES ($1, 'STOCK_IN', 'NS-2026')",
+      keep: "period = 'NS-2026'",
+    });
   });
 });

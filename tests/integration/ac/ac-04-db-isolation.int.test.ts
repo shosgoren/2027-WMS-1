@@ -21,7 +21,7 @@ import { sql } from "../../../packages/db/node_modules/drizzle-orm/index.js";
 import { createDbClient, type DbClient } from "../../../packages/db/src/client.ts";
 import { withUser } from "../../../packages/db/src/index.ts";
 import { APP_ROLE, AUTH_ROLE, PROBE_ROLE, readIntEnv, redactErrorChain } from "../harness/env.ts";
-import { mkMembership, mkUser, newRegistry, seedWorld, type TenantWorld } from "../fixtures/tenants.ts";
+import { cleanupDocuments, mkMembership, mkUser, newRegistry, seedWorld, type TenantWorld } from "../fixtures/tenants.ts";
 
 const env = readIntEnv(process.env);
 const urls = [env.databaseUrl, env.databaseUrlDirect];
@@ -105,7 +105,11 @@ async function discoverTables(): Promise<TenantTable[]> {
       WHERE c.table_schema = 'public' AND c.column_name = 'tenant_id'
       ORDER BY c.table_name`,
   );
-  const names = new Set(found.rows.map((r) => r.table_name));
+  // T-206: document_type_versions KÜRESEL sistem tablosudur (tenant_id NULL = sistem satırı, A-79; wms_app yalnızca SELECT, yazma
+  // politikası yok): "her tenant için satır" ve "yabancı satır görünmez" varsayımları ona uygulanamaz. Yalnızca bu tablo, adıyla
+  // dışarıda; görünürlük/yazma yasağı documents-schema.int.test.ts'te sınanır. Başka tablo bu listeye eklenemez (gevşetme değil).
+  const GLOBAL_SYSTEM_TABLES = new Set(["document_type_versions"]);
+  const names = new Set(found.rows.map((r) => r.table_name).filter((n) => !GLOBAL_SYSTEM_TABLES.has(n)));
   names.add("tenants"); // tenant_id sütunu yok; id tenant kimliğidir (ADR-016 §2)
   const out: TenantTable[] = [];
   for (const name of [...names].sort()) {
@@ -181,7 +185,26 @@ async function cleanupExceptTenants(c: pg.Client, r: typeof reg): Promise<void> 
   const tenantIds = r.worlds.map((w) => w.tenantId);
   const userIds = [...r.worlds.flatMap((w) => [w.ownerUserId, w.memberUserId]), ...r.extraUsers];
   if (tenantIds.length > 0) {
-    for (const t of ["invitations", "membership_roles", "tenant_memberships", "tenant_settings"]) {
+    await cleanupDocuments(c, tenantIds); // T-206 tabloları (append-only tetikleyici replica ile atlanır)
+    // T-204 + T-202 tabloları FK sırasıyla önce (taşıma birimi → seri → lot → barkod/dönüşüm → sahip → ürün → birim; kapsam → kilit → lokasyon → depo).
+    for (const t of [
+      "handling_units",
+      "serials",
+      "lots",
+      "item_barcodes",
+      "unit_conversions",
+      "inventory_owners",
+      "items",
+      "units",
+      "membership_warehouse_scopes",
+      "location_count_locks",
+      "locations",
+      "warehouses",
+      "invitations",
+      "membership_roles",
+      "tenant_memberships",
+      "tenant_settings",
+    ]) {
       await c.query(`DELETE FROM public.${t} WHERE tenant_id = ANY($1::uuid[])`, [tenantIds]);
     }
   }
