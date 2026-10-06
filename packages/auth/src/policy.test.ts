@@ -2,15 +2,14 @@
 // ek alan/kapalı uç yapılandırması, davetle hesap açma (sahte bağımlılıklarla). Bağlantı gerektirmez.
 import { randomBytes, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { AuthConfigError, readAuthEnv } from "./index.ts";
+import { DB_CLIENT_SETTINGS, createDbClient } from "@wms/db/internal";
+import { AuthConfigError, createAuth, inspectAuthOptions, readAuthEnv } from "./index.ts";
+import type { AuthOptionsSnapshot, AuthService } from "./index.ts";
 import {
   DEMO_FORBIDDEN_PATHS,
-  DISABLED_PATHS,
   EMAIL_RATE_RULES,
   InvitedAccountError,
   SESSION_ABSOLUTE_MAX_SEC,
-  SESSION_ADDITIONAL_FIELDS,
-  USER_ADDITIONAL_FIELDS,
   createInvitedAccountWith,
   emailRateKey,
   isDemoEmail,
@@ -108,12 +107,73 @@ describe("kural tablosu (A-41)", () => {
   });
 });
 
-describe("Better Auth yapılandırması (ADR-014 4. tur)", () => {
-  it("mfaVerifiedAt ve invitationClaimId input:false; /update-session kapalı", () => {
-    expect(SESSION_ADDITIONAL_FIELDS.mfaVerifiedAt.input).toBe(false);
-    expect(USER_ADDITIONAL_FIELDS.invitationClaimId.input).toBe(false);
-    expect(DISABLED_PATHS).toContain("/update-session");
-    expect(DISABLED_PATHS).toContain("/verify-password");
+describe("etkin Better Auth yapılandırması (auth.options; ADR-014 4. tur, MAJOR-2)", () => {
+  const social = {
+    GOOGLE_CLIENT_ID: rnd(),
+    GOOGLE_CLIENT_SECRET: rnd(),
+    MICROSOFT_CLIENT_ID: rnd(),
+    MICROSOFT_CLIENT_SECRET: rnd(),
+    AUTH_SOCIAL_ENABLED: "true",
+  };
+  const make = (extra: Record<string, string> = {}): AuthService => {
+    const e = readAuthEnv({ ...BASE_ENV, ...extra });
+    const mk = (url: string) => createDbClient({ url, ...DB_CLIENT_SETTINGS });
+    return createAuth({ client: mk(e.authDatabaseUrl), env: e });
+  };
+  const build = (extra: Record<string, string> = {}): AuthOptionsSnapshot => inspectAuthOptions(make(extra));
+
+  it("mfaVerifiedAt / invitationClaimId input:false; /update-session ve /verify-password kapalı", () => {
+    const o = build();
+    expect(o.session?.additionalFields?.mfaVerifiedAt?.input).toBe(false);
+    expect(o.user?.additionalFields?.invitationClaimId?.input).toBe(false);
+    expect(o.disabledPaths).toContain("/update-session");
+    expect(o.disabledPaths).toContain("/verify-password");
+  });
+  it("hesap bağlama kapalı, köken/CSRF denetimi açık, hız sınırı açık, kayıt varsayılan kapalı", () => {
+    const o = build();
+    expect(o.account?.accountLinking?.enabled).toBe(false);
+    expect(o.advanced?.disableOriginCheck).toBe(false);
+    expect(o.advanced?.disableCSRFCheck).toBe(false);
+    expect(o.rateLimit?.enabled).toBe(true);
+    expect(o.emailAndPassword?.disableSignUp).toBe(true);
+    expect(o.emailAndPassword?.revokeSessionsOnPasswordReset).toBe(true);
+    expect(o.advanced?.ipAddress?.ipAddressHeaders).toEqual(["fly-client-ip"]);
+    expect(build({ WMS_ENV: "local", SIGNUP_ENABLED: "true" }).emailAndPassword?.disableSignUp).toBe(false);
+  });
+  const gate = (o: AuthOptionsSnapshot, name: "google" | "microsoft") => o.socialProviders?.[name];
+  it("anlık görüntü: gizsiz, dondurulmuş ve canlı yapılandırmadan ayrık (mutasyon denemesi etkisiz)", () => {
+    const svc = make(social);
+    const snap = inspectAuthOptions(svc);
+    const text = JSON.stringify(snap);
+    for (const v of [social.GOOGLE_CLIENT_ID, social.GOOGLE_CLIENT_SECRET, social.MICROSOFT_CLIENT_ID, social.MICROSOFT_CLIENT_SECRET, BASE_ENV.BETTER_AUTH_SECRET]) expect(text).not.toContain(v);
+    expect(Object.keys(snap)).not.toContain("secret");
+    expect(Object.keys(snap)).not.toContain("database");
+    expect(Object.isFrozen(snap)).toBe(true);
+    expect(Object.isFrozen(snap.disabledPaths)).toBe(true);
+    expect(Object.isFrozen(snap.session?.additionalFields?.mfaVerifiedAt)).toBe(true);
+    // Mutasyon denemesi (dondurulmuş nesne → katı modda TypeError) canlı yapılandırmayı etkilemez.
+    expect(() => {
+      (snap.disabledPaths as string[]).length = 0;
+    }).toThrow(TypeError);
+    expect(() => {
+      (snap.session?.additionalFields?.mfaVerifiedAt as { input?: boolean }).input = true;
+    }).toThrow(TypeError);
+    const again = inspectAuthOptions(svc);
+    expect(again).not.toBe(snap);
+    expect(again.disabledPaths).toContain("/update-session");
+    expect(again.session?.additionalFields?.mfaVerifiedAt?.input).toBe(false);
+  });
+  it("sosyal sağlayıcılar: kayıt kapısı kapalıyken disableSignUp (istemci requestSignUp ile aşılamaz) + disableImplicitSignUp", () => {
+    const o = build(social);
+    for (const name of ["google", "microsoft"] as const) {
+      const p = gate(o, name);
+      expect(p?.disableSignUp).toBe(true);
+      expect(p?.disableImplicitSignUp).toBe(true);
+    }
+    const open = build({ ...social, WMS_ENV: "local", SIGNUP_ENABLED: "true" });
+    expect(gate(open, "google")?.disableSignUp).toBe(false);
+    expect(gate(open, "google")?.disableImplicitSignUp).toBe(true);
+    expect(build().socialProviders).toBeUndefined();
   });
 });
 

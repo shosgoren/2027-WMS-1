@@ -304,6 +304,69 @@ describe(`auth politikası (target=${env.target})`, () => {
     expect(await scalar("SELECT count(*)::int FROM public.auth_rate_limits WHERE key_hash LIKE '%@%'", [])).toBe(0);
   });
 
+  it("MAJOR-1: paralel yanlış girişler (farklı IP'ler) — yalnızca 5'i parola doğrulamasına ulaşır (401), kalanı 429", async () => {
+    const u = await mkUser();
+    const results = await Promise.all(Array.from({ length: 20 }, () => signIn(u.email, nextIp(), WRONG_PASSWORD)));
+    const statuses = results.map((r) => r.res.status);
+    expect(statuses.filter((c) => c === 401)).toHaveLength(5);
+    expect(statuses.filter((c) => c === 429)).toHaveLength(15);
+    // Kilit doğru parolayı da engeller.
+    expect((await signIn(u.email, nextIp(), PASSWORD)).res.status).toBe(429);
+  });
+
+  it("MAJOR-1: başarılı girişler rezervi geri alır (sayaç -1; sıfırlama değil): 3 başarılı + 5 yanlış → 5 × 401, 6. 429", async () => {
+    const u = await mkUser();
+    for (let i = 0; i < 3; i += 1) expect((await signIn(u.email, nextIp(), PASSWORD)).res.status).toBe(200);
+    for (let i = 0; i < 5; i += 1) expect((await signIn(u.email, nextIp(), WRONG_PASSWORD)).res.status).toBe(401);
+    expect((await signIn(u.email, nextIp(), WRONG_PASSWORD)).res.status).toBe(429);
+  });
+
+  /** wms_auth'un `sessions` DELETE ifadelerinden, metni `pattern` içerenleri bu kullanıcı için reddeden test tetikleyicisi. */
+  async function withDeleteFailure<T>(userId: string, pattern: string, run: () => Promise<T>): Promise<T> {
+    const fn = `t112b_delfail_${randomBytes(4).toString("hex")}`;
+    await adm.query(
+      `CREATE FUNCTION public.${fn}() RETURNS trigger LANGUAGE plpgsql AS $f$
+       BEGIN
+         IF OLD.user_id = '${userId}' AND pg_catalog.current_query() LIKE '${pattern}' THEN
+           RAISE EXCEPTION 't112b induced delete failure';
+         END IF;
+         RETURN OLD;
+       END $f$`,
+    );
+    await adm.query(`CREATE TRIGGER ${fn} BEFORE DELETE ON public.sessions FOR EACH ROW EXECUTE FUNCTION public.${fn}()`);
+    try {
+      return await run();
+    } finally {
+      await adm.query(`DROP TRIGGER IF EXISTS ${fn} ON public.sessions`);
+      await adm.query(`DROP FUNCTION IF EXISTS public.${fn}()`);
+    }
+  }
+
+  it("MINOR-2: change-password sonrası diğer oturumlar silinemezse fail-closed — istek hata, tüm oturumlar (mevcut dahil) düşer", async () => {
+    const u = await mkUser();
+    const ip = nextIp();
+    const a = await signIn(u.email, ip);
+    const b = await signIn(u.email, ip);
+    // 1. deneme (`token <>` içeren ifade) başarısız; 2. deneme (kullanıcının tüm oturumları) başarılı.
+    const res = await withDeleteFailure(u.id, "%token <>%", () => post("/change-password", { currentPassword: PASSWORD, newPassword: NEW_PASSWORD }, ip, a.jar));
+    expect(res.status).toBe(500);
+    expect(await service.getPrincipal(headersWith(a.jar))).toBeNull();
+    expect(await service.getPrincipal(headersWith(b.jar))).toBeNull();
+    expect(await scalar("SELECT count(*)::int FROM public.sessions WHERE user_id = $1", [u.id])).toBe(0);
+  });
+
+  it("MINOR-1: 2FA etkinleştirmede oturum iptali başarısızsa fail-closed — istek hata, mevcut oturum silinir", async () => {
+    const u = await mkUser();
+    const ip = nextIp();
+    const a = await signIn(u.email, ip);
+    const secret = await startEnable(a.jar, ip);
+    // Toplu iptal (`WHERE user_id =`) engellenir; geri dönüş (`WHERE token =`) mevcut oturumu siler.
+    const res = await withDeleteFailure(u.id, "%WHERE user_id =%", () => post("/two-factor/verify-totp", { code: totp(secret) }, ip, a.jar));
+    expect(res.status).toBe(500);
+    expect(await service.getPrincipal(headersWith(a.jar))).toBeNull();
+    expect(await scalar("SELECT count(*)::int FROM public.sessions WHERE user_id = $1", [u.id])).toBe(0);
+  });
+
   it("M9: demo kullanıcısı list-sessions → 403 FORBIDDEN; olayda IP/UA yok; normal kullanıcı etkilenmez", async () => {
     const demo = await mkUser(DEMO_DOMAIN);
     const ip = nextIp();
