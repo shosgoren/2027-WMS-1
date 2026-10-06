@@ -3,7 +3,7 @@
 // kalıcı hedefte (neon) test tenant'ları kalır.
 import { randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createDbClient } from "../../../packages/db/src/index.ts";
 import { DB_CLIENT_SETTINGS, type DbClient } from "../../../packages/db/src/client.ts";
 import { AppError } from "../../../packages/shared/src/errors.ts";
@@ -15,6 +15,19 @@ import {
   type WorkspaceEnv,
 } from "../../../packages/domain/src/onboarding/workspace.ts";
 import { readIntEnv } from "../harness/env.ts";
+
+// withNewTenant çağrı sayacı (yalnızca gözlem; davranış aynen geçer): SLUG_TAKEN yeniden deneme dalının çalıştığını kanıtlar.
+const spy = vi.hoisted(() => ({ calls: 0 }));
+vi.mock("../../../packages/db/src/index.ts", async (orig) => {
+  const m = await orig<typeof import("../../../packages/db/src/index.ts")>();
+  return {
+    ...m,
+    withNewTenant: ((...args: Parameters<typeof m.withNewTenant>) => {
+      spy.calls++;
+      return m.withNewTenant(...args);
+    }) as typeof m.withNewTenant,
+  };
+});
 
 const env = readIntEnv(process.env);
 let app: DbClient;
@@ -125,17 +138,21 @@ describe("createWorkspace", () => {
     expect(await count("SELECT count(*) n FROM public.audit_logs WHERE tenant_id = $1 AND action = 'tenant.created'", [a.tenantId])).toBe(1);
   });
 
-  it("aynı requestId + AÇIK slug ile eşzamanlı çift istek → aynı sonuç, tek tenant (SLUG_TAKEN yarışı yutulur)", async () => {
-    for (let i = 0; i < 5; i++) {
+  it("aynı requestId + AÇIK slug ile eşzamanlı çift istek → aynı sonuç, tek tenant; SLUG_TAKEN yeniden deneme dalı çalışır", async () => {
+    let retries = 0;
+    for (let i = 0; i < 40 && retries === 0; i++) {
       const user = await newUser();
       const requestId = randomUUID();
       const slug = `r-${randomBytes(5).toString("hex")}`;
       const name = uniqueName("Yarış");
+      const before = spy.calls;
       const [a, b] = await Promise.all([create(user, { requestId, slug, name }), create(user, { requestId, slug, name })]);
+      retries += spy.calls - before - 2; // her istek en az 1 çağrı; fazlası = SLUG_TAKEN yeniden denemesi
       expect(a.tenantId).toBe(b.tenantId);
       expect([a.created, b.created].sort()).toEqual([false, true]);
       expect(await count("SELECT count(*) n FROM public.tenants WHERE created_by_user_id = $1", [user])).toBe(1);
     }
+    expect(retries).toBeGreaterThanOrEqual(1);
   });
 
   it("tekrar aynı parametrelerle → created:false; ad ya da şablon değişince ret (ikinci tenant yok)", async () => {

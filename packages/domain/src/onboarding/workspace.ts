@@ -5,9 +5,11 @@
 // - `updateTenantSettings`: ad/dil/saat dilimi (`settings.manage`).
 //
 // Hata görünürlüğü (T-133 açık sorusu; seçim): `SLUG_TAKEN` ve `IDEMPOTENCY_MISMATCH` istemciye ayrı kod olarak
-// gitmez; ikisi de `VALIDATION_FAILED` olur ve rezerve/biçim hatalı slug ile AYNI yanıtı verir. Böylece "bu slug başka
-// bir çalışma alanında var" bilgisi, ayrılmış kelimeden ayırt edilemez ve slug yoklama oracle'ı oluşmaz. Slug
-// verilmezse (otomatik) çakışmada belirlenimli sonekle sessizce sonraki aday denenir; hata hiç görünmez.
+// gitmez; ikisi de `VALIDATION_FAILED` olur ve ayrılmış/biçim hatalı slug ile AYNI yanıt GÖVDESİNİ verir. Yalnızca
+// gövde eşittir; slug yoklaması (oracle) tamamen kapanmaz: ayrılmış liste kodda açıktır; "alınmış" yolu DB'ye gider ve
+// `SLUG_TAKEN` yeniden denemesiyle bir transaction daha ekler → ölçülebilir zamanlama farkı vardır. Risk şimdilik kabul:
+// kapı yalnızca local/ci'da açılır (A-50). Faz 4S'te kayıt açılmadan önce hız sınırı ve tek tip zamanlama kararı
+// gerekir. Slug verilmezse (otomatik) çakışmada belirlenimli sonekle sonraki aday denenir; hata görünmez.
 import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { MembershipError, appendAudit, createDbClient, withNewTenant, withUser } from "@wms/db";
