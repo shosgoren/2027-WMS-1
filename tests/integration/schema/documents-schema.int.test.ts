@@ -21,6 +21,7 @@ const reg = newRegistry();
 const clients: pg.Client[] = [];
 let admin: pg.Client;
 let app: pg.Client;
+let app2: pg.Client;
 let A: TenantWorld;
 let B: TenantWorld;
 let stockInTypeVersionId = "";
@@ -93,6 +94,7 @@ async function postedDoc(q: Q): Promise<{ docId: string; lineId: string }> {
 beforeAll(async () => {
   admin = await connect(env.databaseUrlDirect);
   app = await connect(env.databaseUrl);
+  app2 = await connect(env.databaseUrl);
   A = await seedWorld(admin, reg, "A");
   B = await seedWorld(admin, reg, "B");
   const tv = await admin.query<{ id: string }>("SELECT id FROM public.document_type_versions WHERE tenant_id IS NULL AND key = 'STOCK_IN' AND version = 1");
@@ -197,7 +199,7 @@ describe("T-206 (a) POSTED değişmezliği (I-08)", () => {
       });
       // DELETE yetkisi wms_app'te var (taslak düzenleme), tetikleyici POSTED'da reddeder.
       expectFail(r, CHECK_VIOLATION, sql);
-      if (!r.ok) expect(r.message).toMatch(/DOCUMENT_POSTED_IMMUTABLE/);
+      if (!r.ok) expect(r.message).toMatch(/DOCUMENT_(POSTED_IMMUTABLE|NOT_DRAFT)/);
     }
     const add = await inTenant(A.tenantId, async (q) => {
       const { docId } = await postedDoc(q);
@@ -350,7 +352,6 @@ describe("T-206 (b) bileşik tenant FK'leri", () => {
     }
     // Başka tenant'a ait belge kimliğine satır: belge görünmez, FK reddeder.
     expectFail(await one(A.tenantId, ...insLine(A, B.documentId, randomUUID(), 9)), FK_VIOLATION, "B belgesine satır");
-    expectFail(await one(A.tenantId, "INSERT INTO public.document_status_history (tenant_id, document_id, to_status) VALUES ($1, $2, 'DRAFT')", [A.tenantId, B.documentId]), FK_VIOLATION, "B belgesine geçmiş");
   });
 
   it("lot/seri ürüne bağlıdır: başka ürünün lotu ve serisi reddedilir; kendi ürününün lotu kabul; NULL lot FK'yı atlar", async () => {
@@ -398,26 +399,33 @@ describe("T-206 (b) bileşik tenant FK'leri", () => {
 });
 
 describe("T-206 (c) created_xid zorlama (I-16)", () => {
-  it("wms_app created_xid/occurred_at sütunlarına INSERT yapamaz (42501); göndermezse sunucu xid'i yazılır", async () => {
-    expectFail(
-      await one(A.tenantId, "INSERT INTO public.document_status_history (tenant_id, document_id, to_status, created_xid) VALUES ($1, $2, 'APPROVED', '1'::xid8)", [A.tenantId, A.documentId]),
-      INSUFFICIENT_PRIVILEGE,
-      "created_xid",
-    );
-    expectFail(
-      await one(A.tenantId, "INSERT INTO public.document_status_history (tenant_id, document_id, to_status, occurred_at) VALUES ($1, $2, 'APPROVED', '2000-01-01')", [A.tenantId, A.documentId]),
-      INSUFFICIENT_PRIVILEGE,
-      "occurred_at",
-    );
+  it("wms_app durum geçmişine doğrudan INSERT yapamaz (42501, hiçbir sütunda); geçiş tetikleyiciyle sunucu değerleriyle satır üretir", async () => {
+    for (const cols of ["(tenant_id, document_id, to_status) VALUES ($1, $2, 'APPROVED')", "(tenant_id, document_id, to_status, created_xid) VALUES ($1, $2, 'APPROVED', '1'::xid8)", "(tenant_id, document_id, to_status, occurred_at) VALUES ($1, $2, 'APPROVED', '2000-01-01')"]) {
+      expectFail(await one(A.tenantId, `INSERT INTO public.document_status_history ${cols}`, [A.tenantId, A.documentId]), INSUFFICIENT_PRIVILEGE, cols);
+    }
+    expectFail(await one(A.tenantId, "INSERT INTO public.document_status_history (tenant_id, document_id, to_status) VALUES ($1, $2, 'DRAFT')", [A.tenantId, B.documentId]), INSUFFICIENT_PRIVILEGE, "B belgesine geçmiş");
     const r = await inTenant(A.tenantId, async (q) => {
-      await q("INSERT INTO public.document_status_history (tenant_id, id, document_id, from_status, to_status) VALUES ($1, $2, $3, 'DRAFT', 'APPROVED')", [A.tenantId, randomUUID(), A.documentId]);
+      await q("SELECT set_config('app.current_user_id', $1, true)", [A.ownerUserId]);
+      await q("UPDATE public.documents SET status = 'APPROVED' WHERE id = $1", [A.documentId]);
+      await q("UPDATE public.documents SET reason = 'durum degismedi' WHERE id = $1", [A.documentId]);
       return q(
-        "SELECT (created_xid = pg_current_xact_id()) AS same_xid, (occurred_at = now()) AS same_now FROM public.document_status_history WHERE to_status = 'APPROVED' AND document_id = $1",
+        `SELECT from_status, to_status, actor_user_id::text AS actor, (created_xid = pg_current_xact_id()) AS same_xid, (occurred_at = now()) AS same_now
+           FROM public.document_status_history WHERE document_id = $1 AND to_status = 'APPROVED'`,
         [A.documentId],
       );
     });
     expectOk(r);
-    if (r.ok) expect(r.rows[0]).toEqual({ same_xid: true, same_now: true });
+    if (r.ok) expect(r.rows).toEqual([{ from_status: "DRAFT", to_status: "APPROVED", actor: A.ownerUserId, same_xid: true, same_now: true }]);
+    // INSERT yolu: yeni belge ilk geçmiş satırını (NULL → DRAFT) üretir; aktör ayarı yoksa NULL.
+    const ins = await inTenant(A.tenantId, async (q) => {
+      const id = randomUUID();
+      await q(...insDoc(A, id));
+      return q("SELECT from_status, to_status, actor_user_id FROM public.document_status_history WHERE document_id = $1", [id]);
+    });
+    expectOk(ins);
+    if (ins.ok) expect(ins.rows).toEqual([{ from_status: null, to_status: "DRAFT", actor_user_id: null }]);
+    // Tetikleyici işlevi çağrılamaz.
+    expectFail(await one(A.tenantId, "SELECT public.documents_write_status_history()"), INSUFFICIENT_PRIVILEGE, "işlev EXECUTE");
   });
 
   it("istemcinin (sahip düzeyinde) verdiği created_xid ve occurred_at yok sayılır", async () => {
@@ -536,6 +544,133 @@ describe("T-206 (e) durum geçmişi append-only", () => {
   });
 });
 
+describe("T-206 satır yazımı yalnızca DRAFT'ta (spec 05 §Belge durumları)", () => {
+  it("APPROVED ve CANCELLED belgenin satırı eklenemez/değiştirilemez/silinemez; DRAFT'ta serbest", async () => {
+    for (const st of ["APPROVED", "CANCELLED"]) {
+      for (const sql of ["ins", "UPDATE public.document_lines SET quantity = 9 WHERE id = $1", "DELETE FROM public.document_lines WHERE id = $1", "UPDATE public.document_lines SET reversed_quantity = 1, reversal_status = 'PARTIAL' WHERE id = $1"]) {
+        const r = await inTenant(A.tenantId, async (q) => {
+          const docId = randomUUID();
+          const lineId = randomUUID();
+          await q(...insDoc(A, docId));
+          await q(...insLine(A, docId, lineId, 1));
+          await q("UPDATE public.documents SET status = $2 WHERE id = $1", [docId, st]);
+          if (sql === "ins") await q(...insLine(A, docId, randomUUID(), 2));
+          else await q(sql, [lineId]);
+        });
+        expectFail(r, CHECK_VIOLATION, `${st}: ${sql}`);
+        if (!r.ok) expect(r.message).toMatch(/DOCUMENT_NOT_DRAFT/);
+      }
+    }
+    expectOk(
+      await inTenant(A.tenantId, async (q) => {
+        const docId = randomUUID();
+        const lineId = randomUUID();
+        await q(...insDoc(A, docId));
+        await q(...insLine(A, docId, lineId, 1));
+        await q("UPDATE public.document_lines SET quantity = 9, base_quantity = 9 WHERE id = $1", [lineId]);
+        await q(...insLine(A, docId, randomUUID(), 2));
+        await q("DELETE FROM public.document_lines WHERE id = $1", [lineId]);
+      }),
+      "DRAFT düzenleme",
+    );
+  });
+});
+
+describe("T-206 eşzamanlılık: posting commit etmeden satır yazımı bloklanır ve POSTED görüp reddedilir (I-08, MAJOR-1)", () => {
+  /** Admin ile commit'li DRAFT belge + satır kurar (afterAll cleanupRegistry siler). */
+  async function committedDraft(): Promise<{ docId: string; lineId: string }> {
+    const docId = randomUUID();
+    const lineId = randomUUID();
+    const [dSql, dP] = insDoc(A, docId);
+    await admin.query(dSql, dP);
+    const [lSql, lP] = insLine(A, docId, lineId, 1);
+    await admin.query(lSql, lP);
+    return { docId, lineId };
+  }
+  async function waitLockWait(pid: number): Promise<void> {
+    for (let i = 0; i < 100; i++) {
+      const r = await admin.query<{ n: number }>("SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid = $1 AND wait_event_type = 'Lock'", [pid]);
+      if ((r.rows[0]?.n ?? 0) > 0) return;
+      await new Promise((res) => setTimeout(res, 50));
+    }
+    throw new Error("T2 kilit beklemesine girmedi (tetikleyici üst belgeyi kilitlemiyor)");
+  }
+
+  const cases: [string, (docId: string, lineId: string) => [string, unknown[]]][] = [
+    ["INSERT", (docId) => insLine(A, docId, randomUUID(), 2)],
+    ["UPDATE", (_d, lineId) => ["UPDATE public.document_lines SET quantity = 7, base_quantity = 7 WHERE id = $1", [lineId]]],
+    ["DELETE", (_d, lineId) => ["DELETE FROM public.document_lines WHERE id = $1", [lineId]]],
+  ];
+  for (const [label, stmt] of cases) {
+    it(`${label}: T1 POSTED yapar (commit yok), T2 bloklanır; T1 commit → T2 hata, satır değişmemiş`, async () => {
+      const { docId, lineId } = await committedDraft();
+      await app.query("BEGIN");
+      await app2.query("BEGIN");
+      try {
+        await app.query("SELECT set_config('app.current_tenant_id', $1, true)", [A.tenantId]);
+        await app2.query("SELECT set_config('app.current_tenant_id', $1, true)", [A.tenantId]);
+        const pid = (await app2.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]?.pid ?? 0;
+        await app.query("UPDATE public.documents SET number = $2, status = 'POSTED' WHERE id = $1", [docId, `N-${rnd()}`]);
+        const [sql, p] = stmt(docId, lineId);
+        const t2 = app2.query(sql, p).then(
+          () => ({ ok: true as const }),
+          (e: { code?: string; message?: string }) => ({ ok: false as const, code: e.code, message: String(e.message) }),
+        );
+        await waitLockWait(pid);
+        await app.query("COMMIT");
+        const res = await t2;
+        expect(res.ok, "T2 eski (DRAFT) durumu görüp geçti: I-08 kırık").toBe(false);
+        if (!res.ok) {
+          expect(res.code).toBe(CHECK_VIOLATION);
+          expect(res.message).toMatch(/DOCUMENT_(POSTED_IMMUTABLE|NOT_DRAFT)/);
+        }
+      } finally {
+        await app.query("ROLLBACK").catch(() => undefined);
+        await app2.query("ROLLBACK").catch(() => undefined);
+      }
+      const after = await admin.query<{ n: number; q: string }>("SELECT count(*)::int AS n, coalesce(max(quantity), 0)::text AS q FROM public.document_lines WHERE document_id = $1", [docId]);
+      expect(after.rows[0]).toEqual({ n: 1, q: "5.000000" });
+    }, 30_000);
+  }
+});
+
+describe("T-206 RLS politika biçimi (0010/0011 emsali)", () => {
+  it("beş tenant tablosunda tek PERMISSIVE FOR ALL TO PUBLIC politika, tam USING/WITH CHECK; document_type_versions'ta tek SELECT politikası", async () => {
+    const tenantEq = /^\(tenant_id = \(NULLIF\((?:pg_catalog\.)?current_setting\('app\.current_tenant_id'::text, true\), ''::text\)\)::uuid\)$/;
+    for (const t of NEW_TABLES.filter((x) => x !== "document_type_versions")) {
+      const r = await admin.query<{ n: string; permissive: boolean; cmd: string; roles: string; qual: string | null; chk: string | null; rls: boolean; forced: boolean }>(
+        `SELECT (SELECT count(*) FROM pg_policy WHERE polrelid = c.oid)::text AS n, p.polpermissive AS permissive, p.polcmd::text AS cmd, p.polroles::text AS roles,
+                pg_get_expr(p.polqual, p.polrelid) AS qual, pg_get_expr(p.polwithcheck, p.polrelid) AS chk, c.relrowsecurity AS rls, c.relforcerowsecurity AS forced
+           FROM pg_class c JOIN pg_policy p ON p.polrelid = c.oid WHERE c.oid = ('public.' || $1)::regclass`,
+        [t],
+      );
+      expect(r.rows, t).toHaveLength(1);
+      const row = r.rows[0] as (typeof r.rows)[number];
+      expect(row.n, t).toBe("1");
+      expect(row.permissive, t).toBe(true);
+      expect(row.cmd, t).toBe("*");
+      expect(row.roles, t).toBe("{0}");
+      expect(row.qual, t).toMatch(tenantEq);
+      expect(row.chk, t).toMatch(tenantEq);
+      expect(row.rls && row.forced, t).toBe(true);
+    }
+    const v = await admin.query<{ n: string; permissive: boolean; cmd: string; roles: string; qual: string | null; chk: string | null; rls: boolean; forced: boolean }>(
+      `SELECT (SELECT count(*) FROM pg_policy WHERE polrelid = c.oid)::text AS n, p.polpermissive AS permissive, p.polcmd::text AS cmd, p.polroles::text AS roles,
+              pg_get_expr(p.polqual, p.polrelid) AS qual, pg_get_expr(p.polwithcheck, p.polrelid) AS chk, c.relrowsecurity AS rls, c.relforcerowsecurity AS forced
+         FROM pg_class c JOIN pg_policy p ON p.polrelid = c.oid WHERE c.oid = 'public.document_type_versions'::regclass`,
+    );
+    expect(v.rows).toHaveLength(1);
+    const row = v.rows[0] as (typeof v.rows)[number];
+    expect(row.n).toBe("1");
+    expect(row.cmd).toBe("r");
+    expect(row.permissive).toBe(true);
+    expect(row.roles).toBe("{0}");
+    expect(row.chk).toBeNull();
+    expect(row.qual).toMatch(/^\(\(tenant_id IS NULL\) OR \(tenant_id = \(NULLIF\((?:pg_catalog\.)?current_setting\('app\.current_tenant_id'::text, true\), ''::text\)\)::uuid\)\)$/);
+    expect(row.rls && row.forced).toBe(true);
+  });
+});
+
 describe("T-206 migration 0012 ileri/geri/ileri (geçici veritabanı)", () => {
   const dbName = `wms_doc_${randomBytes(5).toString("hex")}`;
   const urlFor = (db: string): string => {
@@ -587,7 +722,7 @@ describe("T-206 migration 0012 ileri/geri/ileri (geçici veritabanı)", () => {
   it("sistem tohumu varken geri alma serbest; kullanıcı verisi varken ci dışında reddedilir, ci'da geri alınır; tekrar ileri aynı şekli ve tohumu kurar", async () => {
     await withClient(async (c) => {
       expect(await present(c)).toEqual([...NEW_TABLES].sort());
-      expect(await fnCount(c)).toBe(9);
+      expect(await fnCount(c)).toBe(10);
       expect((await c.query("SELECT 1 FROM public.document_type_versions WHERE tenant_id IS NULL")).rowCount).toBe(4);
       const t = randomUUID();
       await c.query("INSERT INTO public.tenants (id, slug, name) VALUES ($1, $2, 'doc')", [t, `doc-${rnd()}`]);
@@ -608,7 +743,7 @@ describe("T-206 migration 0012 ileri/geri/ileri (geçici veritabanı)", () => {
     expect((await migrateUp({ url: scratchUrl })).applied).toEqual([]);
     await withClient(async (c) => {
       expect(await present(c)).toEqual([...NEW_TABLES].sort());
-      expect(await fnCount(c)).toBe(9);
+      expect(await fnCount(c)).toBe(10);
       const rls = await c.query<{ n: number }>("SELECT count(*)::int AS n FROM pg_class WHERE relname = ANY($1::text[]) AND relrowsecurity AND relforcerowsecurity", [[...NEW_TABLES]]);
       expect(rls.rows[0]?.n).toBe(NEW_TABLES.length);
       expect((await c.query("SELECT 1 FROM public.document_type_versions WHERE tenant_id IS NULL")).rowCount).toBe(4);

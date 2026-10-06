@@ -20,7 +20,8 @@
 --   version her başlık UPDATE'inde tetikleyiciyle +1 (istemci değeri yok sayılır; wms_app version'a yazamaz). Tetikleyiciler
 --   migration rolü dahil herkesi bağlar (sahibin DISABLE TRIGGER yapabilmesi bilinen sınır, 0004 emsali).
 -- * created_xid (I-16, ADR-017 §5): document_status_history BEFORE INSERT tetikleyicisi (ENABLE ALWAYS) created_xid ve occurred_at'i
---   sunucu değerine zorlar; wms_app'in INSERT yetkisi sütun düzeyindedir (ikisi de listede YOK).
+--   sunucu değerine zorlar. wms_app'in tabloda INSERT yetkisi HİÇ yoktur: geçmişi documents AFTER INSERT / AFTER UPDATE OF status
+--   tetikleyicisi (SECURITY DEFINER, yalnız OLD/NEW + app.current_user_id'den türetir) yazar (MINOR-3).
 -- * document_status_history append-only: wms_app'e yalnızca SELECT/INSERT; BEFORE UPDATE OR DELETE tetikleyicisi 42501 ile reddeder.
 --   Bu tetikleyici bilerek ENABLE ALWAYS DEĞİLDİR: fikstür temizliği (tablo sahibi + süper kullanıcı) `SET LOCAL
 --   session_replication_role = replica` ile atlayabilsin (0004'ten fark: audit_logs satırı fikstürde yok, burada tohumlanır).
@@ -318,7 +319,11 @@ REVOKE ALL ON FUNCTION public.documents_guard_delete() FROM PUBLIC;
 CREATE TRIGGER documents_guard_delete BEFORE DELETE ON public.documents
   FOR EACH ROW EXECUTE FUNCTION public.documents_guard_delete();
 
--- 2d. document_lines: POSTED belgenin satırı değişmez; istisna reversed_quantity artışı + reversal_status ileri geçişi.
+-- 2d. document_lines: satır yazımı (INSERT/UPDATE/DELETE) YALNIZCA DRAFT belgede (spec 05 §Belge durumları: yalnız DRAFT "Düzenle";
+--     T-213 updateDraft yalnız DRAFT). POSTED belgede tek istisna reversed_quantity artışı + reversal_status ileri geçişi (I-08);
+--     APPROVED/CANCELLED satırları salt okunur. Üst belge durumu FOR SHARE ile okunur: posting işlemi başlığı POSTED yapıp commit
+--     etmeden eşzamanlı satır yazımı bloklanır ve (READ COMMITTED yeniden denetimi) commit sonrası POSTED'ı görüp reddedilir (MAJOR-1).
+--     Satır sahibi belge görünmüyorsa (NULL) bileşik FK reddeder.
 CREATE FUNCTION public.document_lines_guard() RETURNS trigger
   LANGUAGE plpgsql
   SET search_path = pg_catalog, pg_temp
@@ -329,9 +334,9 @@ DECLARE
   new_rank int;
 BEGIN
   IF TG_OP = 'INSERT' THEN
-    SELECT d.status INTO parent_status FROM public.documents d WHERE d.tenant_id = NEW.tenant_id AND d.id = NEW.document_id;
-    IF parent_status = 'POSTED' THEN
-      RAISE EXCEPTION 'DOCUMENT_POSTED_IMMUTABLE: işlenmiş belgeye satır eklenemez (I-08)' USING ERRCODE = '23514';
+    SELECT d.status INTO parent_status FROM public.documents d WHERE d.tenant_id = NEW.tenant_id AND d.id = NEW.document_id FOR SHARE;
+    IF parent_status IS NOT NULL AND parent_status <> 'DRAFT' THEN
+      RAISE EXCEPTION 'DOCUMENT_NOT_DRAFT: yalnızca taslak belgeye satır eklenebilir (belge %)', parent_status USING ERRCODE = '23514';
     END IF;
     IF NEW.reversed_quantity <> 0 OR NEW.reversal_status <> 'NONE' THEN
       RAISE EXCEPTION 'document_lines: yeni satır ters çevrilmiş olamaz' USING ERRCODE = '23514';
@@ -339,11 +344,11 @@ BEGIN
     RETURN NEW;
   END IF;
 
-  SELECT d.status INTO parent_status FROM public.documents d WHERE d.tenant_id = OLD.tenant_id AND d.id = OLD.document_id;
+  SELECT d.status INTO parent_status FROM public.documents d WHERE d.tenant_id = OLD.tenant_id AND d.id = OLD.document_id FOR SHARE;
 
   IF TG_OP = 'DELETE' THEN
-    IF parent_status = 'POSTED' THEN
-      RAISE EXCEPTION 'DOCUMENT_POSTED_IMMUTABLE: işlenmiş belgenin satırı silinemez (I-08)' USING ERRCODE = '23514';
+    IF parent_status IS NOT NULL AND parent_status <> 'DRAFT' THEN
+      RAISE EXCEPTION 'DOCUMENT_NOT_DRAFT: yalnızca taslak belgenin satırı silinebilir (belge %)', parent_status USING ERRCODE = '23514';
     END IF;
     RETURN OLD;
   END IF;
@@ -365,6 +370,8 @@ BEGIN
     IF new_rank < old_rank THEN
       RAISE EXCEPTION 'REVERSAL_DECREASE: reversal_status geri alınamaz (I-08)' USING ERRCODE = '23514';
     END IF;
+  ELSIF parent_status IS NOT NULL AND parent_status <> 'DRAFT' THEN
+    RAISE EXCEPTION 'DOCUMENT_NOT_DRAFT: yalnızca taslak belgenin satırı değiştirilebilir (belge %)', parent_status USING ERRCODE = '23514';
   ELSIF NEW.reversed_quantity IS DISTINCT FROM OLD.reversed_quantity OR NEW.reversal_status IS DISTINCT FROM OLD.reversal_status THEN
     RAISE EXCEPTION 'document_lines: ters çevirme alanları yalnızca POSTED belge satırında değişir' USING ERRCODE = '23514';
   END IF;
@@ -405,6 +412,30 @@ CREATE TRIGGER document_status_history_append_only BEFORE UPDATE OR DELETE ON pu
 CREATE TRIGGER document_status_history_no_truncate BEFORE TRUNCATE ON public.document_status_history
   FOR EACH STATEMENT EXECUTE FUNCTION public.document_status_history_reject_change();
 ALTER TABLE public.document_status_history ENABLE ALWAYS TRIGGER document_status_history_no_truncate;
+
+-- 2e'. Durum geçmişini YALNIZCA documents tetikleyicisi yazar (MINOR-3): wms_app'in doğrudan INSERT yetkisi yoktur, geçmiş gerçek
+--      geçişten sapamaz. SECURITY DEFINER: yazılan her değer yalnızca OLD/NEW'dan ve transaction ayarından (app.current_user_id,
+--      withMembership kurar; yoksa NULL) türetilir; çağıran girdisi yoktur. search_path sabit, PUBLIC'ten EXECUTE kapalı.
+--      Tenant politikası işlev sahibine de uygular (FORCE): satırın tenant'ı, belge yazımını geçen WITH CHECK ile zaten bağlam tenant'ıdır.
+CREATE FUNCTION public.documents_write_status_history() RETURNS trigger
+  LANGUAGE plpgsql
+  SECURITY DEFINER
+  SET search_path = pg_catalog, pg_temp
+AS $fn$
+BEGIN
+  INSERT INTO public.document_status_history (tenant_id, document_id, from_status, to_status, actor_user_id)
+  VALUES (NEW.tenant_id, NEW.id,
+          CASE WHEN TG_OP = 'UPDATE' THEN OLD.status ELSE NULL END,
+          NEW.status,
+          NULLIF(pg_catalog.current_setting('app.current_user_id', true), '')::uuid);
+  RETURN NULL;
+END
+$fn$;
+REVOKE ALL ON FUNCTION public.documents_write_status_history() FROM PUBLIC;
+CREATE TRIGGER documents_status_history_ins AFTER INSERT ON public.documents
+  FOR EACH ROW EXECUTE FUNCTION public.documents_write_status_history();
+CREATE TRIGGER documents_status_history_upd AFTER UPDATE OF status ON public.documents
+  FOR EACH ROW WHEN (OLD.status IS DISTINCT FROM NEW.status) EXECUTE FUNCTION public.documents_write_status_history();
 
 -- 2f. idempotency_records: kimlik/özet sütunları ve sonlanmış kayıt değişmez (tablo sahibi dahil).
 CREATE FUNCTION public.idempotency_records_guard_update() RETURNS trigger
@@ -495,9 +526,8 @@ GRANT UPDATE (line_no, item_id, unit_id, quantity, conversion_factor, base_quant
               lot_id, serial_id, stock_status, inventory_owner_id, handling_unit_id, reversed_quantity, reversal_status)
   ON public.document_lines TO wms_app;
 
--- created_xid ve occurred_at INSERT listesinde YOK (tetikleyici sunucu değerini yazar). UPDATE/DELETE yetkisi yok.
+-- INSERT/UPDATE/DELETE yetkisi YOK: satırı yalnızca documents tetikleyicisi (SECURITY DEFINER) yazar (MINOR-3).
 GRANT SELECT ON public.document_status_history TO wms_app;
-GRANT INSERT (tenant_id, id, document_id, from_status, to_status, actor_user_id, reason) ON public.document_status_history TO wms_app;
 
 GRANT SELECT ON public.idempotency_records TO wms_app;
 GRANT INSERT (tenant_id, id, command_type, client_key, actor_user_id, request_hash, status, result, error_code, http_status, completed_at)
