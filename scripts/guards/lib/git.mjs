@@ -30,11 +30,15 @@ export class GitError extends Error {
   /**
    * @param {string} message
    * @param {string[]} args
+   * @param {{ status?: number | null, stdoutEmpty?: boolean, stderrEmpty?: boolean }} [info] süreç çıkış kodu (sinyalle ölümde `null`) ve çıktıların boş olup olmadığı (ham çıktı taşınmaz)
    */
-  constructor(message, args) {
+  constructor(message, args, info = {}) {
     super(message);
     this.name = "GitError";
     this.args = args;
+    this.status = info.status ?? null;
+    this.stdoutEmpty = info.stdoutEmpty ?? false;
+    this.stderrEmpty = info.stderrEmpty ?? false;
   }
 }
 
@@ -66,10 +70,14 @@ export function git(cwd, args) {
       maxBuffer: 64 * 1024 * 1024,
     });
   } catch (e) {
-    const err = /** @type {{ stderr?: unknown, message?: unknown }} */ (e);
+    const err = /** @type {{ stderr?: unknown, stdout?: unknown, status?: unknown, message?: unknown }} */ (e);
     const stderr = typeof err.stderr === "string" ? err.stderr.trim() : "";
     const msg = stderr || String(err.message ?? e);
-    throw new GitError(`git ${args.join(" ")}: ${msg}`, args);
+    throw new GitError(`git ${args.join(" ")}: ${msg}`, args, {
+      status: typeof err.status === "number" ? err.status : null,
+      stdoutEmpty: typeof err.stdout === "string" && err.stdout.trim() === "",
+      stderrEmpty: stderr === "",
+    });
   }
 }
 
@@ -116,8 +124,13 @@ export function refExists(cwd, ref) {
  * @returns {string} commit kimliği
  */
 export function mergeBase(cwd, target = DEFAULT_TARGET) {
-  if (!refExists(cwd, target)) throw new GitError(`hedef ref bulunamadı: ${target}`, ["merge-base"]);
-  return git(cwd, ["merge-base", target, "HEAD"]).trim();
+  // Tek alt süreç (T-008l madde 1): başarısızlıkta ref'in yokluğu ile ortak ata yokluğu ayrılır.
+  try {
+    return git(cwd, ["merge-base", target, "HEAD"]).trim();
+  } catch (e) {
+    if (!refExists(cwd, target)) throw new GitError(`hedef ref bulunamadı: ${target}`, ["merge-base"]);
+    throw e;
+  }
 }
 
 /**
@@ -180,6 +193,30 @@ export function changedFiles(cwd, base, opts = {}) {
 }
 
 /**
+ * `rev` ağacındaki `files` girdileri: yol → `"<mod> <type> <id>"`; yol yoksa `""`. Tek `ls-tree`
+ * süreci; tam yol eşleşmesi (`--literal-pathspecs`; `:`, `*`, `?`, `[` sihirli sayılmaz).
+ * @param {string} cwd
+ * @param {string} rev
+ * @param {string[]} files
+ * @returns {Map<string, string>}
+ */
+export function treeEntries(cwd, rev, files) {
+  /** @type {Map<string, string>} */
+  const entries = new Map(files.map((f) => [f, ""]));
+  if (files.length === 0) return entries;
+  const out = git(cwd, ["--literal-pathspecs", "ls-tree", "-z", rev, "--", ...files]);
+  for (const rec of out.split("\0")) {
+    const tab = rec.indexOf("\t");
+    if (tab < 0) continue;
+    const file = rec.slice(tab + 1);
+    if (!entries.has(file)) continue;
+    const [mode, type, id] = rec.slice(0, tab).split(" ");
+    entries.set(file, `${mode} ${type} ${id}`);
+  }
+  return entries;
+}
+
+/**
  * Değişikliklerin dokunduğu tüm yollar (ad değişikliğinde eski + yeni), tekil ve sıralı.
  * @param {Change[]} changes
  * @returns {string[]}
@@ -201,14 +238,32 @@ export function touchedPaths(changes) {
  * @returns {string | null}
  */
 export function fileAtRef(cwd, ref, file) {
-  const spec = `${ref}:${file}`;
-  try {
-    git(cwd, ["cat-file", "-e", spec]);
-  } catch {
-    return null;
+  // Tam commit SHA'sı içerik-adreslidir (değişmez; `--no-replace-objects`): bulunan içerik süreç
+  // içinde önbelleklenir (T-008l madde 1). `HEAD`/dal adları ASLA önbelleklenmez; "yok" (null) de değil.
+  const key = /^[0-9a-f]{40}$/.test(ref) ? `${cwd}\0${ref}\0${file}` : null;
+  if (key !== null) {
+    const hit = BLOB_CACHE.get(key);
+    if (hit !== undefined) return hit;
   }
-  return git(cwd, ["cat-file", "blob", spec]);
+  const spec = `${ref}:${file}`;
+  // Tek alt süreç: blob okunur; başarısızsa `cat-file -e` ile "yok" ile "okunamadı"
+  // (ör. girdi blob değil, nesne bozuk) ayrılır — yoksa `null`, varsa asıl hata (fail-closed) fırlar.
+  try {
+    const content = git(cwd, ["cat-file", "blob", spec]);
+    if (key !== null) BLOB_CACHE.set(key, content);
+    return content;
+  } catch (e) {
+    try {
+      git(cwd, ["cat-file", "-e", spec]);
+    } catch {
+      return null;
+    }
+    throw e;
+  }
 }
+
+/** @type {Map<string, string>} */
+const BLOB_CACHE = new Map();
 
 /**
  * `base..HEAD` aralığındaki ilk-ebeveyn birleştirme commit'lerinin konu satırları.
