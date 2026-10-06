@@ -523,9 +523,89 @@ const noNormalizedPathImport = {
     };
   },
 };
+
+/**
+ * T-127b: `"use client"` dosyaları sunucu paketlerini/modüllerini içe aktaramaz (`server-only` paketi worker/vitest'i
+ * bozduğu için sınır lint'te tutulur; T-127 raporu). Girdiler: `@wms/{db,domain,auth,storage,queue-adapter}` (ve alt yolları)
+ * ile `apps/web/lib/{action-guard,rate-limit,queue}` (ve `packages/<bu paketler>/…` yolları). Yol girdisi `normalized`:
+ * göreli yazımlar (`../lib/./queue.ts`, `lib//queue`) içe aktaran dosyaya göre çözülüp normalize edilerek denetlenir.
+ * Kapsam: `import`/`export … from`/`import()`/`import x = require()`/`require`/`createRequire(…)(…)` (`wms/no-client-server-import`)
+ * ve takma adlı yükleyici (`wms/no-client-server-loader`, `no-aliased-module-loader` kuralının "use client" ile sınırlı örneği).
+ */
+const MSG_CLIENT_SERVER =
+  '"use client" dosyası sunucu paketini/modülünü (@wms/db, @wms/domain, @wms/auth, @wms/storage, @wms/queue-adapter, apps/web/lib/{action-guard,rate-limit,queue}) import edemez; veri/yetki işi sunucu eylemlerindedir (T-127b).';
+const CLIENT_FORBIDDEN_MODULES = /** @type {ForbiddenEntry[]} */ ([
+  { regex: "^@wms\\/(?:db|domain|auth|storage|queue-adapter)(?:\\/|$)", message: MSG_CLIENT_SERVER },
+  {
+    regex: "^(?:apps\\/web\\/lib\\/(?:action-guard|rate-limit|queue)(?:\\.[cm]?[jt]sx?)?|packages\\/(?:db|domain|auth|storage|queue-adapter)(?:\\/.*)?)$",
+    message: MSG_CLIENT_SERVER,
+    pathLike: true,
+    normalized: true,
+  },
+]);
+/** Dosya yönerge öncülünde (ilk ifadeler) `"use client"` var mı. @param {any} program */
+const hasUseClientDirective = (program) => {
+  for (const st of program.body) {
+    if (st.type !== "ExpressionStatement" || typeof st.directive !== "string") return false;
+    if (st.directive === "use client") return true;
+  }
+  return false;
+};
+/** @type {import("eslint").Rule.RuleModule} */
+const noClientServerImport = {
+  meta: { type: "problem", schema: [], messages: { forbidden: MSG_CLIENT_SERVER } },
+  create(context) {
+    if (!hasUseClientDirective(context.sourceCode.ast)) return {};
+    const rawRe = new RegExp(CLIENT_FORBIDDEN_MODULES.map((m) => `(?:${m.regex})`).join("|"), "iu");
+    /** @param {any} node @param {any} src */
+    const check = (node, src) => {
+      let spec = null;
+      if (src?.type === "Literal" && typeof src.value === "string") spec = src.value;
+      else if (src?.type === "TemplateLiteral" && src.expressions.length === 0 && src.quasis.length === 1) spec = src.quasis[0].value.cooked;
+      if (spec === null) return;
+      if (rawRe.test(spec) || normalizedSpecifierHit(spec, context.filename, CLIENT_FORBIDDEN_MODULES) !== null) {
+        context.report({ node, messageId: "forbidden" });
+      }
+    };
+    const isLoaderCallee = (/** @type {any} */ c) =>
+      (c.type === "Identifier" && REQUIRE_NAME_JS_RE.test(c.name)) ||
+      (c.type === "MemberExpression" && c.property.type === "Identifier" && REQUIRE_NAME_JS_RE.test(c.property.name)) ||
+      (c.type === "CallExpression" && (c.callee.name === "createRequire" || c.callee.property?.name === "createRequire"));
+    return {
+      ImportDeclaration: (n) => check(n, n.source),
+      ExportNamedDeclaration: (n) => n.source && check(n, n.source),
+      ExportAllDeclaration: (n) => check(n, n.source),
+      ImportExpression: (n) => check(n, n.source),
+      TSExternalModuleReference: (/** @type {any} */ n) => check(n, n.expression),
+      CallExpression: (n) => {
+        if (isLoaderCallee(n.callee) && n.arguments.length > 0) check(n, n.arguments[0]);
+      },
+    };
+  },
+};
+/** Takma adlı yükleyici (`const load = createRequire(…); load("@wms/db")`): mevcut izleme kuralı, yalnızca "use client" dosyalarında. @type {import("eslint").Rule.RuleModule} */
+const noClientServerLoader = {
+  meta: { type: "problem", schema: [], messages: { forbidden: MSG_CLIENT_SERVER } },
+  create(context) {
+    if (!hasUseClientDirective(context.sourceCode.ast)) return {};
+    return /** @type {any} */ (noAliasedModuleLoader).create(
+      Object.create(context, {
+        // `ambiguous`: seçici tabanlı bir kural olmadığından takma adlı çağrıdaki ihlali bu kural raporlar. `(?!)` hiçbir
+        // şeye uymayan yer tutucudur: boş "ambiguous olmayan" küme `new RegExp("")` olup her dizgeye uyardı.
+        options: { value: [{ modules: [...CLIENT_FORBIDDEN_MODULES.map((m) => ({ ...m, ambiguous: true })), { regex: "(?!)" }], allowNonStatic: true }] },
+        report: { value: (/** @type {any} */ d) => context.report({ node: d.node, messageId: "forbidden" }) },
+      }),
+    );
+  },
+};
 const WMS_PLUGIN = {
   meta: { name: "wms-local" },
-  rules: { "no-aliased-module-loader": noAliasedModuleLoader, "no-normalized-path-import": noNormalizedPathImport },
+  rules: {
+    "no-aliased-module-loader": noAliasedModuleLoader,
+    "no-normalized-path-import": noNormalizedPathImport,
+    "no-client-server-import": noClientServerImport,
+    "no-client-server-loader": noClientServerLoader,
+  },
 };
 
 // T-005g Yapılacak 4: tenant bağlam ayarı yalnızca packages/db (`withTenant`) içinde. Desenler bu
@@ -723,6 +803,13 @@ export default defineConfig(
     },
   },
   ...PROFILES,
+  {
+    // T-127b: "use client" dosyalarında sunucu paketi import yasağı. Kural adları benzersizdir (yukarıdaki profillerin
+    // aynı-kural-değiştirme davranışından etkilenmez); hiçbir mevcut kuralı gevşetmez.
+    files: ["apps/web/**/*.{js,mjs,cjs,ts,mts,cts,tsx}"],
+    plugins: { wms: WMS_PLUGIN },
+    rules: { "wms/no-client-server-import": "error", "wms/no-client-server-loader": "error" },
+  },
   {
     // T-015: bekçi giriş noktası `scripts/guards/<ad>.mjs` modülünü `import(pathToFileURL(file).href)`
     // ile yükler; `<ad>` `isGuardName` ile sabit `GUARDS` listesine karşı doğrulanır ve testler

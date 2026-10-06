@@ -904,3 +904,120 @@ describe("AC-28 lint (T-127a): @wms/shared/cache-key yalnızca packages/storage/
     60_000,
   );
 });
+
+// T-127b: "use client" dosyalarında sunucu paketi import yasağı (`wms/no-client-server-import`, `wms/no-client-server-loader`).
+// Her biçim için negatif; sunucu bileşeni (yönergesiz) ve istemci dosyasında serbest modüller için pozitif.
+const CLIENT_RULES = new Set(["wms/no-client-server-import", "wms/no-client-server-loader"]);
+const CLIENT_PATH = probe("apps/web/app/__ac28_client__.tsx");
+const CLIENT_LIB_PATH = probe("apps/web/lib/__ac28_client__.ts");
+const clientHits = (result: ESLint.LintResult): ESLint.LintResult["messages"] =>
+  result.messages.filter((m) => m.ruleId !== null && CLIENT_RULES.has(m.ruleId));
+const USE_CLIENT = '"use client";\n\n';
+const CREATE_REQUIRE = 'import { createRequire } from "node:module";\n\n';
+
+const CLIENT_SERVER_SOURCES: Record<string, string> = {
+  'statik import @wms/db': 'import { withUser } from "@wms/db";\n\nexport const c = withUser;\n',
+  "statik import @wms/domain": 'import { listMembers } from "@wms/domain";\n\nexport const c = listMembers;\n',
+  "statik import @wms/auth": 'import { auth } from "@wms/auth";\n\nexport const c = auth;\n',
+  "statik import @wms/storage": 'import { tenantCacheKey } from "@wms/storage";\n\nexport const c = tenantCacheKey;\n',
+  "statik import @wms/queue-adapter": 'import { createQueue } from "@wms/queue-adapter";\n\nexport const c = createQueue;\n',
+  "alt yol @wms/domain/members": 'import { x } from "@wms/domain/members";\n\nexport const c = x;\n',
+  "yalnızca tip import (@wms/db)": 'import type { TenantContext } from "@wms/db";\n\nexport type C = TenantContext;\n',
+  "ad alanı import * as": 'import * as db from "@wms/db";\n\nexport const c = db;\n',
+  "yan etkili import": 'import "@wms/domain";\n',
+  "yeniden dışa aktarım export { } from": 'export { withUser } from "@wms/db";\n',
+  "yeniden dışa aktarım export * from": 'export * from "@wms/auth";\n',
+  'dinamik import("@wms/db")': 'export const c = (): Promise<unknown> => import("@wms/db");\n',
+  "dinamik import(`@wms/storage`)": "export const c = (): Promise<unknown> => import(`@wms/storage`);\n",
+  'require("@wms/domain")': 'declare const require: (id: string) => unknown;\n\nexport const c = require("@wms/domain");\n',
+  'createRequire(…)("@wms/auth")': `${CREATE_REQUIRE}export const c = createRequire(import.meta.url)("@wms/auth");\n`,
+  'const load = createRequire(…); load("@wms/db")': `${CREATE_REQUIRE}const load = createRequire(import.meta.url);\nexport const c = load("@wms/db");\n`,
+  "const load = createRequire(…); load(`@wms/queue-adapter`)":
+    `${CREATE_REQUIRE}const load = createRequire(import.meta.url);\nexport const c = load(\`@wms/queue-adapter\`);\n`,
+  'import x = require("@wms/db") (TS)': 'import db = require("@wms/db");\n\nexport const c = db;\n',
+  "action-guard (göreli, uzantılı)": 'import { guard } from "../lib/action-guard.ts";\n\nexport const c = guard;\n',
+  "rate-limit (göreli, uzantısız)": 'import { limit } from "../lib/rate-limit";\n\nexport const c = limit;\n',
+  "queue (normalize edilmemiş yol)": 'import { q } from "../lib/./queue.ts";\n\nexport const c = q;\n',
+  "queue (src/../ atlatması)": 'import { q } from "../lib/x/../queue";\n\nexport const c = q;\n',
+  'dinamik import("../lib/queue.ts")': 'export const c = (): Promise<unknown> => import("../lib/queue.ts");\n',
+  'require("../lib/action-guard.ts")': 'declare const require: (id: string) => unknown;\n\nexport const c = require("../lib/action-guard.ts");\n',
+  "yeniden dışa aktarım action-guard": 'export { guard } from "../lib/action-guard.ts";\n',
+  "packages/db yolu": 'import { x } from "../../../packages/db/src/index.ts";\n\nexport const c = x;\n',
+};
+
+describe("AC-28 lint (T-127b): \"use client\" dosyalarında sunucu paketi import yasağı", () => {
+  it.each(Object.entries(CLIENT_SERVER_SOURCES))(
+    "@AC-28 \"use client\" apps/web/app: %s → tek error",
+    async (_name, body) => {
+      const hits = clientHits(await lint(USE_CLIENT + body, CLIENT_PATH));
+      expect(hits).toHaveLength(1);
+      expect(hits[0]?.severity).toBe(2);
+    },
+    60_000,
+  );
+
+  it(
+    "@AC-28 \"use client\" apps/web/lib içinde aynı dizindeki ./action-guard, ./rate-limit, ./queue yasak",
+    async () => {
+      for (const mod of ["./action-guard.ts", "./rate-limit", "./queue.ts", "././queue"]) {
+        const hits = clientHits(await lint(`${USE_CLIENT}import { x } from "${mod}";\n\nexport const c = x;\n`, CLIENT_LIB_PATH));
+        expect(hits, mod).toHaveLength(1);
+        expect(hits[0]?.severity, mod).toBe(2);
+      }
+    },
+    60_000,
+  );
+
+  it(
+    "@AC-28 yönerge öncülünde (\"use strict\" sonrası) ve yorum satırlarından sonra \"use client\" da geçerli",
+    async () => {
+      const code = '// başlık\n"use strict";\n"use client";\nimport { withUser } from "@wms/db";\n\nexport const c = withUser;\n';
+      expect(clientHits(await lint(code, CLIENT_PATH))).toHaveLength(1);
+    },
+    60_000,
+  );
+
+  it(
+    "@AC-28 sunucu bileşeni (\"use client\" yok) aynı içe aktarımları yapabilir; kural yalnızca istemci dosyasını bağlar",
+    async () => {
+      for (const [name, body] of Object.entries(CLIENT_SERVER_SOURCES)) {
+        const hits = clientHits(await lint(body, CLIENT_PATH));
+        expect(hits, name).toHaveLength(0);
+      }
+      // Yönerge yalnızca dosyanın ilk ifadeleri arasındaysa geçerlidir (sonradan gelen dize yönerge değildir).
+      const late = 'import { withUser } from "@wms/db";\n"use client";\n\nexport const c = withUser;\n';
+      expect(clientHits(await lint(late, CLIENT_PATH))).toHaveLength(0);
+    },
+    60_000,
+  );
+
+  it(
+    "@AC-28 \"use client\" dosyasında serbest: bileşen/yardımcı paketler, aynı dizin modülleri, sunucu eylemi dosyası",
+    async () => {
+      const allowed = [
+        'import { Button } from "@wms/ui";\n',
+        'import { AppError } from "@wms/shared/errors";\n',
+        'import { createAuthClient } from "better-auth/react";\n',
+        'import { inviteMemberAction } from "./actions.ts";\n',
+        'import { authPost } from "../lib/auth-client.ts";\n',
+        'import { safeRedirect } from "../lib/safe-redirect.ts";\n',
+        'import { useState } from "react";\n',
+        'import { notQueue } from "../lib/queue-ui.ts";\n',
+      ];
+      for (const body of allowed) {
+        const result = await lint(`${USE_CLIENT}${body}\nexport const c = 1;\n`, CLIENT_PATH);
+        expect(clientHits(result), body).toHaveLength(0);
+      }
+    },
+    60_000,
+  );
+
+  it(
+    "@AC-28 packages/** ve apps/web dışı \"use client\" dosyaları bu kuralın kapsamı dışındadır",
+    async () => {
+      const code = '"use client";\nimport { withUser } from "@wms/db";\n\nexport const c = withUser;\n';
+      expect(clientHits(await lint(code, TENANT_MODULE_PATH))).toHaveLength(0);
+    },
+    60_000,
+  );
+});
