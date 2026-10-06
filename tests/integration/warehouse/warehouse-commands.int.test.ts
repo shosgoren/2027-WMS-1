@@ -278,36 +278,103 @@ describe("review fixes (T-205 inceleme)", () => {
     return Number(r.rows[0]?.n);
   }
 
-  it("race archiveLocation(parent) vs createLocation(child): exactly one wins, no active child under an archived parent", async () => {
+  /**
+   * Deterministik yarış: `adm` bağlantısında kapı transaction'ı hedef satırı `FOR NO KEY UPDATE` kilitler; komutlar başlatılır;
+   * `pg_stat_activity` (wait_event_type = 'Lock'; ikinci bekleyen tuple kilidinde ilk bekleyenin ardına dizilir, doğrudan kapıya değil) ile `waiters` bekleyen oturum görülene kadar beklenir; kapı COMMIT edilir (isteğe bağlı `inGate` SQL'i
+   * önce çalışır). Kilit kaldırılırsa komut kapıya takılmaz → bekleme zaman aşımıyla test kırmızı olur (mutasyon kanıtı).
+   */
+  async function gated<T>(lockSql: string, lockParams: unknown[], waiters: number, start: () => Promise<T>, inGate?: string): Promise<T> {
+    await adm.query("BEGIN");
+    let open = true;
+    try {
+      const pid = (await adm.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]!.pid;
+      await adm.query(lockSql, lockParams);
+      if (inGate !== undefined) await adm.query(inGate, lockParams);
+      const running = start();
+      running.catch(() => undefined);
+      const deadline = Date.now() + 10_000;
+      for (;;) {
+        const n = Number((await adm.query<{ n: string }>("SELECT count(*) AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database() AND pid <> $1", [pid])).rows[0]!.n);
+        if (n >= waiters) break;
+        if (Date.now() > deadline) throw new Error(`gate: expected ${waiters} blocked sessions, saw ${n}`);
+        await sleep(20);
+      }
+      await adm.query("COMMIT");
+      open = false;
+      return await running;
+    } finally {
+      if (open) await adm.query("ROLLBACK");
+    }
+  }
+
+  it("race archiveLocation(parent) vs createLocation(child): both blocked at the gate, exactly one wins, no active child under an archived parent", async () => {
     const { warehouseId } = await createWarehouse(admin(A), { code: uniq("r1-"), name: "R" });
-    for (let i = 0; i < 12; i++) {
+    for (let i = 0; i < 6; i++) {
       const parent = await createLocation(admin(A), { warehouseId, code: `p${i}`, name: "P", kind: "STORAGE" });
-      const calls = [
-        () => archiveLocation(admin(A), { locationId: parent.locationId }),
-        () => createLocation(admin(A), { warehouseId, parentId: parent.locationId, code: `c${i}`, name: "C", kind: "STORAGE" }),
-      ];
-      if (i % 2 === 1) calls.reverse();
-      if (i % 3 === 0) await sleep(0);
-      const res = await Promise.allSettled(calls.map((f) => f()));
+      const res = await gated(
+        "SELECT 1 FROM public.locations WHERE id = $1 FOR NO KEY UPDATE",
+        [parent.locationId],
+        2,
+        () => {
+          const calls = [
+            () => archiveLocation(admin(A), { locationId: parent.locationId }),
+            () => createLocation(admin(A), { warehouseId, parentId: parent.locationId, code: `c${i}`, name: "C", kind: "STORAGE" }),
+          ];
+          if (i % 2 === 1) calls.reverse();
+          return Promise.allSettled(calls.map((f) => f()));
+        },
+      );
       expect(res.filter((r) => r.status === "fulfilled")).toHaveLength(1);
       const rej = res.find((r) => r.status === "rejected") as PromiseRejectedResult;
-      expect((rej.reason as AppError).detail === "IN_USE" || (rej.reason as AppError).detail === "PARENT_INVALID").toBe(true);
+      expect(["IN_USE", "PARENT_INVALID"]).toContain((rej.reason as AppError).detail);
       expect(await activeUnderArchived(warehouseId)).toBe(0);
     }
   });
 
-  it("race archiveWarehouse vs createLocation: exactly one wins, no active location in an archived warehouse", async () => {
-    for (let i = 0; i < 12; i++) {
+  it("race archiveWarehouse vs createLocation: both blocked at the gate, exactly one wins, no active location in an archived warehouse", async () => {
+    for (let i = 0; i < 6; i++) {
       const { warehouseId } = await createWarehouse(admin(A), { code: uniq("r2-"), name: "R" });
-      const calls = [
-        () => archiveWarehouse(admin(A), { warehouseId }),
-        () => createLocation(admin(A), { warehouseId, code: "n1", name: "N", kind: "STORAGE" }),
-      ];
-      if (i % 2 === 1) calls.reverse();
-      const res = await Promise.allSettled(calls.map((f) => f()));
+      const res = await gated(
+        "SELECT 1 FROM public.warehouses WHERE id = $1 FOR NO KEY UPDATE",
+        [warehouseId],
+        2,
+        () => {
+          const calls = [
+            () => archiveWarehouse(admin(A), { warehouseId }),
+            () => createLocation(admin(A), { warehouseId, code: "n1", name: "N", kind: "STORAGE" }),
+          ];
+          if (i % 2 === 1) calls.reverse();
+          return Promise.allSettled(calls.map((f) => f()));
+        },
+      );
       expect(res.filter((r) => r.status === "fulfilled")).toHaveLength(1);
       expect(await activeUnderArchived(warehouseId)).toBe(0);
     }
+  });
+
+  it("TOCTOU: a record archived while a rename/kind change waits is not updated (VALIDATION_FAILED)", async () => {
+    const { warehouseId } = await createWarehouse(admin(A), { code: uniq("r3-"), name: "Eski" });
+    const loc = await createLocation(admin(A), { warehouseId, code: "t1", name: "Eski", kind: "STORAGE" });
+    const archiveLoc = "UPDATE public.locations SET status = 'ARCHIVED', archived_at = now() WHERE id = $1";
+    const lockLoc = "SELECT 1 FROM public.locations WHERE id = $1 FOR NO KEY UPDATE";
+    const r1 = await gated(lockLoc, [loc.locationId], 1, () => failure(renameLocation(admin(A), { locationId: loc.locationId, name: "Yeni" })), archiveLoc);
+    expect(r1.code).toBe("VALIDATION_FAILED");
+    const loc2 = await createLocation(admin(A), { warehouseId, code: "t2", name: "Eski", kind: "STORAGE" });
+    const r2 = await gated(lockLoc, [loc2.locationId], 1, () => failure(setLocationKind(admin(A), { locationId: loc2.locationId, kind: "STAGING" })), archiveLoc);
+    expect(r2.code).toBe("VALIDATION_FAILED");
+    const names = await adm.query<{ name: string; kind: string }>("SELECT name, kind FROM public.locations WHERE id = ANY($1::uuid[]) ORDER BY code", [[loc.locationId, loc2.locationId]]);
+    expect(names.rows).toEqual([{ name: "Eski", kind: "STORAGE" }, { name: "Eski", kind: "STORAGE" }]);
+    await adm.query("UPDATE public.locations SET status = 'ARCHIVED', archived_at = now() WHERE warehouse_id = $1 AND status = 'ACTIVE'", [warehouseId]);
+    const r3 = await gated(
+      "SELECT 1 FROM public.warehouses WHERE id = $1 FOR NO KEY UPDATE",
+      [warehouseId],
+      1,
+      () => failure(renameWarehouse(admin(A), { warehouseId, name: "Yeni" })),
+      "UPDATE public.warehouses SET status = 'ARCHIVED', archived_at = now() WHERE id = $1",
+    );
+    expect(r3.code).toBe("VALIDATION_FAILED");
+    const wn = await adm.query<{ name: string }>("SELECT name FROM public.warehouses WHERE id = $1", [warehouseId]);
+    expect(wn.rows[0]?.name).toBe("Eski");
   });
 });
 

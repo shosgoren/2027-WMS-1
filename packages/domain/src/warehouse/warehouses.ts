@@ -6,7 +6,7 @@
 //   ham INSERT kullanılır (varsayılan sütunlar listeye girmez).
 // - Kod: kırp + yalnızca ASCII a-z büyütülür (yerel ayar yok; `ı`/`İ`/`ß` gibi karakterler ham saklanır, karşılaştırma tam
 //   eşleşme). `code` oluşturulduktan sonra değişmez (A-83).
-// - Arşiv: hedef satır `FOR UPDATE` (createLocation `FOR SHARE` okur → arşiv/oluşturma yarışı serileşir); aktif lokasyon veya pozitif `stock_balances.quantity` → `IN_USE` (bakiye okuması salt SELECT; arşivle eşzamanlı stok girişi
+// - Arşiv: hedef satır `FOR NO KEY UPDATE` (createLocation `FOR SHARE` okur → arşiv/oluşturma yarışı serileşir); aktif lokasyon veya pozitif `stock_balances.quantity` → `IN_USE` (bakiye okuması salt SELECT; arşivle eşzamanlı stok girişi
 //   yarışı lokasyon arşivinde çözülür, arşivli lokasyona stok komutu T-217'de reddedilir).
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
@@ -147,7 +147,7 @@ export async function renameWarehouse(params: WarehouseCallParams, input: Rename
   return runTenantCommand({ ...params, permission: "settings.manage" }, async (tx, m) => {
     await assertWarehouseVisible(tx, m, [warehouseId]);
     const cur = await tx.execute<{ name: string; status: string }>(
-      sql`SELECT name, status FROM public.warehouses WHERE tenant_id = ${m.tenantId}::uuid AND id = ${warehouseId}::uuid`,
+      sql`SELECT name, status FROM public.warehouses WHERE tenant_id = ${m.tenantId}::uuid AND id = ${warehouseId}::uuid FOR NO KEY UPDATE`,
     );
     const row = cur[0];
     if (row === undefined) throw new AppError("NOT_FOUND");
@@ -176,9 +176,9 @@ export async function archiveWarehouse(params: WarehouseCallParams, input: Archi
   const warehouseId = parseUuid(input.warehouseId);
   return runTenantCommand({ ...params, permission: "settings.manage" }, async (tx, m) => {
     await assertWarehouseVisible(tx, m, [warehouseId]);
-    // FOR UPDATE: eşzamanlı `createLocation` (depo satırını FOR SHARE okur) ile serileştirir; kontroller kilitten SONRA yeni görüntüyle çalışır.
+    // FOR NO KEY UPDATE (stok komutlarının FK KEY SHARE'iyle çakışmaz, FOR SHARE ile çakışır): eşzamanlı `createLocation` (depo satırını FOR SHARE okur) ile serileştirir; kontroller kilitten SONRA yeni görüntüyle çalışır.
     const cur = await tx.execute<{ status: string }>(
-      sql`SELECT status FROM public.warehouses WHERE tenant_id = ${m.tenantId}::uuid AND id = ${warehouseId}::uuid FOR UPDATE`,
+      sql`SELECT status FROM public.warehouses WHERE tenant_id = ${m.tenantId}::uuid AND id = ${warehouseId}::uuid FOR NO KEY UPDATE`,
     );
     if (cur[0] === undefined) throw new AppError("NOT_FOUND");
     if (cur[0].status === "ARCHIVED") return { archived: false };
