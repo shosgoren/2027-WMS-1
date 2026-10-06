@@ -3,7 +3,7 @@
 // üzerinde rol/çıkarma/devir/sıfırlama KAPALI. Karttaki "davet → bağlantı kutusu → member.invited" zinciri demo tenant'ta
 // üretilemez; bu testte davetin reddi doğrulanır (rapor: "kart eki gerekli").
 import { expect, test } from "@playwright/test";
-import type { Page } from "@playwright/test";
+import type { Page, TestInfo } from "@playwright/test";
 
 const DEMO_BANNER = "Demo ortamı — gerçek kişisel veri girmeyin";
 
@@ -38,7 +38,68 @@ async function expectNoCspViolations(page: Page, where: string): Promise<void> {
   expect(v, `${where}: CSP ihlali`).toEqual([]);
 }
 
+/** Sorgu/parça atılır (G-09: URL'de belirteç olsa bile loga girmez). */
+function stripUrl(raw: string): string {
+  return raw.split("#")[0]?.split("?")[0] ?? raw;
+}
+
+/**
+ * T-247 tanılama: konsol hataları, `pageerror` ve başarısız/4xx-5xx istekler (yalnızca URL + durum; başlık/çerez/gövde yok).
+ * Başarısızlıkta `testInfo.attach` + `console.log` ile yazılır; assertion'lara dokunmaz.
+ */
+function collectDiagnostics(page: Page): () => Promise<unknown> {
+  const consoleErrors: string[] = [];
+  const pageErrors: string[] = [];
+  const failed: string[] = [];
+  page.on("console", (m) => {
+    if (m.type() === "error" || m.type() === "warning") consoleErrors.push(`${m.type()}: ${m.text().slice(0, 500)} @ ${stripUrl(m.location().url)}`);
+  });
+  page.on("pageerror", (e) => pageErrors.push(String(e.message).slice(0, 500)));
+  page.on("requestfailed", (r) => failed.push(`FAILED ${r.method()} ${stripUrl(r.url())} ${r.failure()?.errorText ?? ""}`));
+  page.on("response", (r) => {
+    if (r.status() >= 400) failed.push(`${r.status()} ${r.request().method()} ${stripUrl(r.url())}`);
+  });
+  return async () => {
+    let state: unknown = "sayfa kapalı";
+    try {
+      // Dize ifadesi (DOM tipleri yok). `hydrated`: React, düğmeye `__reactProps$` özelliğini yalnızca hidrasyondan sonra ekler.
+      state = await page.evaluate(`(() => {
+        const b = [...document.querySelectorAll("button")].find((x) => x.textContent && x.textContent.includes("Üye davet et"));
+        const scripts = [...document.querySelectorAll("script[src]")].map((s) => s.getAttribute("src").split("?")[0]);
+        const res = performance.getEntriesByType("resource").filter((e) => /\\/_next\\/static\\//.test(e.name)).map((e) => ({ n: e.name.split("?")[0].split("/").pop(), dur: Math.round(e.duration), size: e.transferSize, st: e.responseStatus }));
+        return {
+          url: location.pathname, readyState: document.readyState,
+          inviteButton: b ? { hydrated: Object.keys(b).some((k) => k.startsWith("__reactProps")), disabled: b.disabled } : null,
+          dialogs: document.querySelectorAll("dialog").length, dialogOpen: [...document.querySelectorAll("dialog")].map((d) => d.open),
+          scriptTags: scripts.length, scriptsWithNonce: document.querySelectorAll("script[nonce]").length,
+          buildHints: scripts.slice(0, 3), staticResources: res.length, staticResourcesBad: res.filter((r) => !r.st || r.st >= 400),
+          csp: window.__csp || [],
+        };
+      })()`);
+    } catch (e) {
+      state = `durum okunamadı: ${String(e).slice(0, 200)}`;
+    }
+    return { consoleErrors, pageErrors, failed, state };
+  };
+}
+
+async function reportDiagnostics(testInfo: TestInfo, flush: () => Promise<unknown>): Promise<void> {
+  if (testInfo.status === testInfo.expectedStatus) return;
+  const payload = await flush();
+  const body = JSON.stringify(payload, null, 2);
+  await testInfo.attach("t247-diagnostics.json", { body, contentType: "application/json" });
+  console.log(`T247-DIAG ${testInfo.project.name} ${JSON.stringify(payload)}`);
+}
+
 test.describe("demo akışı", () => {
+  let flush: () => Promise<unknown> = () => Promise.resolve(null);
+  test.beforeEach(({ page }) => {
+    flush = collectDiagnostics(page);
+  });
+  test.afterEach(async ({ page }, testInfo) => {
+    if (!page.isClosed()) await reportDiagnostics(testInfo, flush);
+  });
+
   test("yönetici: landing → demo girişi → ana ekran → üyeler → davet reddi → denetim kaydı → çıkış", async ({ page }) => {
     await collectCspViolations(page);
 
