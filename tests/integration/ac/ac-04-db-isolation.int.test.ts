@@ -181,7 +181,17 @@ async function cleanupExceptTenants(c: pg.Client, r: typeof reg): Promise<void> 
   const tenantIds = r.worlds.map((w) => w.tenantId);
   const userIds = [...r.worlds.flatMap((w) => [w.ownerUserId, w.memberUserId]), ...r.extraUsers];
   if (tenantIds.length > 0) {
-    for (const t of ["invitations", "membership_roles", "tenant_memberships", "tenant_settings"]) {
+    // T-202 tabloları FK sırasıyla önce (kapsam → kilit → lokasyon → depo).
+    for (const t of [
+      "membership_warehouse_scopes",
+      "location_count_locks",
+      "locations",
+      "warehouses",
+      "invitations",
+      "membership_roles",
+      "tenant_memberships",
+      "tenant_settings",
+    ]) {
       await c.query(`DELETE FROM public.${t} WHERE tenant_id = ANY($1::uuid[])`, [tenantIds]);
     }
   }

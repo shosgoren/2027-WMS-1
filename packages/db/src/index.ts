@@ -76,6 +76,19 @@ export type {
 export { AUDIT_ACTIONS, AuditError, CHANGE_SUMMARY_MAX_BYTES, REDACTED, appendAudit, isSensitiveKey, looksSensitiveValue, maskChangeSummary, recordSecurityEvent } from "./audit.ts";
 export type { AppendedAudit, AuditAction, AuditEntry, JsonValue, SecurityEventInput } from "./audit.ts";
 export type { AuditLog, NewAuditLog, NewRequestRateLimit, RequestRateLimit } from "./schema/audit.ts";
+// Depo/lokasyon tabloları: yalnızca TİPLER (T-202); tablo nesneleri `@wms/db/internal/schema` alt yolundadır.
+export type {
+  CountLockStatus,
+  Location,
+  LocationCountLock,
+  LocationKind,
+  MembershipWarehouseScope,
+  NewLocation,
+  NewMembershipWarehouseScope,
+  NewWarehouse,
+  Warehouse,
+  WarehouseStatus,
+} from "./schema/warehouse.ts";
 // Bağlantı hedefi karşılaştırması (connection-target.ts, yan etkisiz): kuyruk kurulum CLI'ı uygulama bağlantısını reddetmek için kullanır.
 export { consumeRateLimit } from "./rate-limit.ts";
 export type { ConsumeRateLimitParams, ConsumeRateLimitResult } from "./rate-limit.ts";
