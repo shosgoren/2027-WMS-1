@@ -4,8 +4,8 @@
 // - Mühür AAD'si tenant kimliğini içerir (tenant işinde işin yazıldığı tenant, `ctx.inTenant` içinde okunur;
 //   platform işinde `platform`): başka tenant'ın işine taşınan mühür açılmaz.
 // - Alıcı adresi ve bağlantı loglanmaz (maskeli alıcı). Hata yutulmaz: fırlatılır. Kalıcı hatalar
-//   (`permanent === true`: kip kapalı, geçersiz alıcı, mühür açılamadı, bilinmeyen şablon, sağlayıcı 4xx ≠ 429)
-//   kuyruk bağdaştırıcısında yeniden denenmeden `failed` olur; geçici hatalar (ağ, 5xx, 429) yeniden denenir.
+//   (`permanent === true`: kip kapalı, geçersiz alıcı, mühür açılamadı, bilinmeyen şablon, sağlayıcı 4xx; 408, 409, 425, 429 hariç)
+//   kuyruk bağdaştırıcısında yeniden denenmeden `failed` olur; geçici hatalar (ağ, 5xx, 408, 409, 425, 429) yeniden denenir.
 import { currentTenantId } from "@wms/db";
 import {
   EMAIL_SEND_JOB_TYPE,
