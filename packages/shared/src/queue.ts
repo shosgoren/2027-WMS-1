@@ -6,8 +6,8 @@
 // vermesinin yolu yoktur (tipte alan yok; çalışma anında bilinmeyen alan reddedilir).
 import { z } from "zod";
 
-/** Kayıtlı iş türleri. `email.send` T-116, `demo.reseed` T-123 tarafından doldurulur. */
-export const JOB_TYPES = ["email.send", "demo.reseed"] as const;
+/** Kayıtlı iş türleri. `email.send` T-116, `invitation.deliver` T-117, `demo.reseed` T-123 tarafından doldurulur. */
+export const JOB_TYPES = ["email.send", "invitation.deliver", "demo.reseed"] as const;
 export type JobType = (typeof JOB_TYPES)[number];
 
 /**
@@ -26,6 +26,8 @@ export const JOB_PAYLOAD_SCHEMAS = {
       sealed: z.record(z.string(), z.union([z.string(), z.number()])),
     })
     .strict(),
+  /** Davet teslimi (T-117): yalnızca davet kimliği; belirteç worker'da üretilir, yüke/DB'ye düz yazılmaz (A-42). */
+  "invitation.deliver": z.object({ invitationId: z.string().uuid() }).strict(),
   "demo.reseed": z.object({}).strict(),
 } as const satisfies Record<JobType, z.ZodType>;
 

@@ -125,7 +125,7 @@ describe("withMembership — girdi doğrulaması (sorgusuz ret)", () => {
 });
 
 describe("withMembership — SQL biçimi ve karar tablosu (sahte tx)", () => {
-  it("yalnızca app.current_tenant_id kurar (parametre), tenant ve üyelik FOR SHARE, tenant önce", async () => {
+  it("app.current_tenant_id ve app.current_user_id kurar (parametre), tenant ve üyelik FOR SHARE, tenant önce", async () => {
     const client = newClient();
     const { tx, queries } = fakeTx(client, membershipResponder({ roles: ["PICKER", "COUNTER"] }));
     const result = await withMembership({ client, userId: USER, tenantId: TENANT }, async (t, m) => {
@@ -138,7 +138,9 @@ describe("withMembership — SQL biçimi ve karar tablosu (sahte tx)", () => {
     expect(first?.sql).toBe("SELECT set_config('app.current_tenant_id', $1, true)");
     expect(first?.params).toEqual([TENANT]);
     const all = queries.map((q) => q.sql).join("\n");
-    expect(all).not.toContain("app.current_user_id");
+    // T-117 Supervisor kararı: doğrulanmış üyeliğin kullanıcı kimliği de kurulur (set_config, parametre, transaction-local).
+    expect(queries[1]?.sql).toBe("SELECT set_config('app.current_user_id', $1, true)");
+    expect(queries[1]?.params).toEqual([USER]);
     expect(all).not.toContain("app.system_reason");
     expect(all).not.toContain(TENANT);
     expect(all).not.toContain(USER);
