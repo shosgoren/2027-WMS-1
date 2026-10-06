@@ -12,6 +12,7 @@
     "./onboarding/workspace": "./src/onboarding/workspace.ts",
     "./onboarding/settings-queries": "./src/onboarding/settings-queries.ts",
     "./audit/today": "./src/audit/today.ts",
+    "./audit/audit-query": "./src/audit/audit-query.ts",
     "./onboarding/templates": "./src/onboarding/templates.ts",
     "./demo/seed": "./src/demo/seed.ts"
   },
