@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { getTranslations } from "next-intl/server";
-import { ArrowDownToLine, ArrowLeftRight, ArrowUpFromLine, ClipboardCheck, FileText, Package, Search, SlidersHorizontal, TaskCard, Undo2, Users } from "@wms/ui";
+import { ArrowDownToLine, ArrowLeftRight, ArrowUpFromLine, ClipboardCheck, FileText, Package, Search, SlidersHorizontal, TaskCard, Undo2, Users, Warehouse } from "@wms/ui";
 import type { TaskCardTone } from "@wms/ui";
 
 // "Ne yapmak istiyorsun?" kart ızgarası (T-122). Sunucu bileşeni: izin kararı çağıran sayfadan (`allowed`) gelir ve yalnızca
@@ -14,20 +14,12 @@ export interface TaskMenuProps {
 
 const ICON_PROPS = { className: "size-6", strokeWidth: 2, "aria-hidden": true } as const;
 
-// Lucide'te depo/bina ikonu `packages/ui/src/icons.ts` dışa aktarımında yok (T-246a kapsamı); yalnız bu kart için
-// yerel, currentColor satır içi çizim kalır (kart eki gerekli: `Warehouse` ikonunun eklenmesi).
-const WAREHOUSE_ICON = (
-  <svg viewBox="0 0 24 24" className="size-6" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-    <path d="M3 9.5 12 4l9 5.5V20H3ZM9 20v-6h6v6" />
-  </svg>
-);
-
 const ICONS = {
   members: <Users {...ICON_PROPS} />,
   settings: <SlidersHorizontal {...ICON_PROPS} />,
   audit: <FileText {...ICON_PROPS} />,
   items: <Package {...ICON_PROPS} />,
-  warehouses: WAREHOUSE_ICON,
+  warehouses: <Warehouse {...ICON_PROPS} />,
   receive: <ArrowDownToLine {...ICON_PROPS} />,
   issue: <ArrowUpFromLine {...ICON_PROPS} />,
   transfer: <ArrowLeftRight {...ICON_PROPS} />,

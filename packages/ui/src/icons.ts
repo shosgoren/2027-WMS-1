@@ -17,4 +17,5 @@ export {
   TriangleAlert,
   Undo2,
   Users,
+  Warehouse,
 } from "lucide-react";
