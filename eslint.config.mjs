@@ -467,11 +467,20 @@ const noAliasedModuleLoader = {
  * Kapsam: `import`/`export … from`, `import()`, `import x = require()`, `require`/`createRequire(…)(…)` ve (loader kuralı) yükleyici.
  * @param {string} spec @param {string} filename mutlak dosya yolu @param {ForbiddenEntry[]} list
  */
-const normalizedSpecifierHit = (spec, filename, list) => {
-  const entries = list.filter((e) => e.normalized);
+const normalizedSpecifierHit = (spec, filename, list, extra = []) => {
+  const entries = [...list, ...extra].filter((e) => e.normalized);
   if (entries.length === 0 || typeof spec !== "string") return null;
   if (list.some((e) => new RegExp(e.regex, "iu").test(spec))) return null; // ham dizgi zaten raporlanır
-  let target = spec.startsWith("file:") ? spec.slice(5).replace(/^\/\//, "") : spec;
+  // Yüzde kodlaması (`%2E`, `%63ontext.ts`) çözülür; geçersiz kodlama güvenli tarafta raporlanır.
+  let decoded;
+  try {
+    decoded = decodeURIComponent(spec);
+  } catch {
+    return entries[0] ?? null;
+  }
+  // Ters eğik çizgi `/` sayılır (`..\\src\\context.ts`).
+  let target = decoded.replaceAll("\\", "/");
+  if (target.startsWith("file:")) target = target.slice(5).replace(/^\/\//, "");
   if (/^\.\.?(?:\/|$)/.test(target)) target = path.posix.join(path.posix.dirname(filename.replaceAll("\\", "/")), target);
   target = path.posix.normalize(target);
   if (target.startsWith(`${REPO_ROOT_POSIX}/`)) target = target.slice(REPO_ROOT_POSIX.length + 1);
@@ -482,18 +491,19 @@ const normalizedSpecifierHit = (spec, filename, list) => {
 const noNormalizedPathImport = {
   meta: {
     type: "problem",
-    schema: [{ type: "object", additionalProperties: false, properties: { modules: { type: "array", items: { type: "object" } } } }],
+    schema: [{ type: "object", additionalProperties: false, properties: { modules: { type: "array", items: { type: "object" } }, reexportModules: { type: "array", items: { type: "object" } } } }],
     messages: { forbidden: "{{message}}" },
   },
   create(context) {
     const modules = /** @type {ForbiddenEntry[]} */ (/** @type {any} */ (context.options[0])?.modules ?? ALL_FORBIDDEN_MODULES);
-    /** @param {any} node @param {any} src */
-    const check = (node, src) => {
+    const reexportModules = /** @type {ForbiddenEntry[]} */ (/** @type {any} */ (context.options[0])?.reexportModules ?? []);
+    /** @param {any} node @param {any} src @param {ForbiddenEntry[]} [extra] yalnızca bu düğüm türünde ek yasaklar */
+    const check = (node, src, extra = []) => {
       let spec = null;
       if (src?.type === "Literal" && typeof src.value === "string") spec = src.value;
       else if (src?.type === "TemplateLiteral" && src.expressions.length === 0 && src.quasis.length === 1) spec = src.quasis[0].value.cooked;
       if (spec === null) return;
-      const hit = normalizedSpecifierHit(spec, context.filename, modules);
+      const hit = normalizedSpecifierHit(spec, context.filename, modules, extra);
       if (hit) context.report({ node, messageId: "forbidden", data: { message: hit.message ?? "" } });
     };
     const isLoaderCallee = (/** @type {any} */ c) =>
@@ -502,8 +512,8 @@ const noNormalizedPathImport = {
       (c.type === "CallExpression" && (c.callee.name === "createRequire" || c.callee.property?.name === "createRequire"));
     return {
       ImportDeclaration: (n) => check(n, n.source),
-      ExportNamedDeclaration: (n) => n.source && check(n, n.source),
-      ExportAllDeclaration: (n) => check(n, n.source),
+      ExportNamedDeclaration: (n) => n.source && check(n, n.source, reexportModules),
+      ExportAllDeclaration: (n) => check(n, n.source, reexportModules),
       ImportExpression: (n) => check(n, n.source),
       TSExternalModuleReference: (/** @type {any} */ n) => check(n, /** @type {any} */ (n).expression),
       CallExpression: (n) => {
@@ -587,7 +597,7 @@ const GUARD_LOADER_FILE = "scripts/guards/cli.mjs";
  * @param {{ files: string[], ignores?: string[], allow: ForbiddenEntry[], replace?: ForbiddenEntry[], web?: boolean }} p `allow`: bu kapsamda
  *   serbest girdiler; `replace`: serbest girdi yerine uygulanacak daha dar girdiler.
  */
-const strictProfile = ({ files, ignores = [], allow, replace = [], web = false }) => {
+const strictProfile = ({ files, ignores = [], allow, replace = [], web = false, reexportForbid = [] }) => {
   const modules = [...ALL_FORBIDDEN_MODULES.filter((m) => !allow.includes(m)), ...replace];
   // Web: `@wms/db` kökü yalnızca dinamik/yükleyici biçimlerinde yasak (statik import'ta adlar `paths` ile denetlenir).
   const loaderModules = web ? [...modules, WEB_DB_ENTRY] : modules;
@@ -602,7 +612,7 @@ const strictProfile = ({ files, ignores = [], allow, replace = [], web = false }
       ],
       "no-restricted-syntax": ["error", ...rawClientSyntax(loaderModules), ...CODE_EXEC_SYNTAX, ...TENANT_SETTING_SYNTAX],
       "wms/no-aliased-module-loader": ["error", { modules: loaderModules }],
-      "wms/no-normalized-path-import": ["error", { modules }],
+      "wms/no-normalized-path-import": ["error", { modules, reexportModules: reexportForbid }],
     }),
   };
 };
@@ -637,8 +647,8 @@ const PROFILES = [
     files: ["packages/storage/src/index.ts"],
     allow: [AWS_SDK_ENTRY, STORAGE_CONTEXT_PATH_ENTRY, CACHE_KEY_ENTRY, CACHE_KEY_PATH_ENTRY],
   }),
-  // `@wms/shared` kendi iç göreli `./cache-key` içe aktarımı (çözülmüş yol denetimi) serbesttir; paket adı girdisi yasak kalır.
-  strictProfile({ files: ["packages/shared/src/**"], allow: [CACHE_KEY_PATH_ENTRY] }),
+  // `@wms/shared` kendi iç göreli `./cache-key` içe aktarımı (çözülmüş yol denetimi) serbesttir; `export … from` yeniden dışa aktarımı ve paket adı girdisi yasak kalır.
+  strictProfile({ files: ["packages/shared/src/**"], allow: [CACHE_KEY_PATH_ENTRY], reexportForbid: [CACHE_KEY_PATH_ENTRY] }),
   // `packages/db` ve `tests/integration` ana bloktan muaftır (mevcut); yeni kütüphane yasakları orada da
   // geçerlidir, statik olmayan import/require muafiyeti değişmez. T-127a: depolama sınırları da burada geçerlidir;
   // `@aws-sdk` yalnızca depolama fikstürleri (MinIO/STS kurulumu ve nesne deposu entegrasyon testi) için serbesttir.

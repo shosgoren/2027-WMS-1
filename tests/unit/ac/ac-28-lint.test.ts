@@ -784,6 +784,16 @@ const NORMALIZED_CASES: ReadonlyArray<readonly [string, string, string]> = [
   ["shared/src//cache-key.ts", TENANT_MODULE_PATH, "../../shared/src//cache-key.ts"],
   ["shared/src/x/../cache-key.ts", TENANT_MODULE_PATH, "../../shared/src/x/../cache-key.ts"],
   ["@wms/shared/./cache-key", TENANT_MODULE_PATH, "@wms/shared/./cache-key"],
+  // Yüzde kodlaması, geçersiz kodlama, `file:` ve ters eğik çizgi.
+  ["%2E kodlu: ../../storage/src/%2E/context.ts", TENANT_MODULE_PATH, "../../storage/src/%2E/context.ts"],
+  ["%63ontext.ts kodlu", TENANT_MODULE_PATH, "../../storage/src/%63ontext.ts"],
+  ["%2e%2e kodlu: ../../storage/src/%2e%2e/src/context", TENANT_MODULE_PATH, "../../storage/src/%2e%2e/src/context"],
+  ["%2F kodlu ayırıcı", TENANT_MODULE_PATH, "..%2F..%2Fstorage%2Fsrc%2Fcontext.ts"],
+  ["geçersiz kodlama (%E0%A4%A) güvenli tarafta", TENANT_MODULE_PATH, "../../storage/src/context%E0%A4%A.ts"],
+  ["file: kodlu", TENANT_MODULE_PATH, "file:///repo/packages/storage/src/%63ontext.ts"],
+  ["file: + ./ ", TENANT_MODULE_PATH, "file:///repo/packages/./storage/src/context.ts"],
+  ["ters eğik çizgi ..\\..\\storage\\src\\context.ts", TENANT_MODULE_PATH, "..\\..\\storage\\src\\context.ts"],
+  ["karışık ters eğik çizgi shared", TENANT_MODULE_PATH, "../../shared\\src\\.\\cache-key.ts"],
   ["storage/src içinden (index.ts değil) ./../src/./cache-key yolu", STORAGE_SRC_PATH, "../../shared/src/./cache-key.ts"],
 ];
 
@@ -811,6 +821,25 @@ describe("AC-28 lint (T-127a): normalize edilmemiş yol atlatmaları", () => {
       for (const code of forms) {
         const hits = rawHits(await lint(code, file));
         expect(hits, code).toHaveLength(1);
+      }
+    },
+    60_000,
+  );
+
+  it(
+    "@AC-28 packages/shared/src içinde ./cache-key import'u serbest ama `export … from` yeniden dışa aktarımı yasak",
+    async () => {
+      const file = probe("packages/shared/src/__ac28_probe__.ts");
+      for (const spec of ["./cache-key.ts", "./cache-key", "./x/../cache-key.ts", "../src/./cache-key.ts", "./%63ache-key.ts"]) {
+        const reexports = [`export { x } from ${JSON.stringify(spec)};\n`, `export * from ${JSON.stringify(spec)};\n`];
+        for (const code of reexports) {
+          const hits = rawHits(await lint(code, file));
+          expect(hits, code).toHaveLength(1);
+          expect(hits[0]?.severity, code).toBe(2);
+        }
+        const imp = await lint(`import { x } from ${JSON.stringify(spec)};\n\nexport const c = x;\n`, file);
+        expect(rawHits(imp), spec).toHaveLength(0);
+        expect(imp.errorCount, spec).toBe(0);
       }
     },
     60_000,
