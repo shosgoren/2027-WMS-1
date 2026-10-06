@@ -3,10 +3,11 @@
 // Sıra: (1) `Origin` başlığı YOKSA veya `BETTER_AUTH_URL` kökeniyle eşleşmezse ret (FORBIDDEN); (2) principal çözümü;
 // (3) Zod doğrulaması (VALIDATION_FAILED); (4) işleyici; (5) `AppError` → güvenli yanıt (i18n anahtarı + istek kimliği;
 // yığın izi/SQL/SQLSTATE yok), beklenmeyen hata loglanır ve genel `INTERNAL` döner (G-07). Hız sınırı (T-127): IP (principal
-// çözümünden ÖNCE, DB'ye yük bindirmesin), kullanıcı ve (isteğe bağlı `tenantKey`) tenant; aşım `RATE_LIMITED`.
+// çözümünden ÖNCE, DB'ye yük bindirmesin), kullanıcı ve tenant (`ctx.limitTenant`, üyelik çözüldükten sonra doğrulanmış kimlikle); aşım `RATE_LIMITED`.
 // `routeGuard` aynı denetimleri `/api/t/**` route handler'ları için yapar (POST'ta `Origin` yoksa FORBIDDEN, m4).
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
+import { runTenantQuery, type TenantAccessParams } from "@wms/domain/identity/access";
 import { AppError, type AppErrorBody } from "@wms/shared/errors";
 import { RateLimitedError, clientIp, createProductionLimiter, type RateLimiter } from "./rate-limit.ts";
 
@@ -21,6 +22,11 @@ export interface ActionContext {
   readonly principal: GuardPrincipal | null;
   /** Doğrulanmış uygulama kökeni (`BETTER_AUTH_URL`). */
   readonly origin: string;
+  /**
+   * Tenant başına yazma sınırını tüketir. YALNIZCA üyelik/izin çözüldükten SONRA, DOĞRULANMIŞ tenant kimliğiyle çağrılır
+   * (istemci slug'ı ile asla: üye olmayan kullanıcı başka tenant'ın kovasını tüketemez, MAJOR-1).
+   */
+  readonly limitTenant: (verifiedTenantId: string) => Promise<void>;
 }
 
 export type SafeError = AppErrorBody["error"] & { readonly requestId: string; readonly retryAfterSeconds?: number };
@@ -37,14 +43,14 @@ export interface GuardDeps {
   readonly limiter?: RateLimiter;
   /** Yerelde `Fly-Client-IP` yokken kullanılacak soket adresi (M6). */
   readonly socketIp?: (headers: Headers) => string | undefined;
+  /** Varsayılan: `NODE_ENV === "production"` (Fly-Client-IP/soket yoksa üretimde fail-closed). */
+  readonly production?: boolean;
 }
 
 export interface ActionOptions<S extends z.ZodType> {
   readonly schema: S;
   /** Varsayılan `true`: principal yoksa `UNAUTHENTICATED`. Davet kabulü gibi anonim eylemler `false`. */
   readonly requireAuth?: boolean;
-  /** Doğrulanmış girdiden tenant sayaç anahtarı (slug/kimlik); verilirse tenant başına yazma sınırı uygulanır. */
-  readonly tenantKey?: (input: z.infer<S>) => string | undefined;
 }
 
 function originOf(appUrl: string | undefined): string | undefined {
@@ -91,7 +97,10 @@ async function limit(deps: GuardDeps, kind: "ip" | "user" | "tenant", subject: s
 }
 
 function ipOf(deps: GuardDeps, headers: Headers): string {
-  return clientIp(headers, deps.socketIp?.(headers));
+  return clientIp(headers, {
+    socketIp: deps.socketIp?.(headers),
+    ...(deps.production === undefined ? {} : { production: deps.production }),
+  });
 }
 
 export function createActionGuard(deps: GuardDeps) {
@@ -108,11 +117,9 @@ export function createActionGuard(deps: GuardDeps) {
         const principal = await deps.resolvePrincipal(headers);
         if ((options.requireAuth ?? true) && principal === null) throw new AppError("UNAUTHENTICATED");
         if (principal !== null) await limit(deps, "user", principal.userId);
-        const ctx: ActionContext = { requestId, principal, origin };
+        const ctx: ActionContext = { requestId, principal, origin, limitTenant: (id) => limit(deps, "tenant", id) };
         const parsed = options.schema.safeParse(raw);
         if (!parsed.success) throw new AppError("VALIDATION_FAILED");
-        const tenant = options.tenantKey?.(parsed.data as z.infer<S>);
-        if (tenant !== undefined) await limit(deps, "tenant", tenant);
         return { ok: true, data: await handler(parsed.data as z.infer<S>, ctx) };
       } catch (e) {
         if (e instanceof AppError) {
@@ -126,9 +133,20 @@ export function createActionGuard(deps: GuardDeps) {
   };
 }
 
+/**
+ * Tenant sayacı (MAJOR-1): önce üyelik + izin çözülür (üye olmayan/yetkisiz çağıran burada reddedilir ve HİÇ tenant sayacı
+ * tüketmez), sonra DOĞRULANMIŞ tenant kimliğiyle tüketilir; istemci slug'ı sayaç anahtarı değildir.
+ */
+export async function limitVerifiedTenant(access: TenantAccessParams, ctx: Pick<ActionContext, "limitTenant">): Promise<void> {
+  const tenantId = await runTenantQuery(access, (_tx, membership) => Promise.resolve(membership.tenantId));
+  await ctx.limitTenant(tenantId);
+}
+
 export interface RouteContext {
   readonly requestId: string;
   readonly principal: GuardPrincipal | null;
+  /** Bkz. `ActionContext.limitTenant`. */
+  readonly limitTenant: (verifiedTenantId: string) => Promise<void>;
 }
 
 function jsonResponse(err: AppError, requestId: string): Response {
@@ -156,7 +174,7 @@ export function createRouteGuard(deps: GuardDeps) {
         const principal = await deps.resolvePrincipal(headers);
         if ((options.requireAuth ?? true) && principal === null) throw new AppError("UNAUTHENTICATED");
         if (principal !== null) await limit(deps, "user", principal.userId);
-        return await handler(request, { requestId, principal });
+        return await handler(request, { requestId, principal, limitTenant: (id) => limit(deps, "tenant", id) });
       } catch (e) {
         if (e instanceof AppError) {
           if (e.code === "INTERNAL") deps.log({ level: "error", msg: "route failed", requestId, ...describe(e) });

@@ -6,7 +6,7 @@ import { ROLE_KEYS } from "@wms/domain/identity/permissions";
 import { loadMailConfig } from "@wms/shared/mailer";
 import { getAppDb } from "@wms/db";
 import { headers } from "next/headers";
-import { createProductionGuard } from "../../../../lib/action-guard.ts";
+import { createProductionGuard, limitVerifiedTenant } from "../../../../lib/action-guard.ts";
 import { getSenderQueue } from "../../../../lib/queue.ts";
 
 const slugSchema = z.string().min(1).max(63);
@@ -26,9 +26,10 @@ const logInvitation: NonNullable<InvitationDeps["log"]> = (entry) => {
 const guardedAction = createProductionGuard(() => headers());
 
 export async function inviteMemberAction(raw: unknown) {
-  return guardedAction({ schema: inviteSchema, tenantKey: (i) => i.slug }, async (input, ctx) => {
+  return guardedAction({ schema: inviteSchema }, async (input, ctx) => {
     const principal = ctx.principal;
     if (principal === null) throw new Error("unreachable: principal required");
+    await limitVerifiedTenant({ db: getAppDb(), principal, tenantSlug: input.slug, permission: "users.manage" }, ctx);
     const senderQueue = await getSenderQueue(); // transaction dışında başlatılır
     const result = await inviteMember(
       {
@@ -53,9 +54,10 @@ export async function inviteMemberAction(raw: unknown) {
 }
 
 export async function revokeInvitationAction(raw: unknown) {
-  return guardedAction({ schema: revokeSchema, tenantKey: (i) => i.slug }, async (input, ctx) => {
+  return guardedAction({ schema: revokeSchema }, async (input, ctx) => {
     const principal = ctx.principal;
     if (principal === null) throw new Error("unreachable: principal required");
+    await limitVerifiedTenant({ db: getAppDb(), principal, tenantSlug: input.slug, permission: "users.manage" }, ctx);
     await revokeInvitation({
       db: getAppDb(),
       principal,

@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { buildCsp } from "../proxy.ts";
 import { createActionGuard, createRouteGuard, type GuardDeps } from "./action-guard.ts";
-import { RATE_LIMITS, RateLimitedError, clientIp, createRateLimiter, hashKey, type RateLimitStore } from "./rate-limit.ts";
+import { RATE_LIMITS, RateLimitedError, clientIp, createRateLimiter, deriveKey, hashKey, normalizeIp, type RateLimitStore } from "./rate-limit.ts";
 import { z } from "zod";
 
 const APP = "https://app.example.test";
@@ -72,12 +72,17 @@ describe("action guard", () => {
     expect(await g({})).toMatchObject({ ok: true });
     expect(await g({})).toMatchObject({ ok: false, error: { code: "RATE_LIMITED", retryable: true, retryAfterSeconds: expect.any(Number) as unknown } });
   });
-  it("tenantKey ile tenant sayacı ayrı işler", async () => {
+  it("ctx.limitTenant tenant kimliğine göre ayrı sayar", async () => {
     const limiter = createRateLimiter({ store: memStore(), secret: "s", limits: { tenant: 1 } });
-    const g = createActionGuard(deps({ limiter }))({ schema: z.object({ t: z.string() }), tenantKey: (i) => i.t }, () => Promise.resolve(1));
+    const g = createActionGuard(deps({ limiter }))({ schema: z.object({ t: z.string() }) }, (i, ctx) => ctx.limitTenant(i.t).then(() => 1));
     expect(await g({ t: "a" })).toMatchObject({ ok: true });
     expect(await g({ t: "b" })).toMatchObject({ ok: true });
     expect(await g({ t: "a" })).toMatchObject({ ok: false, error: { code: "RATE_LIMITED" } });
+  });
+  it("üretimde IP kaynağı yoksa fail-closed (FORBIDDEN), ortak kova yok", async () => {
+    const limiter = createRateLimiter({ store: memStore(), secret: "s" });
+    const r = await act(deps({ limiter, production: true }))({});
+    expect(r).toMatchObject({ ok: false, error: { code: "FORBIDDEN" } });
   });
 });
 
@@ -101,16 +106,34 @@ describe("route guard", () => {
 });
 
 describe("rate-limit", () => {
-  it("clientIp yalnızca Fly-Client-IP; X-Forwarded-For yok sayılır", () => {
-    expect(clientIp(new Headers({ "fly-client-ip": "1.2.3.4", "x-forwarded-for": "9.9.9.9" }))).toBe("1.2.3.4");
-    expect(clientIp(new Headers({ "x-forwarded-for": "9.9.9.9" }), "10.0.0.1")).toBe("10.0.0.1");
-    expect(clientIp(new Headers({ "x-forwarded-for": "9.9.9.9" }))).toBe("unknown");
+  it("clientIp yalnızca Fly-Client-IP; X-Forwarded-For yok sayılır; yoksa soket; üretimde ikisi de yoksa fail-closed", () => {
+    expect(clientIp(new Headers({ "fly-client-ip": "1.2.3.4", "x-forwarded-for": "9.9.9.9" }), { production: true })).toBe("1.2.3.4");
+    expect(clientIp(new Headers({ "x-forwarded-for": "9.9.9.9" }), { socketIp: "10.0.0.1", production: true })).toBe("10.0.0.1");
+    expect(() => clientIp(new Headers({ "x-forwarded-for": "9.9.9.9" }), { production: true })).toThrow(expect.objectContaining({ code: "FORBIDDEN" }) as Error);
+    expect(clientIp(new Headers(), { production: false })).toBe("local-dev");
+  });
+  it("IPv6 /64 önekine indirgenir; IPv4 ve IPv4-eşlemeli aynen", () => {
+    const a = normalizeIp("2001:db8:1:2:aaaa:bbbb:cccc:dddd");
+    expect(a).toBe("2001:db8:1:2::/64");
+    expect(normalizeIp("2001:0db8:0001:0002::1")).toBe(a);
+    expect(normalizeIp("2001:DB8:1:2:ffff:ffff:ffff:ffff")).toBe(a);
+    expect(normalizeIp("2001:db8:1:3::1")).not.toBe(a);
+    expect(normalizeIp("::1")).toBe("0:0:0:0::/64");
+    expect(normalizeIp("::ffff:1.2.3.4")).toBe("1.2.3.4");
+    expect(normalizeIp("1.2.3.4")).toBe("1.2.3.4");
+  });
+  it("HKDF anahtarı sırdan türer, ham sırdan farklıdır, sır değişince değişir", () => {
+    const k = deriveKey("s1");
+    expect(k).toHaveLength(32);
+    expect(deriveKey("s1").equals(k)).toBe(true);
+    expect(deriveKey("s2").equals(k)).toBe(false);
+    expect(hashKey(k, "web.ip", "x")).not.toBe(hashKey(Buffer.from("s1"), "web.ip", "x"));
   });
   it("anahtar 64 hex, sırra bağlı, kapsama göre ayrışır", () => {
-    const a = hashKey("s1", "web.ip", "1.2.3.4");
+    const a = hashKey(deriveKey("s1"), "web.ip", "1.2.3.4");
     expect(a).toMatch(/^[0-9a-f]{64}$/);
-    expect(hashKey("s2", "web.ip", "1.2.3.4")).not.toBe(a);
-    expect(hashKey("s1", "web.user", "1.2.3.4")).not.toBe(a);
+    expect(hashKey(deriveKey("s2"), "web.ip", "1.2.3.4")).not.toBe(a);
+    expect(hashKey(deriveKey("s1"), "web.user", "1.2.3.4")).not.toBe(a);
   });
   it("pencere değişince sayaç sıfırlanır; varsayılanlar A-41", async () => {
     expect([RATE_LIMITS.ip.limit, RATE_LIMITS.user.limit, RATE_LIMITS.tenant.limit]).toEqual([300, 120, 600]);

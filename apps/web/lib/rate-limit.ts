@@ -1,10 +1,10 @@
 // Genel hız sınırı (T-127; 03 §Uygulama güvenliği; A-41). Sabit pencere sayaçları PLATFORM tablosu
 // `request_rate_limits` içindedir (T-107): Fly'da çok süreç/makine aynı sayacı paylaşır (süreç belleği yetmez).
 // Tek ifadeli `INSERT … ON CONFLICT DO UPDATE … RETURNING count` atomiktir (okuma-sonra-yazma yarışı yok).
-// Anahtar = HMAC-SHA-256(sır, kapsam|değer): düşük entropili IP'nin sözlükle geri çevrilmesini önler (0004 notu).
+// Anahtar = HMAC-SHA-256(HKDF(sır, "wms/rate-limit/v1"), kapsam|değer): düşük entropili IP'nin sözlükle geri çevrilmesini önler (0004 notu).
 // İstemci IP'si YALNIZCA `Fly-Client-IP`'den (M6); `X-Forwarded-For` istemci tarafından sahtelenebilir, yok sayılır.
 // Better Auth'un kendi uç nokta sınırları ayrıdır ve burada değiştirilmez.
-import { createHmac } from "node:crypto";
+import { createHmac, hkdfSync } from "node:crypto";
 import { consumeRateLimit, getAppDb, type DbClient } from "@wms/db";
 import { AppError } from "@wms/shared/errors";
 
@@ -46,15 +46,53 @@ export function createDbRateLimitStore(client: DbClient): RateLimitStore {
   };
 }
 
-/** İstemci IP'si: yalnızca `Fly-Client-IP` (yerelde çağıranın verdiği soket adresi); `X-Forwarded-For` yok sayılır. */
-export function clientIp(headers: Headers, socketIp?: string): string {
-  const fly = headers.get("fly-client-ip")?.trim();
-  if (fly !== undefined && fly !== "") return fly;
-  return socketIp !== undefined && socketIp !== "" ? socketIp : "unknown";
+export interface ClientIpOptions {
+  /** Yerelde/yedek olarak soket adresi (Next Server Action'da yoktur; çağıran sağlarsa kullanılır). */
+  readonly socketIp?: string | undefined;
+  /** Varsayılan: `NODE_ENV === "production"`. */
+  readonly production?: boolean;
 }
 
-export function hashKey(secret: string, scope: string, value: string): string {
-  return createHmac("sha256", secret).update(`${scope}|${value}`).digest("hex");
+/**
+ * IPv6 adresini /64 önekine indirger (bir kullanıcının tüm /64'ü tek kova: adres döndürerek sınır aşılamaz, MINOR-2);
+ * IPv4 ve IPv4-eşlemeli IPv6 (`::ffff:a.b.c.d`) IPv4 olarak kalır. Tanınmayan biçim olduğu gibi döner.
+ */
+export function normalizeIp(raw: string): string {
+  const ip = raw.trim().toLowerCase().split("%")[0] ?? "";
+  if (!ip.includes(":")) return ip;
+  const mapped = /^(?:0{0,4}:){2,5}ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(ip);
+  if (mapped?.[1] !== undefined) return mapped[1];
+  const halves = ip.split("::");
+  if (halves.length > 2) return ip;
+  const head = (halves[0] ?? "") === "" ? [] : (halves[0] ?? "").split(":");
+  const tail = halves.length === 2 ? ((halves[1] ?? "") === "" ? [] : (halves[1] ?? "").split(":")) : [];
+  const fill = halves.length === 2 ? 8 - head.length - tail.length : 0;
+  const groups = [...head, ...Array<string>(Math.max(0, fill)).fill("0"), ...tail];
+  if (groups.length !== 8 || groups.some((g) => !/^[0-9a-f]{1,4}$/.test(g))) return ip;
+  return `${groups.slice(0, 4).map((g) => g.replace(/^0+(?=.)/, "")).join(":")}::/64`;
+}
+
+/**
+ * İstemci IP'si: YALNIZCA `Fly-Client-IP` (M6; `X-Forwarded-For` yok sayılır), yoksa soket adresi. İkisi de yoksa:
+ * üretimde FAIL-CLOSED (ortak "bilinmeyen" kovası, tek istemcinin herkesi kilitlemesine yol açar; `FORBIDDEN`);
+ * yalnızca geliştirmede `local-dev` kovası.
+ */
+export function clientIp(headers: Headers, opts: ClientIpOptions = {}): string {
+  const fly = headers.get("fly-client-ip")?.trim();
+  if (fly !== undefined && fly !== "") return normalizeIp(fly);
+  const sock = opts.socketIp?.trim();
+  if (sock !== undefined && sock !== "") return normalizeIp(sock);
+  if (opts.production ?? process.env.NODE_ENV === "production") throw new AppError("FORBIDDEN");
+  return "local-dev";
+}
+
+/** HKDF ile `BETTER_AUTH_SECRET`'ten amaca özel HMAC anahtarı (ham sır doğrudan HMAC'e girmez). */
+export function deriveKey(secret: string): Buffer {
+  return Buffer.from(hkdfSync("sha256", secret, "", "wms/rate-limit/v1", 32));
+}
+
+export function hashKey(key: Uint8Array, scope: string, value: string): string {
+  return createHmac("sha256", key).update(`${scope}|${value}`).digest("hex");
 }
 
 export interface RateLimiterDeps {
@@ -71,12 +109,13 @@ export interface RateLimiter {
 
 export function createRateLimiter(deps: RateLimiterDeps): RateLimiter {
   if (deps.secret.trim() === "") throw new Error("rate limit: secret is required");
+  const key = deriveKey(deps.secret);
   const now = deps.now ?? (() => new Date());
   return {
     async check(kind, subject) {
       const { scope, limit: dflt } = RATE_LIMITS[kind];
       const limit = deps.limits?.[kind] ?? dflt;
-      const r = await deps.store.hit(scope, hashKey(deps.secret, scope, subject), { limit, windowSeconds: WINDOW_SECONDS, now: now() });
+      const r = await deps.store.hit(scope, hashKey(key, scope, subject), { limit, windowSeconds: WINDOW_SECONDS, now: now() });
       if (!r.allowed) throw new RateLimitedError(r.retryAfterSeconds);
     },
   };
