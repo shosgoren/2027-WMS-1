@@ -83,6 +83,9 @@ interface Fx {
   adminMembership: string;
   managerMembership: string;
   pickerMembership: string;
+  /** T-207: tenant'a ait sentetik depo (depo sayfası yükleyicileri için). */
+  warehouse: string;
+  warehouseName: string;
 }
 
 async function mkUser(label: string): Promise<{ id: string; email: string }> {
@@ -106,7 +109,10 @@ async function mkTenant(label: string): Promise<Fx> {
   const a = await mkMember(tenant, "TENANT_ADMIN", `${label}-admin`, true);
   const m = await mkMember(tenant, "WAREHOUSE_MANAGER", `${label}-manager`);
   const p = await mkMember(tenant, "PICKER", `${label}-picker`);
-  return { label, tenant, slug, name, admin: a.user, manager: m.user, picker: p.user, adminMembership: a.membership, managerMembership: m.membership, pickerMembership: p.membership };
+  const warehouse = randomUUID();
+  const warehouseName = `T207 Depo ${label} ${rnd()}`;
+  await adm.query("INSERT INTO public.warehouses (tenant_id, id, code, name) VALUES ($1, $2, $3, $4)", [tenant, warehouse, `W-${label}`, warehouseName]);
+  return { label, tenant, slug, name, warehouse, warehouseName, admin: a.user, manager: m.user, picker: p.user, adminMembership: a.membership, managerMembership: m.membership, pickerMembership: p.membership };
 }
 
 /** Tenant'ın gözlemlenebilir tüm durumu (etki yok kanıtı için önce/sonra karşılaştırılır). */
@@ -214,13 +220,27 @@ function files(dir: string, re: RegExp): string[] {
 // Sayfa yükleyicileri
 // ---------------------------------------------------------------------------------------------
 
-const LOADERS = ["layout.tsx", "page.tsx", "members/page.tsx", "settings/page.tsx", "audit/page.tsx"] as const;
-type Loader = (props: { params: Promise<{ slug: string }>; searchParams?: Promise<Record<string, string>>; children?: unknown }) => Promise<unknown>;
+const LOADERS = [
+  "layout.tsx",
+  "page.tsx",
+  "members/page.tsx",
+  "settings/page.tsx",
+  "audit/page.tsx",
+  "warehouses/page.tsx",
+  "warehouses/[warehouseId]/page.tsx",
+] as const;
+type Loader = (props: { params: Promise<{ slug: string; warehouseId?: string }>; searchParams?: Promise<Record<string, string>>; children?: unknown }) => Promise<unknown>;
 
-async function runLoader(rel: (typeof LOADERS)[number], slug: string): Promise<{ outcome: "render" | "notFound" | "redirect"; to?: string; value?: unknown }> {
+/** `[warehouseId]` yükleyicisi için kimlik: verilmezse slug A'nınsa A'nın, değilse B'nin deposu (çapraz tenant denemesi). */
+async function runLoader(
+  rel: (typeof LOADERS)[number],
+  slug: string,
+  warehouseId?: string,
+): Promise<{ outcome: "render" | "notFound" | "redirect"; to?: string; value?: unknown }> {
   const mod = (await import(/* @vite-ignore */ path.join(SLUG_DIR, rel))) as { default: Loader };
+  const wid = warehouseId ?? (slug === A.slug ? A.warehouse : B.warehouse);
   try {
-    const value = await mod.default({ params: Promise.resolve({ slug }), searchParams: Promise.resolve({}), children: null });
+    const value = await mod.default({ params: Promise.resolve({ slug, warehouseId: wid }), searchParams: Promise.resolve({}), children: null });
     return { outcome: "render", value };
   } catch (e) {
     const k = (e as { kind?: string }).kind;
@@ -270,6 +290,23 @@ describe("sayfa yükleyicileri (/t/<slug>)", () => {
       expect(r.value).not.toBeNull();
     });
   }
+
+  it("@AC-04 depo sayfası: A yöneticisi KENDİ slug'ında B'nin depo kimliğini açamaz -> 404 (var olmayan kimlikle aynı), B verisi çizilmez", async () => {
+    as(A.admin);
+    const cross = await runLoader("warehouses/[warehouseId]/page.tsx", A.slug, B.warehouse);
+    as(A.admin);
+    const missing = await runLoader("warehouses/[warehouseId]/page.tsx", A.slug, randomUUID());
+    expect(cross.outcome).toBe("notFound");
+    expect(cross).toEqual(missing);
+    expect(JSON.stringify(cross)).not.toContain(B.warehouseName);
+    // Depo listesi yalnızca kendi tenant'ının deposunu içerir.
+    as(A.admin);
+    const list = await runLoader("warehouses/page.tsx", A.slug);
+    expect(list.outcome).toBe("render");
+    expect(JSON.stringify(list.value)).toContain(A.warehouse);
+    expect(JSON.stringify(list.value)).not.toContain(B.warehouse);
+    expect(JSON.stringify(list.value)).not.toContain(B.warehouseName);
+  });
 
   it("@AC-04 sayfa üyelik sınırı: B'nin ÜYESİ olan kullanıcı A'nın slug'ında 404; B yöneticisi kendi slug'ında çizer", async () => {
     for (const user of [B.admin, B.manager, B.picker]) {

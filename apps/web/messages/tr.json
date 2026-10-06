@@ -429,6 +429,10 @@
         "title": "Kim ne yaptı?",
         "description": "Denetim kaydı"
       },
+      "warehouses": {
+        "title": "Depo ve raflar",
+        "description": "Depoları ve raf düzenini yönet"
+      },
       "receive": {
         "title": "Depoya mal geldi",
         "description": "Gelen malı kaydet"
@@ -608,5 +612,122 @@
     "locked": "Bu ayarları değiştirme yetkin yok.",
     "lockedAction": "Değişiklik gerekiyorsa çalışma alanı yöneticine (sorumlun) sor.",
     "back": "Ana ekrana dön"
+  },
+  "warehouses": {
+    "title": "Depo ve raflar",
+    "intro": "Depolarını ve raf düzenini (bölge, raf, göz) buradan yönet.",
+    "lockedReason": "Bu iş için yetkin yok. Sorumluna sorabilirsin.",
+    "listLabel": "Depo listesi",
+    "create": "Yeni depo",
+    "createTitle": "Yeni depo",
+    "empty": "Henüz depo yok.",
+    "emptyAction": "“Yeni depo” ile ilk deponu ekle.",
+    "emptyReadOnly": "Depo eklemesi için sorumluna sor.",
+    "codeLabel": "Kod: {code}",
+    "locationCount": "{count, plural, =0 {Lokasyon yok} other {# lokasyon}}",
+    "locationCountCapped": "{count}+ lokasyon",
+    "status": {
+      "ACTIVE": "Aktif",
+      "ARCHIVED": "Arşivli"
+    },
+    "open": "Lokasyonları aç",
+    "archive": "Arşivle",
+    "actionsFor": "{name} için işlemler",
+    "paging": "Sayfalama",
+    "more": "Daha fazla",
+    "firstPage": "Başa dön",
+    "done": {
+      "created": "Depo eklendi.",
+      "archived": "Depo arşivlendi."
+    },
+    "confirmArchive": {
+      "title": "{name} arşivlensin mi?",
+      "description": "{name} ({code}) deposu listede arşivli görünür ve yeni lokasyon eklenemez. Depoda stok veya aktif lokasyon varsa arşivlenmez; önce boşalt/arşivle.",
+      "button": "Arşivle"
+    },
+    "kind": {
+      "RECEIVING": "Kabul",
+      "STORAGE": "Raf",
+      "STAGING": "Sevk",
+      "TRANSIT": "Transit"
+    },
+    "form": {
+      "code": "Kod",
+      "codeHint": "Harfler otomatik büyütülür; sonradan değiştirilemez.",
+      "name": "Ad",
+      "kind": "Tür",
+      "submit": "Kaydet",
+      "cancel": "Vazgeç"
+    },
+    "tree": {
+      "title": "Lokasyonlar",
+      "back": "Depo listesine dön",
+      "label": "Lokasyon ağacı",
+      "addRoot": "Lokasyon ekle",
+      "addChild": "Alt lokasyon ekle",
+      "archive": "Arşivle",
+      "expand": "{name} altını aç",
+      "collapse": "{name} altını kapat",
+      "more": "Daha fazla",
+      "empty": "Bu depoda henüz lokasyon yok.",
+      "emptyAction": "“Lokasyon ekle” ile ilk bölgeyi ekle.",
+      "emptyReadOnly": "Lokasyon eklemesi için sorumluna sor.",
+      "warehouseArchived": "Bu depo arşivli; lokasyon eklenemez.",
+      "level": {
+        "zone": "Bölge",
+        "rack": "Raf",
+        "bin": "Göz",
+        "deeper": "Alt düzey"
+      },
+      "createRootTitle": "Yeni lokasyon",
+      "createChildTitle": "Yeni alt lokasyon",
+      "parentIs": "Bağlı olduğu yer: {parent}",
+      "done": {
+        "created": "Lokasyon eklendi.",
+        "archived": "Lokasyon arşivlendi."
+      },
+      "confirmArchive": {
+        "title": "{name} arşivlensin mi?",
+        "description": "{name} ({code}) lokasyonu arşivli olur. Stok, açık sayım veya aktif alt lokasyon varsa arşivlenmez; önce boşalt/arşivle.",
+        "button": "Arşivle"
+      }
+    },
+    "errors": {
+      "code": "Hata kodu: {code}",
+      "mfaLink": "İki adımlı doğrulamayı kur",
+      "loginLink": "Yeniden giriş yap",
+      "forbidden": "Bu işlem için yetkin yok.",
+      "forbiddenAction": "Sorumluna sor.",
+      "forbidden_mfa_required": "Yönetici işlemleri için iki adımlı doğrulama gerekli.",
+      "forbidden_mfa_requiredAction": "Önce doğrulamayı kur, sonra işlemi yinele.",
+      "forbidden_warehouse_out_of_scope": "Bu depo senin kapsamında değil.",
+      "forbidden_warehouse_out_of_scopeAction": "Sorumluna sor.",
+      "unauthenticated": "Oturumun sona ermiş.",
+      "unauthenticatedAction": "Yeniden giriş yapıp işlemi yinele.",
+      "unauthenticated_recent_auth_required": "Bu işlem için kimliğini yeniden doğrulaman gerekiyor.",
+      "unauthenticated_recent_auth_requiredAction": "Yeniden giriş yapıp işlemi yinele.",
+      "not_found": "Kayıt bulunamadı; başka biri değiştirmiş olabilir.",
+      "not_foundAction": "Sayfayı yenileyip yeniden dene.",
+      "validation_failed": "Girilen bilgiler geçersiz.",
+      "validation_failedAction": "Kod ve adı kontrol edip yeniden dene.",
+      "validation_failed_code_taken": "Bu kod zaten kullanılıyor.",
+      "validation_failed_code_takenAction": "Farklı bir kod gir.",
+      "validation_failed_in_use": "Bu depoda stok veya aktif lokasyon var.",
+      "validation_failed_in_useAction": "Önce boşalt/arşivle, sonra yeniden dene.",
+      "validation_failed_in_use_location": "Bu lokasyonda stok, açık sayım veya aktif alt lokasyon var.",
+      "validation_failed_in_use_locationAction": "Önce boşalt veya alt lokasyonları arşivle, sonra yeniden dene.",
+      "validation_failed_parent_invalid": "Üst lokasyon bu işlem için uygun değil.",
+      "validation_failed_parent_invalidAction": "Başka bir üst lokasyon seç veya türü değiştir.",
+      "version_conflict": "Kayıt aynı anda başka bir işlemle değişti.",
+      "version_conflictAction": "Sayfayı yenileyip yeniden dene.",
+      "rate_limited": "Çok fazla işlem yapıldı.",
+      "rate_limitedAction": "Biraz bekleyip yeniden dene.",
+      "tenant_suspended": "Çalışma alanı askıda.",
+      "tenant_suspendedAction": "Sorumluna veya destek ekibine başvur.",
+      "tenant_closing": "Çalışma alanı kapatılıyor.",
+      "tenant_closingAction": "Sorumluna başvur.",
+      "internal": "Bir sorun oluştu.",
+      "internalAction": "Biraz sonra yeniden dene; sürerse hata kodunu destek ekibine ilet."
+    }
   }
 }
