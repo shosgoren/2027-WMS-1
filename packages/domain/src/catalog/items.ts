@@ -3,7 +3,7 @@
 // - Stok DEĞİŞTİRMEZ (G-01); yalnızca katalog satırı yazar ve stok tablolarını OKUR. Bu yüzden `acquireStockLocks`
 //   kullanılmaz; arşiv/stok-denetimi için yalnızca ürün KATALOG satırı `FOR UPDATE` ile kilitlenir (stok kilidi değil).
 // - `base_unit_id`, `tracking_mode`, `quantity_scale` oluşturulduktan sonra değişmez (A-87; wms_app UPDATE yetkisi yok).
-//   `updateItem` bu alanlar için fark isteği gelirse: stoklu üründe `IN_USE`, stoksuzda `VALIDATION_FAILED` (A-98).
+//   `updateItem` bu alanlar için fark isteği gelirse: stoklu üründe `IN_USE`, stoksuzda `VALIDATION_FAILED` (A-107).
 // - "Stoklu" = ürünün herhangi bir stok boyutu (dolayısıyla defter/bakiye) var. `archiveItem`: pozitif bakiye ya da açık
 //   (ACTIVE) rezervasyon varsa `IN_USE`. Kullanılmış kart silinmez; DELETE yoktur (05 §Geri alma).
 import { sql } from "drizzle-orm";
@@ -126,7 +126,7 @@ export async function updateItem(params: CatalogCommandParams, input: UpdateItem
   const quantityScale = input.quantityScale === undefined ? undefined : parseScale(input.quantityScale);
   const { requestId, ...access } = params;
   return runTenantCommand({ ...access, permission: "settings.manage" }, async (tx, actor) => {
-    const cur = await loadItem(tx, actor.tenantId, itemId, true);
+    const cur = await loadItem(tx, actor.tenantId, itemId, "update");
     if (cur === undefined) throw new AppError("NOT_FOUND");
     const immutableChange =
       (trackingMode !== undefined && trackingMode !== cur.tracking_mode) ||
@@ -160,7 +160,7 @@ export async function archiveItem(params: CatalogCommandParams, input: { readonl
   const itemId = parseUuid(input.itemId);
   const { requestId, ...access } = params;
   return runTenantCommand({ ...access, permission: "settings.manage" }, async (tx, actor) => {
-    const cur = await loadItem(tx, actor.tenantId, itemId, true);
+    const cur = await loadItem(tx, actor.tenantId, itemId, "update");
     if (cur === undefined) throw new AppError("NOT_FOUND");
     if (cur.status === "ARCHIVED") return { itemId, changed: false };
     const positive = await tx.execute<{ x: number }>(

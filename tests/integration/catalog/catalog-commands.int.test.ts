@@ -1,12 +1,12 @@
 // T-208: katalog komutları (birim, ürün, dönüşüm, barkod, çözümleme). Gerçek wms_app bağlantısı + RLS; fikstürler sentetik (G-09).
 // Migration rolü yalnızca kurulum/doğrulama/temizlik içindir. Audit append-only: audit yazan tenant'lar kısa ömürlü ortamda kalır.
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createDbClient } from "../../../packages/db/src/index.ts";
-import { DB_CLIENT_SETTINGS, type DbClient } from "../../../packages/db/src/client.ts";
+import { createDbClient, withTenant } from "../../../packages/db/src/index.ts";
+import { createTenantContext, DB_CLIENT_SETTINGS, type DbClient } from "../../../packages/db/src/client.ts";
 import { AppError } from "../../../packages/shared/src/errors.ts";
-import { addBarcode, BarcodeAmbiguousError, removeBarcode, resolveBarcodeQuery } from "../../../packages/domain/src/catalog/barcodes.ts";
+import { addBarcode, BarcodeAmbiguousError, BarcodeNotFoundError, removeBarcode, resolveBarcode, resolveBarcodeQuery } from "../../../packages/domain/src/catalog/barcodes.ts";
 import { archiveItem, createItem, getItem, listItems, updateItem } from "../../../packages/domain/src/catalog/items.ts";
 import { createUnit, listUnits, renameUnit, setUnitConversion } from "../../../packages/domain/src/catalog/units.ts";
 import { GS } from "../../../packages/domain/src/catalog/gs1.ts";
@@ -223,7 +223,7 @@ describe("barkod ve çözümleme", () => {
   it("GS1 öğe dizgisi GTIN üzerinden çözülür (GTIN-13 kayıtlı barkod; lot/SKT/adet döner)", async () => {
     const { itemId } = await createItem(admin(A), { code: `I${rnd()}`, name: "GS1 ürünü", baseUnitId: A.unitId });
     const gtin13 = "4006381333931";
-    // Bu GTIN başka testlerden kalmış olabilir (tenant başına tek dünya): önce yoksa ekle.
+    // Bu GTIN yalnızca bu testte kullanılır (A dünyasında başka testte eklenmez); beklenmedik tekrar test hatasıdır.
     const existing = await adm.query("SELECT 1 FROM public.item_barcodes WHERE tenant_id = $1 AND barcode = $2", [A.tenantId, gtin13]);
     expect(existing.rowCount).toBe(0);
     await addBarcode(admin(A), { itemId, barcode: gtin13 });
@@ -231,6 +231,168 @@ describe("barkod ve çözümleme", () => {
     expect(r).toMatchObject({ itemId, unitId: A.unitId, quantity: "1" });
     expect(r.gs1).toMatchObject({ gtin: "0" + gtin13, lot: "LOT9", expiryDate: "2026-12-31", quantity: "12" });
     // Bozuk kontrol hanesi: GS1 olarak çözülmez → NOT_FOUND.
-    await expectFail(resolveBarcodeQuery(picker(A), `01${"0" + "4006381333932"}`), "NOT_FOUND");
+    const bad = await fail(resolveBarcodeQuery(picker(A), `01${"0" + "4006381333932"}`));
+    expect(bad).toBeInstanceOf(BarcodeNotFoundError);
+    expect(bad).toMatchObject({ code: "NOT_FOUND", gs1Reason: "INVALID_GTIN_CHECK_DIGIT" });
+    const zeroQty = await fail(resolveBarcodeQuery(picker(A), `]C101${"0" + gtin13}3000000`));
+    expect(zeroQty).toMatchObject({ code: "NOT_FOUND", gs1Reason: "INVALID_QUANTITY" });
+  });
+});
+
+// GTIN üretici (sentetik): gövdeye GS1 mod-10 kontrol hanesi ekler.
+function gtinOf(body: string): string {
+  let sum = 0;
+  for (let i = body.length - 1, w = 3; i >= 0; i--, w = w === 3 ? 1 : 3) sum += Number(body[i]) * w;
+  return `${body}${(10 - (sum % 10)) % 10}`;
+}
+const digits = (n: number): string => Array.from(randomBytes(n), (b) => String(b % 10)).join("");
+async function mkItem(w: TenantWorld, name: string): Promise<string> {
+  return (await createItem(admin(w), { code: `I${rnd()}`, name, baseUnitId: w.unitId })).itemId;
+}
+const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+describe("GS1 önceliği ve belirsizlik (A-108)", () => {
+  it("önek/FNC1 varken tam eşleşme ile GTIN eşleşmesi birleştirilir: farklı ürünler → BARCODE_AMBIGUOUS", async () => {
+    const gtin14 = gtinOf(`0${digits(12)}`);
+    const gtin13 = gtin14.slice(1);
+    const p = await mkItem(A, "Tam eşleşme");
+    const q = await mkItem(A, "GTIN eşleşme");
+    await addBarcode(admin(A), { itemId: p, barcode: `]C101${gtin14}` });
+    await addBarcode(admin(A), { itemId: q, barcode: gtin13 });
+    const err = await fail(resolveBarcodeQuery(picker(A), `]C101${gtin14}`));
+    expect(err).toBeInstanceOf(BarcodeAmbiguousError);
+    expect((err as BarcodeAmbiguousError).candidates.map((c) => c.itemId).sort()).toEqual([p, q].sort());
+    // Aynı ürün hem tam hem GTIN ile eşleşirse sahte belirsizlik yok.
+    const r = await mkItem(A, "Aynı ürün");
+    const g2 = gtinOf(`0${digits(12)}`);
+    await addBarcode(admin(A), { itemId: r, barcode: `]C101${g2}` });
+    await addBarcode(admin(A), { itemId: r, barcode: g2.slice(1) });
+    expect(await resolveBarcodeQuery(picker(A), `]C101${g2}`)).toMatchObject({ itemId: r });
+  });
+
+  it("önek/GS yokken '01…' düz barkod: tam eşleşme varsa GS1 yorumlanmaz; yoksa GTIN yedeği", async () => {
+    const gtin14 = gtinOf(`0${digits(12)}`);
+    const p = await mkItem(A, "Düz barkod sahibi");
+    const q = await mkItem(A, "GTIN sahibi");
+    await addBarcode(admin(A), { itemId: q, barcode: gtin14.slice(1) });
+    // Tam eşleşme yok → GTIN yedeği q'yu bulur.
+    expect(await resolveBarcodeQuery(picker(A), `01${gtin14}`)).toMatchObject({ itemId: q });
+    // Tam eşleşme eklenince düz dizgi p'ye aittir; GS1 yorumu araya girmez.
+    await addBarcode(admin(A), { itemId: p, barcode: `01${gtin14}` });
+    expect(await resolveBarcodeQuery(picker(A), `01${gtin14}`)).toMatchObject({ itemId: p });
+  });
+
+  it("kısa biçimler: 12 hane öneksiz da; 8 hane yalnızca sembol önekiyle", async () => {
+    const g12 = gtinOf(digits(11));
+    const g8 = gtinOf(digits(7));
+    const t = await mkItem(A, "GTIN-12");
+    const u = await mkItem(A, "GTIN-8");
+    await addBarcode(admin(A), { itemId: t, barcode: g12 });
+    await addBarcode(admin(A), { itemId: u, barcode: g8 });
+    expect(await resolveBarcodeQuery(picker(A), `01${g12.padStart(14, "0")}`)).toMatchObject({ itemId: t });
+    expect(await resolveBarcodeQuery(picker(A), `]d201${g12.padStart(14, "0")}`)).toMatchObject({ itemId: t });
+    await expectFail(resolveBarcodeQuery(picker(A), `01${g8.padStart(14, "0")}`), "NOT_FOUND");
+    expect(await resolveBarcodeQuery(picker(A), `]d201${g8.padStart(14, "0")}`)).toMatchObject({ itemId: u });
+  });
+});
+
+describe("belirsizlik anahtarı: miktar", () => {
+  it("NULL miktar = 1: aynı ürün+birim+eşdeğer miktar sahte belirsizlik üretmez; farklı miktar üretir ve aday miktarı gösterir", async () => {
+    const itemId = await mkItem(A, "Miktar anahtarı");
+    const same = `QK${rnd()}`;
+    await addBarcode(admin(A), { itemId, barcode: same }); // birim NULL → temel birim, miktar yok (=1)
+    await addBarcode(admin(A), { itemId, unitId: A.unitId, barcode: same, quantity: "1" }); // aynı birim, miktar 1
+    expect(await resolveBarcodeQuery(picker(A), same)).toEqual({ itemId, unitId: A.unitId, quantity: "1" });
+    const diff = `QD${rnd()}`;
+    await addBarcode(admin(A), { itemId, barcode: diff });
+    await addBarcode(admin(A), { itemId, unitId: A.unitId, barcode: diff, quantity: "6" });
+    const err = await fail(resolveBarcodeQuery(picker(A), diff));
+    expect(err).toBeInstanceOf(BarcodeAmbiguousError);
+    expect((err as BarcodeAmbiguousError).candidates.map((c) => c.quantity).sort()).toEqual(["1", "6"]);
+  });
+  it("barkod miktarı sınırları: taşma ve işaret VALIDATION_FAILED (INTERNAL değil)", async () => {
+    const itemId = await mkItem(A, "Miktar sınırı");
+    for (const q of ["100000000000000", "-1", "abc"]) {
+      await expectFail(addBarcode(admin(A), { itemId, barcode: `QB${rnd()}`, unitId: A.boxUnitId, quantity: q }), "VALIDATION_FAILED");
+    }
+  });
+});
+
+describe("tenant bağlamı ve açık tenant filtresi", () => {
+  it("resolveBarcode yanlış/boş bağlamda NOT_FOUND; kimlik biçimi geçersizse VALIDATION_FAILED", async () => {
+    const itemId = await mkItem(A, "Bağlam");
+    const bc = `CTX${rnd()}`;
+    await addBarcode(admin(A), { itemId, barcode: bc });
+    const inA = await withTenant(createTenantContext(app, A.tenantId), (tx) => resolveBarcode(tx, A.tenantId, bc));
+    expect(inA).toMatchObject({ itemId });
+    // A bağlamı + B kimliği (açık filtre), B bağlamı + A kimliği (RLS), hiç verisi olmayan bağlam → NOT_FOUND.
+    await expectFail(withTenant(createTenantContext(app, A.tenantId), (tx) => resolveBarcode(tx, B.tenantId, bc)), "NOT_FOUND");
+    await expectFail(withTenant(createTenantContext(app, B.tenantId), (tx) => resolveBarcode(tx, A.tenantId, bc)), "NOT_FOUND");
+    const empty = randomUUID();
+    await expectFail(withTenant(createTenantContext(app, empty), (tx) => resolveBarcode(tx, empty, bc)), "NOT_FOUND");
+    await expectFail(withTenant(createTenantContext(app, A.tenantId), (tx) => resolveBarcode(tx, "x", bc)), "VALIDATION_FAILED");
+  });
+});
+
+describe("arşiv eşzamanlılığı (FOR SHARE ↔ FOR UPDATE)", () => {
+  /** Arşiv sürerken (ürün satırı kilitli) komut bekler; arşiv commit olunca ACTIVE denetimi kilitten SONRA yapıldığı için reddedilir. */
+  async function archivedWhileWaiting(itemId: string, run: () => Promise<unknown>): Promise<AppError> {
+    await adm.query("BEGIN");
+    try {
+      await adm.query("SELECT 1 FROM public.items WHERE id = $1 FOR UPDATE", [itemId]);
+      let settled = false;
+      const p = run().then(
+        () => {
+          settled = true;
+          return undefined;
+        },
+        (e: unknown) => {
+          settled = true;
+          return e;
+        },
+      );
+      await delay(500);
+      expect(settled).toBe(false); // komut ürün satırında bekliyor
+      await adm.query("UPDATE public.items SET status = 'ARCHIVED', archived_at = now() WHERE id = $1", [itemId]);
+      await adm.query("COMMIT");
+      const err = await p;
+      expect(err).toBeInstanceOf(AppError);
+      return err as AppError;
+    } catch (e) {
+      await adm.query("ROLLBACK");
+      throw e;
+    }
+  }
+
+  it("addBarcode: arşiv commit olmadan bekler, sonra reddedilir; barkod satırı oluşmaz", async () => {
+    const itemId = await mkItem(A, "Yarış barkod");
+    const bc = `RACE${rnd()}`;
+    const err = await archivedWhileWaiting(itemId, () => addBarcode(admin(A), { itemId, barcode: bc }));
+    expect(err).toMatchObject({ code: "VALIDATION_FAILED" });
+    expect((await adm.query("SELECT 1 FROM public.item_barcodes WHERE barcode = $1", [bc])).rowCount).toBe(0);
+  });
+  it("setUnitConversion: aynı yarışta reddedilir; dönüşüm satırı oluşmaz", async () => {
+    const itemId = await mkItem(A, "Yarış dönüşüm");
+    const err = await archivedWhileWaiting(itemId, () => setUnitConversion(admin(A), { itemId, unitId: A.boxUnitId, factor: "3" }));
+    expect(err).toMatchObject({ code: "VALIDATION_FAILED" });
+    expect((await adm.query("SELECT 1 FROM public.unit_conversions WHERE item_id = $1", [itemId])).rowCount).toBe(0);
+  });
+  it("gerçek yarış: archiveItem ∥ addBarcode ∥ setUnitConversion — hata yalnızca VALIDATION_FAILED; arşivli üründe sonradan satır yok", async () => {
+    for (let i = 0; i < 8; i++) {
+      const itemId = await mkItem(A, `Yarış ${i}`);
+      const [arch, add, conv] = await Promise.allSettled([
+        archiveItem(admin(A), { itemId }),
+        addBarcode(admin(A), { itemId, barcode: `RR${rnd()}` }),
+        setUnitConversion(admin(A), { itemId, unitId: A.boxUnitId, factor: "2" }),
+      ]);
+      expect(arch.status).toBe("fulfilled");
+      for (const r of [add, conv]) {
+        if (r.status === "rejected") {
+          expect(r.reason).toBeInstanceOf(AppError);
+          expect((r.reason as AppError).code).toBe("VALIDATION_FAILED");
+        }
+      }
+      expect((await adm.query("SELECT status FROM public.items WHERE id = $1", [itemId])).rows[0]).toMatchObject({ status: "ARCHIVED" });
+    }
   });
 });

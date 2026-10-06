@@ -126,7 +126,7 @@ export async function setUnitConversion(
   const factor = assertConversionFactor(input.factor);
   const { requestId, ...access } = params;
   return runTenantCommand({ ...access, permission: "settings.manage" }, async (tx, actor) => {
-    const item = await loadItem(tx, actor.tenantId, itemId);
+    const item = await loadItem(tx, actor.tenantId, itemId, "share");
     if (item === undefined) throw new AppError("NOT_FOUND");
     if (item.status !== "ACTIVE") throw new AppError("VALIDATION_FAILED");
     const unit = await tx.execute<{ status: string }>(
@@ -168,16 +168,21 @@ export type ItemHeader = {
   readonly status: "ACTIVE" | "ARCHIVED";
 };
 
-/** Ürün satırı (RLS + açık tenant filtresi); `forUpdate` ürün satırını kilitler (katalog satırı, stok kilidi değil). */
-export async function loadItem(tx: AccessTx, tenantId: string, itemId: string, forUpdate = false): Promise<ItemHeader | undefined> {
-  const rows = forUpdate
-    ? await tx.execute<ItemHeader>(
-        sql`SELECT id, code, name, base_unit_id, tracking_mode, quantity_scale, pick_policy, status FROM public.items
-             WHERE tenant_id = ${tenantId}::uuid AND id = ${itemId}::uuid FOR UPDATE`,
-      )
-    : await tx.execute<ItemHeader>(
-        sql`SELECT id, code, name, base_unit_id, tracking_mode, quantity_scale, pick_policy, status FROM public.items
-             WHERE tenant_id = ${tenantId}::uuid AND id = ${itemId}::uuid`,
-      );
+export type ItemLock = "update" | "share";
+
+/**
+ * Ürün satırı (RLS + açık tenant filtresi). `lock`: ürün KATALOG satırını kilitler (stok kilidi değil): `update`
+ * (arşiv/güncelleme), `share` (ürüne bağlı satır yazan komutlar; `archiveItem` ile serileşir, kilit alındıktan SONRA
+ * `status` okunur).
+ */
+export async function loadItem(tx: AccessTx, tenantId: string, itemId: string, lock?: ItemLock): Promise<ItemHeader | undefined> {
+  const cols = sql`id, code, name, base_unit_id, tracking_mode, quantity_scale, pick_policy, status`;
+  const where = sql`WHERE tenant_id = ${tenantId}::uuid AND id = ${itemId}::uuid`;
+  const rows =
+    lock === "update"
+      ? await tx.execute<ItemHeader>(sql`SELECT ${cols} FROM public.items ${where} FOR UPDATE`)
+      : lock === "share"
+        ? await tx.execute<ItemHeader>(sql`SELECT ${cols} FROM public.items ${where} FOR SHARE`)
+        : await tx.execute<ItemHeader>(sql`SELECT ${cols} FROM public.items ${where}`);
   return rows[0];
 }
