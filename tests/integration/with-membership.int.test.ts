@@ -279,7 +279,7 @@ async function guc(tx: TenantTx): Promise<{ tenant: string; user: string; reason
 // withMembership: kabul ve ret yolları
 // ---------------------------------------------------------------------------------------------
 describe(`withMembership — kabul ve ret yolları (target=${env.target})`, () => {
-  it("aktif üyelik: fn çalışır; yalnızca app.current_tenant_id kurulur; roller ve sürüm döner", async () => {
+  it("aktif üyelik: fn çalışır; app.current_tenant_id ve app.current_user_id kurulur (system_reason yok); roller ve sürüm döner", async () => {
     const { tenant, user, membership } = await admin(async (c) => {
       const tenant = await mkTenant(c);
       const user = await mkUser(c);
@@ -288,7 +288,7 @@ describe(`withMembership — kabul ve ret yolları (target=${env.target})`, () =
     });
     const out = await withMembership({ client: app, userId: user, tenantId: tenant }, async (tx, m) => ({ m, g: await guc(tx) }));
     expect(out.m).toEqual({ membershipId: membership, userId: user, tenantId: tenant, isOwner: true, roles: ["COUNTER", "PICKER"], rolesVersion: 0 });
-    expect(out.g).toEqual({ tenant, user: "", reason: "" });
+    expect(out.g).toEqual({ tenant, user, reason: "" });
   });
 
   it("REMOVED → FORBIDDEN; üye olmayan → FORBIDDEN; başka tenant'ın id'si → FORBIDDEN; var olmayan tenant → FORBIDDEN", async () => {
@@ -1551,6 +1551,7 @@ describe(`wms_meta / wms_probe erişimi ve katalog (target=${env.target})`, () =
     });
     expect(r.funcs.map((f) => f.proname)).toEqual([
       "admin_reset_cleanup_on_membership", "consume_admin_reset_grant", "identity_exclusive_to_tenant", "invitation_for_account_creation",
+      "invitation_tenant_for_token", // T-117 migration 0006 (salt okunur; ilke değişmedi)
     ]);
     for (const f of r.funcs) {
       expect([f.proname, f.owner, f.prosecdef, f.proconfig]).toEqual([f.proname, PROBE_ROLE, true, ["search_path=pg_catalog, pg_temp"]]);

@@ -34,17 +34,26 @@ Kaynak sözdizimi: `<dosya>#<json.yolu>` (package.json alanı) veya `docker-comp
 | PostgreSQL (Neon) | — | — sağlayıcı yönetir, kilitlenemez; gözlenen 18.6 (proje pg_version 18, Q-05, T-005d koşu 3) | | ADR-004 |
 | Neon pooler | — | — PgBouncer transaction (belge); sürüm gözlenemedi (Q-02 açık) | | ADR-004 |
 | Prepared statement ayarı | — | — `prepare=false` (üretim, T-005d kapı koşusu; Q-04 kapandı); kod kaynağı `packages/db` `DB_CLIENT_SETTINGS` | | ADR-004 |
-| Kuyruk kütüphanesi | — | — pg-boss seçildi (ADR-005 eki 2026-10-05); sürüm ilk kuyruk kartında kilitlenir (aday 12.36.0) | | ADR-005 |
+| Drizzle ORM (packages/auth, yalnızca `sql` etiketi) | drizzle-orm | 0.45.3 | packages/auth/package.json#dependencies.drizzle-orm | ADR-003 |
+| Drizzle ORM (packages/domain, yalnızca `sql` etiketi) | drizzle-orm | 0.45.3 | packages/domain/package.json#dependencies.drizzle-orm | ADR-003 |
+| Better Auth (kimlik katmanı) | better-auth | 1.7.7 | packages/auth/package.json#dependencies.better-auth | ADR-014 |
+| Argon2id parola özeti | @node-rs/argon2 | 2.2.1 | packages/auth/package.json#dependencies.@node-rs/argon2 | ADR-014 |
+| Kuyruk kütüphanesi | pg-boss | 12.36.0 | packages/queue-adapter/package.json#dependencies.pg-boss | ADR-005 |
+| Worker paketleyici (esbuild; yalnızca derleme) | esbuild | 0.28.2 | apps/worker/package.json#devDependencies.esbuild | ADR-013 |
+| TanStack Query / Virtual | @tanstack/* | — ilk kullanan kart | | |
+| Zod | zod | 4.6.5 | packages/shared/package.json#dependencies.zod | |
+| Zod (kuyruk bağdaştırıcısı) | zod | 4.6.5 | packages/queue-adapter/package.json#dependencies.zod | ADR-005 |
+| Zod (web Server Action girdi doğrulaması) | zod | 4.6.5 | apps/web/package.json#dependencies.zod | T-109b |
+| Drizzle ORM (kuyruk bağdaştırıcısı: `sql`) | drizzle-orm | 0.45.3 | packages/queue-adapter/package.json#dependencies.drizzle-orm | ADR-005 |
 | Tailwind CSS | tailwindcss | 4.3.3 | apps/web/package.json#dependencies.tailwindcss | T-109 |
 | Tailwind PostCSS eklentisi | @tailwindcss/postcss | 4.3.3 | apps/web/package.json#dependencies.@tailwindcss/postcss | T-109 |
 | Shadcn/Radix | — | — ilk kullanan kart | | |
 | Lucide | lucide-react | 1.52.0 | packages/ui/package.json#dependencies.lucide-react | T-110 |
-| TanStack Query / Virtual | @tanstack/* | — ilk kullanan kart | | |
 | next-intl | next-intl | 4.14.9 | apps/web/package.json#dependencies.next-intl | T-109, ADR-002 |
-| Zod | zod | — ilk kullanan kart | | |
 
 Sürüm notları (kaynak: kurulu `package.json`/`pnpm-lock.yaml`, 2026-10-05):
 - **Kapsam kuralı (T-004b):** Workspace'lerin (`pnpm-lock.yaml#importers`) `package.json` dosyalarındaki her doğrudan bağımlılık (`dependencies`, `devDependencies`, `optionalDependencies`; `workspace:` hariç) bu tabloda kaynağıyla kilitli bir satıra sahip olmalıdır; eksikse `node scripts/check-docs.mjs` FAIL verir.
+- **pg-boss rolleri (T-115c):** gönderen (web) `DATABASE_URL` = `wms_app` (yalnızca `pgboss.job` INSERT/SELECT; RLS ile kendi tenant'ı); tüketici (worker) `DATABASE_URL_WORKER` = `wms_worker` (`pgboss.job` SELECT/INSERT/UPDATE/DELETE; fetch/complete/fail/retry). Yetkiler ve RLS `installQueueSchema` ile (migration rolü) verilir; roller 01-roles.sh (Neon: T-105, düz parola, Q-06). Yeni rol için yerel volume'u bir kez `docker compose down -v` ile sıfırlayın.
 - **pg 8.23.1:** yalnızca testlerde kullanılır (entegrasyon düzeneği: rol/RLS probu, PgBouncer yönetimi); uygulama sürücüsü postgres.js'tir.
 - **TypeScript 6.0.3'te kalınır:** typescript-eslint 8.71.0'ın desteklediği TypeScript aralığı `<6.1.0`; TS yükseltmesi typescript-eslint desteğini bekler.
 - **Node.js:** 24 Active LTS (`engines` `>=24 <25`). Node 26 LTS'e 2026-10-28'de geçer; geçiş ayrı kartla yapılır (`engines`, `@types/node`, CI Node sürümü birlikte).

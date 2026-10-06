@@ -1,0 +1,19 @@
+{
+  "name": "@wms/queue-adapter",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
+  },
+  "dependencies": {
+    "@wms/db": "workspace:*",
+    "@wms/shared": "workspace:*",
+    "drizzle-orm": "0.45.3",
+    "pg-boss": "12.36.0",
+    "zod": "4.6.5"
+  }
+}

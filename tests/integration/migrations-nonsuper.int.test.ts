@@ -352,3 +352,87 @@ describe("migrations — süper kullanıcı olmayan migrator (ikinci Testcontain
     );
   });
 });
+
+// 0004_audit (T-107; security-reviewer @79b2011 MAJOR-2): yukarıdaki testler 0001–0003 kopyasında kalır; 0004 ayrı kopyada.
+describe("0004_audit down bekçisi — süper kullanıcı olmayan sahip", () => {
+  let thru4Dir: string | undefined;
+  const thru4 = (): string => (thru4Dir ??= copyMigrations("0004"));
+
+  it("dolu audit_logs ile staging geri alma RAISE eder; veri ve FORCE RLS korunur; ci bayrağıyla geri alma ve yeniden ileri çalışır", async () => {
+    await setProbeMemberships(STANDARD_GRANT);
+    const u = await freshDatabase();
+    expect((await migrateUp({ url: u, dir: thru4() })).applied).toEqual(["0001", "0002", "0003", "0004"]);
+
+    const tenantId = randomUUID();
+    await withClient(u, async (c) => {
+      await c.query("BEGIN");
+      await c.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+      await c.query("INSERT INTO public.tenants (id, slug, name) VALUES ($1, $2, 'NS Audit')", [tenantId, `ns-${randomBytes(4).toString("hex")}`]);
+      await c.query("INSERT INTO public.audit_logs (action, entity_id) VALUES ('tenant.created', 'ns-keep')");
+      await c.query("COMMIT");
+      // Önkoşul (testin anlamı): FORCE RLS altında, bağlamsız sahip audit satırını GÖRMEZ.
+      const blind = await c.query<{ n: string }>("SELECT count(*)::text AS n FROM public.audit_logs");
+      expect(blind.rows[0]?.n, "bağlamsız FORCE RLS sahibi satır görmemeli").toBe("0");
+    });
+
+    await expect(migrateDown({ url: u, dir: thru4(), to: "0003", wmsEnv: "staging" })).rejects.toThrow(/0004_audit down:.*satır var/);
+
+    await withClient(u, async (c) => {
+      const ledger = await c.query<{ version: string }>("SELECT version FROM wms_meta.schema_migrations ORDER BY version");
+      expect(ledger.rows.map((r) => r.version)).toEqual(["0001", "0002", "0003", "0004"]);
+      const force = await c.query<{ relname: string; relforcerowsecurity: boolean; relrowsecurity: boolean }>(
+        "SELECT relname, relforcerowsecurity, relrowsecurity FROM pg_class WHERE oid = 'public.audit_logs'::regclass",
+      );
+      expect(force.rows).toEqual([{ relname: "audit_logs", relforcerowsecurity: true, relrowsecurity: true }]);
+      await c.query("BEGIN");
+      await c.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+      const kept = await c.query<{ n: string }>("SELECT count(*)::text AS n FROM public.audit_logs WHERE entity_id = 'ns-keep'");
+      await c.query("ROLLBACK");
+      expect(kept.rows[0]?.n).toBe("1");
+    });
+
+    expect((await migrateDown({ url: u, dir: thru4(), to: "0003", wmsEnv: "ci" })).reverted).toEqual(["0004"]);
+    expect((await migrateUp({ url: u, dir: thru4() })).applied).toEqual(["0004"]);
+  });
+});
+
+// 0006_invitation_accept (T-117; inceleme @99286d6 MINOR-4): yukarıdaki testler eski kopyalarında kalır; 0001–0006 ayrı kopyada.
+describe("0006_invitation_accept — süper kullanıcı olmayan migrator", () => {
+  let thru6Dir: string | undefined;
+  const thru6 = (): string => (thru6Dir ??= copyMigrations("0006"));
+  const FN = "wms_probe.invitation_tenant_for_token(text)";
+
+  async function expectFunction(u: string): Promise<void> {
+    await withClient(u, async (c) => {
+      const f = await c.query<{ owner: string; secdef: boolean; config: string[] | null; acl: string[] | null; probe_create: boolean; app: boolean; auth: boolean; probe_write: boolean }>(
+        `SELECT p.proowner::regrole::text AS owner, p.prosecdef AS secdef, p.proconfig AS config, p.proacl::text[] AS acl,
+                has_schema_privilege('${PROBE}', 'wms_probe', 'CREATE') AS probe_create,
+                has_function_privilege('wms_app', '${FN}', 'EXECUTE') AS app,
+                has_function_privilege('wms_auth', '${FN}', 'EXECUTE') AS auth,
+                (has_table_privilege('${PROBE}', 'public.invitations', 'INSERT, UPDATE, DELETE')
+                 OR has_table_privilege('${PROBE}', 'public.tenant_memberships', 'INSERT, UPDATE, DELETE')
+                 OR has_table_privilege('${PROBE}', 'public.membership_roles', 'INSERT, UPDATE, DELETE')) AS probe_write
+           FROM pg_proc p WHERE p.oid = '${FN}'::regprocedure`,
+      );
+      const r = f.rows[0];
+      expect(r).toMatchObject({ owner: PROBE, secdef: true, config: ["search_path=pg_catalog, pg_temp"], probe_create: false, app: true, auth: false, probe_write: false });
+      expect(r?.acl).not.toBeNull();
+      expect((r?.acl ?? []).filter((a) => a.startsWith("="))).toEqual([]); // PUBLIC girdisi yok
+    });
+  }
+
+  it("ileri (0001–0006) → 0006 geri → ileri hatasız; işlev probe sahipli SECURITY DEFINER, yalnızca wms_app EXECUTE, probe salt okunur", async () => {
+    await setProbeMemberships(STANDARD_GRANT);
+    const u = await freshDatabase();
+    expect((await migrateUp({ url: u, dir: thru6() })).applied).toEqual(["0001", "0002", "0003", "0004", "0005", "0006"]);
+    await expectFunction(u);
+
+    expect((await migrateDown({ url: u, dir: thru6(), to: "0005", wmsEnv: "ci" })).reverted).toEqual(["0006"]);
+    await withClient(u, async (c) => {
+      const gone = await c.query(`SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'wms_probe' AND p.proname = 'invitation_tenant_for_token'`);
+      expect(gone.rows).toEqual([]);
+    });
+    expect((await migrateUp({ url: u, dir: thru6() })).applied).toEqual(["0006"]);
+    await expectFunction(u);
+  });
+});

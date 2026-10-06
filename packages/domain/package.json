@@ -1,0 +1,21 @@
+{
+  "name": "@wms/domain",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./identity/permissions": "./src/identity/permissions.ts",
+    "./identity/access": "./src/identity/access.ts",
+    "./identity/invitations": "./src/identity/invitations.ts",
+    "./onboarding/workspace": "./src/onboarding/workspace.ts",
+    "./onboarding/templates": "./src/onboarding/templates.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
+  },
+  "dependencies": {
+    "@wms/db": "workspace:*",
+    "@wms/shared": "workspace:*",
+    "drizzle-orm": "0.45.3"
+  }
+}

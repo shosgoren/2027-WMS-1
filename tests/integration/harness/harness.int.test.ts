@@ -237,7 +237,7 @@ if (env.target === "compose") {
       return execFileSync("docker", ["exec", ids[0] as string, "cat", "/auth/userlist.txt"], { encoding: "utf8" });
     }
 
-    it("every userlist entry is `\"user\" \"SCRAM-SHA-256$...\"` and covers app, auth and admin users", () => {
+    it("every userlist entry is `\"user\" \"SCRAM-SHA-256$...\"` and covers app, auth, worker and admin users", () => {
       const lines = readUserlist().split("\n").filter((l) => l.trim() !== "");
       const users: string[] = [];
       for (const line of lines) {
@@ -248,7 +248,7 @@ if (env.target === "compose") {
         expect(secret).toMatch(VERIFIER);
         users.push(user as string);
       }
-      expect(users.sort()).toEqual([APP_ROLE, AUTH_ROLE, "pgbouncer_admin"].sort());
+      expect(users.sort()).toEqual([APP_ROLE, AUTH_ROLE, "wms_worker", "pgbouncer_admin"].sort());
     });
 
     it("userlist does not contain any of the configured passwords", () => {

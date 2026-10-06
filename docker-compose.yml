@@ -15,6 +15,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB .env içinde tanımlı olmalı}
       WMS_APP_PASSWORD: ${WMS_APP_PASSWORD:?WMS_APP_PASSWORD .env içinde tanımlı olmalı}
       WMS_AUTH_PASSWORD: ${WMS_AUTH_PASSWORD:?WMS_AUTH_PASSWORD .env içinde tanımlı olmalı}
+      WMS_WORKER_PASSWORD: ${WMS_WORKER_PASSWORD:?WMS_WORKER_PASSWORD .env içinde tanımlı olmalı}
     ports:
       - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
@@ -44,7 +45,7 @@ services:
         condition: service_healthy
     entrypoint: ["/bin/bash", "/scripts/make-verifier.sh"]
     environment:
-      # wms_app/wms_auth verifier'ı sunucudaki pg_authid'den kopyalanır (PgBouncer SCRAM pass-through
+      # wms_app/wms_auth/wms_worker verifier'ı sunucudaki pg_authid'den kopyalanır (PgBouncer SCRAM pass-through
       # sunucuyla aynı tuzu ister); bu yüzden bu servis o rollerin parolasını bilmez. Bootstrap
       # parolası libpq ortamıyla (PGPASSWORD) verilir, argv'ye girmez.
       PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD .env içinde tanımlı olmalı}
@@ -69,7 +70,7 @@ services:
       PGBOUNCER_DEFAULT_POOL_SIZE: ${PGBOUNCER_DEFAULT_POOL_SIZE:-20}
       PGBOUNCER_MAX_PREPARED_STATEMENTS: ${PGBOUNCER_MAX_PREPARED_STATEMENTS:-1000}
     # İmajın kendi entrypoint'i yerine: şablon ini'yi doldur ve pgbouncer'ı başlat. Userlist
-    # /auth/userlist.txt (pgbouncer-userlist servisi, SCRAM verifier); wms_app/wms_auth parolası
+    # /auth/userlist.txt (pgbouncer-userlist servisi, SCRAM verifier); wms_app/wms_auth/wms_worker parolası
     # bu serviste hiç bulunmaz. İstemci SCRAM'ı sunucuya pass-through edilir (PgBouncer 1.26).
     entrypoint:
       - /bin/sh

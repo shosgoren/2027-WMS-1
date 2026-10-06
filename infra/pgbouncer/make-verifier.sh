@@ -6,7 +6,7 @@
 #
 # Neden pg_authid'den okunur (deneyle doğrulandı): PgBouncer istemci SCRAM kanıtından ClientKey'i çıkarıp
 # sunucuya SCRAM'ı kendi adına yürütür (pass-through). Sunucunun StoredKey'i yalnızca KENDİ tuzuyla
-# türetilmiş ClientKey'i kabul eder; bu yüzden wms_app/wms_auth verifier'ı sunucudakiyle BİREBİR
+# türetilmiş ClientKey'i kabul eder; bu yüzden wms_app/wms_auth/wms_worker verifier'ı sunucudakiyle BİREBİR
 # aynı (aynı tuz ve yineleme) olmalıdır. Rastgele tuzla parolalardan üretilen verifier istemci
 # kimlik doğrulamasını geçirir ama sunucu tarafında "password authentication failed" verir.
 # Bu yüzden wms_app/wms_auth satırları bootstrap (süper kullanıcı) bağlantısıyla pg_authid.rolpassword'den
@@ -51,8 +51,8 @@ umask 077
 tmp="$(mktemp "$OUT_DIR/.userlist.XXXXXX")"
 trap 'rm -f "$tmp"' EXIT
 
-# wms_app / wms_auth: sunucudaki verifier birebir kopyalanır (psql parolayı PGPASSWORD ortamından alır).
-for user in wms_app wms_auth; do
+# wms_app / wms_auth / wms_worker: sunucudaki verifier birebir kopyalanır (psql parolayı PGPASSWORD ortamından alır).
+for user in wms_app wms_auth wms_worker; do
   secret="$(psql -X -A -t -q -v ON_ERROR_STOP=1 -h "${PGHOST:-postgres}" -U "${POSTGRES_USER:?POSTGRES_USER tanımlı değil}" \
     -d "${POSTGRES_DB:?POSTGRES_DB tanımlı değil}" \
     -c "SELECT rolpassword FROM pg_catalog.pg_authid WHERE rolname = '$user'")"
@@ -76,4 +76,4 @@ mv -f "$tmp" "$OUT_DIR/userlist.txt"
 trap - EXIT
 chown "$OWNER_UID_GID" "$OUT_DIR"
 chmod 0750 "$OUT_DIR"
-echo "make-verifier: userlist.txt yazıldı (3 kullanıcı, SCRAM-SHA-256)"
+echo "make-verifier: userlist.txt yazıldı (4 kullanıcı, SCRAM-SHA-256)"

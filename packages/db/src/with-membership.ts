@@ -7,8 +7,11 @@
 // satırı UPDATE) bu transaction bitene kadar bekler; tersi sırada yazma güncel durumu görür. Kilit sırası sabittir
 // (tenants → tenant_memberships → membership_roles): deadlock yok.
 //
-// m1: `withMembership` YALNIZCA `app.current_tenant_id` kurar; `app.current_user_id` `withUser`'da ve `withNewTenant`'ın
-// idempotent mevcut-tenant araması sırasında (tenant bağlamı boşken, kısa süreli; bulununca temizlenir) kurulur;
+// m1 (T-117 Supervisor kararı ile güncellendi): `withMembership` `app.current_tenant_id` ve DOĞRULANMIŞ üyeliğin kullanıcı
+// kimliğini (`app.current_user_id`) kurar — `enqueue`'nun "actorUserId tx kullanıcı bağlamıyla çelişemez" denetimi
+// `runTenantCommand` yolunda da etkindir (auth paket incelemesi MINOR-2). Kullanıcı kimliği tenant bağlamı DOLUYKEN
+// ek bir okuma yolu açmaz: üyelik listesi politikası tenant bağlamı BOŞ olmasını ister. `withUser` ve `withNewTenant`'ın
+// idempotent mevcut-tenant araması (tenant bağlamı boşken, kısa süreli; bulununca temizlenir) kimlik kurar;
 // `app.system_reason` yalnızca `withSystemTenant`'te. Hepsi `set_config(..., true)` + aynı `tx` (I-02); `SET` ve
 // string birleştirme yok, değerler parametredir. Geçersiz UUID/gerekçe veritabanına sorgu gönderilmeden reddedilir.
 //
@@ -19,7 +22,13 @@ import { isUuid, rawDb, type DbClient, type TenantTx } from "./client.ts";
 import type { RoleKey } from "./schema/tenancy.ts";
 
 /** 15 §Hata kodları: üyelik/tenant reddi. */
-export type MembershipErrorCode = "FORBIDDEN" | "TENANT_SUSPENDED" | "TENANT_CLOSING" | "SLUG_TAKEN" | "IDEMPOTENCY_MISMATCH";
+export type MembershipErrorCode =
+  | "FORBIDDEN"
+  | "TENANT_SUSPENDED"
+  | "TENANT_CLOSING"
+  | "SLUG_TAKEN"
+  | "IDEMPOTENCY_MISMATCH"
+  | "NOT_FOUND";
 
 export class MembershipError extends Error {
   override name = "MembershipError";
@@ -104,6 +113,7 @@ export async function withMembership<T>(
   const db = rawDb(client as DbClient);
   return db.transaction(async (tx) => {
     await tx.execute(sql`SELECT set_config('app.current_tenant_id', ${tenantId}, true)`);
+    await tx.execute(sql`SELECT set_config('app.current_user_id', ${userId}, true)`);
     const tenantStatus = await lockTenantRow(tx, tenantId);
     const rows = await tx.execute<{ id: string; is_owner: boolean; status: string; roles_version: number }>(
       sql`SELECT id, is_owner, status, roles_version
@@ -134,6 +144,45 @@ export async function withMembership<T>(
       roles,
       rolesVersion: Number(m.roles_version),
     });
+  });
+}
+
+const TOKEN_HASH_FORMAT = /^[0-9a-f]{64}$/;
+
+/**
+ * Davet kabulü için tenant bağlamı (T-117, migration 0006): GENEL `tenantId` ALMAZ; tenant yalnızca geçerli bir davet
+ * belirteci özetinden türetilir. Aynı transaction'da `wms_probe.invitation_tenant_for_token(token_hash)` çağrılır
+ * (salt okunur, SECURITY DEFINER); geçerli davet yoksa (yok/süresi dolmuş/iptal/kabul/demo/askıda tenant — hepsi aynı)
+ * `NOT_FOUND`. Bulunursa `app.current_tenant_id` (+ verilmişse `app.current_user_id`) kurulur; `app.system_reason`
+ * KURULMAZ. Çağıran işlevin sonucuna körü körüne güvenmez: `fn` içinde `invitations` satırı `FOR UPDATE` ile yeniden
+ * okunup doğrulanmalıdır. Üyelik/izin denetimi YOKTUR (kabul eden henüz üye değildir): bu yüzden yalnızca davet
+ * kabul adımlarında kullanılır.
+ */
+export async function withInvitationTenant<T>(
+  client: DbClient,
+  tokenHash: string,
+  fn: (tx: TenantTx, tenantId: string) => Promise<T>,
+  options?: { readonly userId?: string },
+): Promise<T> {
+  if (typeof tokenHash !== "string" || !TOKEN_HASH_FORMAT.test(tokenHash)) {
+    throw new MembershipError("NOT_FOUND", "invitation not found");
+  }
+  const userId = options?.userId;
+  if (userId !== undefined) assertUuid(userId, "userId");
+  const db = rawDb(client);
+  return db.transaction(async (tx) => {
+    const rows = await tx.execute<{ tenant_id: string | null }>(
+      sql`SELECT wms_probe.invitation_tenant_for_token(${tokenHash}) AS tenant_id`,
+    );
+    const tenantId = rows[0]?.tenant_id;
+    if (tenantId === null || tenantId === undefined || !isUuid(tenantId)) {
+      throw new MembershipError("NOT_FOUND", "invitation not found");
+    }
+    await tx.execute(sql`SELECT set_config('app.current_tenant_id', ${tenantId}, true)`);
+    if (userId !== undefined) await tx.execute(sql`SELECT set_config('app.current_user_id', ${userId}, true)`);
+    const status = await lockTenantRow(tx, tenantId);
+    if (status !== "ACTIVE") throw new MembershipError("NOT_FOUND", "invitation not found");
+    return fn(tx, tenantId);
   });
 }
 

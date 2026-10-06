@@ -20,6 +20,11 @@ kill_timeout = "15s"
   # Next standalone sunucusu HOSTNAME/PORT'u okur; tüm arayüzlerde dinlemeli (Fly proxy dışarıdan bağlanır).
   HOSTNAME = "0.0.0.0"
   PORT = "3000"
+  # İşlemsel e-posta (T-116, ADR-013). Sırlar Fly sırrıdır, buraya yazılmaz: RESEND_API_KEY,
+  # MAIL_RESTRICTED_RECIPIENTS, QUEUE_SEAL_KEY. Anahtar yoksa gönderim MAIL_DELIVERY_DISABLED ile reddedilir.
+  MAIL_MODE = "resend"
+  # Alan adı doğrulanana kadar (U-03) Resend'in test gönderen adresi.
+  MAIL_FROM = "onboarding@resend.dev"
 
 # Süreç komutu imajın CMD'sinin yerine geçer (ENTRYPOINT yok). Yollar imajda doğrulandı:
 # standalone izleme kökü depo kökü → /app/apps/web/server.js; worker → /app/apps/worker/dist/main.js.
