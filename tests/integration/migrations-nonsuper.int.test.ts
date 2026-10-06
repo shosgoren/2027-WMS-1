@@ -1023,7 +1023,7 @@ describe("0013–0014 — süper kullanıcı olmayan migrator", () => {
            UNION ALL SELECT 1 FROM information_schema.columns WHERE table_schema = 'public'
               AND (table_name, column_name) IN (('documents', 'source_kind'), ('documents', 'source_id'), ('document_lines', 'source_line_id'), ('document_lines', 'target_stock_status'),
                                                 ('reservations', 'order_line_id'), ('tenant_settings', 'receiving_qc_enabled'))
-           UNION ALL SELECT 1 FROM pg_proc WHERE proname IN ('field_docs_bump_version', 'field_docs_guard_keys')`,
+           UNION ALL SELECT 1 FROM pg_proc WHERE proname IN ('field_docs_bump_version', 'field_docs_guard_keys', 'field_docs_lines_guard_closed')`,
           [NEW16],
         );
         expect(gone.rows).toEqual([]);

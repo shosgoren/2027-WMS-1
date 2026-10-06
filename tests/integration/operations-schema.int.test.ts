@@ -460,6 +460,76 @@ describe("T-301 CHECK ve tutarlılık kuralları", () => {
     );
   });
 
+  it("kapanmış (CLOSED/CANCELLED) başlığın satırı değişmez → 23514; açık başlıkta geçer; kapanmış siparişte yalnız returned_quantity değişebilir", async () => {
+    for (const status of ["CLOSED", "CANCELLED"]) {
+      expectFail(
+        await asApp(A.tenantId, async (q) => {
+          const { receiptId, lineId } = await mkReceipt(q, A);
+          await q("UPDATE public.inbound_receipts SET status = $3 WHERE tenant_id = $1 AND id = $2", [A.tenantId, receiptId, status]);
+          await q("UPDATE public.inbound_receipt_lines SET received_quantity = 1 WHERE tenant_id = $1 AND id = $2", [A.tenantId, lineId]);
+        }),
+        CHECK_VIOLATION,
+        `kabul ${status}`,
+      );
+      expectFail(
+        await asApp(A.tenantId, async (q) => {
+          const { orderId, lineId } = await mkOrder(q, A, A.itemNoneId, "5");
+          await q("UPDATE public.sales_orders SET status = $3 WHERE tenant_id = $1 AND id = $2", [A.tenantId, orderId, status]);
+          await q("UPDATE public.sales_order_lines SET shipped_quantity = 1 WHERE tenant_id = $1 AND id = $2", [A.tenantId, lineId]);
+        }),
+        CHECK_VIOLATION,
+        `sipariş ${status}`,
+      );
+      expectFail(
+        await asApp(A.tenantId, async (q) => {
+          const { lineId } = await mkOrder(q, A, A.itemNoneId);
+          const ret = randomUUID();
+          const rl = randomUUID();
+          await q(insReturn, [A.tenantId, ret, A.warehouseId, `RT-${rnd()}`, randomUUID()]);
+          await q(insReturnLine, [A.tenantId, rl, ret, 1, lineId, A.itemNoneId, "1"]);
+          await q("UPDATE public.customer_returns SET status = $3 WHERE tenant_id = $1 AND id = $2", [A.tenantId, ret, status]);
+          await q("UPDATE public.customer_return_lines SET quantity = 2 WHERE tenant_id = $1 AND id = $2", [A.tenantId, rl]);
+        }),
+        CHECK_VIOLATION,
+        `iade ${status}`,
+      );
+    }
+    // Açık başlıkta (DRAFT/OPEN) satır güncellemesi geçer.
+    expectOk(
+      await asApp(A.tenantId, async (q) => {
+        const { receiptId, lineId } = await mkReceipt(q, A);
+        await q("UPDATE public.inbound_receipt_lines SET received_quantity = 2 WHERE tenant_id = $1 AND id = $2", [A.tenantId, lineId]);
+        await q("UPDATE public.inbound_receipts SET status = 'OPEN' WHERE tenant_id = $1 AND id = $2", [A.tenantId, receiptId]);
+        await q("UPDATE public.inbound_receipt_lines SET received_quantity = 3 WHERE tenant_id = $1 AND id = $2", [A.tenantId, lineId]);
+      }),
+      "açık kabul",
+    );
+    // Kapanmış siparişte iade sayacı (sevk sonrası gelen iade) artabilir; sevk/iptal/istenen değişmez.
+    expectOk(
+      await asApp(A.tenantId, async (q) => {
+        const { orderId, lineId } = await mkOrder(q, A, A.itemNoneId, "5");
+        await q("UPDATE public.sales_order_lines SET shipped_quantity = 5 WHERE tenant_id = $1 AND id = $2", [A.tenantId, lineId]);
+        await q("UPDATE public.sales_orders SET status = 'CLOSED' WHERE tenant_id = $1 AND id = $2", [A.tenantId, orderId]);
+        await q("UPDATE public.sales_order_lines SET returned_quantity = 1 WHERE tenant_id = $1 AND id = $2", [A.tenantId, lineId]);
+      }),
+      "kapanmış sipariş returned",
+    );
+    expectFail(
+      await asApp(A.tenantId, async (q) => {
+        const { orderId, lineId } = await mkOrder(q, A, A.itemNoneId, "5");
+        await q("UPDATE public.sales_orders SET status = 'CLOSED' WHERE tenant_id = $1 AND id = $2", [A.tenantId, orderId]);
+        await q("UPDATE public.sales_order_lines SET returned_quantity = 1, requested_quantity = 9 WHERE tenant_id = $1 AND id = $2", [A.tenantId, lineId]);
+      }),
+      CHECK_VIOLATION,
+      "kapanmış sipariş returned + başka sütun",
+    );
+    const fn = await admin.query<{ secdef: boolean; config: string[]; public_exec: boolean }>(
+      `SELECT prosecdef AS secdef, proconfig AS config, has_function_privilege('public', oid, 'EXECUTE') AS public_exec
+         FROM pg_proc WHERE proname = 'field_docs_lines_guard_closed'`,
+    );
+    expect(fn.rows).toEqual([{ secdef: false, config: ["search_path=pg_catalog, pg_temp"], public_exec: false }]);
+  });
+
   it("iade satırı: miktar > 0; ürün sevk satırının ürünüyle eşleşmeli (bileşik FK, 23503)", async () => {
     expectFail(
       await asApp(A.tenantId, async (q) => {
