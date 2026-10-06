@@ -49,10 +49,15 @@ const EnvelopeSchema = z
 type Envelope = z.infer<typeof EnvelopeSchema>;
 
 /** Hata olayı günlüğü: yalnızca ad + SQLSTATE (mesaj bağlantı bilgisi/parola içerebilir, G-09). */
+/** Hata adı yalnızca tanımlayıcı biçimliyse taşınır; dinamik/veri taşıyan ad (e-posta, boşluk, uzun metin) `Error` olur. */
+function safeErrorName(err: unknown): string {
+  return err instanceof Error && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(err.name) ? err.name : "Error";
+}
+
 function safeErrorFields(err: unknown): Record<string, unknown> {
   const code = (err as { code?: unknown } | null)?.code;
   return {
-    name: err instanceof Error ? err.name : "unknown",
+    name: safeErrorName(err),
     ...(typeof code === "string" && /^[0-9A-Z]{5}$/.test(code) ? { sqlstate: code } : {}),
   };
 }
@@ -104,7 +109,7 @@ function failureOutput(err: unknown): Record<string, unknown> {
   const code = (err as { code?: unknown } | null)?.code;
   return {
     permanent: true,
-    name: err instanceof Error ? err.name : "unknown",
+    name: safeErrorName(err),
     ...(typeof code === "string" && /^[A-Z][A-Z0-9_]{2,63}$/.test(code) ? { code } : {}),
   };
 }
@@ -127,7 +132,7 @@ class SanitizedJobError extends Error {
 function sanitizedFailure(err: unknown): SanitizedJobError {
   const code = (err as { code?: unknown } | null)?.code;
   return new SanitizedJobError(
-    err instanceof Error && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(err.name) ? err.name : "Error",
+    safeErrorName(err),
     typeof code === "string" && /^[A-Z][A-Z0-9_]{2,63}$/.test(code) ? code : undefined,
   );
 }
@@ -303,6 +308,7 @@ export function createJobQueue(options: JobQueueOptions): PgBossJobQueue {
               logger?.error("job handler failed (transient; will retry)", { jobId: bossJob.id, type, ...safeErrorFields(err) });
               throw sanitizedFailure(err);
             }
+            logger?.error("job handler failed (permanent)", { jobId: bossJob.id, type, ...safeErrorFields(err) });
             results.push({ id: bossJob.id, status: "deadletter", output: failureOutput(err) });
           }
         }

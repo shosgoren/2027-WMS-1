@@ -372,6 +372,29 @@ describe("wms_worker: tüm tenant'ların işini tüketir (fetch/complete/fail/re
     // Yapılandırılmış log da mesaj/e-posta taşımaz (yalnızca ad/SQLSTATE/jobId/type).
     expect(JSON.stringify(logged)).not.toContain(LEAK_EMAIL);
     expect(JSON.stringify(logged)).not.toContain("hunter2");
+    // Logger gerçekten çağrıldı (boş log ile yeşil kalmaz): geçici ve kalıcı hata satırları, yalnızca ad içerir.
+    const handlerLogs = logged.filter((f) => f.type === "demo.reseed" && typeof f.jobId === "string");
+    expect(handlerLogs.length).toBeGreaterThanOrEqual(2);
+    expect(handlerLogs.some((f) => f.name === "MailError")).toBe(true);
+  });
+});
+
+describe("hata adı temizliği", () => {
+  it("dinamik/veri taşıyan hata adı (kalıcı yol) output'a ve loga girmez; 'Error' olur", async () => {
+    const t = newTenant();
+    const id = await adminInsertJob(envelope(t));
+    const logged: Record<string, unknown>[] = [];
+    const worker = queueFor(workerUrl, (f) => logged.push(f ?? {}));
+    await worker.work("demo.reseed", async (ctx) => {
+      const tt = ctx.hasTenant ? await ctx.inTenant((tx) => currentTenantId(tx)) : undefined;
+      if (tt === t) throw Object.assign(new Error("x"), { name: `Bad ${LEAK_EMAIL}`, code: "BAD_THING", permanent: true });
+    });
+    await waitFor(async () => (await stateOf(id))?.state === "failed", "kalıcı hata -> failed");
+    const out = (await stateOf(id))?.output;
+    expect(out).toMatchObject({ permanent: true, name: "Error", code: "BAD_THING" });
+    expect(JSON.stringify(out)).not.toContain(LEAK_EMAIL);
+    expect(logged.some((f) => f.jobId === id || (f.type === "demo.reseed" && f.name === "Error"))).toBe(true);
+    expect(JSON.stringify(logged)).not.toContain(LEAK_EMAIL);
   });
 });
 
