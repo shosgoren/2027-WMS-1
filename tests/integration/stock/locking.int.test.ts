@@ -123,14 +123,31 @@ describe("tam plan: belge, lokasyon, boyut/bakiye, rezervasyon", () => {
     expect(again.dimensions.map((d) => d.id).sort()).toEqual(state.dimensions.map((d) => d.id).sort());
   });
 
-  // BULGU (T-210, Q-53 önerisi): 0011 `serials` için wms_app'e yalnızca SELECT + INSERT verir; PostgreSQL her satır kilidi modu
+  // BULGU (T-210, Q-56): 0011 `serials` için wms_app'e yalnızca SELECT + INSERT verir; PostgreSQL her satır kilidi modu
   // (FOR UPDATE/SHARE/KEY SHARE) tabloda UPDATE yetkisi ister. Spec adım 6 (`lockSerials` FOR UPDATE) bu yüzden bugün wms_app ile
-  // çalışamaz; işlev KAPALI ÇÖKER (42501, sessiz atlama yok). Çözüm migration gerektirir (kart kapsamı dışı: "migration yok"); migration
-  // inince bu test `state.serials` beklentisine çevrilir ve aşağıdaki NOT_FOUND vakası eklenir.
-  it("seri kilidi: bugün wms_app UPDATE yetkisi olmadığından 42501 ile kapalı çöker (bulgu, bkz. yorum)", async () => {
-    expect(await sqlstateOf(run(empty({ serialIds: [A.serialId] })))).toBe("42501");
+  // çalışamaz. Seri adımı KAPALI BAYRAKLIDIR (STOCK_SERIAL_LOCK_ENABLED): bayrak yokken plan sorgudan önce reddedilir; bayrak açıkken
+  // işlev KAPALI ÇÖKER (42501, sessiz atlama yok). Migration (Q-56) inince bu test `state.serials` beklentisine çevrilir.
+  const withSerialFlag = async <T,>(value: string | undefined, fn: () => Promise<T>): Promise<T> => {
+    const old = process.env.STOCK_SERIAL_LOCK_ENABLED;
+    if (value === undefined) delete process.env.STOCK_SERIAL_LOCK_ENABLED;
+    else process.env.STOCK_SERIAL_LOCK_ENABLED = value;
+    try {
+      return await fn();
+    } finally {
+      if (old === undefined) delete process.env.STOCK_SERIAL_LOCK_ENABLED;
+      else process.env.STOCK_SERIAL_LOCK_ENABLED = old;
+    }
+  };
+  it("seri kilidi bayrak KAPALIYKEN reddedilir: VALIDATION_FAILED", async () => {
+    expect(await withSerialFlag(undefined, () => codeOf(run(empty({ serialIds: [A.serialId] }))))).toBe("VALIDATION_FAILED");
+  });
+  it("seri kilidi bayrak AÇIKKEN bugün wms_app UPDATE yetkisi olmadığından 42501 ile kapalı çöker (Q-56)", async () => {
+    expect(await withSerialFlag("true", () => sqlstateOf(run(empty({ serialIds: [A.serialId] }))))).toBe("42501");
   });
 
+  it("tenantId transaction bağlamıyla uyuşmuyorsa FORBIDDEN (başka tenant kimliğiyle çağrı)", async () => {
+    expect(await codeOf(withTenant(ctxA, (tx) => acquireStockLocks(tx, B.tenantId, empty({ reservationIds: [A.reservationId] }))))).toBe("FORBIDDEN");
+  });
   it("başka tenant'ın kimlikleri görünmez: NOT_FOUND (varlık sızmaz)", async () => {
     expect(await codeOf(run(empty({ locationIds: [B.rootLocationId] })))).toBe("NOT_FOUND");
     expect(await codeOf(run(empty({ document: { id: B.documentId, expectedVersion: 1 } })))).toBe("NOT_FOUND");
@@ -169,42 +186,72 @@ describe("boyut anahtarı sırası = PostgreSQL ORDER BY … NULLS FIRST (uygula
 });
 
 describe("eşzamanlı ters sıralı planlar: deadlock yok", () => {
-  it("kontrol: elle ters sırayla bakiye kilitleme 40P01 üretir (eşzamanlılık gerçek)", async () => {
-    const seeded = await run(empty({ dimensions: [dim(A.itemNoneId, A.rootLocationId, { stockStatus: "BLOCKED" }), dim(A.itemNoneId, A.childLocationId, { stockStatus: "BLOCKED" })] }));
-    const [d1, d2] = seeded.dimensions.map((d) => d.id) as [string, string];
-    const lockPair = (first: string, second: string) =>
-      withTenant(ctxA, async (tx) => {
-        await tx.execute(`SELECT 1 FROM public.stock_balances WHERE tenant_id = '${A.tenantId}'::uuid AND stock_dimension_id = '${first}'::uuid FOR UPDATE`);
-        await tx.execute("SELECT pg_sleep(0.3)");
-        await tx.execute(`SELECT 1 FROM public.stock_balances WHERE tenant_id = '${A.tenantId}'::uuid AND stock_dimension_id = '${second}'::uuid FOR UPDATE`);
-      });
-    const results = await Promise.all([sqlstateOf(lockPair(d1, d2)), sqlstateOf(lockPair(d2, d1))]);
-    expect(results.filter((r) => r === "40P01")).toHaveLength(1);
-  }, 30_000);
+  // Ayırt edici tasarım (inceleme MAJOR-3): belge YOK; her tur TAZE lokasyonda 8 YENİ boyut (henüz var olmayan satırlar: sıralı olmayan
+  // ekleme ters kilit sırası = 40P01) + 4 rezervasyon, iki yönde. Planı normalize eden sıralama kaldırılırsa test 40P01 ile kırmızıya döner
+  // (mutasyon kanıtı rapordadır). Kontrol testi AYNI satır kümesini elle ters sırayla kilitler ve 40P01 üretir.
+  const extraReservations: string[] = [];
+  const roundKeys = (locationId: string): StockDimensionKey[] =>
+    (["AVAILABLE", "QUARANTINE", "DAMAGED", "BLOCKED"] as const).flatMap((stockStatus) =>
+      [null, A.ownerId].map((inventoryOwnerId) => dim(A.itemNoneId, locationId, { stockStatus, inventoryOwnerId })),
+    );
+  const freshLocation = async (): Promise<string> => {
+    const locationId = randomUUID();
+    await adminTx(A.tenantId, async (q) => {
+      await q("INSERT INTO public.locations (tenant_id, id, warehouse_id, parent_id, code, name, depth, kind) VALUES ($1, $2, $3, NULL, $4, 'T210 tur', 0, 'STORAGE')", [
+        A.tenantId,
+        locationId,
+        A.warehouseId,
+        `T210-${locationId.slice(0, 8)}`,
+      ]);
+    });
+    return locationId;
+  };
+  const hold = (tx: Parameters<Parameters<typeof withTenant>[1]>[0]) => tx.execute("SELECT pg_sleep(0.05)");
+  let lastLocation = "";
 
-  it("acquireStockLocks: iki transaction ters sırada plan bildirir; tümü deadlock'suz tamamlanır", async () => {
-    const keys: StockDimensionKey[] = [];
-    for (const locationId of [A.rootLocationId, A.childLocationId]) {
-      for (const stockStatus of ["AVAILABLE", "QUARANTINE", "DAMAGED"] as const) keys.push(dim(A.itemNoneId, locationId, { stockStatus }));
-    }
-    const forward: StockLockPlan = empty({
-      document: { id: A.documentId, expectedVersion: 1 },
-      locationIds: [A.rootLocationId, A.childLocationId],
-      dimensions: keys,
-      reservationIds: [A.reservationId],
+  beforeAll(async () => {
+    // Mevcut boyuta 3 ek ACTIVE rezervasyon (rezerve toplamı bakiyede aynı transaction'da güncellenir; mutlak denetim ertelenmiş).
+    await adminTx(A.tenantId, async (q) => {
+      for (let n = 0; n < 3; n++) {
+        const rid = randomUUID();
+        extraReservations.push(rid);
+        await q("INSERT INTO public.reservations (tenant_id, id, stock_dimension_id, document_line_id, quantity) VALUES ($1, $2, $3, $4, 1)", [
+          A.tenantId,
+          rid,
+          A.dimensionId,
+          A.documentLineNoneId,
+        ]);
+      }
+      await q("UPDATE public.stock_balances SET reserved_quantity = reserved_quantity + 3 WHERE tenant_id = $1 AND stock_dimension_id = $2", [A.tenantId, A.dimensionId]);
     });
-    const backward: StockLockPlan = empty({
-      document: forward.document as NonNullable<StockLockPlan["document"]>,
-      locationIds: [...forward.locationIds].reverse(),
-      dimensions: [...keys].reverse(),
-      reservationIds: [...forward.reservationIds].reverse(),
-    });
-    const hold = (tx: Parameters<Parameters<typeof withTenant>[1]>[0]) => tx.execute("SELECT pg_sleep(0.05)");
-    for (let round = 0; round < 12; round++) {
+  }, 60_000);
+
+  it("acquireStockLocks: iki yönde ters sıralı boyut ve rezervasyon planları; belge yok; her tur yeni satırlar; deadlock'suz", async () => {
+    const reservations = [A.reservationId, ...extraReservations];
+    for (let round = 0; round < 6; round++) {
+      lastLocation = await freshLocation();
+      const keys = roundKeys(lastLocation);
+      const forward = empty({ dimensions: keys, reservationIds: reservations });
+      const backward = empty({ dimensions: [...keys].reverse(), reservationIds: [...reservations].reverse() });
       const outcomes = await Promise.all([sqlstateOf(run(forward, hold)), sqlstateOf(run(backward, hold)), sqlstateOf(run(forward, hold)), sqlstateOf(run(backward, hold))]);
       expect(outcomes).toEqual([undefined, undefined, undefined, undefined]);
     }
-  }, 60_000);
+  }, 120_000);
+
+  it("kontrol: AYNI satır kümesi (son turun 8 bakiyesi) elle ters sırayla kilitlenince 40P01 üretir (eşzamanlılık gerçek)", async () => {
+    const seeded = await run(empty({ dimensions: roundKeys(lastLocation) }));
+    const ids = seeded.dimensions.map((d) => d.id);
+    expect(ids).toHaveLength(8);
+    const lockAll = (order: string[]) =>
+      withTenant(ctxA, async (tx) => {
+        for (const [n, id] of order.entries()) {
+          await tx.execute(`SELECT 1 FROM public.stock_balances WHERE tenant_id = '${A.tenantId}'::uuid AND stock_dimension_id = '${id}'::uuid FOR UPDATE`);
+          if (n === 0) await tx.execute("SELECT pg_sleep(0.3)");
+        }
+      });
+    const results = await Promise.all([sqlstateOf(lockAll(ids)), sqlstateOf(lockAll([...ids].reverse()))]);
+    expect(results.filter((r) => r === "40P01")).toHaveLength(1);
+  }, 30_000);
 });
 
 describe("sayım kilidi", () => {
@@ -239,6 +286,16 @@ describe("sayım kilidi", () => {
       expect(await codeOf(run(empty({ locationIds: [A.childLocationId], dimensions: [dim(A.itemNoneId, A.childLocationId, { stockStatus: "BLOCKED", inventoryOwnerId: A.ownerId })] })))).toBe("LOCATION_LOCKED");
       const after = await withTenant(ctxA, (tx) => tx.execute<{ n: string }>(`SELECT count(*)::text AS n FROM public.stock_dimensions WHERE tenant_id = '${A.tenantId}'::uuid`));
       expect(after[0]?.n).toBe(before[0]?.n);
+      // MAJOR-4: boyutu COUNTING lokasyonda olup locationIds'te unutulmuş plan da reddedilir (denetim = locationIds ∪ boyut lokasyonları).
+      const forgotten = dim(A.itemNoneId, A.childLocationId, { stockStatus: "DAMAGED", inventoryOwnerId: A.ownerId });
+      expect(await codeOf(run(empty({ dimensions: [forgotten] })))).toBe("LOCATION_LOCKED");
+      const after2 = await withTenant(ctxA, (tx) => tx.execute<{ n: string }>(`SELECT count(*)::text AS n FROM public.stock_dimensions WHERE tenant_id = '${A.tenantId}'::uuid`));
+      expect(after2[0]?.n).toBe(before[0]?.n);
+      // Oturumlu istisna boyut lokasyonunu da kapsar: aynı oturumdaki COUNTING lokasyonda boyut kabul edilir.
+      const okDim = await run(empty({ dimensions: [forgotten], countSessionId: session }));
+      expect(okDim.locations).toEqual([{ locationId: A.childLocationId, status: "COUNTING", countSessionId: session }]);
+      // Kapsanan lokasyon yokken countSessionId → VALIDATION_FAILED.
+      expect(await codeOf(run(empty({ countSessionId: session })))).toBe("VALIDATION_FAILED");
     } finally {
       await setCounting(A.childLocationId, false);
     }

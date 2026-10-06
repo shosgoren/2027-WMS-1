@@ -628,9 +628,16 @@ const tableRe = (tables) => `(?:"?public"?\\s*\\.\\s*)?"?(?:${tables.join("|")})
 const STOCK_LOCK_SQL_RE = new RegExp(`\\bFOR\\s+(?:NO\\s+KEY\\s+UPDATE|UPDATE|KEY\\s+SHARE|SHARE)\\b`, "i");
 const STOCK_LOCK_TABLE_RE = new RegExp(`(?<![\\w])${tableRe(STOCK_LOCK_TABLES)}`, "i");
 const STOCK_WRITE_SQL_RE = new RegExp(
-  `(?<![\\w])(?:INSERT\\s+INTO|UPDATE|DELETE\\s+FROM|TRUNCATE(?:\\s+TABLE)?)\\s+(?:ONLY\\s+)?${tableRe(STOCK_WRITE_TABLES)}`,
+  `(?<![\\w])(?:INSERT\\s+INTO|UPDATE|DELETE\\s+FROM|MERGE\\s+INTO|TRUNCATE(?:\\s+TABLE)?)\\s+(?:ONLY\\s+)?${tableRe(STOCK_WRITE_TABLES)}`,
   "i",
 );
+/** Tablo adı yerinde değişken olan şablonlarda aranan fiiller (T-210 inceleme MAJOR-2 iv). */
+const STOCK_WRITE_VERB_RE = /(?<![\w])(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM|MERGE\s+INTO|TRUNCATE)\s/i;
+const STOCK_WRITE_TABLE_ANY_RE = new RegExp(`(?<![\\w])${tableRe(STOCK_WRITE_TABLES)}`, "i");
+const STOCK_WRITE_TABLE_EXACT_RE = new RegExp(`^\\s*${tableRe(STOCK_WRITE_TABLES)}\\s*$`, "i");
+const STOCK_FOR_MODE_RE = /^\s*(?:no\s+key\s+update|update|share|key\s+share)\s*$/i;
+/** Tabloyu `pgTable("…")` ile tanımlayan şema dosyaları (tanım, yazma değildir). */
+const STOCK_SCHEMA_DEFINITION_FILES = ["packages/db/src/schema/stock.ts", "packages/db/src/schema/warehouse.ts"];
 const MSG_STOCK_LOCK = "Stok tablolarında FOR UPDATE/FOR SHARE yalnızca packages/db/src/locking.ts içindedir (`acquireStockLocks`; I-15, T-210).";
 const MSG_STOCK_WRITE = "Stok tablolarına INSERT/UPDATE/DELETE yalnızca STOCK_WRITE_FILES dosyalarındadır (G-01, I-04, T-210).";
 const MSG_STOCK_SCHEMA =
@@ -662,6 +669,27 @@ const stockSqlGuard = {
     const isLockFile = rel === STOCK_LOCK_FILE;
     const writeAllowed = STOCK_WRITE_FILES.includes(rel);
     const schemaAllowed = writeAllowed || rel.startsWith("packages/db/src/");
+    /** Aynı düğüm için aynı ileti ikinci kez raporlanmaz (statik ve dinamik tespit çakışabilir). @type {Set<string>} */
+    const reported = new Set();
+    /** @param {any} node @param {"lock"|"write"|"schema"|"exports"} messageId */
+    const report = (node, messageId) => {
+      const k = `${messageId}@${node.range?.[0]}-${node.range?.[1]}`;
+      if (reported.has(k)) return;
+      reported.add(k);
+      context.report({ node, messageId });
+    };
+    /** TS sarmalayıcılarını (`as`, `!`, `satisfies`, `<T>x`) soyar. @param {any} n */
+    const unwrap = (n) => {
+      let x = n;
+      while (x && (x.type === "TSAsExpression" || x.type === "TSNonNullExpression" || x.type === "TSSatisfiesExpression" || x.type === "TSTypeAssertion")) x = x.expression;
+      return x;
+    };
+    /** (iv) dosya düzeyi: stok tablosu adı bir dizede geçiyor mu; ifadeli şablon/birleştirmede yazma/kilit fiili var mı. */
+    const seen = { writeTable: false, lockTable: false };
+    /** @type {{ node: any, kind: "write" | "lock" }[]} */
+    const dynamicVerbs = [];
+    /** @type {Set<string>} stok şemasının ad alanı yerel adları (yalnızca STOCK_SCHEMA_NAMESPACE_FILES) */
+    const nsNames = new Set();
     /** @param {any} node */
     const checkText = (node) => {
       const parent = node.parent;
@@ -669,8 +697,14 @@ const stockSqlGuard = {
       if (parent?.type === "ImportDeclaration" || parent?.type === "ExportAllDeclaration" || parent?.type === "ExportNamedDeclaration") return;
       const text = staticText(node);
       if (text === null) return;
-      if (!isLockFile && STOCK_LOCK_SQL_RE.test(text) && STOCK_LOCK_TABLE_RE.test(text)) context.report({ node, messageId: "lock" });
-      if (!writeAllowed && STOCK_WRITE_SQL_RE.test(text)) context.report({ node, messageId: "write" });
+      if (STOCK_WRITE_TABLE_ANY_RE.test(text)) seen.writeTable = true;
+      if (STOCK_LOCK_TABLE_RE.test(text)) seen.lockTable = true;
+      if (text.includes("\u0000")) {
+        if (!writeAllowed && STOCK_WRITE_VERB_RE.test(text)) dynamicVerbs.push({ node, kind: "write" });
+        if (!isLockFile && STOCK_LOCK_SQL_RE.test(text)) dynamicVerbs.push({ node, kind: "lock" });
+      }
+      if (!isLockFile && STOCK_LOCK_SQL_RE.test(text) && STOCK_LOCK_TABLE_RE.test(text)) report(node, "lock");
+      if (!writeAllowed && STOCK_WRITE_SQL_RE.test(text)) report(node, "write");
     };
     /** @param {any} src */
     const isSchemaSource = (src) => {
@@ -697,7 +731,7 @@ const stockSqlGuard = {
         return s.type !== "ImportSpecifier" && s.type !== "ExportSpecifier" ? true : STOCK_SCHEMA_OBJECTS.has(importedName(s) ?? s.local?.name);
       });
     const dynamicSchema = (/** @type {any} */ n, /** @type {any} */ src) => {
-      if (!schemaAllowed && isSchemaSource(src)) context.report({ node: n, messageId: "schema" });
+      if (!schemaAllowed && isSchemaSource(src)) report(n, "schema");
     };
     /** @type {import("eslint").Rule.RuleListener} */
     const listener = {
@@ -705,33 +739,36 @@ const stockSqlGuard = {
       TemplateLiteral: checkText,
       BinaryExpression: checkText,
       ImportDeclaration: (/** @type {any} */ n) => {
-        if (!schemaAllowed && isSchemaSource(n.source) && specifiersHit(n, n.specifiers)) context.report({ node: n, messageId: "schema" });
+        if (STOCK_SCHEMA_NAMESPACE_FILES.includes(rel) && isSchemaSource(n.source)) {
+          for (const sp of n.specifiers) if (sp.type === "ImportNamespaceSpecifier") nsNames.add(sp.local.name);
+        }
+        if (!schemaAllowed && isSchemaSource(n.source) && specifiersHit(n, n.specifiers)) report(n, "schema");
       },
       ExportNamedDeclaration: (/** @type {any} */ n) => {
         if (n.source) {
-          if (!schemaAllowed && isSchemaSource(n.source) && specifiersHit(n, n.specifiers)) context.report({ node: n, messageId: "schema" });
+          if (!schemaAllowed && isSchemaSource(n.source) && specifiersHit(n, n.specifiers)) report(n, "schema");
         }
         if (isLockFile && !n.source) {
           const d = n.declaration;
           if (d) {
             const typeOnly = d.type === "TSTypeAliasDeclaration" || d.type === "TSInterfaceDeclaration" || n.exportKind === "type";
             const names = d.type === "VariableDeclaration" ? d.declarations.map((/** @type {any} */ x) => x.id?.name) : [d.id?.name];
-            if (!typeOnly && !names.every((/** @type {string} */ x) => STOCK_LOCK_VALUE_EXPORTS.has(x))) context.report({ node: n, messageId: "exports" });
+            if (!typeOnly && !names.every((/** @type {string} */ x) => STOCK_LOCK_VALUE_EXPORTS.has(x))) report(n, "exports");
           } else if (n.exportKind !== "type") {
             for (const s of n.specifiers) {
               const exported = s.exported?.name ?? s.exported?.value;
-              if (s.exportKind !== "type" && !STOCK_LOCK_VALUE_EXPORTS.has(exported)) context.report({ node: s, messageId: "exports" });
+              if (s.exportKind !== "type" && !STOCK_LOCK_VALUE_EXPORTS.has(exported)) report(s, "exports");
             }
           }
         }
-        if (isLockFile && n.source && n.exportKind !== "type") context.report({ node: n, messageId: "exports" });
+        if (isLockFile && n.source && n.exportKind !== "type") report(n, "exports");
       },
       ExportAllDeclaration: (/** @type {any} */ n) => {
-        if (!schemaAllowed && isSchemaSource(n.source)) context.report({ node: n, messageId: "schema" });
-        if (isLockFile && n.exportKind !== "type") context.report({ node: n, messageId: "exports" });
+        if (!schemaAllowed && isSchemaSource(n.source)) report(n, "schema");
+        if (isLockFile && n.exportKind !== "type") report(n, "exports");
       },
       ExportDefaultDeclaration: (/** @type {any} */ n) => {
-        if (isLockFile) context.report({ node: n, messageId: "exports" });
+        if (isLockFile) report(n, "exports");
       },
       ImportExpression: (/** @type {any} */ n) => dynamicSchema(n, n.source),
       TSExternalModuleReference: (/** @type {any} */ n) => dynamicSchema(n, n.expression),
@@ -742,6 +779,40 @@ const stockSqlGuard = {
           (c.type === "MemberExpression" && c.property.type === "Identifier" && REQUIRE_NAME_JS_RE.test(c.property.name)) ||
           (c.type === "CallExpression" && (c.callee.name === "createRequire" || c.callee.property?.name === "createRequire"));
         if (loader && n.arguments.length > 0) dynamicSchema(n, n.arguments[0]);
+        const prop = c.type === "MemberExpression" && !c.computed && c.property.type === "Identifier" ? c.property.name : null;
+        const first = n.arguments[0];
+        const firstText = first === undefined ? null : staticText(first);
+        // (i) sql.identifier("<stok tablosu>")
+        if (!writeAllowed && prop === "identifier" && firstText !== null && STOCK_WRITE_TABLE_EXACT_RE.test(firstText)) report(n, "write");
+        // (ii) pgTable("<stok tablosu>")
+        const isPgTable = (c.type === "Identifier" && c.name === "pgTable") || prop === "pgTable";
+        if (!writeAllowed && !STOCK_SCHEMA_DEFINITION_FILES.includes(rel) && isPgTable && firstText !== null && STOCK_WRITE_TABLE_EXACT_RE.test(firstText)) {
+          report(n, "write");
+        }
+        // (iii) .for("update" | "share" | "no key update" | "key share") (Drizzle sorgu oluşturucusu kilidi); `Symbol.for` hariç
+        if (!isLockFile && prop === "for" && !(c.object.type === "Identifier" && c.object.name === "Symbol")) {
+          if (first === undefined || firstText === null || STOCK_FOR_MODE_RE.test(firstText)) report(n, "lock");
+        }
+      },
+      MemberExpression: (/** @type {any} */ n) => {
+        const obj = unwrap(n.object);
+        if (obj?.type !== "Identifier" || !nsNames.has(obj.name)) return;
+        const name = !n.computed && n.property.type === "Identifier" ? n.property.name : n.computed && n.property.type === "Literal" ? String(n.property.value) : null;
+        if (name === null || STOCK_SCHEMA_OBJECTS.has(name)) report(n, "schema");
+      },
+      VariableDeclarator: (/** @type {any} */ n) => {
+        const init = unwrap(n.init);
+        if (init?.type !== "Identifier" || !nsNames.has(init.name) || n.id.type !== "ObjectPattern") return;
+        for (const prop of n.id.properties) {
+          const key = prop.type === "Property" && !prop.computed ? (prop.key.name ?? String(prop.key.value)) : null;
+          if (key === null || STOCK_SCHEMA_OBJECTS.has(key)) report(prop, "schema");
+        }
+      },
+      "Program:exit": () => {
+        for (const { node, kind } of dynamicVerbs) {
+          if (kind === "write" && seen.writeTable) report(node, "write");
+          if (kind === "lock" && seen.lockTable) report(node, "lock");
+        }
       },
     };
     return listener;

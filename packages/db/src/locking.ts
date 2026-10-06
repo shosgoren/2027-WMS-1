@@ -14,6 +14,7 @@
 // alan katmanı `code` ile `AppError`'a eşler (packages/db `@wms/shared`'a bağlı değildir).
 import { sql, type SQL } from "drizzle-orm";
 import { isUuid, type TenantTx } from "./client.ts";
+import { currentTenantId } from "./with-tenant.ts";
 
 /** ADR-017 §1: boyut doğal anahtarı. `null` = anahtar bileşeni yok (NULLS NOT DISTINCT). */
 export interface StockDimensionKey {
@@ -39,11 +40,19 @@ export interface StockLockPlan {
 
 export type StockLockErrorCode =
   | "VALIDATION_FAILED"
+  | "FORBIDDEN"
   | "NOT_FOUND"
   | "VERSION_CONFLICT"
   | "LOCATION_LOCKED"
   | "COUNT_LOCK_ROW_MISSING"
   | "INTERNAL";
+
+/**
+ * Kapalı bayrak (Q-56): `serials` satırı kilidi `wms_app` ile bugün alınamaz (0011 yalnızca SELECT+INSERT; satır kilidi UPDATE yetkisi ister,
+ * 42501). Bayrak `STOCK_SERIAL_LOCK_ENABLED=true` değilse `serialIds` boş olmayan plan HİÇ sorgu çalıştırılmadan reddedilir; böylece
+ * 42501 yakalanıp seri kilitsiz yeniden deneme yolu açılmaz. Çağrı anında okunur (yeniden başlatma gerekmez).
+ */
+const serialLockEnabled = (): boolean => process.env.STOCK_SERIAL_LOCK_ENABLED === "true";
 
 /** Fırlatılan hata (sınıf dışa açılmaz; `name === "StockLockError"` ve `code` ile tanınır). 15 §Hata kodları kodlarıdır. */
 export interface StockLockError extends Error {
@@ -172,6 +181,10 @@ const normalizePlan = (plan: StockLockPlan): NormalizedPlan => {
     if (!Number.isSafeInteger(v) || v < 0) throw new StockLockErrorImpl("VALIDATION_FAILED", "document.expectedVersion must be a non-negative integer");
     document = { id: uuid(plan.document.id, "document.id"), expectedVersion: v };
   }
+  const serialIds = sortedUniqueIds(plan.serialIds, "serialIds");
+  if (serialIds.length > 0 && !serialLockEnabled()) {
+    throw new StockLockErrorImpl("VALIDATION_FAILED", "serial locking is disabled (STOCK_SERIAL_LOCK_ENABLED, Q-56)");
+  }
   const unique = new Map<string, StockDimensionKey>();
   for (const raw of plan.dimensions) {
     const k = normalizeKey(raw);
@@ -182,10 +195,13 @@ const normalizePlan = (plan: StockLockPlan): NormalizedPlan => {
     locationIds: sortedUniqueIds(plan.locationIds, "locationIds"),
     dimensions: [...unique.values()].sort(compareDimensionKeys),
     reservationIds: sortedUniqueIds(plan.reservationIds, "reservationIds"),
-    serialIds: sortedUniqueIds(plan.serialIds, "serialIds"),
+    serialIds,
     countSessionId: plan.countSessionId === undefined ? undefined : uuid(plan.countSessionId, "countSessionId"),
   };
 };
+
+/** Denetlenen lokasyon kümesi: `locationIds` ∪ `dimensions[].locationId` (boyutu olup `locationIds`'te unutulan lokasyon da denetlenir). */
+const auditedLocationIds = (p: NormalizedPlan): string[] => [...new Set([...p.locationIds, ...p.dimensions.map((d) => d.locationId)])].sort(cmp);
 
 /**
  * Sayım kilidi kararı (saf): sayım oturumu verilmemişse hiçbir lokasyon COUNTING olamaz; verilmişse İSTİSNA yalnızca TÜM
@@ -262,7 +278,7 @@ async function ensureDimensions(tx: TenantTx, tenantId: string, keys: readonly S
     sql`INSERT INTO public.stock_dimensions (tenant_id, item_id, location_id, lot_id, serial_id, stock_status, inventory_owner_id, handling_unit_id)
         SELECT ${tenantId}::uuid, w.item_id, w.location_id, w.lot_id, w.serial_id, w.stock_status, w.inventory_owner_id, w.handling_unit_id
           FROM ${recordset} ORDER BY w.ord
-        ON CONFLICT DO NOTHING`,
+        ON CONFLICT ON CONSTRAINT stock_dimensions_natural_key DO NOTHING`,
   );
   const rows = await tx.execute<Row>(
     sql`SELECT d.id, d.item_id, d.location_id, d.lot_id, d.serial_id, d.stock_status, d.inventory_owner_id, d.handling_unit_id, w.ord
@@ -294,7 +310,7 @@ async function ensureBalanceRows(tx: TenantTx, tenantId: string, dimensionIds: r
   await tx.execute(
     sql`INSERT INTO public.stock_balances (tenant_id, stock_dimension_id)
         SELECT ${tenantId}::uuid, u.id FROM unnest(${uuidArray(dimensionIds)}) AS u(id) ORDER BY u.id
-        ON CONFLICT DO NOTHING`,
+        ON CONFLICT ON CONSTRAINT stock_balances_pkey DO NOTHING`,
   );
 }
 
@@ -348,9 +364,18 @@ async function lockSerials(tx: TenantTx, tenantId: string, ids: readonly string[
 export async function acquireStockLocks(tx: TenantTx, tenantId: string, plan: StockLockPlan): Promise<LockedState> {
   const tenant = uuid(tenantId, "tenantId");
   const p = normalizePlan(plan);
+  const audited = auditedLocationIds(p);
+  if (p.countSessionId !== undefined && audited.length === 0) {
+    throw new StockLockErrorImpl("VALIDATION_FAILED", "countSessionId requires at least one location in the plan");
+  }
+  // Çağıranın tenantId'si transaction'daki tenant bağlamıyla aynı olmalı (RLS başka tenant'ı süzer; yanlış kimlik sessiz boş sonuç olmasın).
+  const contextTenant = await currentTenantId(tx);
+  if (contextTenant === undefined || contextTenant.toLowerCase() !== tenant) {
+    throw new StockLockErrorImpl("FORBIDDEN", "tenantId does not match the transaction tenant context");
+  }
 
   const document = p.document === undefined ? undefined : await lockDocument(tx, tenant, p.document);
-  const locations = p.locationIds.length === 0 ? [] : await assertLocationsNotCounting(tx, tenant, p.locationIds, p.countSessionId);
+  const locations = audited.length === 0 ? [] : await assertLocationsNotCounting(tx, tenant, audited, p.countSessionId);
 
   let dimensions: LockedDimension[] = [];
   let balances: LockedBalance[] = [];

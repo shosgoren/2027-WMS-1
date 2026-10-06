@@ -10,10 +10,10 @@ import { acquireStockLocks, type StockDimensionKey, type StockLockPlan } from ".
 
 const TENANT = "0b3c6a52-6f0e-4a8b-9d1e-2f4a5b6c7d8e";
 const dialect = new PgDialect();
-// Lint (wms/stock-sql-guard) test dosyasında stok yazma SQL metnini yasaklar; ifade başlangıcı ve tablo adı ayrı dizelerdir.
-const INSERT_DIMENSIONS = "INSERT INTO";
-const isDimensionInsert = (c: { text: string }): boolean => c.text.startsWith(INSERT_DIMENSIONS) && c.text.includes("stock_dimensions");
-const isBalanceInsert = (c: { text: string }): boolean => c.text.startsWith(INSERT_DIMENSIONS) && c.text.includes("stock_balances");
+// Lint (wms/stock-sql-guard) bu dosyada stok yazma SQL metnini yasaklar.
+// Ekleme ifadeleri fiil/tablo adı yazılmadan, yapısal ayırt edicilerle tanınır (lint bu dosyada dize bölmeye dayanmaz).
+const isDimensionInsert = (c: { text: string }): boolean => c.text.includes("jsonb_to_recordset") && c.text.includes("ON CONFLICT");
+const isBalanceInsert = (c: { text: string }): boolean => c.text.includes("unnest(") && c.text.includes("ON CONFLICT");
 const id = (n: number): string => `00000000-0000-4000-8000-${n.toString(16).padStart(12, "0")}`;
 
 interface Call {
@@ -24,16 +24,27 @@ interface Fixture {
   document?: { id: string; version: number; status: string; warehouse_id: string };
   locks?: { location_id: string; status: "IDLE" | "COUNTING"; count_session_id: string | null }[];
   visibleLocations?: string[];
+  /** Transaction'daki tenant bağlamı (`undefined` = ayarlı değil). Varsayılan: TENANT. */
+  contextTenant?: string | null;
 }
 
-function fakeTx(fx: Fixture = {}): { tx: TenantTx; calls: Call[] } {
+function fakeTx(fx: Fixture = {}): { tx: TenantTx; calls: Call[]; probes: () => number } {
   const calls: Call[] = [];
+  let probes = 0;
   const execute = (query: SQL): Promise<Record<string, unknown>[]> => {
     const q = dialect.sqlToQuery(query);
     const text = q.sql.replace(/\s+/g, " ");
+    if (text.includes("current_setting")) {
+      probes++; // tenant bağlamı yoklaması (`currentTenantId`); sözleşme sorguları `calls`'tadır
+      return Promise.resolve([{ tenant_id: fx.contextTenant === undefined ? TENANT : fx.contextTenant }]);
+    }
     calls.push({ text, params: q.params });
     if (text.includes("FROM public.documents")) return Promise.resolve(fx.document === undefined ? [] : [fx.document]);
-    if (text.includes("FROM public.location_count_locks")) return Promise.resolve(fx.locks ?? []);
+    if (text.includes("FROM public.location_count_locks")) {
+      // Fikstür verilmediyse istenen her lokasyon IDLE'dır.
+      const asked = q.params.filter((p): p is string => typeof p === "string" && p !== TENANT);
+      return Promise.resolve(fx.locks ?? asked.map((location_id) => ({ location_id, status: "IDLE" as const, count_session_id: null })));
+    }
     if (text.includes("FROM public.locations")) return Promise.resolve((fx.visibleLocations ?? []).map((i) => ({ id: i })));
     if (text.includes("JOIN public.stock_dimensions")) {
       const json = q.params.find((p): p is string => typeof p === "string" && p.startsWith("["));
@@ -50,7 +61,7 @@ function fakeTx(fx: Fixture = {}): { tx: TenantTx; calls: Call[] } {
     }
     return Promise.resolve([]);
   };
-  return { tx: { execute } as unknown as TenantTx, calls };
+  return { tx: { execute } as unknown as TenantTx, calls, probes: () => probes };
 }
 
 const plan = (over: Partial<StockLockPlan> = {}): StockLockPlan => ({ locationIds: [], dimensions: [], reservationIds: [], serialIds: [], ...over });
@@ -73,8 +84,22 @@ const codeOf = async (p: Promise<unknown>): Promise<string | undefined> => {
 const dimensionJson = (calls: Call[]): { item_id: string }[] =>
   JSON.parse(calls.find(isDimensionInsert)?.params.find((p) => typeof p === "string" && p.startsWith("[")) as string);
 
+const FLAG = "STOCK_SERIAL_LOCK_ENABLED";
+/** Bayrağı geçici ayarlar (`undefined` = tanımsız) ve eski değeri geri yükler. */
+async function withFlag<T>(value: string | undefined, fn: () => Promise<T>): Promise<T> {
+  const old = process.env[FLAG];
+  if (value === undefined) delete process.env[FLAG];
+  else process.env[FLAG] = value;
+  try {
+    return await fn();
+  } finally {
+    if (old === undefined) delete process.env[FLAG];
+    else process.env[FLAG] = old;
+  }
+}
+
 describe("plan normalizasyonu", () => {
-  it("boş plan hiçbir sorgu göndermez (boş adımlar atlanır)", async () => {
+  it("boş plan yalnızca tenant bağlamı yoklamasını yapar (boş adımlar atlanır)", async () => {
     const { tx, calls } = fakeTx();
     const state = await acquireStockLocks(tx, TENANT, plan());
     expect(calls).toHaveLength(0);
@@ -83,7 +108,7 @@ describe("plan normalizasyonu", () => {
 
   it("kimlikler küçük harfe çevrilir, tekilleştirilir ve artan sıralanır; SQL ORDER BY ile birlikte", async () => {
     const { tx, calls } = fakeTx();
-    await acquireStockLocks(tx, TENANT, plan({ reservationIds: [id(3), id(1).toUpperCase(), id(3), id(2)], serialIds: [id(9), id(7), id(9)] }));
+    await withFlag("true", () => acquireStockLocks(tx, TENANT, plan({ reservationIds: [id(3), id(1).toUpperCase(), id(3), id(2)], serialIds: [id(9), id(7), id(9)] })));
     const res = calls.find((c) => c.text.includes("FROM public.reservations"));
     const ser = calls.find((c) => c.text.includes("FROM public.serials"));
     expect(res?.params.filter((p) => p !== TENANT)).toEqual([id(1), id(2), id(3)]);
@@ -120,7 +145,7 @@ describe("adım sırası (I-15)", () => {
       document: { id: id(1), version: 4, status: "APPROVED", warehouse_id: id(2) },
       locks: [{ location_id: id(7), status: "IDLE", count_session_id: null }],
     });
-    await acquireStockLocks(
+    await withFlag("true", () => acquireStockLocks(
       tx,
       TENANT,
       plan({
@@ -130,7 +155,7 @@ describe("adım sırası (I-15)", () => {
         locationIds: [id(7)],
         document: { id: id(1), expectedVersion: 4 },
       }),
-    );
+    ));
     const order: ((c: Call) => boolean)[] = [
       (c) => c.text.includes("FROM public.documents"),
       (c) => c.text.includes("FROM public.location_count_locks"),
@@ -234,5 +259,73 @@ describe("belge kilidi", () => {
     const { tx } = fakeTx({ document: { id: id(1), version: 4, status: "APPROVED", warehouse_id: id(2) } });
     const s = await acquireStockLocks(tx, TENANT, plan({ document: { id: id(1), expectedVersion: 4 } }));
     expect(s.document).toEqual({ id: id(1), version: 4, status: "APPROVED", warehouseId: id(2) });
+  });
+});
+
+describe("inceleme MAJOR-4: denetlenen lokasyon = locationIds ∪ boyut lokasyonları", () => {
+  const S1 = id(0x51);
+  it("boyutu COUNTING lokasyonda olup locationIds'te yok → LOCATION_LOCKED; boyut/bakiye eklenmez", async () => {
+    const { tx, calls } = fakeTx({ locks: [{ location_id: id(7), status: "COUNTING", count_session_id: S1 }] });
+    expect(await codeOf(acquireStockLocks(tx, TENANT, plan({ dimensions: [key({ itemId: id(5), locationId: id(7) })] })))).toBe("LOCATION_LOCKED");
+    expect(calls.some(isDimensionInsert)).toBe(false);
+  });
+  it("lokasyonlar birleşim olarak tekilleştirilir ve artan sorgulanır", async () => {
+    const { tx, calls } = fakeTx({ locks: [{ location_id: id(7), status: "IDLE", count_session_id: null }, { location_id: id(8), status: "IDLE", count_session_id: null }] });
+    const s = await acquireStockLocks(tx, TENANT, plan({ locationIds: [id(8), id(7)], dimensions: [key({ itemId: id(5), locationId: id(7) })] }));
+    expect(calls[0]?.params.filter((p) => p !== TENANT)).toEqual([id(7), id(8)]);
+    expect(s.locations.map((l) => l.locationId)).toEqual([id(7), id(8)]);
+  });
+  it("countSessionId verilmiş ama kapsanan lokasyon yok → VALIDATION_FAILED, sorgu yok", async () => {
+    const { tx, calls, probes } = fakeTx();
+    expect(await codeOf(acquireStockLocks(tx, TENANT, plan({ countSessionId: S1 })))).toBe("VALIDATION_FAILED");
+    expect(calls).toHaveLength(0);
+    expect(probes()).toBe(0);
+  });
+  it("oturum istisnası boyut lokasyonlarını da kapsar: boyut IDLE lokasyonda → LOCATION_LOCKED", async () => {
+    const { tx } = fakeTx({ locks: [{ location_id: id(7), status: "COUNTING", count_session_id: S1 }, { location_id: id(8), status: "IDLE", count_session_id: null }] });
+    expect(
+      await codeOf(acquireStockLocks(tx, TENANT, plan({ locationIds: [id(7)], countSessionId: S1, dimensions: [key({ itemId: id(5), locationId: id(8) })] }))),
+    ).toBe("LOCATION_LOCKED");
+  });
+});
+
+describe("inceleme MAJOR-5: seri kilidi kapalı bayrak (Q-56)", () => {
+  it.each([undefined, "", "false", "1", "TRUE"])("bayrak %j iken serialIds → VALIDATION_FAILED, HİÇ sorgu yok (belge/tenant yoklaması dahil)", async (value) => {
+    const { tx, calls, probes } = fakeTx({ document: { id: id(1), version: 1, status: "APPROVED", warehouse_id: id(2) } });
+    const code = await withFlag(value, () => codeOf(acquireStockLocks(tx, TENANT, plan({ document: { id: id(1), expectedVersion: 1 }, serialIds: [id(9)] }))));
+    expect(code).toBe("VALIDATION_FAILED");
+    expect(calls).toHaveLength(0);
+    expect(probes()).toBe(0);
+  });
+  it("bayrak kapalıyken serialIds boşsa plan çalışır", async () => {
+    const { tx } = fakeTx();
+    await withFlag(undefined, () => acquireStockLocks(tx, TENANT, plan({ reservationIds: [id(3)] })));
+  });
+  it("bayrak 'true' iken seri adımı çalışır", async () => {
+    const { tx, calls } = fakeTx();
+    await withFlag("true", () => acquireStockLocks(tx, TENANT, plan({ serialIds: [id(9)] })));
+    expect(calls.some((c) => c.text.includes("FROM public.serials"))).toBe(true);
+  });
+});
+
+describe("inceleme MINOR-3/4", () => {
+  it("tenantId transaction bağlamıyla uyuşmuyorsa FORBIDDEN (sorgu yok)", async () => {
+    const { tx, calls } = fakeTx({ contextTenant: id(0x99) });
+    expect(await codeOf(acquireStockLocks(tx, TENANT, plan({ reservationIds: [id(3)] })))).toBe("FORBIDDEN");
+    expect(calls).toHaveLength(0);
+  });
+  it("tenant bağlamı kurulu değilse FORBIDDEN", async () => {
+    const { tx } = fakeTx({ contextTenant: null });
+    expect(await codeOf(acquireStockLocks(tx, TENANT, plan({ reservationIds: [id(3)] })))).toBe("FORBIDDEN");
+  });
+  it("büyük harfli tenantId bağlamla eşleşir", async () => {
+    const { tx } = fakeTx();
+    await acquireStockLocks(tx, TENANT.toUpperCase(), plan({ reservationIds: [id(3)] }));
+  });
+  it("çakışma hedefi adlandırılmış kısıttır (migration 0013 adları)", async () => {
+    const { tx, calls } = fakeTx();
+    await acquireStockLocks(tx, TENANT, plan({ dimensions: [key({ itemId: id(5), locationId: id(6) })] }));
+    expect(calls.find(isDimensionInsert)?.text).toContain("ON CONFLICT ON CONSTRAINT stock_dimensions_natural_key DO NOTHING");
+    expect(calls.find(isBalanceInsert)?.text).toContain("ON CONFLICT ON CONSTRAINT stock_balances_pkey DO NOTHING");
   });
 });
