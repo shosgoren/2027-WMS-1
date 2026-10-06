@@ -2,13 +2,14 @@
 // yalnızca bu okuyucuları çağırır. Yazma yok.
 //
 // - `listMembers` / `listPendingInvitations`: `runTenantQuery` (güncel üyelik + izin, MFA, tenant bağlamı, RLS).
-// - Okuma izni (A-60 önerisi, spec'te `users.view` yok): üye listesi için `stock.view` (her rol; tenant üyesi okuyabilir),
+// - Okuma izni (A-61 önerisi, spec'te `users.view` yok): üye listesi için `stock.view` (her rol; tenant üyesi okuyabilir),
 //   e-posta yalnızca `users.manage` sahibine tam, diğerlerine maskeli (`a***@alanadi`). Bekleyen davetler (davet edilen
 //   kişinin e-postası) yalnızca `users.manage` sahibine açıktır.
-// - `resetLinkAvailable`: `issuePasswordResetLink` kararıyla aynı koşullar (çağıran `users.manage`, tenant demo değil, hedef
-//   kendisi/demo/sahip değil, `wms_probe.identity_exclusive_to_tenant`); NEDEN dönmez (T-119 2. tur m6). Probe işlevi hedefin
-//   `users` satırını transaction sonuna kadar `FOR UPDATE` kilitler; bu yüzden yalnızca diğer koşulları geçen adaylar için,
-//   `userId` sırasıyla (deterministik kilit sırası) çağrılır; kilit kısa okuma transaction'ı bitince düşer.
+// - `resetLinkAvailable`: YALNIZCA `resetLinkPrechecks` (çağıran `users.manage`, tenant demo değil, hedef kendisi/demo/sahip
+//   değil); NEDEN dönmez (T-119 2. tur m6). `identity_exclusive_to_tenant` probu BİLEREK çağrılmaz: hedefin `users` satırını
+//   `FOR UPDATE` kilitler ve okuma yolunda tenant'lar arası girişi bekletirdi (inceleme MAJOR-1). Paylaşılan kimlik için
+//   kesin karar `issuePasswordResetLink`'tedir (IDENTITY_SHARED → nötr FORBIDDEN); bu alan "sunulabilir" ipucudur. Liste yolu
+//   `users` satırı kilidi almaz (int testli).
 // - `getMembershipSummary`: `withUser` (tenant bağlamı boş; yalnızca kendi ACTIVE üyelikleri + tenant adı/slug). Roller
 //   `membership_roles` politikası gereği tenant bağlamı ister; her tenant için `withMembership` (kendi doğrulanmış üyeliği,
 //   roller `membership.roles`) kullanılır. Askıda/kapanan tenant `withMembership` ile reddedilir ve özetten düşer.
@@ -27,6 +28,8 @@ export interface MemberQueryDeps {
 type QueryParams = Omit<TenantAccessParams, "permission" | "recentAuth">;
 
 export interface MemberRow {
+  /** `tenant_memberships.id`; üyelik komutları `memberId`/`toMemberId` olarak bunu bekler (userId DEĞİL). */
+  readonly membershipId: string;
   readonly userId: string;
   readonly displayName: string;
   /** `users.manage` sahibine tam; diğerlerine maskeli. */
@@ -51,11 +54,19 @@ export interface MembershipSummary {
   readonly memberships: readonly { readonly slug: string; readonly tenantName: string; readonly roles: readonly RoleKey[] }[];
 }
 
-/** `ab***@alanadi`; `@` yoksa tamamen maskeli. Yalnızca yetkisiz okuyucuya döner. */
+/**
+ * Yetkisiz okuyucu için: yerel kısım <4 karakterse `***`, aksi halde ilk 2 + `***`; alan adının ilk etiketi ilk harf + `***`,
+ * kalan (TLD vb.) açık. `@` yoksa/boşsa tamamen `***`.
+ */
 export function maskEmail(email: string): string {
   const at = email.lastIndexOf("@");
-  if (at <= 0) return "***";
-  return `${email.slice(0, Math.min(2, at))}***${email.slice(at)}`;
+  if (at <= 0 || at === email.length - 1) return "***";
+  const local = email.slice(0, at);
+  const domain = email.slice(at + 1);
+  const dot = domain.indexOf(".");
+  const first = dot === -1 ? domain : domain.slice(0, dot);
+  const rest = dot === -1 ? "" : domain.slice(dot);
+  return `${local.length < 4 ? "***" : `${local.slice(0, 2)}***`}@${first.slice(0, 1)}***${rest}`;
 }
 
 export interface ResetLinkInput {
@@ -66,7 +77,7 @@ export interface ResetLinkInput {
   readonly isOwner: boolean;
 }
 
-/** `issuePasswordResetLink` ön koşulları (probe hariç; probe kilit aldığı için yalnızca bunları geçen adaylara sorulur). */
+/** `issuePasswordResetLink` ön koşulları (kilit yok; paylaşılan kimlik denetimi yalnızca komutta). */
 export function resetLinkPrechecks(i: ResetLinkInput): boolean {
   return i.callerCanManage && !i.tenantIsDemo && !i.isSelf && !i.isDemoTarget && !i.isOwner;
 }
@@ -94,33 +105,26 @@ export async function listMembers(params: QueryParams, deps: MemberQueryDeps): P
       if (list === undefined) rolesBy.set(r.membership_id, [r.role_key]);
       else list.push(r.role_key);
     }
-    const candidates = new Map<string, boolean>();
-    const base = rows.map((r) => {
+    return rows.map((r) => {
       const isDemo = isDemoAddress(r.email, deps.demoEmailDomain);
-      const pre = resetLinkPrechecks({
-        callerCanManage: canManage,
-        tenantIsDemo,
-        isSelf: r.user_id === actor.userId,
-        isDemoTarget: isDemo,
+      return {
+        membershipId: r.id,
+        userId: r.user_id,
+        displayName: r.name,
+        email: canManage ? r.email : maskEmail(r.email),
+        roles: rolesBy.get(r.id) ?? [],
         isOwner: r.is_owner,
-      });
-      if (pre) candidates.set(r.user_id, false);
-      return { r, isDemo };
+        status: "ACTIVE" as const,
+        isDemo,
+        resetLinkAvailable: resetLinkPrechecks({
+          callerCanManage: canManage,
+          tenantIsDemo,
+          isSelf: r.user_id === actor.userId,
+          isDemoTarget: isDemo,
+          isOwner: r.is_owner,
+        }),
+      };
     });
-    for (const userId of [...candidates.keys()].sort()) {
-      const probe = await tx.execute<{ ok: boolean }>(sql`SELECT wms_probe.identity_exclusive_to_tenant(${userId}::uuid) AS ok`);
-      candidates.set(userId, probe[0]?.ok === true);
-    }
-    return base.map(({ r, isDemo }) => ({
-      userId: r.user_id,
-      displayName: r.name,
-      email: canManage ? r.email : maskEmail(r.email),
-      roles: rolesBy.get(r.id) ?? [],
-      isOwner: r.is_owner,
-      status: "ACTIVE" as const,
-      isDemo,
-      resetLinkAvailable: candidates.get(r.user_id) === true,
-    }));
   });
 }
 

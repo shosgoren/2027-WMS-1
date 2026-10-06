@@ -5,6 +5,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDbClient } from "../../../packages/db/src/index.ts";
 import { DB_CLIENT_SETTINGS, type DbClient } from "../../../packages/db/src/client.ts";
 import { AppError } from "../../../packages/shared/src/errors.ts";
+import { runTenantQuery } from "../../../packages/domain/src/identity/access.ts";
+import { sql } from "../../../packages/db/node_modules/drizzle-orm/index.js";
 import { getMembershipSummary, listMembers, listPendingInvitations } from "../../../packages/domain/src/identity/member-queries.ts";
 import { readIntEnv, redactErrorChain } from "../harness/env.ts";
 
@@ -86,11 +88,13 @@ describe("listMembers", () => {
     expect(rows.map((r) => r.userId).sort()).toEqual([a.owner.userId, p.userId].sort());
     expect(rows.some((r) => r.userId === foreign.userId)).toBe(false);
     const pr = rows.find((r) => r.userId === p.userId);
+    expect(pr?.membershipId).toBe(p.membershipId);
+    expect(rows.find((r) => r.userId === a.owner.userId)?.membershipId).toBe(a.owner.membershipId);
     expect(pr).toMatchObject({ displayName: p.name, email: p.email, roles: ["PICKER"], isOwner: false, status: "ACTIVE", isDemo: false, resetLinkAvailable: true });
     expect(rows.find((r) => r.userId === a.owner.userId)).toMatchObject({ isOwner: true, resetLinkAvailable: false });
   });
 
-  it("resetLinkAvailable: paylaşılan kimlik, demo hedef, sahip ve kendisi için false", async () => {
+  it("resetLinkAvailable: demo hedef, sahip, kendisi için false (paylaşılan kimlik kararı komutta; kilit yok)", async () => {
     const a = await mkTenant();
     const b = await mkTenant();
     const solo = await mkMember(a.tenant, "PICKER");
@@ -100,7 +104,7 @@ describe("listMembers", () => {
     const rows = await listMembers(acc(a, a.owner), deps);
     const by = (m: Member) => rows.find((r) => r.userId === m.userId);
     expect(by(solo)?.resetLinkAvailable).toBe(true);
-    expect(by(shared)?.resetLinkAvailable).toBe(false);
+    expect(by(shared)?.resetLinkAvailable).toBe(true); // prob çağrılmaz; kesin karar issuePasswordResetLink'te
     expect(by(demo)).toMatchObject({ isDemo: true, resetLinkAvailable: false });
     expect(by(a.owner)?.resetLinkAvailable).toBe(false);
     // Bir yönetici (sahip olmayan) kendi satırında false.
@@ -118,7 +122,7 @@ describe("listMembers", () => {
     expect(rows.every((r) => !r.resetLinkAvailable)).toBe(true);
     const tr = rows.find((r) => r.userId === t.userId);
     expect(tr?.email).not.toBe(t.email);
-    expect(tr?.email).toMatch(/^.{1,2}\*\*\*@example\.test$/);
+    expect(tr?.email).toMatch(/^.{2}\*\*\*@e\*\*\*\.test$|^\*\*\*@e\*\*\*\.test$/);
   });
 
   it("demo tenant'ta resetLinkAvailable false; üye olmayan çağıran NOT_FOUND", async () => {
@@ -128,6 +132,38 @@ describe("listMembers", () => {
     expect(rows.find((r) => r.userId === t.userId)?.resetLinkAvailable).toBe(false);
     const other = await mkTenant();
     await expect(listMembers({ db: app, principal: { userId: other.owner.userId, mfaVerified: true }, tenantSlug: d.slug }, deps)).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+});
+
+describe("kilit ve RLS", () => {
+  it("liste yolu users satırı kilidi almaz: başka bağlantı users satırlarını FOR UPDATE tutarken listMembers bloklanmaz", async () => {
+    const a = await mkTenant();
+    const t = await mkMember(a.tenant, "PICKER");
+    const holder = new pg.Client({ connectionString: env.databaseUrlDirect });
+    holder.on("error", () => undefined);
+    await holder.connect();
+    try {
+      await holder.query("BEGIN");
+      await holder.query("SELECT id FROM public.users WHERE id = ANY($1::uuid[]) FOR UPDATE", [[a.owner.userId, t.userId]]);
+      const done = await Promise.race([
+        listMembers(acc(a, a.owner), deps).then(() => "done"),
+        new Promise<string>((r) => setTimeout(() => r("blocked"), 5000)),
+      ]);
+      expect(done).toBe("done");
+    } finally {
+      await holder.query("ROLLBACK").catch(() => undefined);
+      await holder.end();
+    }
+  });
+
+  it("RLS: uygulama WHERE'i olmadan tenant_memberships başka tenant satırını göstermez", async () => {
+    const a = await mkTenant();
+    const b = await mkTenant();
+    await mkMember(b.tenant, "PICKER");
+    const seen = await runTenantQuery({ ...acc(a, a.owner), permission: "stock.view" }, (tx) =>
+      tx.execute<{ tenant_id: string }>(sql`SELECT DISTINCT tenant_id FROM public.tenant_memberships`),
+    );
+    expect(seen.map((r) => r.tenant_id)).toEqual([a.tenant]);
   });
 });
 
@@ -175,6 +211,10 @@ describe("getMembershipSummary", () => {
       { slug: a.slug, tenantName: "Alfa", roles: ["PICKER"] },
       { slug: b.slug, tenantName: "Beta", roles: ["TENANT_ADMIN"] },
     ]);
+    // Çağıranın kendi REMOVED üyeliği de özette yok.
+    await adm.query("UPDATE public.tenant_memberships SET status='REMOVED', removed_at=now() WHERE tenant_id=$1 AND user_id=$2", [b.tenant, me.userId]);
+    const s2 = await getMembershipSummary({ db: app, principal: { userId: me.userId, mfaVerified: true } });
+    expect(s2.memberships.map((m) => m.slug)).toEqual([a.slug]);
     const so = await getMembershipSummary({ db: app, principal: { userId: other.userId, mfaVerified: true } });
     expect(so.memberships).toEqual([]);
     expect(JSON.stringify(so)).not.toContain(me.email);
