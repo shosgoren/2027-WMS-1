@@ -54,6 +54,7 @@ Q-49 | Durum değiştiren taşımada (ör. AVAILABLE → QUARANTINE) belge satı
 Q-50 | Stok defteri `reason` için izinli değer kümesi nedir (sabit kod listesi mi, serbest metin mi)? Şimdilik yalnızca boş olmama CHECK'i | T-232 | açık — T-213/T-217 komut katmanı kodları belirleyince CHECK daraltılır
 Q-51 | Stok defteri `actor_user_id` zorunlu mu (sistem/worker hareketleri)? Şimdilik nullable, FK yok | T-232 | açık — 0012 geçmiş yazıcısıyla tutarlı karar T-213'te
 Q-52 | Stok defteri satırı hangi belge durumunda yazılabilir (senkron yol ≤200 satır `posting_job_id`'siz; asenkron yol APPROVED+posting_job_id; ters kayıt belgesi)? DB şimdilik belge durumuna bakmıyor | T-232 inceleme MINOR-5, ADR-018 §2 | açık — T-213/T-217 posting akışıyla DB kuralı (tetikleyici, FOR SHARE) eklenir
+Q-60 | `@wms/db` genel yüzeyinde tenant bağlamı boş "platform transaction" ilkeli (`withPlatformTx`) eklensin mi? T-214 şimdilik `withUser(db, sıfır-UUID)` kullanıyor | T-214 | açık — ayrı kart
 
 ## Varsayımlar
 A-01 | Neon pooler'ı transaction-mode PgBouncer'dır (kullanıcı kararı kaydı, 2026-10-05) — **teyit edildi 2026-10-05, sürüm hariç** (belge + T-005d koşu 3 çoklama gözlemi, https://github.com/shosgoren/2027-WMS-1/actions/runs/37388724069); PgBouncer sürümü gözlenemedi | Neon pooler türünü/kipini değiştirdiğini duyurana veya yeniden spike aksini gösterene kadar | Q-02
@@ -156,3 +157,5 @@ A-97 | Seri boyutu yoksa `stock_balances.serial_key` sıfır UUID sentinelidir (
 A-104 | `processed_events.event_id` tipi uuid (pg-boss iş kimliği); T-214 metin anahtar isterse küçük migration | T-214 tüketici anahtarı | T-211
 A-105 | `stock_consistency_runs.findings` jsonb NOT NULL DEFAULT '[]', şekil kısıtı DB'de yok; ADR-019 "≤100 bulgu" sınırı T-225 uygulamasında | T-225 | T-211
 A-106 | wms_ops yalnızca `stock_consistency_signals` SELECT alır (0009 RESTRICTIVE denetimli oturum zorunluluğuyla); diğer tenant tablolarında yetkisiz (A-94) Not: tenant'sız platform sinyallerini okumak herhangi bir tenant bağlamında açılmış ops oturumuna bağlı (denetim kaydı o tenant'a düşer) → 4P alarm kartında ayrı platform denetim olayı | — | T-211
+A-119 | A-53 kapanışı: e-posta ve davet işleri `processed_events` ile etkide tam bir kez (ADR-019); kalan pencere "haricî çağrı başarılı, satır yazımı başarısız" → aynı idempotency anahtarıyla yeniden çağrı, sağlayıcı tekilleştirmesine güvenilir | — | T-214
+A-120 | Resend tekilleştirme penceresi doğrulanamadı (SDK'da bilgi yok, resend.com ajan ortamından kapalı); AC-22 haricî kolu yalnız "aynı anahtar gider" düzeyinde kanıtlı | Resend belgeleri | T-214
