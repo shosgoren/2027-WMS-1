@@ -429,9 +429,9 @@
         "title": "Who did what?",
         "description": "Audit log"
       },
-      "warehouses": {
-        "title": "Warehouses and racks",
-        "description": "Manage warehouses and rack layout"
+      "items": {
+        "title": "My products",
+        "description": "Product card, units and barcodes"
       },
       "receive": {
         "title": "Goods arrived",
@@ -456,6 +456,10 @@
       "undo": {
         "title": "I made a mistake",
         "description": "Let's fix the wrong record together"
+      },
+      "warehouses": {
+        "title": "Warehouses and racks",
+        "description": "Manage warehouses and rack layout"
       }
     },
     "today": {
@@ -612,6 +616,152 @@
     "locked": "You are not allowed to change these settings.",
     "lockedAction": "If a change is needed, ask your workspace administrator.",
     "back": "Back to home"
+  },
+  "items": {
+    "title": "Products",
+    "intro": "Manage product cards, their units and barcodes here.",
+    "lockedReason": "You do not have permission for this. Ask your manager.",
+    "listLabel": "Product list",
+    "create": "New product",
+    "empty": "No products yet.",
+    "emptyAction": "Add your first product with “New product”.",
+    "emptyReadOnly": "Ask your manager to add products.",
+    "emptyFiltered": "No products match your search.",
+    "emptyFilteredAction": "Type the first letters of the code or name, or the full barcode; or clear the search.",
+    "codeLabel": "Code: {code}",
+    "baseUnitLabel": "Base unit: {unit}",
+    "status": {
+      "ACTIVE": "Active",
+      "ARCHIVED": "Archived"
+    },
+    "open": "Open details",
+    "openFor": "Open details: {name}",
+    "paging": "Pagination",
+    "more": "More",
+    "firstPage": "Back to start",
+    "search": {
+      "label": "Search products",
+      "hint": "First letters of the code or name; for a barcode type or scan the whole value.",
+      "status": "Status",
+      "all": "All",
+      "submit": "Search",
+      "clear": "Clear search"
+    },
+    "tracking": {
+      "NONE": "No tracking",
+      "LOT": "Lot tracking",
+      "SERIAL": "Serial tracking",
+      "LOT_AND_SERIAL": "Lot and serial tracking"
+    },
+    "pick": {
+      "FIFO": "First in, first out (FIFO)",
+      "FEFO": "Earliest expiry first (FEFO)"
+    },
+    "form": {
+      "createTitle": "New product",
+      "code": "Product code",
+      "codeHint": "Cannot be changed later; the server tidies the format.",
+      "name": "Product name",
+      "baseUnit": "Base unit",
+      "baseUnitHint": "Stock is counted in this unit; it cannot be changed later.",
+      "scale": "Quantity precision",
+      "scaleHint": "How many digits after the decimal point; it cannot be changed later.",
+      "scaleInteger": "Whole numbers (0 digits)",
+      "scaleDecimals": "{count, plural, one {# digit} other {# digits}}",
+      "advanced": "Advanced settings",
+      "advancedHint": "Most products do not need changes here. The tracking mode cannot be changed after creation.",
+      "tracking": "Tracking mode",
+      "pick": "Picking policy",
+      "submit": "Save",
+      "cancel": "Cancel",
+      "noUnits": "No units are defined yet; a product needs a base unit first (e.g. PCS). Ask your manager or support."
+    },
+    "detail": {
+      "title": "Product card",
+      "back": "Back to product list",
+      "archivedNote": "This product is archived; it cannot be changed and no barcode or conversion can be added.",
+      "cardTitle": "Product details",
+      "save": "Save changes",
+      "lockedFixed": "The base unit, quantity precision and tracking mode cannot be changed after the product is created.",
+      "lockedInUse": "This product has stock or an open reservation; its base unit, quantity precision and tracking mode are locked.",
+      "conversionsTitle": "Unit conversions",
+      "conversionsHint": "State how many {unit} a unit such as a box contains, per product.",
+      "conversionsEmpty": "No conversions are set for this product.",
+      "conversionLine": "1 {unit} = {factor} {base}",
+      "conversionUnit": "Unit",
+      "conversionFactor": "How many {base} is it?",
+      "conversionFactorHint": "Example: 12 or 0.5. Saving the same unit again updates the factor; past documents do not change.",
+      "conversionSave": "Save conversion",
+      "barcodesTitle": "Barcodes",
+      "barcodesHint": "Type the barcode or scan it (scanning is plain text entry).",
+      "barcodesEmpty": "No barcodes are linked to this product.",
+      "barcodeMeta": "Unit: {unit} · Quantity per scan: {quantity}",
+      "barcodeAmbiguous": "This barcode is also registered on other products; scanning it is never assigned to one product automatically. Fix the barcode if needed.",
+      "barcodeRemove": "Remove",
+      "barcodeRemoveFor": "Remove: {barcode}",
+      "barcodeValue": "Barcode",
+      "barcodeValueHint": "Scan or type it.",
+      "barcodeUnit": "Barcode unit",
+      "barcodeUnitBase": "Base unit ({unit})",
+      "barcodeQuantity": "Quantity per scan",
+      "barcodeQuantityHint": "If left empty, 1 is used.",
+      "barcodeAdd": "Add barcode",
+      "archiveTitle": "Archive product",
+      "archiveHint": "An archived product shows as archived and cannot be changed. It cannot be archived while it has stock or an open reservation.",
+      "archive": "Archive",
+      "confirmArchive": {
+        "title": "Archive {name}?",
+        "description": "{name} ({code}) will be archived and cannot be changed. It is not archived while it has stock or an open reservation; clear those first.",
+        "button": "Archive"
+      },
+      "confirmRemove": {
+        "title": "Remove barcode?",
+        "description": "{barcode} will be deleted from this product. This cannot be undone; you can add it again if needed.",
+        "button": "Remove"
+      },
+      "done": {
+        "saved": "Changes saved.",
+        "conversion": "Conversion saved.",
+        "barcodeAdded": "Barcode added.",
+        "barcodeRemoved": "Barcode removed.",
+        "archived": "Product archived."
+      }
+    },
+    "errors": {
+      "code": "Error code: {code}",
+      "mfaLink": "Set up two-step verification",
+      "loginLink": "Sign in again",
+      "forbidden": "You do not have permission for this.",
+      "forbiddenAction": "Ask your manager.",
+      "forbidden_mfa_required": "Two-step verification is required for admin actions.",
+      "forbidden_mfa_requiredAction": "Set up verification first, then repeat the action.",
+      "unauthenticated": "Your session has ended.",
+      "unauthenticatedAction": "Sign in again and repeat the action.",
+      "unauthenticated_recent_auth_required": "You need to verify your identity again for this.",
+      "unauthenticated_recent_auth_requiredAction": "Sign in again and repeat the action.",
+      "not_found": "Record not found; someone else may have changed it.",
+      "not_foundAction": "Refresh the page and try again.",
+      "validation_failed": "The details are invalid or not allowed for this record.",
+      "validation_failedAction": "Check the fields and try again; archived products cannot be changed.",
+      "validation_failed_code_taken": "This code or barcode entry already exists.",
+      "validation_failed_code_takenAction": "Enter a different value.",
+      "validation_failed_in_use": "This product has stock or an open reservation.",
+      "validation_failed_in_useAction": "Clear the stock and close reservations first, then try again.",
+      "validation_failed_unit_conversion_invalid": "A conversion cannot be set for the base unit, or the factor is invalid: it must be greater than zero, with at most 6 decimals and 14 integer digits.",
+      "validation_failed_unit_conversion_invalidAction": "Choose a unit other than the base unit and re-enter the factor within these limits (e.g. 12 or 0.5).",
+      "version_conflict": "The record was changed by another action at the same time.",
+      "version_conflictAction": "Refresh the page and try again.",
+      "rate_limited": "Too many actions.",
+      "rate_limitedAction": "Wait a moment and try again.",
+      "tenant_suspended": "The workspace is suspended.",
+      "tenant_suspendedAction": "Contact your manager or support.",
+      "tenant_closing": "The workspace is being closed.",
+      "tenant_closingAction": "Contact your manager.",
+      "internal": "Something went wrong.",
+      "internalAction": "Try again shortly; if it continues, send the error code to support."
+    },
+    "locked": "You do not have permission to view products.",
+    "lockedAction": "Ask your workspace manager."
   },
   "warehouses": {
     "title": "Warehouses and racks",

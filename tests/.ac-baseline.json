@@ -1,7 +1,7 @@
 {
   "acTests": {
     "AC-02": 7,
-    "AC-04": 98,
+    "AC-04": 108,
     "AC-05": 2,
     "AC-09": 8,
     "AC-18": 9,
@@ -17,8 +17,9 @@
     "tests/guards/ac-43.test.mjs": 37,
     "tests/guards/ac-44.test.mjs": 42,
     "tests/integration/ac/ac-02-worker-event.int.test.ts": 35,
+    "tests/integration/ac/ac-04-api-slug-catalog.int.test.ts": 20,
     "tests/integration/ac/ac-04-api-slug-warehouse.int.test.ts": 44,
-    "tests/integration/ac/ac-04-api-slug.int.test.ts": 53,
+    "tests/integration/ac/ac-04-api-slug.int.test.ts": 75,
     "tests/integration/ac/ac-04-db-isolation.int.test.ts": 94,
     "tests/integration/ac/ac-04-export-route.int.test.ts": 50,
     "tests/integration/ac/ac-04-file-cache.int.test.ts": 59,
