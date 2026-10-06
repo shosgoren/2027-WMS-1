@@ -817,6 +817,89 @@ describe("T-232 sahip yolu: takip modu / seri lotu değişmezliği (MINOR-1)", (
   });
 });
 
+describe("T-232 sahip yolu ile eşzamanlı boyut ekleme yarışı (LOCK TABLE SHARE)", () => {
+  const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+  const track = <T,>(p: Promise<T>): { p: Promise<T>; done: () => boolean } => {
+    let d = false;
+    const w = p.finally(() => {
+      d = true;
+    });
+    w.catch(() => undefined);
+    return { p: w, done: () => d };
+  };
+  const ownerBegin = async (c: pg.Client): Promise<void> => {
+    await c.query("BEGIN");
+    await c.query("SELECT set_config('app.current_tenant_id', $1, true)", [A.tenantId]);
+  };
+  const dimSql = "INSERT INTO public.stock_dimensions (tenant_id, id, item_id, location_id, lot_id, serial_id) VALUES ($1, $2, $3, $4, $5, $6)";
+
+  it("wms_app bu yola giremez: items.tracking_mode ve serials.lot_id UPDATE yetkisi yok", async () => {
+    const r = await admin.query<{ i: boolean; s: boolean }>(
+      "SELECT has_column_privilege('wms_app', 'public.items', 'tracking_mode', 'UPDATE') AS i, has_column_privilege('wms_app', 'public.serials', 'lot_id', 'UPDATE') AS s",
+    );
+    expect(r.rows[0]).toEqual({ i: false, s: false });
+  });
+
+  it("T1 (sahip) tracking_mode'u değiştirip commit etmeden: T2 (wms_app) aynı ürüne boyut eklerken bekler; T1 commit → T2 TRACKING_VIOLATION", async () => {
+    const item = randomUUID();
+    await admin.query("INSERT INTO public.items (tenant_id, id, code, name, base_unit_id, tracking_mode) VALUES ($1, $2, $3, 'yaris', $4, 'NONE')", [A.tenantId, item, `Y${rnd()}`, A.unitId]);
+    const c1 = await connect(env.databaseUrlDirect);
+    const c2 = await connect(env.databaseUrl);
+    await ownerBegin(c1);
+    await c1.query("UPDATE public.items SET tracking_mode = 'LOT' WHERE id = $1", [item]);
+    await ownerBegin(c2);
+    const t2 = track(c2.query(dimSql, [A.tenantId, randomUUID(), item, A.rootLocationId, null, null]));
+    await sleep(400);
+    expect(t2.done(), "T2 T1'in commit'ine kadar beklemeliydi").toBe(false);
+    await c1.query("COMMIT");
+    await expect(t2.p).rejects.toMatchObject({ code: CHECK_VIOLATION, message: expect.stringContaining("TRACKING_VIOLATION") });
+    await c2.query("ROLLBACK").catch(() => undefined);
+    const left = await admin.query("SELECT count(*)::int AS n FROM public.stock_dimensions WHERE item_id = $1", [item]);
+    expect((left.rows[0] as { n: number }).n).toBe(0);
+  });
+
+  it("T2 önce boyut ekler (commit etmeden): T1 (sahip) tracking_mode değişimi bekler; T2 commit → T1 TRACKING_VIOLATION; tutarsız durum kalmaz", async () => {
+    const item = randomUUID();
+    await admin.query("INSERT INTO public.items (tenant_id, id, code, name, base_unit_id, tracking_mode) VALUES ($1, $2, $3, 'yaris2', $4, 'NONE')", [A.tenantId, item, `Y${rnd()}`, A.unitId]);
+    const c1 = await connect(env.databaseUrlDirect);
+    const c2 = await connect(env.databaseUrl);
+    await ownerBegin(c2);
+    await c2.query(dimSql, [A.tenantId, randomUUID(), item, A.rootLocationId, null, null]);
+    await ownerBegin(c1);
+    const t1 = track(c1.query("UPDATE public.items SET tracking_mode = 'LOT' WHERE id = $1", [item]));
+    await sleep(400);
+    expect(t1.done(), "T1 T2'nin commit'ine kadar beklemeliydi").toBe(false);
+    // Boyut bakiyesizdir (Σ = 0): denetim geçer.
+    await c2.query("COMMIT");
+    await expect(t1.p).rejects.toMatchObject({ code: CHECK_VIOLATION, message: expect.stringContaining("TRACKING_VIOLATION") });
+    await c1.query("ROLLBACK").catch(() => undefined);
+    const m = await admin.query("SELECT tracking_mode FROM public.items WHERE id = $1", [item]);
+    expect((m.rows[0] as { tracking_mode: string }).tracking_mode).toBe("NONE");
+  });
+
+  it("serials.lot_id: T2 seriyi kullanan boyutu ekler (commit etmeden), T1 (sahip) lot_id değişimi bekler; T2 commit → T1 reddedilir", async () => {
+    const item = randomUUID();
+    const lot = randomUUID();
+    const serial = randomUUID();
+    await admin.query("INSERT INTO public.items (tenant_id, id, code, name, base_unit_id, tracking_mode) VALUES ($1, $2, $3, 'yaris3', $4, 'LOT_AND_SERIAL')", [A.tenantId, item, `Y${rnd()}`, A.unitId]);
+    await admin.query("INSERT INTO public.lots (tenant_id, id, item_id, lot_code) VALUES ($1, $2, $3, $4)", [A.tenantId, lot, item, `L${rnd()}`]);
+    await admin.query("INSERT INTO public.serials (tenant_id, id, item_id, serial_no, lot_id) VALUES ($1, $2, $3, $4, $5)", [A.tenantId, serial, item, `S${rnd()}`, lot]);
+    const c1 = await connect(env.databaseUrlDirect);
+    const c2 = await connect(env.databaseUrl);
+    await ownerBegin(c2);
+    await c2.query(dimSql, [A.tenantId, randomUUID(), item, A.rootLocationId, lot, serial]);
+    await ownerBegin(c1);
+    const t1 = track(c1.query("UPDATE public.serials SET lot_id = NULL WHERE id = $1", [serial]));
+    await sleep(400);
+    expect(t1.done(), "T1 T2'nin commit'ine kadar beklemeliydi").toBe(false);
+    await c2.query("COMMIT");
+    await expect(t1.p).rejects.toMatchObject({ code: CHECK_VIOLATION, message: expect.stringContaining("TRACKING_VIOLATION") });
+    await c1.query("ROLLBACK").catch(() => undefined);
+    const m = await admin.query("SELECT lot_id FROM public.serials WHERE id = $1", [serial]);
+    expect((m.rows[0] as { lot_id: string }).lot_id).toBe(lot);
+  });
+});
+
 describe("T-232 bölünmüş yazım ve kilitsiz güncelleme eşzamanlılığı (MINOR-3)", () => {
   async function dimWithZeroBalance(status: string): Promise<string> {
     const dim = randomUUID();

@@ -274,6 +274,9 @@ BEGIN
   IF NULLIF(pg_catalog.current_setting('app.current_tenant_id', true), '')::uuid IS DISTINCT FROM OLD.tenant_id THEN
     RAISE EXCEPTION 'STOCK_TENANT_CONTEXT_MISMATCH: tracking_mode değişimi için tenant bağlamı satırın tenant''ı olmalı' USING ERRCODE = '23514';
   END IF;
+  -- Eşzamanlı boyut INSERT'iyle yarış: KEY SHARE (FK) ile NO KEY UPDATE çakışmaz; SHARE kipi ROW EXCLUSIVE (INSERT) ile çakışır →
+  -- eşzamanlı boyut ekleme commit'e kadar bekler ve sonra yeni değeri görür; ya da biz onun commit'ini bekleyip boyutu görürüz.
+  LOCK TABLE public.stock_dimensions IN SHARE MODE;
   IF EXISTS (SELECT 1 FROM public.stock_dimensions d WHERE d.tenant_id = OLD.tenant_id AND d.item_id = OLD.id) THEN
     RAISE EXCEPTION 'TRACKING_VIOLATION: ürünün stok boyutu var; tracking_mode değiştirilemez (A-87)' USING ERRCODE = '23514';
   END IF;
@@ -293,6 +296,9 @@ BEGIN
   IF NULLIF(pg_catalog.current_setting('app.current_tenant_id', true), '')::uuid IS DISTINCT FROM OLD.tenant_id THEN
     RAISE EXCEPTION 'STOCK_TENANT_CONTEXT_MISMATCH: serinin lot_id değişimi için tenant bağlamı satırın tenant''ı olmalı' USING ERRCODE = '23514';
   END IF;
+  -- Eşzamanlı boyut INSERT'iyle yarış: KEY SHARE (FK) ile NO KEY UPDATE çakışmaz; SHARE kipi ROW EXCLUSIVE (INSERT) ile çakışır →
+  -- eşzamanlı boyut ekleme commit'e kadar bekler ve sonra yeni değeri görür; ya da biz onun commit'ini bekleyip boyutu görürüz.
+  LOCK TABLE public.stock_dimensions IN SHARE MODE;
   IF EXISTS (SELECT 1 FROM public.stock_dimensions d WHERE d.tenant_id = OLD.tenant_id AND d.serial_id = OLD.id) THEN
     RAISE EXCEPTION 'TRACKING_VIOLATION: seri bir stok boyutunda kullanılıyor; lot_id değiştirilemez' USING ERRCODE = '23514';
   END IF;
