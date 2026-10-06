@@ -466,8 +466,9 @@ const noAliasedModuleLoader = {
  * aynı modül olarak yakalanır. Ham dizgi zaten herhangi bir yasaklı girdiye uyuyorsa burada yinelenmez (tek ihlal = tek rapor).
  * Kapsam: `import`/`export … from`, `import()`, `import x = require()`, `require`/`createRequire(…)(…)` ve (loader kuralı) yükleyici.
  * @param {string} spec @param {string} filename mutlak dosya yolu @param {ForbiddenEntry[]} list
+ * @param {ForbiddenEntry[]} [extra] yalnızca yeniden dışa aktarımda ek yasaklar
  */
-const normalizedSpecifierHit = (spec, filename, list, extra = []) => {
+const normalizedSpecifierHit = (spec, filename, list, extra = /** @type {ForbiddenEntry[]} */ ([])) => {
   const entries = [...list, ...extra].filter((e) => e.normalized);
   if (entries.length === 0 || typeof spec !== "string") return null;
   if (list.some((e) => new RegExp(e.regex, "iu").test(spec))) return null; // ham dizgi zaten raporlanır
@@ -594,7 +595,7 @@ const GUARD_LOADER_FILE = "scripts/guards/cli.mjs";
  * girdiler çıkarılmış) verir. Bloklar ana bloktan SONRA gelir ve birbirinden ayrık dosyalara bakar.
  * Hiçbir profil tenant bağlam ayarı (TENANT_SETTING_SYNTAX), kod yürütme (CODE_EXEC_SYNTAX) veya
  * statik olmayan belirteç denetimini gevşetmez.
- * @param {{ files: string[], ignores?: string[], allow: ForbiddenEntry[], replace?: ForbiddenEntry[], web?: boolean }} p `allow`: bu kapsamda
+ * @param {{ files: string[], ignores?: string[], allow: ForbiddenEntry[], replace?: ForbiddenEntry[], web?: boolean, reexportForbid?: ForbiddenEntry[] }} p `allow`: bu kapsamda
  *   serbest girdiler; `replace`: serbest girdi yerine uygulanacak daha dar girdiler.
  */
 const strictProfile = ({ files, ignores = [], allow, replace = [], web = false, reexportForbid = [] }) => {
