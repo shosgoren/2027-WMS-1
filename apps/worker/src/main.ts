@@ -3,7 +3,7 @@ import { DEMO_TENANT_ID, createDbClient, withSystemTenant, withUser } from "@wms
 import { createJobQueue } from "@wms/queue-adapter";
 import { assertMailModeAllowed, loadMailConfig } from "@wms/shared/mailer";
 import { createSealer } from "@wms/shared/seal";
-import { JOB_TYPES, type JobHandler, type JobType } from "@wms/shared/queue";
+import { JOB_TYPES, PLATFORM_NO_USER_ID, type JobHandler, type JobType } from "@wms/shared/queue";
 import { createDeliverInvitationHandler } from "./jobs/deliver-invitation.js";
 import { DEMO_RESEED_SINGLETON_KEY, registerDemoReseed } from "./jobs/demo-reseed.js";
 import { createMailer, createSendEmailHandler } from "./jobs/send-email.js";
@@ -37,8 +37,7 @@ const DEFERRED_JOB_TYPES: readonly JobType[] = ["demo.reseed", "stock.document.p
 
 // Platform işleri (`enqueuePlatform`) için tenant bağlamı BOŞ `wms_app` transaction'ı (processed_events `tenant_id NULL`,
 // ADR-019 §2). `@wms/db` genel yüzeyinde bağlamsız transaction yoktur; `withUser` yalnızca `app.current_user_id` kurar
-// (tenant bağlamı boş kalır). Sıfır UUID hiçbir kullanıcıya karşılık gelmez (kart eki önerisi: özel `withPlatformTx`).
-const PLATFORM_NO_USER_ID = "00000000-0000-0000-0000-000000000000";
+// (tenant bağlamı boş kalır). Sıfır UUID (`PLATFORM_NO_USER_ID`) hiçbir kullanıcıya karşılık gelmez; kuyruk actor olarak reddeder (kart eki önerisi: özel `withPlatformTx`).
 
 // İki ayrı bağlantı (T-115c): kuyruk tüketimi `DATABASE_URL_WORKER` (wms_worker: yalnızca pgboss iş tablosu, tüm
 // tenant'ların işleri) ile; tenant verisine erişim `DATABASE_URL` (wms_app, RLS + withSystemTenant) ile. wms_app

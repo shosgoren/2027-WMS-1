@@ -15,6 +15,7 @@ import { currentTenantId, currentUserId, type withTenant } from "@wms/db";
 import {
   JOB_PAYLOAD_SCHEMAS,
   JOB_TYPES,
+  PLATFORM_NO_USER_ID,
   QueueError,
   isJobType,
   isActorMandatory,
@@ -82,6 +83,9 @@ export function isPermanentFailure(err: unknown): boolean {
  * yetki yine üyelik denetimiyle (withMembership) doğrulanır.
  */
 export function workerPrincipal(actorUserId: string | null): { readonly userId: string; readonly mfaVerified: false } | null {
+  if (actorUserId === PLATFORM_NO_USER_ID) {
+    throw new QueueError("VALIDATION_FAILED", "actorUserId is the platform no-user sentinel; not a principal");
+  }
   return actorUserId === null ? null : { userId: actorUserId, mfaVerified: false };
 }
 
@@ -241,7 +245,13 @@ export function createJobQueue(options: JobQueueOptions): PgBossJobQueue {
     if (tx !== undefined) {
       // İşlemde kimlik bağlamı kuruluysa çağıranın verdiği actor onunla çelişemez; yoksa bağlamdan türetilir.
       const ctxUser = await currentUserId(tx);
-      if (ctxUser !== undefined) {
+      if (ctxUser === PLATFORM_NO_USER_ID) {
+        // Platform işlemi (kimlik yerine sıfır UUID): bu bir kullanıcı değildir, sessizce actor olarak damgalanmaz (MINOR-8).
+        // Açık ve geçerli actor (parseJob sıfır UUID'yi reddeder) kullanılır; yoksa iş reddedilir.
+        if (actor === null) {
+          throw new QueueError("VALIDATION_FAILED", "platform transaction has no user; an explicit actorUserId is required");
+        }
+      } else if (ctxUser !== undefined) {
         if (actor !== null && actor.toLowerCase() !== ctxUser.toLowerCase()) {
           throw new QueueError("VALIDATION_FAILED", "actorUserId conflicts with the transaction user context");
         }
@@ -299,6 +309,9 @@ export function createJobQueue(options: JobQueueOptions): PgBossJobQueue {
             const envelope = parseEnvelope(bossJob.data);
             const payload = parsePayload(type, envelope.payload);
             const { tenantId } = envelope;
+            if (envelope.actorUserId === PLATFORM_NO_USER_ID) {
+              throw new JobParseError("VALIDATION_FAILED", "job envelope actorUserId is the platform no-user sentinel");
+            }
             if (isActorMandatory(type) && envelope.actorUserId === null) {
               throw new JobParseError("VALIDATION_FAILED", "job envelope requires actorUserId");
             }

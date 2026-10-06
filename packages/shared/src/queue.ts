@@ -102,6 +102,12 @@ export class QueueError extends Error {
   }
 }
 
+/**
+ * Platform işlerinde tenant bağlamı boş transaction'ı açan çağıranın `app.current_user_id` yerine koyduğu sıfır UUID
+ * (`withUser` yalnızca UUID alır). Hiçbir kullanıcı değildir: actor olarak ASLA kabul edilmez (T-214 MINOR-8).
+ */
+export const PLATFORM_NO_USER_ID = "00000000-0000-0000-0000-000000000000";
+
 /** Zarfta `actorUserId` zorunlu olan türler (istek sahibi adına çalışan işler). */
 const ACTOR_REQUIRED_TYPES: ReadonlySet<JobType> = new Set<JobType>(["stock.document.post"]);
 
@@ -168,6 +174,9 @@ export function parseJob(job: unknown): Job {
   const { actorUserId, singletonKey } = record;
   if (actorUserId !== undefined && (typeof actorUserId !== "string" || !UUID_RE.test(actorUserId))) {
     throw new QueueError("VALIDATION_FAILED", "actorUserId must be a UUID");
+  }
+  if (typeof actorUserId === "string" && actorUserId === PLATFORM_NO_USER_ID) {
+    throw new QueueError("VALIDATION_FAILED", "actorUserId must not be the platform no-user sentinel");
   }
   if (
     singletonKey !== undefined &&
