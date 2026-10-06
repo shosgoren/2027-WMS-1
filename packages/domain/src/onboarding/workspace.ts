@@ -389,6 +389,8 @@ export async function updateTenantSettings(
   slug: string,
   principal: AccessPrincipal | null | undefined,
   input: TenantSettingsInput,
+  /** İsteğe bağlı audit gerekçesi (T-123: demo onarımı `demo.reseed`); kullanıcı eylemlerinde verilmez. */
+  options: { readonly reason?: string } = {},
 ): Promise<{ changed: boolean }> {
   if (!validName(input?.name) || !SUPPORTED_LOCALES.includes(input.locale) || !validTimeZone(input.timeZone)) {
     throw validationFailed();
@@ -419,6 +421,7 @@ export async function updateTenantSettings(
       actorUserId: membership.userId,
       entityType: "tenant",
       entityId: membership.tenantId,
+      ...(options.reason === undefined ? {} : { reason: options.reason }),
       changeSummary: changes,
     });
     return { changed: true };

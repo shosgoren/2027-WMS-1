@@ -15,6 +15,7 @@ import {
   DEMO_TENANT_ID,
   DEMO_TENANT_NAME,
   bootstrapDemoOwner,
+  bootstrapOwnerInTenant,
   reseedDemo,
   type DemoAccountPort,
 } from "../../../packages/domain/src/demo/seed.ts";
@@ -192,7 +193,7 @@ describe("bootstrapDemoOwner (demo.bootstrap)", () => {
     await q("INSERT INTO public.tenants (id, slug, name, is_demo) VALUES ($1, $2, 'T123 non-demo', false)", [tenantId, `t123-${randomBytes(5).toString("hex")}`]);
     let err: unknown;
     try {
-      await bootstrapDemoOwner(app, { ownerUserId: owner, tenantId });
+      await bootstrapOwnerInTenant(app, owner, tenantId);
     } catch (e) {
       err = e;
     }
@@ -237,6 +238,19 @@ describe("bootstrapDemoOwner (demo.bootstrap)", () => {
     expect(row).toEqual({ actor_user_id: null, ip: null, user_agent: null }); // aktör = sistem; demo'da IP/UA yok
     expect(await bootstrapDemoOwner(app, { ownerUserId: owner })).toEqual({ written: false });
     expect(await auditCount("demo.bootstrap")).toBe(before + 1);
+  });
+
+  it("var olan ACTIVE sahip üyeliğe TENANT_ADMIN rolü eklenince roles_version artar", async () => {
+    await wipeDemoMemberships();
+    const owner = (await accounts.ensureAccount({ email: DEMO_ROLES.TENANT_ADMIN, name: "Demo Yönetici", password: PASSWORD })).userId;
+    const mid = await mkMembership(DEMO_TENANT_ID, owner, { owner: true, roles: [] }); // ACTIVE sahip, rolsüz
+    const version = async () => Number((await q<{ v: number }>("SELECT roles_version v FROM public.tenant_memberships WHERE id = $1", [mid]))[0]!.v);
+    const v0 = await version();
+    expect(await bootstrapDemoOwner(app, { ownerUserId: owner })).toEqual({ written: true });
+    expect(await version()).toBe(v0 + 1);
+    expect(await n("SELECT count(*) n FROM public.membership_roles WHERE membership_id = $1 AND role_key = 'TENANT_ADMIN'", [mid])).toBe(1);
+    expect(await bootstrapDemoOwner(app, { ownerUserId: owner })).toEqual({ written: false });
+    expect(await version()).toBe(v0 + 1);
   });
 
   it("eşzamanlı iki bootstrap (ayrı bağlantılar): tek sahip üyelik, tek TENANT_ADMIN rol, tek audit, hata yok", async () => {
@@ -329,6 +343,12 @@ describe("reseedDemo", () => {
     expect(r.passwordsUpdated).toBe(1);
     expect(r.memberships).toMatchObject({ created: 0, reactivated: 1, rolesFixed: 2, ownershipChanged: true, removed: 1 });
     expect(r.settings).toEqual({ nameOrLocaleChanged: true, templateChanged: true });
+    // MINOR-2: ad/dil onarımı audit'i gerekçe `demo.reseed` taşır; aktör demo sahibi.
+    const sa = await q<{ reason: string | null; actor_user_id: string }>(
+      "SELECT reason, actor_user_id FROM public.audit_logs WHERE tenant_id = $1 AND action = 'tenant.settings_changed' AND change_summary ? 'name' ORDER BY occurred_at DESC LIMIT 1",
+      [DEMO_TENANT_ID],
+    );
+    expect(sa).toEqual([{ reason: "demo.reseed", actor_user_id: ids[DEMO_ROLES.TENANT_ADMIN] }]);
     const active = (await demoState()).filter((x) => x.status === "ACTIVE" && (Object.values(DEMO_ROLES) as string[]).includes(x.email));
     expect(active).toEqual(expectedDemoState());
     expect((await demoState()).find((x) => x.email.startsWith("t123-stranger"))).toMatchObject({ status: "REMOVED", is_owner: false });
@@ -382,7 +402,7 @@ describe("reseedDemo", () => {
     // Var olmayan kimlikle bootstrap: withSystemTenant FORBIDDEN → NOT_FOUND.
     let err: unknown;
     try {
-      await bootstrapDemoOwner(app, { ownerUserId: await mkForeignUser("missing"), tenantId: randomUUID() });
+      await bootstrapOwnerInTenant(app, await mkForeignUser("missing"), randomUUID());
     } catch (e) {
       err = e;
     }
