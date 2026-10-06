@@ -1,0 +1,154 @@
+# Etkin WMS — staging veritabanı hazırlığı (T-105 / ADR-004, ADR-013, ADR-015 §4). KORUNAN DOSYA (PROTOCOL §3b).
+# `scripts/provision-staging.mjs`: Neon `etkin-wms` ana dalında `wms_identity_probe` + uygulama rolleri (`wms_app`,
+# `wms_auth`, `wms_worker`: NOSUPERUSER NOBYPASSRLS …, hiçbir role üye değil) kurar/döndürür, nitelikleri katalogdan
+# doğrular ve YALNIZCA hepsi yeşilse Fly `etkin-wms-staging` uygulamasına sırları `--stage` ile yazar (sonraki
+# dağıtımda etkin olur; deploy-staging.yml `main` push'unda ya da dispatch'te).
+#
+# Tetikleyici: YALNIZCA workflow_dispatch. İş akışı önce `main`'e birleşir, sonra Supervisor tetikler.
+# `if: github.ref == 'refs/heads/main'` YALNIZCA EK SAVUNMADIR, sır sınırı DEĞİLDİR (repo sırları environment'a bağlı
+# değil; repoya yazabilen herkes sırrı okuyan bir iş akışı koşturabilir — deploy-staging.yml ile aynı bilinen risk).
+# NEON_API_KEY yalnızca bu proje kapsamlıdır (U-07); FLY_API_TOKEN uygulama kapsamlı deploy token'ıdır (U-06).
+#
+# Girdiler (dispatch):
+#   rotate             — uygulama rollerinin parolalarını döndür ve Fly URL sırlarını yeniden yaz
+#   rotate_auth_secret — BETTER_AUTH_SECRET'ı yenile (TÜM OTURUMLAR düşer)
+#   rotate_seal_key    — QUEUE_SEAL_KEY'i yenile (bekleyen email.send işleri çözülemez; yalnızca kuyruk boşken)
+#   role_path          — `api` (varsayılan; Neon API, parola sağlayıcıda üretilir) | `sql` (düz parola, A-56 riski:
+#                        yalnızca docs/OPEN_QUESTIONS.md'de Supervisor karar satırı varsa; kayıt yoksa BLOCKED)
+#   sql_decision       — `sql` yolunda karar kaydının kimliği (A-xx / Q-xx)
+# Girdiler `run:` içine ENJEKTE EDİLMEZ; ortam değişkeniyle geçer ve kabuk içinde doğrulanır.
+#
+# Sır kapsamı (G-09): NEON_API_KEY, FLY_API_TOKEN, RESEND_API_KEY, STAGING_DEMO_PASSWORD (isteğe bağlı) ve
+# NEON_PROJECT_ID YALNIZCA "Provision" adımının env'indedir (tek süreç: Neon parolası Fly'a aktarılır). Betik her gizli
+# değeri `::add-mask::` ile maskeler, alt süreç ortamlarını daraltır (flyctl yalnızca FLY_API_TOKEN, psql yalnızca
+# bağlantı bilgisi), Fly'a değerleri stdin'den verir. Yalnızca `.artifacts/t-105/summary.{json,md}` (sır ADLARI, değer
+# yok) yüklenir. Fly'a sahip/migration URI'si (DATABASE_URL_DIRECT) YAZILMAZ (Supervisor eki (e)).
+# Üçüncü taraf kodu: action'lar tam commit SHA ile sabit; flyctl SHA-256 doğrulamalı (deploy-staging.yml deseni).
+name: provision-staging
+
+on:
+  workflow_dispatch:
+    inputs:
+      rotate:
+        description: "Uygulama rolü parolalarını döndür (Fly URL sırları yeniden yazılır)"
+        type: boolean
+        default: false
+      rotate_auth_secret:
+        description: "BETTER_AUTH_SECRET'ı yenile (tüm oturumlar düşer)"
+        type: boolean
+        default: false
+      rotate_seal_key:
+        description: "QUEUE_SEAL_KEY'i yenile (yalnızca kuyruk boşken)"
+        type: boolean
+        default: false
+      role_path:
+        description: "Rol oluşturma yolu (sql yalnızca Supervisor karar kaydıyla)"
+        type: choice
+        options:
+          - api
+          - sql
+        default: api
+      sql_decision:
+        description: "role_path=sql için karar kaydı kimliği (örn. A-57)"
+        type: string
+        default: ""
+
+# Aynı anda tek koşu; koşan iptal edilmez (yarım rol/sır durumu bırakılmaz).
+concurrency:
+  group: provision-staging
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+# .pnpmfile kodu hiçbir adımda yüklenmez (bu iş pnpm kullanmaz).
+env:
+  npm_config_ignore_pnpmfile: "true"
+
+jobs:
+  provision:
+    name: provision
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      # flyctl (Apache-2.0) resmî sürüm ikilisi; SHA-256 deploy-staging.yml ile aynı (flyctl_<sürüm>_checksums.txt).
+      FLYCTL_VERSION: 0.4.111
+      FLYCTL_SHA256: 1878d7fb1f8a418039042cf0749e4b7216c6c7018b66ae10611a64c2b6d9aa9e
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Node sürümü package.json "engines.node" alanından (betik yalnızca Node yerleşik modüllerini kullanır).
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: package.json
+          package-manager-cache: false
+      - name: Install flyctl
+        run: |
+          tarball="flyctl_${FLYCTL_VERSION}_Linux_x86_64.tar.gz"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/superfly/flyctl/releases/download/v${FLYCTL_VERSION}/${tarball}"
+          echo "${FLYCTL_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/flyctl"
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP/flyctl" flyctl
+          echo "$RUNNER_TEMP/flyctl" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/flyctl/flyctl" version
+      # Katalog denetimi psql (libpq ≥16: sslrootcert=system) ile yapılır.
+      - name: Ensure psql
+        run: |
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -q
+            sudo apt-get install -y -q postgresql-client
+          fi
+          psql --version
+      - name: Provision
+        env:
+          NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
+          NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          # İsteğe bağlı: bilinen demo parolası (≥ 16 karakter). Yoksa rastgele üretilir (okunamaz).
+          STAGING_DEMO_PASSWORD: ${{ secrets.STAGING_DEMO_PASSWORD }}
+          IN_ROTATE: ${{ inputs.rotate }}
+          IN_ROTATE_AUTH_SECRET: ${{ inputs.rotate_auth_secret }}
+          IN_ROTATE_SEAL_KEY: ${{ inputs.rotate_seal_key }}
+          IN_ROLE_PATH: ${{ inputs.role_path }}
+          IN_SQL_DECISION: ${{ inputs.sql_decision }}
+        run: |
+          args=()
+          [ "$IN_ROTATE" = "true" ] && args+=(--rotate)
+          [ "$IN_ROTATE_AUTH_SECRET" = "true" ] && args+=(--rotate-auth-secret)
+          [ "$IN_ROTATE_SEAL_KEY" = "true" ] && args+=(--rotate-seal-key)
+          case "$IN_ROLE_PATH" in
+            api) ;;
+            sql)
+              if ! printf '%s' "$IN_SQL_DECISION" | grep -qE '^[AQ]-[0-9]+$'; then
+                echo "::error::role_path=sql için sql_decision (A-xx/Q-xx) gerekli"
+                exit 1
+              fi
+              args+=(--role-path sql --sql-decision "$IN_SQL_DECISION")
+              ;;
+            *)
+              echo "::error::geçersiz role_path"
+              exit 1
+              ;;
+          esac
+          node scripts/provision-staging.mjs "${args[@]}"
+      # Özet yalnızca sır ADLARI ve nitelik sonuçlarını içerir (betik sızıntı taramasından geçirir).
+      - name: Stage summary
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/provision-staging"
+          for f in summary.json summary.md; do
+            if [ -f ".artifacts/t-105/$f" ]; then cp ".artifacts/t-105/$f" "$RUNNER_TEMP/provision-staging/"; fi
+          done
+          if [ -f ".artifacts/t-105/summary.md" ]; then cat ".artifacts/t-105/summary.md" >> "$GITHUB_STEP_SUMMARY"; fi
+      - name: Upload summary
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: provision-staging-summary
+          path: ${{ runner.temp }}/provision-staging/
+          if-no-files-found: warn
+          retention-days: 30

@@ -1,6 +1,8 @@
 # Etkin WMS — Fly.io staging (T-010 / ADR-013). Dağıtım yalnızca GitHub Actions'tan
 # (.github/workflows/deploy-staging.yml): `flyctl deploy --remote-only -c fly.staging.toml`.
-# Sır yok: DB/S3/e-posta bu kartta bağlanmaz; sırlar ileride `flyctl secrets` ile verilir, buraya yazılmaz.
+# Sır yok: sırlar (DATABASE_URL, AUTH_DATABASE_URL, DATABASE_URL_WORKER, BETTER_AUTH_SECRET, QUEUE_SEAL_KEY, DEMO_PASSWORD,
+# RESEND_API_KEY …) `.github/workflows/provision-staging.yml` (T-105) ile `flyctl secrets import --stage` yazılır, buraya yazılmaz.
+# Sahip/migration URI'si (DATABASE_URL_DIRECT) Fly'a hiç yazılmaz; `release_command` yoktur (migration Actions'ta, T-106).
 # Belge: https://fly.io/docs/reference/configuration/ · https://fly.io/docs/launch/processes/
 app = "etkin-wms-staging"
 primary_region = "fra"
