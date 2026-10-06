@@ -391,6 +391,56 @@
         "title": "Yanlış bir şey yaptım",
         "description": "Hatalı kaydı birlikte düzeltelim"
       }
+    },
+    "today": {
+      "title": "Bugün yaptıkların",
+      "empty": "Bugün henüz bir işlem yapmadın. Yaptıkların burada görünecek."
     }
+  },
+  "audit": {
+    "member": {
+      "invited": "Bir üyeyi davet ettin.",
+      "removed": "Bir üyeyi çalışma alanından çıkardın.",
+      "role_changed": "Bir üyenin rolünü değiştirdin.",
+      "left": "Çalışma alanından ayrıldın."
+    },
+    "ownership": {
+      "transferred": "Çalışma alanının sahipliğini devrettin."
+    },
+    "invitation": {
+      "revoked": "Bir daveti iptal ettin.",
+      "accepted": "Bir daveti kabul ettin."
+    },
+    "tenant": {
+      "created": "Çalışma alanını oluşturdun.",
+      "settings_changed": "Çalışma alanı ayarlarını değiştirdin."
+    },
+    "onboarding": {
+      "step_completed": "Bir kurulum adımını tamamladın."
+    },
+    "password_reset_link": {
+      "issued": "Bir üye için parola sıfırlama bağlantısı oluşturdun."
+    },
+    "audit": {
+      "exported": "Denetim kaydını dışa aktardın."
+    },
+    "other": "Bir işlem yaptın."
+  },
+  "settings": {
+    "title": "Çalışma alanı ayarları",
+    "intro": "Çalışma alanının adını, dilini ve saat dilimini buradan değiştirebilirsin.",
+    "name": "Çalışma alanı adı",
+    "locale": "Dil",
+    "localeTr": "Türkçe",
+    "localeEn": "English",
+    "timeZone": "Saat dilimi",
+    "timeZoneHint": "Örnek: Europe/Istanbul",
+    "save": "Kaydet",
+    "saved": "Ayarlar kaydedildi.",
+    "unchanged": "Değişiklik yok; ayarlar zaten böyle.",
+    "addressNote": "Çalışma alanı adresi (slug) ad değişince değişmez: {slug}",
+    "locked": "Bu ayarları değiştirme yetkin yok.",
+    "lockedAction": "Değişiklik gerekiyorsa çalışma alanı yöneticine (sorumlun) sor.",
+    "back": "Ana ekrana dön"
   }
 }

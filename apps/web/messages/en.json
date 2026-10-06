@@ -391,6 +391,56 @@
         "title": "I made a mistake",
         "description": "Let's fix the wrong record together"
       }
+    },
+    "today": {
+      "title": "What you did today",
+      "empty": "You have not done anything yet today. What you do will appear here."
     }
+  },
+  "audit": {
+    "member": {
+      "invited": "You invited a member.",
+      "removed": "You removed a member from the workspace.",
+      "role_changed": "You changed a member's role.",
+      "left": "You left the workspace."
+    },
+    "ownership": {
+      "transferred": "You transferred ownership of the workspace."
+    },
+    "invitation": {
+      "revoked": "You revoked an invitation.",
+      "accepted": "You accepted an invitation."
+    },
+    "tenant": {
+      "created": "You created the workspace.",
+      "settings_changed": "You changed the workspace settings."
+    },
+    "onboarding": {
+      "step_completed": "You completed a setup step."
+    },
+    "password_reset_link": {
+      "issued": "You created a password reset link for a member."
+    },
+    "audit": {
+      "exported": "You exported the audit log."
+    },
+    "other": "You did something."
+  },
+  "settings": {
+    "title": "Workspace settings",
+    "intro": "Change the workspace name, language and time zone here.",
+    "name": "Workspace name",
+    "locale": "Language",
+    "localeTr": "Türkçe",
+    "localeEn": "English",
+    "timeZone": "Time zone",
+    "timeZoneHint": "Example: Europe/Istanbul",
+    "save": "Save",
+    "saved": "Settings saved.",
+    "unchanged": "No change; the settings are already like this.",
+    "addressNote": "The workspace address (slug) does not change when the name changes: {slug}",
+    "locked": "You are not allowed to change these settings.",
+    "lockedAction": "If a change is needed, ask your workspace administrator.",
+    "back": "Back to home"
   }
 }

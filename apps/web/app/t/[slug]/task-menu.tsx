@@ -79,8 +79,8 @@ export async function TaskMenu({ slug, allowed }: TaskMenuProps) {
   const t = await getTranslations("home");
   const entries: Entry[] = [
     { key: "members", kind: "link", allowed: allowed.usersManage, href: `/t/${encodeURIComponent(slug)}/members` },
-    // Ayarlar ve denetim ekranları bu kartta yok (bkz. rapor: eksik sunucu okumaları, T-126): açık bağlantı değil, "yakında".
-    { key: "settings", kind: "screen-soon", allowed: allowed.settingsManage },
+    { key: "settings", kind: "link", allowed: allowed.settingsManage, href: `/t/${encodeURIComponent(slug)}/settings` },
+    // Denetim ekranı T-126'dadır: o gelene kadar "yakında".
     { key: "audit", kind: "screen-soon", allowed: allowed.auditView },
     { key: "receive", kind: "warehouse-soon", tone: "accent" },
     { key: "issue", kind: "warehouse-soon", tone: "accent" },
