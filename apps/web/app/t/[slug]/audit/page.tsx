@@ -17,9 +17,9 @@ export async function generateMetadata(): Promise<Metadata> {
 
 const SHOWN = ["forbidden", "recent_auth_required", "rate_limited", "validation_failed", "internal"] as const;
 const LINK_CLS =
-  "inline-flex min-h-12 min-w-12 items-center justify-center rounded-control border-2 border-border bg-surface px-6 text-base font-bold text-ink focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus";
+  "inline-flex min-h-12 min-w-12 items-center justify-center rounded-control border-2 border-border-strong bg-surface px-6 text-base font-bold text-ink focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus";
 const FIELD_CLS =
-  "min-h-12 w-full min-w-0 rounded-card border-2 border-border bg-surface px-4 text-base text-ink focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus";
+  "min-h-12 w-full min-w-0 rounded-card border-2 border-border-strong bg-surface px-4 text-base text-ink focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus";
 
 function first(v: string | string[] | undefined): string | undefined {
   const s = Array.isArray(v) ? v[0] : v;

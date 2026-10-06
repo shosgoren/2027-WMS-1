@@ -2,39 +2,60 @@
 /* `packages/ui/src` sınıfları (Button, Banner…) Tailwind 4 otomatik algılamasının dışındadır (T-119). Yol bu dosyaya göredir. */
 @source "../../../packages/ui/src";
 
-/* Tasarım belirteçleri (T-109; kaynak: docs/design/stok-takip-prototipi.pdf, Q-09).
+/* Tasarım belirteçleri (ADR-020 / docs/design/palette.md; kontrast: theme-contrast.test.ts).
+   Her anlam rengi üç rol: <ad> (dolu zemin + ikon), <ad>-ink (metin), <ad>-bg (açık zemin).
    Koyu tema bu kartta yok. Dış font indirilmez: sistem yığını. */
 @theme {
   /* Nötr (Tailwind yardımcıları :root CSS değişkenlerini üretir) */
-  --color-ink: #12302b;
-  --color-ink-muted: #3f544f;
+  --color-ink: #172133;
+  --color-ink-muted: #4a5568;
   --color-surface: #ffffff;
-  --color-border: #c9d6d2;
+  --color-border: #d5dce5; /* yalnız süsleyici ayırıcı */
+  --color-border-strong: #6b778a; /* girdi, ikincil düğme kenarı (WCAG 1.4.11) */
 
-  /* Akış görünümü (yeşil/teal) — varsayılan */
-  --color-bg: #ecf3f1;
-  --color-accent: #0f766e;
-  --color-accent-ink: #0b5a54;
-  --color-accent-soft: #d3ece6;
+  /* Akış görünümü (mavi) — varsayılan */
+  --color-bg: #f3f5f9;
+  --color-accent: #1559c7;
+  --color-accent-ink: #0f4699;
+  --color-accent-soft: #e3ecfa;
   --color-on-accent: #ffffff;
 
   /* Kilitli kart */
-  --color-locked-bg: #e2e9e7;
-  --color-locked-ink: #46564f;
+  --color-locked-bg: #e9edf2;
+  --color-locked-ink: #4a5568;
 
-  /* Uyarı (sarı) ve geri al (turuncu) */
-  --color-warning-bg: #fff3c4;
-  --color-warning-ink: #6b4300;
-  --color-undo-bg: #ffe8d1;
-  --color-undo-ink: #8a3b00;
+  /* Uyarı */
+  --color-warning: #b45309;
+  --color-warning-ink: #7a3e00;
+  --color-warning-bg: #fff4d5;
+
+  /* Geri al / ters kayıt */
+  --color-undo: #c2410c;
+  --color-undo-ink: #8a3300;
+  --color-undo-bg: #fdebdd;
+
+  /* Hata / tehlike */
+  --color-danger: #c9252c;
+  --color-danger-ink: #a51c22;
+  --color-danger-bg: #fdeaea;
+
+  /* Başarı */
+  --color-success: #18794e;
+  --color-success-ink: #11613d;
+  --color-success-bg: #e4f4ea;
+
+  /* Bilgi */
+  --color-info: #1a6fc2;
+  --color-info-ink: #0d4f91;
+  --color-info-bg: #e5f0fb;
 
   /* Odak halkası */
-  --color-focus: #12302b;
+  --color-focus: #1559c7;
 
   /* Köşe yarıçapı, gölge */
   --radius-card: 1.25rem;
   --radius-control: 999px;
-  --shadow-card: 0 1px 2px rgb(18 48 43 / 0.08), 0 4px 12px rgb(18 48 43 / 0.06);
+  --shadow-card: 0 1px 2px rgb(23 33 51 / 0.08), 0 4px 12px rgb(23 33 51 / 0.06);
 
   --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
 }
@@ -50,15 +71,16 @@
   --touch-min: 3rem; /* 48 px */
 }
 
-/* Kokpit görünümü (mavi vurgu) */
+/* Kokpit görünümü (koyu lacivert vurgu; anlam belirteçleri değişmez) */
 [data-view="cockpit"] {
-  --color-bg: #eff2fa;
-  --color-accent: #2548c4;
-  --color-accent-ink: #1d3a9e;
-  --color-accent-soft: #dbe3fb;
-  --color-locked-bg: #e3e7f1;
-  --color-locked-ink: #464f6b;
-  --color-border: #c9d0e4;
+  --color-bg: #eef1f7;
+  --color-accent: #243d8f;
+  --color-accent-ink: #1c3175;
+  --color-accent-soft: #e1e6f5;
+  --color-locked-bg: #e5e9f1;
+  --color-locked-ink: #465066;
+  --color-border: #cfd6e3;
+  --color-focus: #243d8f;
 }
 
 html,

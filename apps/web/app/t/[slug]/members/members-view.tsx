@@ -4,7 +4,7 @@
 // Sunucu reddi neden ayrıştırılmadan gösterilir (2. tur m6). Mobilde kart görünümü; tablo yok (yatay taşma yok).
 import { useFormatter, useTranslations } from "next-intl";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 import { Banner, Button, ConfirmDialog, EmptyState } from "@wms/ui";
 import { changeRoleAction, issuePasswordResetLinkAction, removeMemberAction, revokeInvitationAction, transferOwnershipAction } from "./actions.ts";
 import { InviteDialog, LinkBox, ServerErrorBanner } from "./invite-dialog.tsx";
@@ -38,8 +38,10 @@ interface Confirm {
 }
 
 const SELECT =
-  "min-h-12 w-full min-w-0 rounded-card border-2 border-border bg-surface px-3 text-base text-ink sm:w-auto focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus";
+  "min-h-12 w-full min-w-0 rounded-card border-2 border-border-strong bg-surface px-3 text-base text-ink sm:w-auto focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus";
 const BADGE = "inline-flex items-center rounded-full px-2 text-xs font-bold";
+
+const noopSubscribe = (): (() => void) => () => undefined;
 
 export function MembersView({
   slug,
@@ -61,6 +63,9 @@ export function MembersView({
   const router = useRouter();
   const canManage = pending !== null;
   const [inviteOpen, setInviteOpen] = useState(false);
+  // T-247: sunucu HTML'i hidrasyondan önce tıklanabilir görünür; o tıklama React'e ulaşmaz (staging'de yavaş JS yüklemesinde
+  // davet diyaloğu açılmıyordu). Düğme hidrasyon bitene kadar devre dışı: sunucuda/ilk çizimde false, istemcide true.
+  const hydrated = useSyncExternalStore(noopSubscribe, () => true, () => false);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const [revoking, setRevoking] = useState<PendingView | null>(null);
   const [busy, setBusy] = useState(false);
@@ -143,7 +148,7 @@ export function MembersView({
           <p className="break-words text-base text-ink-muted">{t("intro")}</p>
         </div>
         <div className="flex w-full min-w-0 flex-col gap-1 sm:w-auto sm:*:shrink-0 sm:*:whitespace-nowrap">
-          <Button onClick={() => setInviteOpen(true)} disabled={!canManage} aria-describedby={canManage ? undefined : "invite-locked"}>
+          <Button onClick={() => setInviteOpen(true)} disabled={!canManage || !hydrated} aria-describedby={canManage ? undefined : "invite-locked"}>
             {t("invite")}
           </Button>
           {canManage ? null : (

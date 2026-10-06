@@ -1,0 +1,89 @@
+// Stok komutu çekirdeği (T-213): 7 adımlı yürütücü, idempotency, yeniden deneme, belge yaşam döngüsü, numaralama.
+// İşleme mantığı (defter/bakiye) T-217'de `executeStockCommand`'a takılır; UI ve worker aynı komutları çağırır.
+export {
+  EMPTY_LOCK_PLAN,
+  FeatureDisabledError,
+  STOCK_TIMEOUTS,
+  executeStockCommand,
+  mapStockError,
+  type StockAudit,
+  type StockCommandApplied,
+  type StockCommandContext,
+  type StockCommandOutcome,
+  type StockCommandParams,
+  type StockCommandPlan,
+  type StockNumbering,
+  type StockTimeouts,
+} from "./command.ts";
+export {
+  SERVER_FIELDS,
+  StoredRejectionError,
+  assertResultWhitelisted,
+  beginIdempotency,
+  canonicalJson,
+  completeIdempotency,
+  decodeErrorCode,
+  encodeErrorCode,
+  isPersistedRejectionCode,
+  parseClientKey,
+  recordRejection,
+  requestHash,
+  type IdempotencyKey,
+  type IdempotencyOutcome,
+  type StockCommandResult,
+  type StockResultLine,
+} from "./idempotency.ts";
+export {
+  MAX_ATTEMPTS,
+  RETRYABLE_SQLSTATES,
+  isRetryableDbError,
+  jitterDelay,
+  sqlstateOf,
+  withRetry,
+  type RetryOptions,
+  type RetryReport,
+} from "./retry.ts";
+export {
+  MAX_DOCUMENT_LINES,
+  approveDocument,
+  assertItemsActive,
+  assertLocationsActiveInWarehouse,
+  assertNotProcessing,
+  cancelDocument,
+  createStockDocument,
+  readDocumentHeader,
+  updateDraft,
+  type CancelDocumentInput,
+  type CreateStockDocumentInput,
+  type DocumentHeader,
+  type DocumentLineInput,
+  type StockDocCallParams,
+  type StockDocumentKind,
+  type TransitionInput,
+  type UpdateDraftInput,
+} from "./documents.ts";
+export {
+  NUMBER_PREFIX,
+  formatDocumentNumber,
+  nextDocumentNumber,
+  periodOf,
+  yearOfBusinessDate,
+  type NumberedDocumentKind,
+} from "./numbering.ts";
+export { SYNC_POST_MAX_LINES, postDocument, type PostDocumentInput } from "./posting.ts";
+export {
+  REASON_BY_KIND,
+  buildPostingPlan,
+  dimensionIdentity,
+  fromMicro,
+  toMicro,
+  type LedgerEntry,
+  type LedgerReason,
+  type PostingKind,
+  type PostingLine,
+  type PostingPlan,
+  type PostingStatus,
+} from "./plan.ts";
+export { assertLineRules, assertSerialUnique, assertSufficient, type BalanceView, type ItemInfo, type SerialInfo } from "./rules.ts";
+export { assertTracking, type TrackedLine, type TrackingMode } from "./tracking.ts";
+export { readAvailability, type AvailabilityFilter, type AvailabilityRow } from "./availability.ts";

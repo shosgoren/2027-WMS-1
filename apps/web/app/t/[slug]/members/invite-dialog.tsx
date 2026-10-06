@@ -4,7 +4,7 @@
 import { useTranslations } from "next-intl";
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
-import { Banner, Button, TextField } from "@wms/ui";
+import { Banner, Button, TextField, TriangleAlert } from "@wms/ui";
 import { inviteMemberAction } from "./actions.ts";
 
 /** Sunucu eylem hatası (`ActionResult.error`); yalnızca kod + ayrıntı + istek kimliği kullanılır. */
@@ -62,15 +62,18 @@ export function LinkBox({ title, link, warning, onDismiss }: { title: string; li
     }
   }
   return (
-    <section aria-label={title} className="flex min-w-0 flex-col gap-3 rounded-card border-2 border-warning-bg bg-surface p-4 shadow-card" data-testid="link-box">
-      <h3 className="break-words text-lg font-bold text-ink">{title}</h3>
+    <section aria-label={title} className="flex min-w-0 flex-col gap-3 rounded-card border-2 border-warning bg-surface p-4 shadow-card" data-testid="link-box">
+      <div className="flex min-w-0 items-center gap-2">
+        <TriangleAlert aria-hidden="true" className="size-5 shrink-0 text-warning" />
+        <h3 className="min-w-0 break-words text-lg font-bold text-ink">{title}</h3>
+      </div>
       <Banner kind="warning">{warning}</Banner>
       <input
         readOnly
         value={link}
         aria-label={title}
         onFocus={(e) => e.currentTarget.select()}
-        className="min-h-12 w-full min-w-0 rounded-card border-2 border-border bg-surface px-4 text-base text-ink focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus"
+        className="min-h-12 w-full min-w-0 rounded-card border-2 border-border-strong bg-surface px-4 text-base text-ink focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus"
       />
       <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap">
         <Button onClick={() => void copy()}>{t("copy")}</Button>
@@ -162,7 +165,7 @@ export function InviteDialog({
               id="invite-role"
               name="roleKey"
               defaultValue="READ_ONLY"
-              className="min-h-12 w-full min-w-0 rounded-card border-2 border-border bg-surface px-4 text-base focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus"
+              className="min-h-12 w-full min-w-0 rounded-card border-2 border-border-strong bg-surface px-4 text-base focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus"
             >
               {roleKeys.map((r) => (
                 <option key={r} value={r}>
