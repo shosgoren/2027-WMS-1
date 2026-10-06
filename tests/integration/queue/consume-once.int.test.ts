@@ -1,8 +1,9 @@
 // Kuyruk tüketici sözleşmesi (T-214, ADR-019): gerçek pg-boss + gerçek roller (wms_app/wms_worker), PgBouncer.
 // - Aynı iş iki kez teslim → yan etki tablosunda tek satır (gerçek yeniden teslim: iş durumu `created`'a geri alınır).
 // - Tenant A işi B satırı yazamaz; A ve B'de aynı (consumer, event_id) iki ayrı etki üretir.
-// - Platform `processed_events` (tenant_id NULL) satırları PAYLAŞILAN veritabanına COMMIT EDİLMEZ (Supervisor notu, AC-04
-//   taraması): bu testte platform yolu rollback eden transaction içinde sınanır.
+// - Platform `processed_events` (tenant_id NULL) satırları: tekillik testi rollback eden transaction içinde sınanır;
+//   eşzamanlı teslim testi (MINOR-7) gerçek platform işleminde satırı commit eder ve `finally` içinde yalnızca kendi
+//   rastgele event_id'li satırını siler (int dosyaları sıralı koşar; AC-04 NULL satırlarını dinamik sayar).
 // Sentetik UUID'ler (G-09). Yan etki tablosu testin kendi tablosudur ve sonunda silinir.
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
@@ -233,6 +234,23 @@ describe("Faz 2 iş türleri", () => {
     await admin.query(`INSERT INTO ${QUEUE_SCHEMA}.job (id, name, data) VALUES ($1, 'stock.document.post', $2::jsonb)`, [
       id,
       JSON.stringify({ v: 1, tenantId, actorUserId: null, payload: { documentId: randomUUID(), idempotencyRecordId: randomUUID() } }),
+    ]);
+    await waitFor(async () => (await admin.query(`SELECT state FROM ${QUEUE_SCHEMA}.job WHERE id = $1`, [id])).rows[0]?.state === "failed", "failed");
+    expect(called).toBe(0);
+  });
+
+  it("zarfta actorUserId'si sıfır UUID olan stock.document.post (elle yazılmış) tüketicide kalıcı hata; handler çağrılmaz (MINOR-9)", async () => {
+    const tenantId = await mkTenant();
+    const q = queueFor();
+    let called = 0;
+    await q.work("stock.document.post", () => {
+      called += 1;
+      return Promise.resolve();
+    });
+    const id = randomUUID();
+    await admin.query(`INSERT INTO ${QUEUE_SCHEMA}.job (id, name, data) VALUES ($1, 'stock.document.post', $2::jsonb)`, [
+      id,
+      JSON.stringify({ v: 1, tenantId, actorUserId: NIL_USER, payload: { documentId: randomUUID(), idempotencyRecordId: randomUUID() } }),
     ]);
     await waitFor(async () => (await admin.query(`SELECT state FROM ${QUEUE_SCHEMA}.job WHERE id = $1`, [id])).rows[0]?.state === "failed", "failed");
     expect(called).toBe(0);
