@@ -47,9 +47,13 @@ jobs:
       - name: Print Playwright error context
         if: failure()
         run: |
-          find .artifacts/e2e -name error-context.md -print0 | while IFS= read -r -d '' f; do
+          # İçerikteki `::` satırları iş akışı komutu olarak yorumlanmasın (stop-commands, rastgele belirteç).
+          tok="$(openssl rand -hex 16)"
+          find .artifacts/e2e -type f -name error-context.md -print0 | while IFS= read -r -d '' f; do
             echo "::group::$f"
+            echo "::stop-commands::${tok}"
             cat -- "$f"
+            echo "::${tok}::"
             echo "::endgroup::"
           done
       - name: Upload .artifacts/e2e
