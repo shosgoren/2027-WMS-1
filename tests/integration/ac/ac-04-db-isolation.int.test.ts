@@ -181,8 +181,16 @@ async function cleanupExceptTenants(c: pg.Client, r: typeof reg): Promise<void> 
   const tenantIds = r.worlds.map((w) => w.tenantId);
   const userIds = [...r.worlds.flatMap((w) => [w.ownerUserId, w.memberUserId]), ...r.extraUsers];
   if (tenantIds.length > 0) {
-    // T-202 tabloları FK sırasıyla önce (kapsam → kilit → lokasyon → depo).
+    // T-204 + T-202 tabloları FK sırasıyla önce (taşıma birimi → seri → lot → barkod/dönüşüm → sahip → ürün → birim; kapsam → kilit → lokasyon → depo).
     for (const t of [
+      "handling_units",
+      "serials",
+      "lots",
+      "item_barcodes",
+      "unit_conversions",
+      "inventory_owners",
+      "items",
+      "units",
       "membership_warehouse_scopes",
       "location_count_locks",
       "locations",

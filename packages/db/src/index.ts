@@ -89,6 +89,30 @@ export type {
   Warehouse,
   WarehouseStatus,
 } from "./schema/warehouse.ts";
+// Katalog/izlenebilirlik tabloları: yalnızca TİPLER (T-204); tablo nesneleri `@wms/db/internal/schema` alt yolundadır.
+export type {
+  CatalogStatus,
+  HandlingUnit,
+  HandlingUnitKind,
+  HandlingUnitStatus,
+  InventoryOwner,
+  Item,
+  ItemBarcode,
+  Lot,
+  NewHandlingUnit,
+  NewInventoryOwner,
+  NewItem,
+  NewItemBarcode,
+  NewLot,
+  NewSerial,
+  NewUnit,
+  NewUnitConversion,
+  PickPolicy,
+  Serial,
+  TrackingMode,
+  Unit,
+  UnitConversion,
+} from "./schema/catalog.ts";
 // Bağlantı hedefi karşılaştırması (connection-target.ts, yan etkisiz): kuyruk kurulum CLI'ı uygulama bağlantısını reddetmek için kullanır.
 export { consumeRateLimit } from "./rate-limit.ts";
 export type { ConsumeRateLimitParams, ConsumeRateLimitResult } from "./rate-limit.ts";
