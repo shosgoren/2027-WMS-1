@@ -168,7 +168,9 @@ describe("AC-04 dosya katmanı", () => {
     // Kodlanmış '..' ile de açılmaz.
     const encodedEscape = new URL(url);
     encodedEscape.pathname = `/${bucket}/tenants/${tenantA}/%2e%2e/${tenantB}/${keyB.slice(`tenants/${tenantB}/`.length)}`;
-    expect((await fetch(encodedEscape)).status).not.toBe(200);
+    const r3 = await fetch(encodedEscape);
+    expect(r3.status).toBe(403);
+    expect(await r3.text()).not.toContain("b-verisi");
     // İmzasız B nesnesi (bucket özel).
     expect((await fetch(`${endpoint}/${bucket}/${keyB}`)).status).toBe(403);
     // B'nin kendi imzalı URL'si B'yi açar; A'nın bağlamı bunu üretemez (yukarıda FORBIDDEN).
