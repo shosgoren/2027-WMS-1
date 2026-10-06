@@ -4,7 +4,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createDbClient, withMembership, withSystemTenant, withTenant } from "../../../packages/db/src/index.ts";
+import { createDbClient, getAppDb, withMembership, withSystemTenant, withTenant } from "../../../packages/db/src/index.ts";
 import { DB_CLIENT_SETTINGS, createTenantContext, type DbClient } from "../../../packages/db/src/client.ts";
 import { createAuth, readAuthEnv, type AuthService } from "../../../packages/auth/src/index.ts";
 import { QUEUE_SCHEMA, createJobQueue, installQueueSchema, type PgBossJobQueue } from "../../../packages/queue-adapter/src/index.ts";
@@ -817,6 +817,36 @@ describe("getSenderQueue (web)", () => {
       await closeSenderQueue();
       restore();
       await adm.query(`DROP DATABASE IF EXISTS ${dbName} WITH (FORCE)`).catch(() => undefined);
+    }
+  });
+});
+
+describe("getAppDb (web'in tek DB erişim noktası)", () => {
+  it("aynı örneği döndürür (süreç başına tek havuz, globalThis tekil) ve çalışan bir wms_app havuzudur", async () => {
+    const saved = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = env.databaseUrl;
+    try {
+      const a = getAppDb();
+      expect(getAppDb()).toBe(a);
+      const fx = await mkTenant();
+      const roles = await runTenantCommand({ db: a, principal: principalOf(fx.admin), tenantSlug: fx.slug, permission: "users.manage" }, async (_tx, m) => m.roles);
+      expect(roles).toEqual(["TENANT_ADMIN"]);
+      await a.close();
+    } finally {
+      if (saved === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = saved;
+    }
+  });
+
+  it("DATABASE_URL yoksa açık hata (değer sızmaz)", () => {
+    const saved = process.env.DATABASE_URL;
+    delete process.env.DATABASE_URL;
+    try {
+      // Önceki testte havuz singleton'a yazıldı ve kapatıldı; yeni bir süreç gibi davranmak için tekil anahtar sıfırlanır.
+      delete (globalThis as Record<symbol, unknown>)[Symbol.for("@wms/db/app-db")];
+      expect(() => getAppDb()).toThrow(/DATABASE_URL is not configured/);
+    } finally {
+      if (saved !== undefined) process.env.DATABASE_URL = saved;
     }
   });
 });

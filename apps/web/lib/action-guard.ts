@@ -6,7 +6,6 @@
 // kancasına bağlanacak: bu kartta kanca tanımlıdır, varsayılan yoktur.
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { createDbClient } from "@wms/db";
 import { AppError, type AppErrorBody } from "@wms/shared/errors";
 
 /** Sarmalayıcının ihtiyaç duyduğu principal şekli (`@wms/auth` `Principal` atanabilir). */
@@ -105,7 +104,7 @@ export function createActionGuard(deps: GuardDeps) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Üretim bağlamı (@wms/auth + ortam); Next istek başlıkları çağıran `actions.ts`'ten verilir (`headers` from "next/headers").
+// Üretim bağlamı (@wms/auth + ortam; veritabanı yalnızca `@wms/db` `getAppDb()` ile); Next istek başlıkları çağıran `actions.ts`'ten verilir (`headers` from "next/headers").
 // Bu modül Next'e bağımlı değildir: kök typecheck/entegrasyon testleri `createActionGuard`'ı doğrudan kullanır.
 // ---------------------------------------------------------------------------------------------
 
@@ -125,17 +124,4 @@ export function createProductionGuard(getHeaders: GuardDeps["getHeaders"]) {
     },
     newRequestId: randomUUID,
   });
-}
-
-type AppDb = ReturnType<typeof createDbClient>;
-let appDb: AppDb | undefined;
-
-/** `wms_app` bağlantısı (DATABASE_URL; pooler transaction mode → `prepare: false`); ilk kullanımda kurulur. */
-export function getAppDb(): AppDb {
-  if (appDb === undefined) {
-    const url = process.env.DATABASE_URL;
-    if (url === undefined || url.trim() === "") throw new Error("DATABASE_URL is not configured");
-    appDb = createDbClient({ url, poolMax: 5, prepare: false });
-  }
-  return appDb;
 }
