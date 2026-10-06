@@ -236,3 +236,22 @@
 - 15:05Z T-232 3ca5734 (items.tracking_mode / serials.lot_id UPDATE tetikleyicisi ALWAYS + bağlam fail-closed; bölünmüş yazım RC/RR ikisi de ret; FOR UPDATE'siz +n RC toplar RR ret; test:int 921/921) → int/faz2-stok-sema 79ac368. Son inceleme (T-232+T-233) + test:int sürüyor.
 - 15:10Z stok-sema son inceleme @79ac368 0·0·5: MINOR-1 sahip mod değişimi ↔ eşzamanlı boyut INSERT yazım çarpıklığı (LOCK stock_dimensions SHARE) → T-232; MINOR-2/3 bulgu testi kod/ileti, AC-09 etiketleri → T-233; MINOR-4 (T-213 notu var), MINOR-5 (A-89). A-87 notu faz2-sema'ya. T-234 5a63db4 (FORCE sahip testi) → iki int'e; tam koşuda ac-04-file-cache imzalı URL bir kez düştü (bilinen MinIO yük duyarlılığı), tek başına 10/10.
 - 15:15Z #56 T-132b MERGED → main 54e204b (CI 9/9). T-132a main ile birleşti → 1213d7a; test:ac --ci yeni main'de PASS 7 FAIL 0; yeniden inceleme sürüyor. int/faz2-stok-sema @79ac368 test:int 52/1001 yeşil.
+
+## 2026-10-06 15:20Z — FAZ 1 KAPISI GEÇTİ (Supervisor kararı, ADR-012 rev.)
+Kanıt (T-132, main 36087a2; rapor `.artifacts/phase1-gate/report.md` yerel):
+- `pnpm verify` lint/typecheck/unit OK (2163) · `pnpm test:int` 753 PASS · `pnpm test:e2e` 4/4 (masaüstü+mobil)
+- `pnpm test:ac --phase 1`: AC-04 PASS (80), AC-18 PASS (9), NO_TEST 0 · `test:ac -- AC-05` PASS (4) · `test:ac --ci` (passedGates [0]): 44 AC · PASS 7 · FAIL 0
+- CI main yeşil (run 37483201585) · deploy-staging #29 yeşil (migrate + web {db:ok} + worker kararlı) · e2e-staging #1 yeşil · provision-staging #3 yeşil
+- restore-drill #2 PASS: RPO 413.026 sn (hedef ≤900), RTO 11.403 sn (hedef ≤14400), parmak izi eşit, geçici dal silindi (Supervisor logdan teyit)
+- uptime: elle koşu #1 yeşil
+Kartlar: T-101…T-131, T-105c/e/g, T-106b/c, T-112e, T-124, T-128, T-130, T-132a/b. Açık A-37…A-53 ve Q'lar OPEN_QUESTIONS'ta (pilot öncesi doğrulanır).
+Bilinen sınırlamalar: Tigris yok (MinIO yalnız yerel/CI), sosyal giriş kapalı, doğrulanmış alan adı yok (Resend onboarding), Sentry yok; main push'unda guards/check-all scope kırmızı (dal "main"); uptime zamanlanmış koşusu GitHub'da hiç tetiklenmedi (yalnız elle) → takip; ADR-012 bilinen riski (insan incelemesi yok, bekçi + security-reviewer kapısı).
+Sonraki: Faz 2 — int/faz2-sema ve int/faz2-stok-sema PR'ları, ardından T-205/T-208/T-210/T-211.
+
+### 2026-10-06 15:20Z Supervisor turu
+- 15:20Z T-232 a57863f (LOCK stock_dimensions SHARE sahip yolunda; 2 bağlantılı yarış testleri her iki yön; test:int 925/925) → int/faz2-stok-sema. T-233 assertion/etiket düzeltmesi bekleniyor, sonra son delta incelemesi.
+- 15:25Z #57 T-132a MERGED → main 36087a2 (CI 9/9; currentGatePhase 1, passedGates [0]). T-132 kapı koşusu qa-verifier'da yeniden başladı.
+- 15:30Z T-233 f42cca8 (bulgu testleri kod/ileti/FK adı; ac-09 etiket düzeltmesi, çapraz tenant @AC-04 ayrı test; miktar-2 testi üçe bölündü — ratchet AC_TEST_REMOVED düşüşü reddetti; AC-04 84, AC-09 8; test:int 1005) → int/faz2-stok-sema 93e1dde; 3 dosya 119/119. Son delta incelemesi + test:int sürüyor.
+- 15:35Z stok-sema son inceleme @93e1dde 0·0·2 (yalnız docs: LOCK SHARE runbook, HU lokasyonu) → A-87/A-89/T-211 notları (int/faz2-sema 872e52e, stok-sema'ya docs birleşmesi). İki Faz 2 şema dalı inceleme açısından kapandı; PR'lar Faz 1 kapısından sonra.
+- 15:10Z T-132 kapı koşusu (main 36087a2): verify 2163 OK, test:int 753 PASS, test:ac --phase 1 AC-04 80 + AC-18 9 PASS, AC-05 4 PASS, --ci PASS7 FAIL0, e2e 4/4 (temiz compose -p t132; eski etkin-wms volume checksum uyuşmazlığı — dokunulmadı). GitHub: ci main yeşil, deploy-staging #29 + main 36087a2 yeşil, restore-drill #2 success (RPO 413/RTO 11.4 Supervisor logdan teyit), e2e-staging #1, provision #3 yeşil. check:all scope/protected yerelde int/faz1-kapi olmadığı için koşamadı (PR CI'da yeşil). Uptime schedule hiç koşmamış (0 run) → elle tetiklendi. Öneri: GEÇER (koşullu).
+- int/faz2-stok-sema @93e1dde test:int 52/1010 yeşil (son).
