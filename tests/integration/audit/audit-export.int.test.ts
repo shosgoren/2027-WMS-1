@@ -157,7 +157,8 @@ describe("listAudit (keyset)", () => {
   it("filtre: işlem + tarih aralığı; geçersiz imleç/filtre/limit VALIDATION_FAILED", async () => {
     const none = await listAudit(access(A, A.admin.userId), { filters: { action: "tenant.created" } });
     expect(none.items).toHaveLength(0);
-    const today = new Date().toISOString().slice(0, 10);
+    // Filtre tarihleri kiracı saat diliminde yorumlanır (fikstür: Europe/Istanbul); UTC tarihi 21:00–24:00 UTC arasında bir gün geride kalır (T-249).
+    const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Istanbul", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
     const some = await listAudit(access(A, A.admin.userId), { limit: 5, filters: { from: today, to: today, action: "member.invited" } });
     expect(some.items.length).toBe(5);
     const past = await listAudit(access(A, A.admin.userId), { filters: { to: "2000-01-01" } });
