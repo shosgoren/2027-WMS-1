@@ -5,15 +5,17 @@
 //
 // URI kaynağı (m7 / A-54):
 //   1) `STAGING_DATABASE_URL_DIRECT` repo sırrı (yalnızca staging veritabanı kapsamı) → yol `direct-secret`.
-//   2) Yoksa `NEON_API_KEY` + `NEON_PROJECT_ID` ile `scripts/neon-api.mjs` üzerinden sahip rolün doğrudan URI'si
-//      → yol `neon-api`; adım özetine `fallback: neon-api` yazılır. Bu yol 2026-11-15'ten sonra kırmızıdır.
+//   2) Yoksa ayrı, koşullu iş akışı adımı `--resolve-only --out <dosya>` ile `NEON_API_KEY` + `NEON_PROJECT_ID`
+//      kullanarak `scripts/neon-api.mjs` üzerinden sahip rolün doğrudan URI'sini maskeler ve 0600 dosyaya yazar
+//      (bağımlılık kurulmadan ÖNCE); `Migrate` adımı `--uri-file <dosya>` ile okur ve siler → yol `neon-api`;
+//      özete `fallback: neon-api` yazılır. `Migrate` adımı NEON_API_KEY'i hiç görmez. Yol 2026-11-15'ten sonra kırmızıdır.
 // Sır (G-09, I-03): URI/parola ilk elde edildiği anda `::add-mask::` ile maskelenir ve hiçbir yere yazılmaz.
-// `pnpm db:migrate` alt süreci DARALTILMIŞ ortam alır: yalnızca PATH/HOME gibi izinli değişkenler +
+// `pnpm db:migrate` alt süreci DARALTILMIŞ ortam alır (RUNNER_TEMP/NODE_OPTIONS dahil değil): izinli değişkenler +
 // `DATABASE_URL_DIRECT`, `WMS_ENV=staging`, `DEMO_MODE=1`; `NEON_API_KEY`, `FLY_API_TOKEN` ve `DATABASE_URL`
 // alt sürece GEÇMEZ. `DATABASE_URL_DIRECT` Fly'a yazılmaz (yalnızca bu adımın süreç ortamında yaşar).
 // `DEMO_MODE=1` ile migration rolü demo tenant adımını (T-123) aynı koşuda yürütür.
 import { spawn } from "node:child_process";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createLineFilter, createRedactor, maskSecret } from "./neon-spike.mjs";
@@ -25,8 +27,8 @@ export const FALLBACK_LAST_DAY = "2026-11-15";
 const FALLBACK_CUTOFF_MS = Date.parse(`${FALLBACK_LAST_DAY}T00:00:00Z`) + 24 * 3600 * 1000;
 /** Alt sürece geçen ortam değişkenleri (izin listesi; sır taşımaz). */
 export const CHILD_ENV_ALLOW = Object.freeze([
-  "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "CI", "GITHUB_ACTIONS", "RUNNER_TEMP", "PNPM_HOME",
-  "npm_config_ignore_pnpmfile", "NODE_OPTIONS", "COREPACK_HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
+  "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "CI", "GITHUB_ACTIONS", "PNPM_HOME",
+  "npm_config_ignore_pnpmfile", "COREPACK_HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
 ]);
 
 export class DeployMigrateError extends Error {
@@ -85,22 +87,15 @@ export function buildChildEnv(base, uri) {
 }
 
 /**
- * Sahip rolün doğrudan URI'sini bulur; hepsi maskelenir.
+ * Yedek yol: Neon API'sinden sahip rolün doğrudan URI'si (A-54 tarih denetimiyle); hepsi maskelenir.
  * @param {{
  *   env: Record<string, string | undefined>, now: Date, redactor: ReturnType<typeof createRedactor>,
  *   write?: (s: string) => void, apiFactory?: typeof createNeonProjectApi,
  * }} o
- * @returns {Promise<{ path: "direct-secret" | "neon-api", uri: string }>}
+ * @returns {Promise<string>}
  */
-export async function resolveDirectUri(o) {
+export async function resolveViaNeonApi(o) {
   const mask = (/** @type {string} */ v) => maskSecret(o.redactor, v, { env: o.env, ...(o.write ? { write: o.write } : {}) });
-  const direct = (o.env["STAGING_DATABASE_URL_DIRECT"] ?? "").trim();
-  if (direct !== "") {
-    mask(direct);
-    assertDirectUri(direct);
-    mask(parsePgUri(direct).password);
-    return { path: "direct-secret", uri: direct };
-  }
   assertFallbackAllowed(o.now);
   const { apiKey, projectId } = readNeonEnv(o.env);
   const api = (o.apiFactory ?? createNeonProjectApi)({
@@ -117,7 +112,76 @@ export async function resolveDirectUri(o) {
   mask(uri);
   assertDirectUri(uri);
   mask(parsePgUri(uri).password);
+  return uri;
+}
+
+/**
+ * `--uri-file`: resolve adımının yazdığı 0600 dosya okunur ve silinir (yalnızca sahibi okuyabilmeli).
+ * @param {string} file
+ * @returns {string}
+ */
+export function readUriFile(file) {
+  let mode;
+  try {
+    mode = statSync(file).mode;
+  } catch {
+    throw new DeployMigrateError("URI dosyası okunamadı (yedek yol adımı koşmadı mı?)");
+  }
+  if ((mode & 0o077) !== 0) throw new DeployMigrateError("URI dosyası yalnızca sahibine açık olmalı (0600)");
+  const uri = readFileSync(file, "utf8").trim();
+  unlinkSync(file);
+  return uri;
+}
+
+/**
+ * Migrate adımının URI'si: `STAGING_DATABASE_URL_DIRECT` sırrı, yoksa resolve adımının dosyası. Bu işlev
+ * NEON_API_KEY KULLANMAZ (Migrate adımının ortamında yoktur).
+ * @param {{
+ *   env: Record<string, string | undefined>, now: Date, redactor: ReturnType<typeof createRedactor>,
+ *   write?: (s: string) => void, uriFile?: string,
+ * }} o
+ * @returns {{ path: "direct-secret" | "neon-api", uri: string }}
+ */
+export function resolveDirectUri(o) {
+  const mask = (/** @type {string} */ v) => maskSecret(o.redactor, v, { env: o.env, ...(o.write ? { write: o.write } : {}) });
+  const direct = (o.env["STAGING_DATABASE_URL_DIRECT"] ?? "").trim();
+  if (direct !== "") {
+    mask(direct);
+    assertDirectUri(direct);
+    mask(parsePgUri(direct).password);
+    return { path: "direct-secret", uri: direct };
+  }
+  if (o.uriFile === undefined) {
+    throw new DeployMigrateError("URI kaynağı yok: STAGING_DATABASE_URL_DIRECT boş ve --uri-file verilmedi");
+  }
+  assertFallbackAllowed(o.now);
+  const uri = readUriFile(o.uriFile);
+  mask(uri);
+  assertDirectUri(uri);
+  mask(parsePgUri(uri).password);
   return { path: "neon-api", uri };
+}
+
+/**
+ * @param {string[]} argv
+ * @returns {{ resolveOnly: boolean, out?: string, uriFile?: string }}
+ */
+export function parseArgs(argv) {
+  /** @type {{ resolveOnly: boolean, out?: string, uriFile?: string }} */
+  const r = { resolveOnly: false };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--resolve-only") r.resolveOnly = true;
+    else if (a === "--out" || a === "--uri-file") {
+      const v = argv[++i];
+      if (v === undefined || v === "") throw new DeployMigrateError(`${a} bir değer ister`);
+      if (a === "--out") r.out = v;
+      else r.uriFile = v;
+    } else throw new DeployMigrateError(`bilinmeyen argüman "${a}"`);
+  }
+  if (r.resolveOnly && r.out === undefined) throw new DeployMigrateError("--resolve-only için --out gerekli");
+  if (r.resolveOnly && r.uriFile !== undefined) throw new DeployMigrateError("--resolve-only ile --uri-file birlikte kullanılamaz");
+  return r;
 }
 
 /**
@@ -199,6 +263,7 @@ export function runMigrateProcess(o) {
  * @param {{
  *   env?: Record<string, string | undefined>, now?: Date, write?: (s: string) => void,
  *   runner?: typeof runMigrateProcess, apiFactory?: typeof createNeonProjectApi, summaryFile?: string,
+ *   argv?: string[],
  * }} [o]
  * @returns {Promise<number>}
  */
@@ -213,10 +278,30 @@ export async function main(o = {}) {
   const summarize = (s) => {
     if (summaryFile) appendFileSync(summaryFile, renderSummaryMd(s));
   };
-  /** @type {Awaited<ReturnType<typeof resolveDirectUri>>} */
+  /** @type {ReturnType<typeof parseArgs>} */
+  let args;
+  try {
+    args = parseArgs(o.argv ?? process.argv.slice(2));
+  } catch (e) {
+    write(`::error::deploy-migrate: ${e instanceof Error ? e.message : String(e)}\n`);
+    return 2;
+  }
+  if (args.resolveOnly) {
+    try {
+      const uri = await resolveViaNeonApi({ env, now, redactor, write: rawWrite, ...(o.apiFactory ? { apiFactory: o.apiFactory } : {}) });
+      // 0600, yalnızca yeni dosya (`wx`): var olan dosya/symlink üzerine yazılmaz.
+      writeFileSync(/** @type {string} */ (args.out), `${uri}\n`, { mode: 0o600, flag: "wx" });
+      write("deploy-migrate: yedek yol URI'si alındı (fallback: neon-api; A-54); dosyaya yazıldı\n");
+      return 0;
+    } catch (e) {
+      write(`::error::deploy-migrate: ${e instanceof Error ? e.message : String(e)}\n`);
+      return 1;
+    }
+  }
+  /** @type {ReturnType<typeof resolveDirectUri>} */
   let resolved;
   try {
-    resolved = await resolveDirectUri({ env, now, redactor, write: rawWrite, ...(o.apiFactory ? { apiFactory: o.apiFactory } : {}) });
+    resolved = resolveDirectUri({ env, now, redactor, write: rawWrite, ...(args.uriFile ? { uriFile: args.uriFile } : {}) });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     write(`::error::deploy-migrate: ${msg}\n`);
