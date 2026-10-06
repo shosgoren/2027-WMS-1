@@ -505,7 +505,7 @@ const noNormalizedPathImport = {
       ExportNamedDeclaration: (n) => n.source && check(n, n.source),
       ExportAllDeclaration: (n) => check(n, n.source),
       ImportExpression: (n) => check(n, n.source),
-      TSExternalModuleReference: (n) => check(n, /** @type {any} */ (n).expression),
+      TSExternalModuleReference: (/** @type {any} */ n) => check(n, /** @type {any} */ (n).expression),
       CallExpression: (n) => {
         if (isLoaderCallee(n.callee) && n.arguments.length > 0) check(n, n.arguments[0]);
       },
