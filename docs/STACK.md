@@ -34,7 +34,6 @@ Kaynak sözdizimi: `<dosya>#<json.yolu>` (package.json alanı) veya `docker-comp
 | Drizzle ORM (packages/domain, yalnızca `sql` etiketi) | drizzle-orm | 0.45.3 | packages/domain/package.json#dependencies.drizzle-orm | ADR-003 |
 | Better Auth (kimlik katmanı) | better-auth | 1.7.7 | packages/auth/package.json#dependencies.better-auth | ADR-014 |
 | Argon2id parola özeti | @node-rs/argon2 | 2.2.1 | packages/auth/package.json#dependencies.@node-rs/argon2 | ADR-014 |
-| Kuyruk kütüphanesi | — | — pg-boss seçildi (ADR-005 eki 2026-10-05); sürüm ilk kuyruk kartında kilitlenir (aday 12.36.0) | | ADR-005 |
 | Kuyruk kütüphanesi | pg-boss | 12.36.0 | packages/queue-adapter/package.json#dependencies.pg-boss | ADR-005 |
 | Worker paketleyici (esbuild; yalnızca derleme) | esbuild | 0.28.2 | apps/worker/package.json#devDependencies.esbuild | ADR-013 |
 | Tailwind CSS | tailwindcss | — ilk kullanan kart | | |
