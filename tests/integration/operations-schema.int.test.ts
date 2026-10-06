@@ -812,3 +812,600 @@ describe("T-301 belge kaynak bağlantısı ve tenant_settings.receiving_qc_enabl
     expectFail(await asApp(A.tenantId, (q) => q("UPDATE public.tenant_settings SET receiving_qc_enabled = NULL WHERE tenant_id = $1", [A.tenantId])), "23502", "NULL");
   });
 });
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// T-302 (ADR-021 §3 §5-§7, migration 0017): görev, sayım oturumu, min-maks politikası, uyarı, COUNT_ADJUSTMENT, count_abandon_hours.
+// ---------------------------------------------------------------------------------------------------------------------------------
+const NEW_TABLES_302 = ["warehouse_tasks", "count_sessions", "count_session_lines", "item_stock_policies", "stock_alerts"] as const;
+
+const insTask = "INSERT INTO public.warehouse_tasks (tenant_id, id, warehouse_id, kind, location_id, item_id, quantity) VALUES ($1, $2, $3, $4, $5, $6, $7)";
+const insSession = "INSERT INTO public.count_sessions (tenant_id, id, warehouse_id, blind, started_by) VALUES ($1, $2, $3, $4, $5)";
+const insSessionLine =
+  "INSERT INTO public.count_session_lines (tenant_id, id, session_id, warehouse_id, location_id, stock_dimension_id, item_id, reference_quantity) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)";
+const insPolicy = "INSERT INTO public.item_stock_policies (tenant_id, id, warehouse_id, item_id, min_quantity, max_quantity) VALUES ($1, $2, $3, $4, $5, $6)";
+const insAlert = "INSERT INTO public.stock_alerts (tenant_id, id, kind, warehouse_id, item_id, observed_quantity, threshold) VALUES ($1, $2, $3, $4, $5, $6, $7)";
+
+async function mkSession(q: Q, w: TenantWorld, warehouseId: string = w.warehouseId): Promise<string> {
+  const id = randomUUID();
+  await q(insSession, [w.tenantId, id, warehouseId, false, w.ownerMembershipId]);
+  return id;
+}
+/** Aynı tenant'ta ikinci depo + o depoda kök lokasyon (aynı-depo FK denemeleri için). */
+async function mkSecondWarehouse(q: Q, w: TenantWorld): Promise<{ warehouseId: string; locationId: string }> {
+  const warehouseId = randomUUID();
+  const locationId = randomUUID();
+  await q("INSERT INTO public.warehouses (tenant_id, id, code, name) VALUES ($1, $2, $3, 'Ikinci')", [w.tenantId, warehouseId, `W-${rnd()}`]);
+  await q("INSERT INTO public.locations (tenant_id, id, warehouse_id, parent_id, code, name, depth, kind) VALUES ($1, $2, $3, NULL, 'X1', 'x', 0, 'STORAGE')", [
+    w.tenantId, locationId, warehouseId,
+  ]);
+  return { warehouseId, locationId };
+}
+const lockSql =
+  "UPDATE public.location_count_locks SET status = 'COUNTING', count_session_id = $2, locked_at = now(), locked_by = $3 WHERE tenant_id = $1 AND location_id = $4";
+
+describe("T-302 RLS, yetkiler, sütun bazlı INSERT/UPDATE (yeni tablolar)", () => {
+  it("beş tabloda ENABLE + FORCE RLS ve USING + WITH CHECK tenant politikası (PERMISSIVE, ALL)", async () => {
+    const t = await admin.query<{ relname: string; relrowsecurity: boolean; relforcerowsecurity: boolean }>(
+      "SELECT relname, relrowsecurity, relforcerowsecurity FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relname = ANY($1::text[]) ORDER BY 1",
+      [[...NEW_TABLES_302]],
+    );
+    expect(t.rows.map((r) => [r.relname, r.relrowsecurity, r.relforcerowsecurity])).toEqual([...NEW_TABLES_302].sort().map((n) => [n, true, true]));
+    const p = await admin.query<{ tablename: string; permissive: string; cmd: string; qual: string | null; with_check: string | null }>(
+      "SELECT tablename, permissive, cmd, qual, with_check FROM pg_policies WHERE schemaname = 'public' AND tablename = ANY($1::text[]) ORDER BY 1",
+      [[...NEW_TABLES_302]],
+    );
+    expect(p.rows.map((r) => r.tablename)).toEqual([...NEW_TABLES_302].sort());
+    for (const r of p.rows) {
+      expect(r.permissive, r.tablename).toBe("PERMISSIVE");
+      expect(r.cmd, r.tablename).toBe("ALL");
+      expect(r.qual, r.tablename).toContain("app.current_tenant_id");
+      expect(r.with_check, r.tablename).toContain("app.current_tenant_id");
+    }
+  });
+
+  it("tenant_id NOT NULL; her tabloda UNIQUE (tenant_id, id); tüm FK'ler tenant_id ile başlayan bileşik anahtardır (tenants FK'si hariç tek sütun yok)", async () => {
+    const nn = await admin.query<{ table_name: string }>(
+      "SELECT table_name FROM information_schema.columns WHERE table_schema = 'public' AND column_name = 'tenant_id' AND is_nullable = 'NO' AND table_name = ANY($1::text[])",
+      [[...NEW_TABLES_302]],
+    );
+    expect(nn.rows.map((r) => r.table_name).sort()).toEqual([...NEW_TABLES_302].sort());
+    const uq = await admin.query<{ conrelid: string }>("SELECT conrelid::regclass::text AS conrelid FROM pg_constraint WHERE contype = 'u' AND conname = ANY($1::text[])", [
+      NEW_TABLES_302.map((t) => `${t}_tenant_id_id_key`),
+    ]);
+    expect(uq.rows.map((r) => r.conrelid).sort()).toEqual([...NEW_TABLES_302].sort());
+    const fks = await admin.query<{ conname: string; first_col: string; ncols: number }>(
+      `SELECT conname, (SELECT attname FROM pg_attribute WHERE attrelid = conrelid AND attnum = conkey[1]) AS first_col, array_length(conkey, 1) AS ncols
+         FROM pg_constraint WHERE contype = 'f' AND conrelid::regclass::text = ANY($1::text[])`,
+      [[...NEW_TABLES_302]],
+    );
+    expect(fks.rows.length).toBeGreaterThanOrEqual(17);
+    for (const f of fks.rows) {
+      expect(f.first_col, f.conname).toBe("tenant_id");
+      if (!f.conname.endsWith("_tenant_id_fkey")) expect(f.ncols, f.conname).toBeGreaterThanOrEqual(2);
+    }
+    // location_count_locks → count_sessions (A-84): bileşik, doğrulanmış.
+    const lk = await admin.query<{ def: string; convalidated: boolean }>(
+      "SELECT pg_get_constraintdef(oid) AS def, convalidated FROM pg_constraint WHERE conrelid = 'public.location_count_locks'::regclass AND conname = 'location_count_locks_session_fkey'",
+    );
+    expect(lk.rows).toEqual([{ def: "FOREIGN KEY (tenant_id, count_session_id) REFERENCES count_sessions(tenant_id, id)", convalidated: true }]);
+    // A-85 CHECK'i korunur.
+    const a85 = await admin.query<{ n: number }>("SELECT count(*)::int AS n FROM pg_constraint WHERE conrelid = 'public.location_count_locks'::regclass AND conname = 'location_count_locks_state_chk'");
+    expect(a85.rows[0]?.n).toBe(1);
+  });
+
+  it("wms_app: DELETE/TRUNCATE yok; PUBLIC, wms_ops ve wms_auth hiçbir yetkiye sahip değil", async () => {
+    const r = await admin.query<{ t: string; app_delete: boolean; app_trunc: boolean; ops_any: boolean; auth_any: boolean; public_any: boolean }>(
+      `SELECT t, has_table_privilege('wms_app', 'public.' || t, 'DELETE') AS app_delete,
+              has_table_privilege('wms_app', 'public.' || t, 'TRUNCATE') AS app_trunc,
+              has_any_column_privilege('wms_ops', 'public.' || t, 'SELECT,INSERT,UPDATE,REFERENCES') AS ops_any,
+              has_any_column_privilege('wms_auth', 'public.' || t, 'SELECT,INSERT,UPDATE,REFERENCES') AS auth_any,
+              coalesce((SELECT bool_or(x.grantee = 0) FROM pg_class c, aclexplode(c.relacl) x WHERE c.oid = ('public.' || t)::regclass), false) AS public_any
+         FROM unnest($1::text[]) AS t`,
+      [[...NEW_TABLES_302]],
+    );
+    expect(r.rows).toHaveLength(NEW_TABLES_302.length);
+    for (const row of r.rows) expect(row, row.t).toMatchObject({ app_delete: false, app_trunc: false, ops_any: false, auth_any: false, public_any: false });
+  });
+
+  it("sunucu sütunlarında wms_app INSERT yetkisi yok; anahtar/türetilen sütunlarda UPDATE yetkisi yok; yazılabilir sütunlarda var", async () => {
+    const noInsert: [string, string][] = [
+      ["warehouse_tasks", "status"], ["warehouse_tasks", "version"], ["warehouse_tasks", "completed_at"], ["warehouse_tasks", "assigned_membership_id"],
+      ["count_sessions", "status"], ["count_sessions", "approved_by"], ["count_sessions", "approved_at"], ["count_sessions", "started_at"], ["count_sessions", "cancel_reason"],
+      ["count_session_lines", "counted_quantity"], ["count_session_lines", "counted_by"], ["count_session_lines", "counted_at"],
+      ["item_stock_policies", "version"],
+      ["stock_alerts", "status"], ["stock_alerts", "opened_at"], ["stock_alerts", "resolved_at"],
+    ];
+    const noUpdate: [string, string][] = [
+      ["warehouse_tasks", "version"], ["warehouse_tasks", "completed_at"], ["warehouse_tasks", "kind"], ["warehouse_tasks", "warehouse_id"], ["warehouse_tasks", "item_id"],
+      ["warehouse_tasks", "quantity"], ["warehouse_tasks", "source_id"], ["warehouse_tasks", "tenant_id"],
+      ["count_sessions", "approved_at"], ["count_sessions", "started_by"], ["count_sessions", "blind"], ["count_sessions", "warehouse_id"], ["count_sessions", "started_at"],
+      ["count_session_lines", "reference_quantity"], ["count_session_lines", "counted_at"], ["count_session_lines", "location_id"], ["count_session_lines", "stock_dimension_id"],
+      ["count_session_lines", "session_id"], ["count_session_lines", "item_id"],
+      ["item_stock_policies", "version"], ["item_stock_policies", "warehouse_id"], ["item_stock_policies", "item_id"],
+      ["stock_alerts", "resolved_at"], ["stock_alerts", "opened_at"], ["stock_alerts", "kind"], ["stock_alerts", "warehouse_id"], ["stock_alerts", "item_id"],
+    ];
+    const yesUpdate: [string, string][] = [
+      ["warehouse_tasks", "status"], ["warehouse_tasks", "assigned_membership_id"], ["count_sessions", "status"], ["count_sessions", "approved_by"],
+      ["count_sessions", "cancel_reason"], ["count_session_lines", "counted_quantity"], ["count_session_lines", "counted_by"],
+      ["item_stock_policies", "min_quantity"], ["item_stock_policies", "max_quantity"], ["stock_alerts", "status"], ["tenant_settings", "count_abandon_hours"],
+    ];
+    for (const [t, c] of noInsert) {
+      const r = await admin.query<{ p: boolean }>("SELECT has_column_privilege('wms_app', $1, $2, 'INSERT') AS p", [`public.${t}`, c]);
+      expect(r.rows[0]?.p, `${t}.${c} INSERT`).toBe(false);
+    }
+    for (const [t, c] of noUpdate) {
+      const r = await admin.query<{ p: boolean }>("SELECT has_column_privilege('wms_app', $1, $2, 'UPDATE') AS p", [`public.${t}`, c]);
+      expect(r.rows[0]?.p, `${t}.${c} UPDATE`).toBe(false);
+    }
+    for (const [t, c] of yesUpdate) {
+      const r = await admin.query<{ p: boolean }>("SELECT has_column_privilege('wms_app', $1, $2, 'UPDATE') AS p", [`public.${t}`, c]);
+      expect(r.rows[0]?.p, `${t}.${c} UPDATE`).toBe(true);
+    }
+  });
+
+  it("status/versiyon/onay alanı için doğrudan INSERT 42501 (görev status, oturum status/approved_by, uyarı status)", async () => {
+    expectFail(await asApp(A.tenantId, (q) => q("INSERT INTO public.warehouse_tasks (tenant_id, warehouse_id, kind, status) VALUES ($1, $2, 'PICK', 'DONE')", [A.tenantId, A.warehouseId])), INSUFFICIENT_PRIVILEGE, "task status");
+    expectFail(await asApp(A.tenantId, (q) => q("INSERT INTO public.count_sessions (tenant_id, warehouse_id, started_by, status) VALUES ($1, $2, $3, 'APPROVED')", [A.tenantId, A.warehouseId, A.ownerMembershipId])), INSUFFICIENT_PRIVILEGE, "session status");
+    expectFail(await asApp(A.tenantId, (q) => q("INSERT INTO public.count_sessions (tenant_id, warehouse_id, started_by, approved_by) VALUES ($1, $2, $3, $3)", [A.tenantId, A.warehouseId, A.ownerMembershipId])), INSUFFICIENT_PRIVILEGE, "session approved_by");
+    expectFail(await asApp(A.tenantId, (q) => q("INSERT INTO public.stock_alerts (tenant_id, kind, warehouse_id, item_id, observed_quantity, threshold, status) VALUES ($1, 'MIN_MAX', $2, $3, 1, 2, 'RESOLVED')", [A.tenantId, A.warehouseId, A.itemId])), INSUFFICIENT_PRIVILEGE, "alert status");
+  });
+});
+
+describe("T-302 tenant yalıtımı (AC-04 DB katmanı, yeni tablolar)", () => {
+  it("B tenant'ının görev/oturum/satır/politika/uyarı satırları A bağlamında görünmez; A bağlamında B tenant_id'li satır yazılamaz (42501)", async () => {
+    const r = await asApp(B.tenantId, async (q) => {
+      await q(insTask, [B.tenantId, randomUUID(), B.warehouseId, "PUTAWAY", B.rootLocationId, B.itemNoneId, "1"]);
+      const sid = await mkSession(q, B);
+      await q(insSessionLine, [B.tenantId, randomUUID(), sid, B.warehouseId, B.rootLocationId, B.dimensionId, B.itemNoneId, "10"]);
+      await q(insPolicy, [B.tenantId, randomUUID(), B.warehouseId, B.itemId, "1", "5"]);
+      await q(insAlert, [B.tenantId, randomUUID(), "MIN_MAX", B.warehouseId, B.itemId, "0", "1"]);
+      await setCtx(q, A.tenantId);
+      for (const t of NEW_TABLES_302) {
+        const c = await q(`SELECT count(*)::int AS n FROM public.${t} WHERE tenant_id = $1`, [B.tenantId]);
+        expect(c.rows[0]?.n, `${t} A bağlamında B satırı görünür`).toBe(0);
+        const own = await q(`SELECT count(*)::int AS n FROM public.${t}`);
+        expect(own.rows[0]?.n, `${t} A kendi satırlarını görmeli`).toBeGreaterThanOrEqual(1);
+      }
+    });
+    expectOk(r, "B satırları A'dan görünmez");
+
+    const w: [string, string, unknown[]][] = [
+      ["warehouse_tasks", insTask, [B.tenantId, randomUUID(), A.warehouseId, "PUTAWAY", null, null, null]],
+      ["count_sessions", insSession, [B.tenantId, randomUUID(), A.warehouseId, false, A.ownerMembershipId]],
+      ["item_stock_policies", insPolicy, [B.tenantId, randomUUID(), A.warehouseId, A.itemId, "1", "5"]],
+      ["stock_alerts", insAlert, [B.tenantId, randomUUID(), "MIN_MAX", A.warehouseId, A.itemId, "0", "1"]],
+    ];
+    for (const [t, sql, p] of w) expectFail(await asApp(A.tenantId, (q) => q(sql, p)), INSUFFICIENT_PRIVILEGE, `${t} B satırı A bağlamında`);
+    // Bağlamsız (tenant ayarı yok) bağlantı satır görmez.
+    await app.query("BEGIN");
+    try {
+      for (const t of NEW_TABLES_302) {
+        const c = await app.query<{ n: number }>(`SELECT count(*)::int AS n FROM public.${t}`);
+        expect(c.rows[0]?.n, `${t} bağlamsız`).toBe(0);
+      }
+    } finally {
+      await app.query("ROLLBACK");
+    }
+  });
+
+  it("başka tenant'ın üyeliği/oturumu/ürünü/lokasyonu A satırına bağlanamaz (23503)", async () => {
+    expectFail(await asApp(A.tenantId, (q) => q(insSession, [A.tenantId, randomUUID(), A.warehouseId, false, B.ownerMembershipId])), FK_VIOLATION, "oturum started_by = B üyeliği");
+    expectFail(
+      await asApp(A.tenantId, async (q) => {
+        const t = randomUUID();
+        await q(insTask, [A.tenantId, t, A.warehouseId, "PICK", null, null, null]);
+        await q("UPDATE public.warehouse_tasks SET status = 'ASSIGNED', assigned_membership_id = $2 WHERE id = $1", [t, B.memberMembershipId]);
+      }),
+      FK_VIOLATION,
+      "görev atanan = B üyeliği",
+    );
+    expectFail(await asApp(A.tenantId, (q) => q(insTask, [A.tenantId, randomUUID(), A.warehouseId, "PUTAWAY", B.rootLocationId, null, null])), FK_VIOLATION, "görev lokasyonu = B");
+    expectFail(await asApp(A.tenantId, (q) => q(insPolicy, [A.tenantId, randomUUID(), A.warehouseId, B.itemId, "1", "2"])), FK_VIOLATION, "politika ürünü = B");
+    expectFail(await asApp(A.tenantId, (q) => q(insAlert, [A.tenantId, randomUUID(), "MIN_MAX", B.warehouseId, A.itemId, "0", "1"])), FK_VIOLATION, "uyarı deposu = B");
+    expectFail(
+      await asApp(A.tenantId, async (q) => {
+        const sid = await mkSession(q, A);
+        await q(insSessionLine, [A.tenantId, randomUUID(), sid, A.warehouseId, A.rootLocationId, B.dimensionId, A.itemNoneId, "1"]);
+      }),
+      FK_VIOLATION,
+      "satır boyutu = B",
+    );
+  });
+});
+
+describe("T-302 sayım kilidi → oturum FK'si (A-84) ve A-85 CHECK'i", () => {
+  it("COUNTING satırı var olmayan oturuma 23503; var olan oturuma kabul; A-85 CHECK (COUNTING ama oturum boş) 23514 korunur", async () => {
+    expectFail(await asApp(A.tenantId, (q) => q(lockSql, [A.tenantId, randomUUID(), A.ownerMembershipId, A.rootLocationId])), FK_VIOLATION, "var olmayan oturum");
+    expectFail(await asApp(A.tenantId, (q) => q(lockSql, [A.tenantId, B.countSessionId, A.ownerMembershipId, A.rootLocationId])), FK_VIOLATION, "B'nin oturumu (RLS'e göre görünmez)");
+    expectOk(
+      await asApp(A.tenantId, async (q) => {
+        const sid = await mkSession(q, A);
+        await q(lockSql, [A.tenantId, sid, A.ownerMembershipId, A.rootLocationId]);
+        const r = await q("SELECT status, count_session_id FROM public.location_count_locks WHERE location_id = $1", [A.rootLocationId]);
+        expect(r.rows).toEqual([{ status: "COUNTING", count_session_id: sid }]);
+      }),
+      "gerçek oturum",
+    );
+    expectFail(
+      await asApp(A.tenantId, (q) => q("UPDATE public.location_count_locks SET status = 'COUNTING' WHERE tenant_id = $1 AND location_id = $2", [A.tenantId, A.rootLocationId])),
+      CHECK_VIOLATION,
+      "A-85: COUNTING ama oturum boş",
+    );
+    expectFail(
+      await asApp(A.tenantId, async (q) => {
+        const sid = await mkSession(q, A);
+        await q("UPDATE public.location_count_locks SET status = 'IDLE', count_session_id = $2 WHERE tenant_id = $1 AND location_id = $3", [A.tenantId, sid, A.rootLocationId]);
+      }),
+      CHECK_VIOLATION,
+      "A-85: IDLE ama oturum dolu",
+    );
+  });
+
+  it("kilide bağlı oturum silinemez/başka tenant'a taşınamaz: sahip düzeyinde de oturum satırı kilit varken silmek 23503", async () => {
+    const r = await asAdmin(A.tenantId, async (q) => {
+      const sid = await mkSession(q, A);
+      await q(lockSql, [A.tenantId, sid, A.ownerMembershipId, A.rootLocationId]);
+      await q("DELETE FROM public.count_sessions WHERE id = $1", [sid]);
+    }, true);
+    expectFail(r, FK_VIOLATION, "kilitli oturum silme");
+  });
+});
+
+describe("T-302 görevler (warehouse_tasks)", () => {
+  it("ASSIGNED ⇒ atanan dolu (23514); atanınca kabul; DONE'a geçişte completed_at sunucuda yazılır, version +1; terminal görev değişmez", async () => {
+    expectFail(
+      await asApp(A.tenantId, async (q) => {
+        const t = randomUUID();
+        await q(insTask, [A.tenantId, t, A.warehouseId, "PICK", null, null, null]);
+        await q("UPDATE public.warehouse_tasks SET status = 'ASSIGNED' WHERE id = $1", [t]);
+      }),
+      CHECK_VIOLATION,
+      "ASSIGNED atanansız",
+    );
+    expectOk(
+      await asApp(A.tenantId, async (q) => {
+        const t = randomUUID();
+        await q(insTask, [A.tenantId, t, A.warehouseId, "PUTAWAY", A.rootLocationId, A.itemNoneId, "3.5"]);
+        const o = await q("SELECT status, version, completed_at FROM public.warehouse_tasks WHERE id = $1", [t]);
+        expect(o.rows).toEqual([{ status: "OPEN", version: 1, completed_at: null }]);
+        await q("UPDATE public.warehouse_tasks SET status = 'ASSIGNED', assigned_membership_id = $2 WHERE id = $1", [t, A.memberMembershipId]);
+        await q("UPDATE public.warehouse_tasks SET status = 'DONE' WHERE id = $1", [t]);
+        const d = await q("SELECT status, version, completed_at IS NOT NULL AS done, assigned_membership_id FROM public.warehouse_tasks WHERE id = $1", [t]);
+        expect(d.rows).toEqual([{ status: "DONE", version: 3, done: true, assigned_membership_id: A.memberMembershipId }]);
+        await q("UPDATE public.warehouse_tasks SET status = 'DONE' WHERE id = $1", [t]); // değişmeyen UPDATE geçer
+      }),
+      "atama + tamamlama",
+    );
+    for (const terminal of ["DONE", "CANCELLED"]) {
+      expectFail(
+        await asApp(A.tenantId, async (q) => {
+          const t = randomUUID();
+          await q(insTask, [A.tenantId, t, A.warehouseId, "PICK", null, null, null]);
+          await q("UPDATE public.warehouse_tasks SET status = $2 WHERE id = $1", [t, terminal]);
+          await q("UPDATE public.warehouse_tasks SET status = 'OPEN' WHERE id = $1", [t]);
+        }),
+        CHECK_VIOLATION,
+        `${terminal} terminal`,
+      );
+    }
+  });
+
+  it("CHECK'ler: kind/status/source beyaz listesi, kaynak çifti, miktar>0 ve ürün gerekir; lokasyon görevin deposunda olmalı (23503)", async () => {
+    const bad: [string, string, unknown[]][] = [
+      ["kind", insTask, [A.tenantId, randomUUID(), A.warehouseId, "SHIP", null, null, null]],
+      ["miktar 0", insTask, [A.tenantId, randomUUID(), A.warehouseId, "PICK", null, A.itemNoneId, "0"]],
+      ["miktar ürünsüz", insTask, [A.tenantId, randomUUID(), A.warehouseId, "PICK", null, null, "1"]],
+      ["source_kind tek başına", "INSERT INTO public.warehouse_tasks (tenant_id, warehouse_id, kind, source_kind) VALUES ($1, $2, 'PICK', 'SALES_ORDER')", [A.tenantId, A.warehouseId]],
+      ["source_kind beyaz liste", "INSERT INTO public.warehouse_tasks (tenant_id, warehouse_id, kind, source_kind, source_id) VALUES ($1, $2, 'PICK', 'TASK', gen_random_uuid())", [A.tenantId, A.warehouseId]],
+      ["source_line kaynaksız", "INSERT INTO public.warehouse_tasks (tenant_id, warehouse_id, kind, source_line_id) VALUES ($1, $2, 'PICK', gen_random_uuid())", [A.tenantId, A.warehouseId]],
+    ];
+    for (const [label, sql, p] of bad) expectFail(await asApp(A.tenantId, (q) => q(sql, p)), CHECK_VIOLATION, label);
+    expectOk(
+      await asApp(A.tenantId, (q) => q("INSERT INTO public.warehouse_tasks (tenant_id, warehouse_id, kind, source_kind, source_id, source_line_id, group_id) VALUES ($1, $2, 'PICK', 'SALES_ORDER', gen_random_uuid(), gen_random_uuid(), gen_random_uuid())", [A.tenantId, A.warehouseId])),
+      "geçerli kaynak bağlantılı görev",
+    );
+    expectFail(
+      await asApp(A.tenantId, async (q) => {
+        const w2 = await mkSecondWarehouse(q, A);
+        await q(insTask, [A.tenantId, randomUUID(), A.warehouseId, "PUTAWAY", w2.locationId, null, null]);
+      }),
+      FK_VIOLATION,
+      "başka depodaki lokasyon",
+    );
+  });
+
+  it("anahtar sütunlar tablo sahibi dahil değişmez (23514)", async () => {
+    for (const set of ["kind = 'PICK'", "quantity = 9", "created_at = now() + interval '1 day'"]) {
+      expectFail(
+        await asAdmin(A.tenantId, (q) => q(`UPDATE public.warehouse_tasks SET ${set} WHERE tenant_id = $1 AND kind = 'PUTAWAY'`, [A.tenantId])),
+        CHECK_VIOLATION,
+        set,
+      );
+    }
+  });
+});
+
+describe("T-302 sayım oturumu ve satırları", () => {
+  it("oturum COUNTING doğar; onay APPROVED'a geçerken approved_by zorunlu (23514) ve approved_at sunucuda yazılır; geri gitmez; CANCELLED gerekçe ister", async () => {
+    expectOk(
+      await asApp(A.tenantId, async (q) => {
+        const sid = await mkSession(q, A);
+        const o = await q("SELECT status, blind, approved_by, approved_at, cancel_reason, started_at IS NOT NULL AS has_start FROM public.count_sessions WHERE id = $1", [sid]);
+        expect(o.rows).toEqual([{ status: "COUNTING", blind: false, approved_by: null, approved_at: null, cancel_reason: null, has_start: true }]);
+        await q("UPDATE public.count_sessions SET status = 'SUBMITTED' WHERE id = $1", [sid]);
+        await q("UPDATE public.count_sessions SET status = 'APPROVED', approved_by = $2 WHERE id = $1", [sid, A.ownerMembershipId]);
+        const a = await q("SELECT status, approved_by, approved_at IS NOT NULL AS has_at FROM public.count_sessions WHERE id = $1", [sid]);
+        expect(a.rows).toEqual([{ status: "APPROVED", approved_by: A.ownerMembershipId, has_at: true }]);
+        await q("UPDATE public.count_sessions SET status = 'POSTED' WHERE id = $1", [sid]);
+      }),
+      "tam yaşam döngüsü",
+    );
+    const fails: [string, (q: Q) => Promise<unknown>][] = [
+      ["onaysız APPROVED", async (q) => { const s = await mkSession(q, A); await q("UPDATE public.count_sessions SET status = 'APPROVED' WHERE id = $1", [s]); }],
+      ["COUNTING iken approved_by", async (q) => { const s = await mkSession(q, A); await q("UPDATE public.count_sessions SET approved_by = $2 WHERE id = $1", [s, A.ownerMembershipId]); }],
+      ["gerekçesiz CANCELLED", async (q) => { const s = await mkSession(q, A); await q("UPDATE public.count_sessions SET status = 'CANCELLED' WHERE id = $1", [s]); }],
+      ["boş gerekçe", async (q) => { const s = await mkSession(q, A); await q("UPDATE public.count_sessions SET status = 'CANCELLED', cancel_reason = '  ' WHERE id = $1", [s]); }],
+      ["gerekçe CANCELLED olmadan", async (q) => { const s = await mkSession(q, A); await q("UPDATE public.count_sessions SET cancel_reason = 'x' WHERE id = $1", [s]); }],
+      ["SUBMITTED → COUNTING", async (q) => { const s = await mkSession(q, A); await q("UPDATE public.count_sessions SET status = 'SUBMITTED' WHERE id = $1", [s]); await q("UPDATE public.count_sessions SET status = 'COUNTING' WHERE id = $1", [s]); }],
+      ["CANCELLED sonrası geri", async (q) => { const s = await mkSession(q, A); await q("UPDATE public.count_sessions SET status = 'CANCELLED', cancel_reason = 'x' WHERE id = $1", [s]); await q("UPDATE public.count_sessions SET status = 'COUNTING', cancel_reason = NULL WHERE id = $1", [s]); }],
+      ["POSTED sonrası iptal", async (q) => { const s = await mkSession(q, A); await q("UPDATE public.count_sessions SET status = 'SUBMITTED' WHERE id = $1", [s]); await q("UPDATE public.count_sessions SET status = 'APPROVED', approved_by = $2 WHERE id = $1", [s, A.ownerMembershipId]); await q("UPDATE public.count_sessions SET status = 'POSTED' WHERE id = $1", [s]); await q("UPDATE public.count_sessions SET status = 'CANCELLED', cancel_reason = 'x' WHERE id = $1", [s]); }],
+      ["COUNTING → POSTED (onay atlatılamaz)", async (q) => { const s = await mkSession(q, A); await q("UPDATE public.count_sessions SET status = 'POSTED' WHERE id = $1", [s]); }],
+      ["COUNTING → POSTED onaylı alanlarla", async (q) => { const s = await mkSession(q, A); await q("UPDATE public.count_sessions SET status = 'POSTED', approved_by = $2 WHERE id = $1", [s, A.ownerMembershipId]); }],
+      ["SUBMITTED → POSTED (onay atlatılamaz)", async (q) => { const s = await mkSession(q, A); await q("UPDATE public.count_sessions SET status = 'SUBMITTED' WHERE id = $1", [s]); await q("UPDATE public.count_sessions SET status = 'POSTED', approved_by = $2 WHERE id = $1", [s, A.ownerMembershipId]); }],
+      ["COUNTING → APPROVED (gönderim atlatılamaz)", async (q) => { const s = await mkSession(q, A); await q("UPDATE public.count_sessions SET status = 'APPROVED', approved_by = $2 WHERE id = $1", [s, A.ownerMembershipId]); }],
+      ["APPROVED → SUBMITTED", async (q) => { const s = await mkSession(q, A); await q("UPDATE public.count_sessions SET status = 'SUBMITTED' WHERE id = $1", [s]); await q("UPDATE public.count_sessions SET status = 'APPROVED', approved_by = $2 WHERE id = $1", [s, A.ownerMembershipId]); await q("UPDATE public.count_sessions SET status = 'SUBMITTED' WHERE id = $1", [s]); }],
+      ["durum beyaz liste", async (q) => { const s = await mkSession(q, A); await q("UPDATE public.count_sessions SET status = 'DONE' WHERE id = $1", [s]); }],
+    ];
+    for (const [label, work] of fails) expectFail(await asApp(A.tenantId, work), CHECK_VIOLATION, label);
+    expectFail(await asAdmin(A.tenantId, (q) => q("UPDATE public.count_sessions SET blind = NOT blind WHERE tenant_id = $1", [A.tenantId])), CHECK_VIOLATION, "blind değişmez (sahip)");
+  });
+
+  it("satır: boyutsuz satırın referansı 0; boyut-ürün uyumu ve oturum-depo/lokasyon-depo uyumu bileşik FK ile (23503); mükerrer satır 23505", async () => {
+    expectFail(
+      await asApp(A.tenantId, async (q) => {
+        const sid = await mkSession(q, A);
+        await q(insSessionLine, [A.tenantId, randomUUID(), sid, A.warehouseId, A.rootLocationId, null, A.itemId, "1"]);
+      }),
+      CHECK_VIOLATION,
+      "boyutsuz satır referans > 0",
+    );
+    expectOk(
+      await asApp(A.tenantId, async (q) => {
+        const sid = await mkSession(q, A);
+        await q(insSessionLine, [A.tenantId, randomUUID(), sid, A.warehouseId, A.rootLocationId, null, A.itemId, "0"]);
+      }),
+      "sistemde olmayan sayılan ürün (boyutsuz, referans 0)",
+    );
+    expectFail(
+      await asApp(A.tenantId, async (q) => {
+        const sid = await mkSession(q, A);
+        await q(insSessionLine, [A.tenantId, randomUUID(), sid, A.warehouseId, A.rootLocationId, A.dimensionId, A.itemId, "1"]); // boyut itemNone'a ait
+      }),
+      FK_VIOLATION,
+      "boyut-ürün uyuşmazlığı",
+    );
+    expectFail(
+      await asApp(A.tenantId, async (q) => {
+        const w2 = await mkSecondWarehouse(q, A);
+        const sid = await mkSession(q, A);
+        await q(insSessionLine, [A.tenantId, randomUUID(), sid, A.warehouseId, w2.locationId, null, A.itemId, "0"]);
+      }),
+      FK_VIOLATION,
+      "lokasyon başka depoda",
+    );
+    expectFail(
+      await asApp(A.tenantId, async (q) => {
+        const w2 = await mkSecondWarehouse(q, A);
+        const sid = await mkSession(q, A);
+        await q(insSessionLine, [A.tenantId, randomUUID(), sid, w2.warehouseId, w2.locationId, null, A.itemId, "0"]);
+      }),
+      FK_VIOLATION,
+      "satır deposu oturum deposundan farklı",
+    );
+    expectFail(
+      await asApp(A.tenantId, async (q) => {
+        const sid = await mkSession(q, A);
+        await q(insSessionLine, [A.tenantId, randomUUID(), sid, A.warehouseId, A.rootLocationId, A.dimensionId, A.itemNoneId, "10"]);
+        await q(insSessionLine, [A.tenantId, randomUUID(), sid, A.warehouseId, A.rootLocationId, A.dimensionId, A.itemNoneId, "10"]);
+      }),
+      UNIQUE_VIOLATION,
+      "aynı boyut iki satır",
+    );
+    expectFail(
+      await asApp(A.tenantId, async (q) => {
+        const sid = await mkSession(q, A);
+        await q(insSessionLine, [A.tenantId, randomUUID(), sid, A.warehouseId, A.rootLocationId, null, A.itemId, "0"]);
+        await q(insSessionLine, [A.tenantId, randomUUID(), sid, A.warehouseId, A.rootLocationId, null, A.itemId, "0"]);
+      }),
+      UNIQUE_VIOLATION,
+      "aynı lokasyon×ürün boyutsuz iki satır",
+    );
+  });
+
+  it("sayım değeri: counted_quantity/counted_by birlikte; counted_at sunucuda; referans bakiye UPDATE edilemez (42501, sahip düzeyinde 23514)", async () => {
+    expectOk(
+      await asApp(A.tenantId, async (q) => {
+        const sid = await mkSession(q, A);
+        const lid = randomUUID();
+        await q(insSessionLine, [A.tenantId, lid, sid, A.warehouseId, A.rootLocationId, A.dimensionId, A.itemNoneId, "10"]);
+        await q("UPDATE public.count_session_lines SET counted_quantity = 9.5, counted_by = $2 WHERE id = $1", [lid, A.ownerMembershipId]);
+        const r = await q("SELECT reference_quantity::text AS ref, counted_quantity::text AS c, counted_at IS NOT NULL AS has_at FROM public.count_session_lines WHERE id = $1", [lid]);
+        expect(r.rows).toEqual([{ ref: "10.000000", c: "9.500000", has_at: true }]);
+        await q("UPDATE public.count_session_lines SET counted_quantity = NULL, counted_by = NULL WHERE id = $1", [lid]);
+        const z = await q("SELECT counted_at FROM public.count_session_lines WHERE id = $1", [lid]);
+        expect(z.rows).toEqual([{ counted_at: null }]);
+      }),
+      "sayım yazımı",
+    );
+    const mk = async (q: Q): Promise<string> => {
+      const sid = await mkSession(q, A);
+      const lid = randomUUID();
+      await q(insSessionLine, [A.tenantId, lid, sid, A.warehouseId, A.rootLocationId, A.dimensionId, A.itemNoneId, "10"]);
+      return lid;
+    };
+    expectFail(await asApp(A.tenantId, async (q) => { const l = await mk(q); await q("UPDATE public.count_session_lines SET counted_quantity = 1 WHERE id = $1", [l]); }), CHECK_VIOLATION, "sayan olmadan değer");
+    expectFail(await asApp(A.tenantId, async (q) => { const l = await mk(q); await q("UPDATE public.count_session_lines SET counted_quantity = -1, counted_by = $2 WHERE id = $1", [l, A.ownerMembershipId]); }), CHECK_VIOLATION, "negatif sayım");
+    expectFail(await asApp(A.tenantId, async (q) => { const l = await mk(q); await q("UPDATE public.count_session_lines SET reference_quantity = 0 WHERE id = $1", [l]); }), INSUFFICIENT_PRIVILEGE, "referans (wms_app)");
+    expectFail(await asAdmin(A.tenantId, (q) => q("UPDATE public.count_session_lines SET reference_quantity = reference_quantity + 1 WHERE tenant_id = $1", [A.tenantId])), CHECK_VIOLATION, "referans (sahip)");
+  });
+});
+
+describe("T-302 onaylanmış/kapanmış oturumun satırı değişmez", () => {
+  it("APPROVED/POSTED/CANCELLED oturumda satır INSERT/UPDATE 23514 (onaylanan fark donar); COUNTING/SUBMITTED oturumda geçer; kapanmış oturumda değişmeyen UPDATE geçer", async () => {
+    const closeAs = async (q: Q, sid: string, to: "CANCELLED" | "APPROVED" | "POSTED"): Promise<void> => {
+      if (to === "CANCELLED") await q("UPDATE public.count_sessions SET status = 'CANCELLED', cancel_reason = 'x' WHERE id = $1", [sid]);
+      else if (to === "APPROVED") {
+        await q("UPDATE public.count_sessions SET status = 'SUBMITTED' WHERE id = $1", [sid]);
+        await q("UPDATE public.count_sessions SET status = 'APPROVED', approved_by = $2 WHERE id = $1", [sid, A.ownerMembershipId]);
+      } else {
+        await q("UPDATE public.count_sessions SET status = 'SUBMITTED' WHERE id = $1", [sid]);
+        await q("UPDATE public.count_sessions SET status = 'APPROVED', approved_by = $2 WHERE id = $1", [sid, A.ownerMembershipId]);
+        await q("UPDATE public.count_sessions SET status = 'POSTED' WHERE id = $1", [sid]);
+      }
+    };
+    for (const to of ["CANCELLED", "APPROVED", "POSTED"] as const) {
+      expectFail(
+        await asApp(A.tenantId, async (q) => {
+          const sid = await mkSession(q, A);
+          const lid = randomUUID();
+          await q(insSessionLine, [A.tenantId, lid, sid, A.warehouseId, A.rootLocationId, A.dimensionId, A.itemNoneId, "10"]);
+          await closeAs(q, sid, to);
+          await q("UPDATE public.count_session_lines SET counted_quantity = 1, counted_by = $2 WHERE id = $1", [lid, A.ownerMembershipId]);
+        }),
+        CHECK_VIOLATION,
+        `${to} oturumda satır UPDATE`,
+      );
+      expectFail(
+        await asApp(A.tenantId, async (q) => {
+          const sid = await mkSession(q, A);
+          await closeAs(q, sid, to);
+          await q(insSessionLine, [A.tenantId, randomUUID(), sid, A.warehouseId, A.rootLocationId, null, A.itemId, "0"]);
+        }),
+        CHECK_VIOLATION,
+        `${to} oturuma satır INSERT`,
+      );
+    }
+    expectOk(
+      await asApp(A.tenantId, async (q) => {
+        const sid = await mkSession(q, A);
+        const lid = randomUUID();
+        await q(insSessionLine, [A.tenantId, lid, sid, A.warehouseId, A.rootLocationId, A.dimensionId, A.itemNoneId, "10"]);
+        await q("UPDATE public.count_sessions SET status = 'SUBMITTED' WHERE id = $1", [sid]);
+        await q("UPDATE public.count_session_lines SET counted_quantity = 2, counted_by = $2 WHERE id = $1", [lid, A.ownerMembershipId]);
+        await closeAs(q, sid, "CANCELLED");
+        await q("UPDATE public.count_session_lines SET counted_quantity = counted_quantity WHERE id = $1", [lid]);
+      }),
+      "açık oturumda yazım + kapanmışta no-op",
+    );
+  });
+});
+
+describe("T-302 min-maks politikası ve uyarılar", () => {
+  it("CHECK 0 ≤ min ≤ max (23514); depo × ürün tek politika (23505, A-131); değerler güncellenebilir", async () => {
+    for (const [label, mn, mx] of [["min > max", "5", "4"], ["min < 0", "-1", "4"]] as const) {
+      expectFail(await asApp(A.tenantId, (q) => q(insPolicy, [A.tenantId, randomUUID(), A.warehouseId, A.itemId, mn, mx])), CHECK_VIOLATION, label);
+    }
+    expectFail(await asApp(A.tenantId, (q) => q(insPolicy, [A.tenantId, randomUUID(), A.warehouseId, A.itemNoneId, "1", "2"])), UNIQUE_VIOLATION, "ikinci politika (fikstürde var)");
+    expectOk(
+      await asApp(A.tenantId, async (q) => {
+        await q(insPolicy, [A.tenantId, randomUUID(), A.warehouseId, A.itemId, "0", "0"]);
+        await q("UPDATE public.item_stock_policies SET min_quantity = 1, max_quantity = 7.5 WHERE tenant_id = $1 AND item_id = $2", [A.tenantId, A.itemId]);
+        const r = await q("SELECT version, max_quantity::text AS mx FROM public.item_stock_policies WHERE item_id = $1", [A.itemId]);
+        expect(r.rows).toEqual([{ version: 2, mx: "7.500000" }]);
+      }),
+      "min = max = 0 ve güncelleme",
+    );
+    expectFail(await asApp(A.tenantId, (q) => q("UPDATE public.item_stock_policies SET min_quantity = 99 WHERE tenant_id = $1", [A.tenantId])), CHECK_VIOLATION, "güncellemede min > max");
+  });
+
+  it("aynı depo × ürün için ikinci OPEN uyarı 23505; kapatılınca yenisi açılabilir; RESOLVED terminal ve resolved_at sunucuda", async () => {
+    expectFail(await asApp(A.tenantId, (q) => q(insAlert, [A.tenantId, randomUUID(), "MIN_MAX", A.warehouseId, A.itemNoneId, "0", "2"])), UNIQUE_VIOLATION, "ikinci OPEN (fikstürde var)");
+    expectOk(
+      await asApp(A.tenantId, async (q) => {
+        await q("UPDATE public.stock_alerts SET status = 'RESOLVED' WHERE tenant_id = $1 AND item_id = $2", [A.tenantId, A.itemNoneId]);
+        const r = await q("SELECT status, resolved_at IS NOT NULL AS has_at FROM public.stock_alerts WHERE tenant_id = $1 AND item_id = $2", [A.tenantId, A.itemNoneId]);
+        expect(r.rows).toEqual([{ status: "RESOLVED", has_at: true }]);
+        await q(insAlert, [A.tenantId, randomUUID(), "MIN_MAX", A.warehouseId, A.itemNoneId, "0", "2"]);
+        const n = await q("SELECT count(*)::int AS n FROM public.stock_alerts WHERE tenant_id = $1 AND item_id = $2", [A.tenantId, A.itemNoneId]);
+        expect(n.rows[0]?.n).toBe(2);
+      }),
+      "kapat ve yeniden aç",
+    );
+    expectFail(
+      await asApp(A.tenantId, async (q) => {
+        await q("UPDATE public.stock_alerts SET status = 'RESOLVED' WHERE tenant_id = $1 AND item_id = $2", [A.tenantId, A.itemNoneId]);
+        await q("UPDATE public.stock_alerts SET status = 'OPEN' WHERE tenant_id = $1 AND item_id = $2", [A.tenantId, A.itemNoneId]);
+      }),
+      CHECK_VIOLATION,
+      "RESOLVED yeniden açılamaz",
+    );
+    expectFail(await asApp(A.tenantId, (q) => q(insAlert, [A.tenantId, randomUUID(), "STOCKOUT", A.warehouseId, A.itemId, "0", "1"])), CHECK_VIOLATION, "kind beyaz liste");
+    expectFail(await asApp(A.tenantId, (q) => q(insAlert, [A.tenantId, randomUUID(), "MIN_MAX", A.warehouseId, A.itemId, "-1", "1"])), CHECK_VIOLATION, "negatif gözlem");
+  });
+
+  it("uyarı yazımı stok tablolarına dokunmaz: wms_app uyarı yazarken stock_ledger/stock_balances satır sayısı değişmez (AC-20 DB önkoşulu)", async () => {
+    const count = async (): Promise<[string, string]> => {
+      const l = await admin.query<{ n: string }>("SELECT count(*)::text AS n FROM public.stock_ledger WHERE tenant_id = $1", [A.tenantId]);
+      const b = await admin.query<{ n: string }>("SELECT count(*)::text AS n FROM public.stock_balances WHERE tenant_id = $1", [A.tenantId]);
+      return [l.rows[0]?.n ?? "", b.rows[0]?.n ?? ""];
+    };
+    const before = await count();
+    expectOk(await asApp(A.tenantId, (q) => q(insAlert, [A.tenantId, randomUUID(), "MIN_MAX", A.warehouseId, A.itemId, "0", "1"])), "uyarı yazımı");
+    expect(await count()).toEqual(before);
+  });
+});
+
+describe("T-302 COUNT_ADJUSTMENT belge türü ve count_abandon_hours", () => {
+  const insDoc =
+    "INSERT INTO public.documents (tenant_id, id, kind, type_version_id, warehouse_id, business_date, created_by) VALUES ($1, $2, $3, $4, $5, '2026-02-01', $6)";
+  const typeVersion = async (q: Q, key: string): Promise<string> => {
+    const r = await q("SELECT id FROM public.document_type_versions WHERE tenant_id IS NULL AND key = $1 AND version = 1", [key]);
+    return (r.rows[0] as { id: string }).id;
+  };
+
+  it("sistem v1 satırı vardır; COUNT_ADJUSTMENT belgesi sistem sürümüyle açılır, STOCK_IN sürümüyle 23503; beyaz liste dışı tür 23514; sayaç anahtarı kabul", async () => {
+    expectOk(
+      await asApp(A.tenantId, async (q) => {
+        const tv = await q("SELECT version, definition FROM public.document_type_versions WHERE tenant_id IS NULL AND key = 'COUNT_ADJUSTMENT'");
+        expect(tv.rows).toEqual([{ version: 1, definition: { schemaVersion: 1, kind: "COUNT_ADJUSTMENT" } }]);
+        await q(insDoc, [A.tenantId, randomUUID(), "COUNT_ADJUSTMENT", await typeVersion(q, "COUNT_ADJUSTMENT"), A.warehouseId, A.ownerUserId]);
+        await q("INSERT INTO public.number_sequences (tenant_id, document_kind, period) VALUES ($1, 'COUNT_ADJUSTMENT', '2026')", [A.tenantId]);
+      }),
+      "COUNT_ADJUSTMENT belgesi",
+    );
+    expectFail(
+      await asApp(A.tenantId, async (q) => q(insDoc, [A.tenantId, randomUUID(), "COUNT_ADJUSTMENT", await typeVersion(q, "STOCK_IN"), A.warehouseId, A.ownerUserId])),
+      FK_VIOLATION,
+      "tür/sürüm uyuşmazlığı",
+    );
+    expectFail(
+      await asApp(A.tenantId, async (q) => q(insDoc, [A.tenantId, randomUUID(), "COUNT_DIFF", await typeVersion(q, "COUNT_ADJUSTMENT"), A.warehouseId, A.ownerUserId])),
+      CHECK_VIOLATION,
+      "kind beyaz liste",
+    );
+    expectFail(await asApp(A.tenantId, (q) => q("INSERT INTO public.number_sequences (tenant_id, document_kind, period) VALUES ($1, 'COUNT_DIFF', '2026')", [A.tenantId])), CHECK_VIOLATION, "sayaç beyaz liste");
+    // Sistem satırı wms_app için değişmez (I-11).
+    expectFail(await asApp(A.tenantId, (q) => q("UPDATE public.document_type_versions SET definition = '{}'::jsonb WHERE key = 'COUNT_ADJUSTMENT'")), INSUFFICIENT_PRIVILEGE, "wms_app UPDATE");
+    expectFail(await asAdmin(A.tenantId, (q) => q("DELETE FROM public.document_type_versions WHERE key = 'COUNT_ADJUSTMENT'")), INSUFFICIENT_PRIVILEGE, "sahip DELETE (tetikleyici)");
+  });
+
+  it("tenant_settings.count_abandon_hours: varsayılan 8 (A-136); wms_app 1–168 arası günceller; dışı 23514", async () => {
+    const d = await admin.query<{ column_default: string; data_type: string; is_nullable: string }>(
+      "SELECT column_default, data_type, is_nullable FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'tenant_settings' AND column_name = 'count_abandon_hours'",
+    );
+    expect(d.rows).toEqual([{ column_default: "8", data_type: "smallint", is_nullable: "NO" }]);
+    const cur = await admin.query<{ v: number }>("SELECT count_abandon_hours AS v FROM public.tenant_settings WHERE tenant_id = $1", [A.tenantId]);
+    expect(cur.rows[0]?.v).toBe(8);
+    expectOk(
+      await asApp(A.tenantId, async (q) => {
+        const u = await q("UPDATE public.tenant_settings SET count_abandon_hours = 12 WHERE tenant_id = $1 RETURNING count_abandon_hours", [A.tenantId]);
+        expect(u.rows).toEqual([{ count_abandon_hours: 12 }]);
+      }),
+      "12 saat",
+    );
+    for (const v of [0, 169]) {
+      expectFail(await asApp(A.tenantId, (q) => q("UPDATE public.tenant_settings SET count_abandon_hours = $2 WHERE tenant_id = $1", [A.tenantId, v])), CHECK_VIOLATION, `${v} saat`);
+    }
+    expectFail(await asApp(A.tenantId, (q) => q("UPDATE public.tenant_settings SET tenant_id = tenant_id WHERE tenant_id = $1", [A.tenantId])), INSUFFICIENT_PRIVILEGE, "tenant_id yine yazılamaz (yetki genişlemedi)");
+  });
+});
