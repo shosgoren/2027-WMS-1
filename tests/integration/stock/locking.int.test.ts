@@ -330,8 +330,18 @@ describe("eşzamanlı ters sıralı planlar: deadlock yok (bariyerli, olasılık
       }
       await q("UPDATE public.stock_balances SET reserved_quantity = reserved_quantity + 3 WHERE tenant_id = $1 AND stock_dimension_id = $2", [A.tenantId, A.dimensionId]);
     });
+    // Önceki koşudan artık (Neon gibi kalıcı hedefte afterAll çalışmadıysa) SESSİZCE silinmez: yüksek sesle başarısız olur, temizlik elle yapılır.
+    const stale = await admin.query<{ what: string }>(
+      `SELECT 'trigger ' || tgname AS what FROM pg_trigger WHERE tgname LIKE 'zz\\_t238%' AND NOT tgisinternal
+       UNION ALL SELECT 'function ' || p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE p.proname LIKE 't238\\_%' AND n.nspname = 'public'`,
+    );
+    if (stale.rows.length > 0) {
+      throw new Error(
+        `T-238 test artığı bulundu (${stale.rows.map((r) => r.what).join(", ")}); önceki koşu temizlenmemiş. Elle: DROP TRIGGER zz_t238_dimension_barrier ON public.stock_dimensions; DROP FUNCTION public.t238_dimension_barrier();`,
+      );
+    }
     await admin.query(`
-      CREATE OR REPLACE FUNCTION public.t238_dimension_barrier() RETURNS trigger LANGUAGE plpgsql AS $fn$
+      CREATE FUNCTION public.t238_dimension_barrier() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $fn$
       DECLARE
         loc text := nullif(current_setting('t238.loc', true), '');
         me int; other int; n int;
@@ -356,7 +366,7 @@ describe("eşzamanlı ters sıralı planlar: deadlock yok (bariyerli, olasılık
         RETURN NEW;
       END
       $fn$`);
-    await admin.query("DROP TRIGGER IF EXISTS zz_t238_dimension_barrier ON public.stock_dimensions");
+    await admin.query("REVOKE ALL ON FUNCTION public.t238_dimension_barrier() FROM PUBLIC");
     await admin.query("CREATE TRIGGER zz_t238_dimension_barrier BEFORE INSERT ON public.stock_dimensions FOR EACH ROW EXECUTE FUNCTION public.t238_dimension_barrier()");
   }, 60_000);
 

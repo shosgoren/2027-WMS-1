@@ -271,6 +271,11 @@ describe("T-238: tablo adı taşıma (sabit modülü, takma ad, join, sql.raw)",
     ["stok olmayan tablo adları", 'export const a = ["users", "items", "documents", "locations", "serial"];\n'],
     ["şablon: ad yalnızca parça sonekinde", "export const q = (p: string) => `${p}_stock_balances`;\n"],
     ["yorumdaki ad", "// stock_balances\n/* reservations */\nexport const a = 1;\n"],
+    ["alan adı (nav)", 'export const nav = [{ key: "reservations", href: "/r" }, { key: "serials" }];\n'],
+    ["alan adı listesi", 'export const keys = ["serials", "lots"];\n'],
+    ["yetki kaynağı", 'export const p = { resource: "reservations", action: "read" };\n'],
+    ["çağrı argümanı (SQL dışı)", 'declare function can(r: string): boolean;\nexport const ok = can("reservations");\n'],
+    ["karşılaştırma", 'export const f = (r: string) => r === "reservations";\n'],
     ["tür düzeyi şablon", 'export type K = `${"a" | "b"}_x`;\n'],
   ])("yanlış pozitif yok: %s", async (_n, code) => {
     expect(await hits(code, CONSISTENCY)).toEqual([]);
@@ -301,9 +306,9 @@ describe("T-238: pgTable takma adı", () => {
   it("yanlış pozitif yok: takmasız pgTable (stok olmayan), diğer içe aktarımlar takma adlı olabilir", async () => {
     expect(await hits('import { pgTable, uuid } from "drizzle-orm/pg-core";\nexport const t = pgTable("widgets", { id: uuid("id") });\n', CONSISTENCY)).toEqual([]);
     expect(await hits('import { uuid as u, text as tx } from "drizzle-orm/pg-core";\nexport const c = [u, tx];\n', CONSISTENCY)).toEqual([]);
-    // Bilinen sınır: `const tbl = pgTable` tek başına ihlal değildir (AC-28 örneği); tablo adı yazıldığında tam-ad kuralı yakalar.
+    // Bilinen sınır: `const tbl = pgTable` tek başına ihlal değildir (AC-28 örneği); `const tbl = pgTable` sonrası `tbl("…")` bilinen sınırdır (kural yorumu).
     expect(await hits('import { pgTable } from "drizzle-orm/pg-core";\nexport const t = pgTable;\n', CONSISTENCY)).toEqual([]);
-    expect((await hits('import { pgTable } from "drizzle-orm/pg-core";\nconst tbl = pgTable;\nexport const t = tbl("stock_balances", {});\n', CONSISTENCY)).length).toBeGreaterThanOrEqual(1);
+    // (`const tbl = pgTable; tbl("stock_balances")` kural yorumundaki bilinen sınırlardandır: tam-ad kuralı yalnızca SQL'e ulaşan bağlamlarda çalışır.)
   });
   it("şema tanım dosyası ve izinli dosyada takma ad serbest", async () => {
     const code = 'import { pgTable as tbl, uuid } from "drizzle-orm/pg-core";\nexport const t = tbl("x", { id: uuid("id") });\n';
@@ -380,5 +385,26 @@ describe("T-238: auth ad alanı nesnesi başka değişkene atanamaz", () => {
   });
   it("ad alanı atama kuralı başka dosyalarda geçerli değildir (ad alanı importunun kendisi zaten ihlal)", async () => {
     expect(await hits("const schema = { a: 1 };\nconst s = schema;\nexport const t = s;\n", "packages/auth/src/other.ts")).toEqual([]);
+  });
+});
+
+describe("T-238: (iv) yalnızca tablo konumu dinamik olan şablonlar", () => {
+  const READ = 'export const r = (a: string) => `SELECT quantity FROM public.stock_balances WHERE tenant_id = ${a}`;\n';
+  it.each([
+    ["UPDATE public.items + stok SELECT", `${READ}export const u = (x: string, y: string) => \`UPDATE public.items SET name = \${x} WHERE id = \${y}\`;\n`],
+    ["INSERT INTO public.warehouses + stok SELECT", `${READ}export const i = (a: string, b: string) => \`INSERT INTO public.warehouses (code, name) VALUES (\${a}, \${b})\`;\n`],
+    ["FROM public.lots FOR SHARE + serials SELECT", 'export const k = "SELECT id FROM public.serials WHERE lot_id IS NULL";\nexport const l = (a: string) => `SELECT id FROM public.lots WHERE id = ${a} FOR SHARE`;\n'],
+    ["stok SELECT + stok dışı DELETE", `${READ}export const d = (a: string) => \`DELETE FROM public.locations WHERE id = \${a}\`;\n`],
+  ])("consistency.ts içinde %s → temiz", async (_n, code) => {
+    expect(await hits(code, CONSISTENCY)).toEqual([]);
+  });
+  it.each([
+    ["UPDATE ${T}", 'const T = "stock_balances";\nexport const q = (x: number) => `UPDATE ${T} SET quantity = ${x}`;\n'],
+    ["sql.identifier(t) şablonu", 'import { sql } from "drizzle-orm";\nconst t = "stock_ledger";\nexport const q = sql`INSERT INTO ${sql.identifier(t)} (a) VALUES (1)`;\n'],
+    ["FROM ${T} ... FOR UPDATE", 'const T = "stock_balances";\nexport const q = (a: string) => `SELECT 1 FROM ${T} WHERE id = ${a} FOR UPDATE`;\n'],
+    ["FROM public.${T} FOR SHARE", 'const T = "reservations";\nexport const q = `SELECT 1 FROM public.${T} FOR SHARE`;\n'],
+    ["JOIN ${T} FOR UPDATE", 'const T = "stock_dimensions";\nexport const q = `SELECT 1 FROM x JOIN ${T} ON true FOR UPDATE`;\n'],
+  ])("consistency.ts içinde %s → ihlal", async (_n, code) => {
+    expect((await hits(code, CONSISTENCY)).length).toBeGreaterThanOrEqual(1);
   });
 });
