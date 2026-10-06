@@ -6,19 +6,20 @@ import { ROLE_KEYS } from "@wms/domain/identity/permissions";
 import { loadMailConfig } from "@wms/shared/mailer";
 import { headers } from "next/headers";
 import { createProductionGuard, getAppDb } from "../../../../lib/action-guard.ts";
+import { getSenderQueue } from "../../../../lib/queue.ts";
 
 const slugSchema = z.string().min(1).max(63);
 
 const inviteSchema = z.object({ slug: slugSchema, email: z.string().min(3).max(254), roleKey: z.enum(ROLE_KEYS) }).strict();
 const revokeSchema = z.object({ slug: slugSchema, invitationId: z.string().uuid() }).strict();
 
-/**
- * İş kuyruğu: web süreci henüz `@wms/queue-adapter`'a bağlı değildir (apps/web/package.json bağımlılığı yok; T-109b
- * kapsamı dışında kaldı). Bu yüzden `enqueue` AÇIKÇA reddeder ve `inviteMember` A-42 geri dönüş yoluna düşer:
- * bağlantı yalnızca daveti oluşturan yöneticiye ekranda gösterilir (`screenReason: QUEUE_UNAVAILABLE`). Sahte başarı yok.
- */
+/** Kuyruk yoksa `inviteMember` A-42 geri dönüşüne düşer (ekranda bağlantı + `screenReason`); varsayılan yol EMAIL. */
 const unavailableQueue: InvitationDeps["queue"] = {
   enqueue: () => Promise.reject(new Error("job queue is not available in the web process")),
+};
+
+const logInvitation: NonNullable<InvitationDeps["log"]> = (entry) => {
+  console.error(JSON.stringify(entry));
 };
 
 const guardedAction = createProductionGuard(() => headers());
@@ -27,6 +28,7 @@ export async function inviteMemberAction(raw: unknown) {
   return guardedAction({ schema: inviteSchema }, async (input, ctx) => {
     const principal = ctx.principal;
     if (principal === null) throw new Error("unreachable: principal required");
+    const senderQueue = await getSenderQueue(); // transaction dışında başlatılır
     const result = await inviteMember(
       {
         db: getAppDb(),
@@ -36,7 +38,7 @@ export async function inviteMemberAction(raw: unknown) {
         roleKey: input.roleKey,
         requestId: ctx.requestId,
       },
-      { mailConfig: loadMailConfig(process.env), queue: unavailableQueue },
+      { mailConfig: loadMailConfig(process.env), queue: senderQueue ?? unavailableQueue, log: logInvitation },
     );
     return {
       invitationId: result.invitationId,

@@ -395,3 +395,44 @@ describe("0004_audit down bekçisi — süper kullanıcı olmayan sahip", () => 
     expect((await migrateUp({ url: u, dir: thru4() })).applied).toEqual(["0004"]);
   });
 });
+
+// 0006_invitation_accept (T-117; inceleme @99286d6 MINOR-4): yukarıdaki testler eski kopyalarında kalır; 0001–0006 ayrı kopyada.
+describe("0006_invitation_accept — süper kullanıcı olmayan migrator", () => {
+  let thru6Dir: string | undefined;
+  const thru6 = (): string => (thru6Dir ??= copyMigrations("0006"));
+  const FN = "wms_probe.invitation_tenant_for_token(text)";
+
+  async function expectFunction(u: string): Promise<void> {
+    await withClient(u, async (c) => {
+      const f = await c.query<{ owner: string; secdef: boolean; config: string[] | null; acl: string[] | null; probe_create: boolean; app: boolean; auth: boolean; probe_write: boolean }>(
+        `SELECT p.proowner::regrole::text AS owner, p.prosecdef AS secdef, p.proconfig AS config, p.proacl::text[] AS acl,
+                has_schema_privilege('${PROBE}', 'wms_probe', 'CREATE') AS probe_create,
+                has_function_privilege('wms_app', '${FN}', 'EXECUTE') AS app,
+                has_function_privilege('wms_auth', '${FN}', 'EXECUTE') AS auth,
+                (has_table_privilege('${PROBE}', 'public.invitations', 'INSERT, UPDATE, DELETE')
+                 OR has_table_privilege('${PROBE}', 'public.tenant_memberships', 'INSERT, UPDATE, DELETE')
+                 OR has_table_privilege('${PROBE}', 'public.membership_roles', 'INSERT, UPDATE, DELETE')) AS probe_write
+           FROM pg_proc p WHERE p.oid = '${FN}'::regprocedure`,
+      );
+      const r = f.rows[0];
+      expect(r).toMatchObject({ owner: PROBE, secdef: true, config: ["search_path=pg_catalog, pg_temp"], probe_create: false, app: true, auth: false, probe_write: false });
+      expect(r?.acl).not.toBeNull();
+      expect((r?.acl ?? []).filter((a) => a.startsWith("="))).toEqual([]); // PUBLIC girdisi yok
+    });
+  }
+
+  it("ileri (0001–0006) → 0006 geri → ileri hatasız; işlev probe sahipli SECURITY DEFINER, yalnızca wms_app EXECUTE, probe salt okunur", async () => {
+    await setProbeMemberships(STANDARD_GRANT);
+    const u = await freshDatabase();
+    expect((await migrateUp({ url: u, dir: thru6() })).applied).toEqual(["0001", "0002", "0003", "0004", "0005", "0006"]);
+    await expectFunction(u);
+
+    expect((await migrateDown({ url: u, dir: thru6(), to: "0005", wmsEnv: "ci" })).reverted).toEqual(["0006"]);
+    await withClient(u, async (c) => {
+      const gone = await c.query(`SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'wms_probe' AND p.proname = 'invitation_tenant_for_token'`);
+      expect(gone.rows).toEqual([]);
+    });
+    expect((await migrateUp({ url: u, dir: thru6() })).applied).toEqual(["0006"]);
+    await expectFunction(u);
+  });
+});

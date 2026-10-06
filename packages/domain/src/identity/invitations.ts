@@ -21,6 +21,10 @@ import { ROLE_KEYS, type RoleKey } from "./permissions.ts";
 
 /** Davet geçerlilik süresi (A-42). */
 export const INVITATION_TTL_HOURS = 72;
+/** Hesap girdisi sınırları: `@wms/auth` ile aynı (A-41: parola 12–128; ad ≤200). Auth yine kendi doğrulamasını yapar. */
+const ACCOUNT_NAME_MAX = 200;
+const ACCOUNT_PASSWORD_MIN = 12;
+const ACCOUNT_PASSWORD_MAX = 128;
 /** Hesap-yok akışında talebin geçerlilik süresi (T-117 m8). */
 export const INVITATION_CLAIM_TTL_MINUTES = 10;
 
@@ -115,6 +119,8 @@ export interface InvitationDeps {
   readonly mailConfig: MailConfig;
   /** Yalnızca `enqueue` kullanılır; iş komutun transaction'ında yazılır. */
   readonly queue: Pick<JobQueue<AccessTx>, "enqueue">;
+  /** Maskeli günlük (yalnızca sınıf adı/kod; alıcı, belirteç, SQL yok — G-09). */
+  readonly log?: (entry: Readonly<Record<string, unknown>>) => void;
 }
 
 export type InviteMemberParams = Omit<TenantAccessParams, "permission"> & {
@@ -187,8 +193,16 @@ export async function inviteMember(params: InviteMemberParams, deps: InvitationD
           );
           delivery = "EMAIL";
           screenReason = undefined;
-        } catch {
-          // Kök neden yanıta girmez; sonuçta `screenReason: QUEUE_UNAVAILABLE` ile görünür (sahte başarı yok, G-07).
+        } catch (cause) {
+          // Kök neden yanıta girmez; sonuçta `screenReason: QUEUE_UNAVAILABLE` ile görünür (sahte başarı yok, G-07)
+          // ve maskeli loglanır (sınıf adı + kod; mesaj bağlantı bilgisi içerebilir).
+          const c = cause as { name?: unknown; code?: unknown } | null;
+          deps.log?.({
+            level: "error",
+            msg: "invitation enqueue failed",
+            error: typeof c?.name === "string" ? c.name : "unknown",
+            ...(typeof c?.code === "string" ? { code: c.code } : {}),
+          });
           screenReason = "QUEUE_UNAVAILABLE";
         }
       }
@@ -414,8 +428,16 @@ export async function acceptInvitation(params: AcceptInvitationParams, deps: Acc
     if (principal !== null && principal !== undefined) {
       return await acceptWithExistingAccount(db, tokenHash, parseUuid(principal.userId), deps, requestId);
     }
-    if (newAccount === undefined || typeof newAccount.name !== "string" || typeof newAccount.password !== "string") {
-      throw new AppError("VALIDATION_FAILED");
+    if (
+      newAccount === undefined ||
+      typeof newAccount.name !== "string" ||
+      newAccount.name.trim() === "" ||
+      newAccount.name.length > ACCOUNT_NAME_MAX ||
+      typeof newAccount.password !== "string" ||
+      newAccount.password.length < ACCOUNT_PASSWORD_MIN ||
+      newAccount.password.length > ACCOUNT_PASSWORD_MAX
+    ) {
+      throw new AppError("VALIDATION_FAILED"); // talep yazılmadan önce (geçersiz girdi davetin talebini yakmaz)
     }
     return await acceptWithNewAccount(db, tokenHash, newAccount, deps, requestId);
   } catch (e) {
@@ -507,13 +529,16 @@ export interface PreparedInvitationDelivery {
   readonly locale: "tr" | "en";
   /** Düz belirteç: yalnızca bellek + e-posta. DB'ye yalnızca özeti yazıldı. */
   readonly token: string;
+  /** Yazılan SHA-256 özeti: sağlayıcı `Idempotency-Key`'i bundan türetilir (her yeni belirteç yeni anahtar). */
+  readonly tokenHash: string;
 }
 
 /**
  * Tenant bağlamlı transaction'da (worker `ctx.inTenant`): davet hâlâ geçerli (kabul/iptal/süre yok) ve e-posta ile
  * teslim bekliyorsa YENİ belirteç üretir, özetini yazar ve düz değeri döndürür (eski belirteç/yer tutucu geçersiz kalır;
  * yeniden denemede yeniden çağrılır). Geçerli değilse `null` (iş sessizce biter; sahte başarı değil: gönderilecek bir şey yok).
- * Çağıran e-postayı AYNI transaction içinde gönderir: gönderim hata verirse özet yazımı geri alınır.
+ * Çağıran bu transaction'ı COMMIT eder ve e-postayı transaction DIŞINDA gönderir (satır kilidi gönderim boyunca tutulmaz;
+ * T-117 MAJOR-1). Gönderim başarısızsa iş hata verir; yeniden denemede yeni belirteç/anahtar üretilir (eski bağlantı geçersiz).
  */
 export async function prepareInvitationDelivery(tx: AccessTx, invitationId: string): Promise<PreparedInvitationDelivery | null> {
   const id = parseUuid(invitationId);
@@ -530,13 +555,14 @@ export async function prepareInvitationDelivery(tx: AccessTx, invitationId: stri
   const inv = rows[0];
   if (inv === undefined) return null;
   const token = generateInvitationToken();
+  const tokenHash = hashInvitationToken(token);
   await tx.execute(
-    sql`UPDATE public.invitations SET token_hash = ${hashInvitationToken(token)}
+    sql`UPDATE public.invitations SET token_hash = ${tokenHash}
          WHERE tenant_id = ${inv.tenant_id}::uuid AND id = ${inv.id}::uuid`,
   );
   const settings = await tx.execute<{ locale: string }>(
     sql`SELECT locale FROM public.tenant_settings WHERE tenant_id = ${inv.tenant_id}::uuid`,
   );
   const locale = settings[0]?.locale === "en" ? "en" : "tr";
-  return { email: inv.email_normalized, locale, token };
+  return { email: inv.email_normalized, locale, token, tokenHash };
 }

@@ -209,12 +209,21 @@ describe(`inviteMember (target=${env.target})`, () => {
 
   it("kuyruğa yazılamazsa SCREEN'e düşer (A-42), screenReason görünür; sahte başarı yok", async () => {
     const fx = await mkTenant();
-    const broken: InvitationDeps = { mailConfig: mailOn, queue: { enqueue: () => Promise.reject(new Error("queue down")) } };
+    const logs: Record<string, unknown>[] = [];
+    const secret = `postgres://u:${randomBytes(6).toString("hex")}@db/x`;
+    const broken: InvitationDeps = {
+      mailConfig: mailOn,
+      queue: { enqueue: () => Promise.reject(Object.assign(new Error(`connect failed ${secret}`), { name: "QueueFault", code: "ECONNREFUSED" })) },
+      log: (e) => void logs.push(e),
+    };
     const r = await inviteMember({ db: app, principal: principalOf(fx.admin), tenantSlug: fx.slug, email: rndEmail(), roleKey: "PICKER" }, broken);
     expect(r.delivery).toBe("SCREEN");
     expect(r.screenReason).toBe("QUEUE_UNAVAILABLE");
     expect(r.token).toBeDefined();
     expect((await invRow(r.invitationId)).delivered_via).toBe("SCREEN");
+    // MINOR-2: kök neden maskeli loglanır (sınıf/kod); mesaj (bağlantı bilgisi) loga girmez.
+    expect(logs).toEqual([{ level: "error", msg: "invitation enqueue failed", error: "QueueFault", code: "ECONNREFUSED" }]);
+    expect(JSON.stringify(logs)).not.toContain(secret);
   });
 
   it("aynı e-postaya yeni davet eskisini iptal eder (audit: superseded)", async () => {
@@ -291,29 +300,74 @@ describe("invitation.deliver (worker)", () => {
   const tenantFor = async (hash: string): Promise<string | null> =>
     (await adm.query("SELECT wms_probe.invitation_tenant_for_token($1) AS t", [hash])).rows[0].t;
 
-  it("teslim: yeni belirteç yazılır (yalnızca özet) ve e-postayla gider; yeniden denemede yeni belirteç, eskisi geçersiz", async () => {
+  it("teslim: yeni belirteç yazılır (yalnızca özet), gönderim sırasında satır kilidi YOK, anahtar özetten türer; yeniden denemede yeni belirteç ve yeni anahtar, eskisi geçersiz", async () => {
     const fx = await mkTenant();
     const r = await inviteMember({ db: app, principal: principalOf(fx.admin), tenantSlug: fx.slug, email: rndEmail(), roleKey: "PICKER" }, deps());
     const sent: MailMessage[] = [];
-    await handlerWith(sent)(ctxFor(fx.tenant, r.invitationId));
+    let lockFreeDuringSend = false;
+    const probing = createDeliverInvitationHandler({
+      config: mailOn,
+      mailer: {
+        send: async (m) => {
+          // Gönderim anında satır kilidi tutulmuyor: ayrı bağlantıdan NOWAIT kilit alınabilir.
+          const other = new pg.Client({ connectionString: env.databaseUrlDirect });
+          other.on("error", () => undefined);
+          await other.connect();
+          try {
+            await other.query("BEGIN");
+            await other.query("SELECT 1 FROM public.invitations WHERE id = $1 FOR UPDATE NOWAIT", [r.invitationId]);
+            lockFreeDuringSend = true;
+            await other.query("ROLLBACK");
+          } finally {
+            await other.end();
+          }
+          sent.push(m);
+        },
+      },
+      logger,
+      appBaseUrl: BASE,
+    });
+    await probing(ctxFor(fx.tenant, r.invitationId));
+    expect(lockFreeDuringSend).toBe(true);
     const t1 = tokenFrom(sent[0]);
     expect((await invRow(r.invitationId)).token_hash).toBe(sha(t1));
+    expect(sent[0]?.idempotencyKey).toBe(`invitation-${sha(t1)}`);
     expect(await tenantFor(sha(t1))).toBe(fx.tenant);
     await handlerWith(sent)(ctxFor(fx.tenant, r.invitationId));
     const t2 = tokenFrom(sent[1]);
     expect(t2).not.toBe(t1);
+    expect(sent[1]?.idempotencyKey).toBe(`invitation-${sha(t2)}`);
+    expect(sent[1]?.idempotencyKey).not.toBe(sent[0]?.idempotencyKey);
     expect(await tenantFor(sha(t1))).toBeNull(); // eski belirteç geçersiz
     expect(await tenantFor(sha(t2))).toBe(fx.tenant);
     const dump = await adm.query("SELECT row_to_json(i)::text AS j FROM public.invitations i WHERE id = $1", [r.invitationId]);
     expect(dump.rows[0].j).not.toContain(t2);
   });
 
-  it("gönderim hata verirse özet yazımı geri alınır (eski değer kalır) ve hata fırlatılır", async () => {
+  it("başarısız gönderim: iş hata fırlatır; yeniden deneme YENİ belirteç + YENİ anahtarla gider ve DB'deki özet son e-postadaki belirtece aittir (lost-ack)", async () => {
     const fx = await mkTenant();
     const r = await inviteMember({ db: app, principal: principalOf(fx.admin), tenantSlug: fx.slug, email: rndEmail(), roleKey: "PICKER" }, deps());
-    const before = (await invRow(r.invitationId)).token_hash;
-    await expect(handlerWith([], true)(ctxFor(fx.tenant, r.invitationId))).rejects.toThrow();
-    expect((await invRow(r.invitationId)).token_hash).toBe(before);
+    const seen: MailMessage[] = [];
+    // Sağlayıcı e-postayı aldı ama ack kayboldu: mesaj kaydedilir, istek hata ile biter.
+    const lostAck = createDeliverInvitationHandler({
+      config: mailOn,
+      mailer: { send: (m) => (seen.push(m), Promise.reject(new Error("ack lost"))) },
+      logger,
+      appBaseUrl: BASE,
+    });
+    await expect(lostAck(ctxFor(fx.tenant, r.invitationId))).rejects.toThrow();
+    await expect(lostAck(ctxFor(fx.tenant, r.invitationId))).rejects.toThrow();
+    expect(seen).toHaveLength(2);
+    const [first, second] = [tokenFrom(seen[0]), tokenFrom(seen[1])];
+    expect(first).not.toBe(second);
+    expect(seen[0]?.idempotencyKey).not.toBe(seen[1]?.idempotencyKey);
+    expect(await tenantFor(sha(first))).toBeNull();
+    expect(await tenantFor(sha(second))).toBe(fx.tenant); // alıcının elindeki SON e-postanın belirteci geçerli
+    // Son e-postadaki belirteçle kabul tamamlanır.
+    const email = (await adm.query("SELECT email_normalized AS e FROM public.invitations WHERE id = $1", [r.invitationId])).rows[0].e as string;
+    const user = await mkUser(email, true);
+    await acceptInvitation({ db: app, token: second, principal: { userId: user } }, acceptDeps());
+    expect((await invRow(r.invitationId)).accepted_at).not.toBeNull();
   });
 
   it("iptal edilmiş / kabul edilmiş / SCREEN davet için gönderim yapılmaz (sessiz bitiş)", async () => {
@@ -531,10 +585,14 @@ describe("acceptInvitation (hesap yok; claim akışı)", () => {
     expect(members.rows[0].n).toBe(1);
   });
 
-  it("hesap yok akışında parola/ad olmadan → VALIDATION_FAILED; demo adresli davet → FORBIDDEN", async () => {
+  it("hesap yok akışında parola/ad olmadan ya da geçersizse → VALIDATION_FAILED ve talep YAZILMAZ (MINOR-1); demo adresli davet → FORBIDDEN", async () => {
     const fx = await mkTenant();
     const inv = await mkInvite(fx, { email: rndEmail() });
     expect((await failure(acceptInvitation({ db: app, token: inv.token }, acceptDeps()))).code).toBe("VALIDATION_FAILED");
+    for (const bad of [{ name: "  ", password: PASSWORD }, { name: "Ad", password: "kisa" }, { name: "Ad", password: "x".repeat(129) }, { name: "a".repeat(201), password: PASSWORD }]) {
+      expect((await failure(acceptInvitation({ db: app, token: inv.token, newAccount: bad }, acceptDeps()))).code).toBe("VALIDATION_FAILED");
+    }
+    expect((await invRow(inv.id)).claim_id).toBeNull();
     const demoInv = await mkInvite(fx, { email: rndEmail(DEMO_DOMAIN) });
     expect((await failure(acceptInvitation({ db: app, token: demoInv.token, newAccount: account }, acceptDeps()))).code).toBe("FORBIDDEN");
   });

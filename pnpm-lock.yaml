@@ -47,6 +47,9 @@ importers:
       '@wms/domain':
         specifier: workspace:*
         version: link:../../packages/domain
+      '@wms/queue-adapter':
+        specifier: workspace:*
+        version: link:../../packages/queue-adapter
       '@wms/shared':
         specifier: workspace:*
         version: link:../../packages/shared
