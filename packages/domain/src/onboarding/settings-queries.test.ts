@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { AppError } from "@wms/shared/errors";
 import { AUDIT_ACTIONS } from "@wms/db";
 import { AUDIT_OTHER_KEY, listMyActionsToday, summaryKeyFor } from "../audit/today.ts";
+import { validCursorTs } from "../audit/today-impl.ts";
 import { getTenantSettings } from "./settings-queries.ts";
 
 const db = {} as never; // doğrulama/kimlik reddi DB'ye ulaşmadan olur
@@ -20,7 +21,19 @@ describe("girdi doğrulama (DB'ye gitmeden)", () => {
     await expect(listMyActionsToday(base, { limit })).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
   });
   it("bozuk imleç → VALIDATION_FAILED", async () => {
-    await expect(listMyActionsToday(base, { cursor: { ts: "x'; --", id: "y" } })).rejects.toBeInstanceOf(AppError);
+    const rejected = listMyActionsToday(base, { cursor: { ts: "x'; --", id: "y" } });
+    await expect(rejected).rejects.toBeInstanceOf(AppError);
+    await expect(rejected).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+  });
+  it.each(["2026-02-30 10:00:00+00", "2026-13-01 10:00:00+00", "2026-01-01 25:00:00+00", "2026-01-01 10:60:00+00", "2026-01-01 10:00:00+99", "2026-01-01 10:00:00"])(
+    "geçersiz tarihli imleç %s → VALIDATION_FAILED",
+    async (ts) => {
+      expect(validCursorTs(ts)).toBe(false);
+      await expect(listMyActionsToday(base, { cursor: { ts, id: "00000000-0000-0000-0000-000000000002" } })).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+    },
+  );
+  it.each(["2026-10-06 06:14:50.123456+00", "2026-10-06 06:14:50+05:30", "2024-02-29 00:00:00.1-03"])("geçerli imleç %s kabul", (ts) => {
+    expect(validCursorTs(ts)).toBe(true);
   });
   it("principal yok → UNAUTHENTICATED", async () => {
     await expect(getTenantSettings({ ...base, principal: null })).rejects.toMatchObject({ code: "UNAUTHENTICATED" });
