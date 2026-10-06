@@ -1,11 +1,11 @@
 // Next 16 `proxy.ts` (middleware'in yeni adı). T-127: istek başına nonce'lu CSP buradadır. Bu bir İYİMSER denetimdir: yalnızca oturum ÇEREZİNİN varlığına bakar,
 // geçerliliğine bakmaz; GÜVENLİK SINIRI DEĞİLDİR. Yetki her zaman sunucuda `runTenantCommand`/`runTenantQuery` ile
 // (ADR-014/016) verilir. T-129: `x-request-id` (yalnızca UUID biçimli gelen korunur, değilse yenisi; istek başlığına ve yanıta) ve
-// maskeli erişim günlüğü (yol/sorguda davet ve sıfırlama belirteçleri maskelenir) buradadır.
+// maskeli erişim günlüğü (yol maskeli, sorguda yalnızca izinli anahtarlar; belirteçler davet ve sıfırlama belirteçleri maskelenir) buradadır.
 // Yönlendirme hedefi YALNIZCA `safeNext` ile (T-117 M10): başka yönlendirme mantığı yok.
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
-import { createConsoleLogger, maskString, requestIdFrom } from "@wms/shared/log";
+import { createConsoleLogger, maskAccessPath, maskString, requestIdFrom } from "@wms/shared/log";
 import { safeNext } from "./lib/safe-redirect.ts";
 
 const logger = createConsoleLogger("web");
@@ -61,8 +61,10 @@ export function proxy(request: NextRequest): NextResponse {
   requestHeaders.set("x-request-id", requestId);
   // Erişim günlüğü: yol + sorgu MASKELİ (davet/sıfırlama belirteci, `next=` içindeki dahil); başlık/çerez/IP yok.
   const rawPath = `${pathname}${search}`;
+  // Günlükte yol maskeli; sorgu YALNIZCA izinli anahtarlarla (değerler maskeli), diğerleri düşürülür (kişisel veri yazılmaz).
+  const access = maskAccessPath(pathname, search);
+  logger.info("request", { requestId, method: request.method, path: access.path, droppedParams: access.droppedParams });
   const maskedPath = maskString(rawPath);
-  logger.info("request", { requestId, method: request.method, path: maskedPath });
   // Belirteç yolda (`/invite/<t>`), sorguda (`/reset-password?token=`) ya da başka bir parametrenin içinde
   // (`/login?next=%2Finvite%2F<t>`) taşınabilir: maskeleme bir şeyi değiştirdiyse dış kaynaklara Referer ile sızmaz
   // (T-117 MINOR-5, T-117b MINOR-4).

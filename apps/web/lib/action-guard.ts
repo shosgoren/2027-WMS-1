@@ -9,7 +9,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { runTenantQuery, type TenantAccessParams } from "@wms/domain/identity/access";
 import { AppError, type AppErrorBody } from "@wms/shared/errors";
-import { requestIdFrom } from "@wms/shared/log";
+import { createJsonLogger, requestIdFrom } from "@wms/shared/log";
 import { RateLimitedError, clientIp, createProductionLimiter, type RateLimiter } from "./rate-limit.ts";
 
 /** Sarmalayıcının ihtiyaç duyduğu principal şekli (`@wms/auth` `Principal` atanabilir). */
@@ -205,6 +205,15 @@ export function createRouteGuard(deps: GuardDeps) {
 // Bu modül Next'e bağımlı değildir: kök typecheck/entegrasyon testleri `createActionGuard`'ı doğrudan kullanır.
 // ---------------------------------------------------------------------------------------------
 
+// Eylem/route hataları stderr'e (`console.error`; mevcut davranış) maskeli JSON satırı olarak yazılır.
+const logger = createJsonLogger(
+  (line) => {
+    console.error(line);
+  },
+  undefined,
+  { service: "web" },
+);
+
 export function createProductionGuard(getHeaders: GuardDeps["getHeaders"], limiter: RateLimiter = createProductionLimiter()) {
   return createActionGuard({
     getHeaders,
@@ -218,7 +227,9 @@ export function createProductionGuard(getHeaders: GuardDeps["getHeaders"], limit
       return process.env.BETTER_AUTH_URL; // her istekte okunur (derleme anında değil)
     },
     log: (entry) => {
-      console.error(JSON.stringify(entry));
+      // Maskeli yapılandırılmış log (T-129). `code` alanı `errorCode` olarak yazılır (`code` anahtarı doğrulama kodu sayılıp maskelenir).
+      const { msg, code, ...rest } = entry; // `level` rest içinde kalır; logger'da ayrılmış alan olduğundan ezilemez.
+      logger.error(typeof msg === "string" ? msg : "guard log", code === undefined ? rest : { ...rest, errorCode: code });
     },
     newRequestId: randomUUID,
   });

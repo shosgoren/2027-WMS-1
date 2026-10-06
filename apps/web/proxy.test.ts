@@ -60,13 +60,25 @@ describe("proxy: x-request-id, erişim günlüğü (T-129)", () => {
     ["/login?next=%2Finvite%2FSuperSecretInviteToken123", "/login?next=%2Finvite%2F***"],
     ["/mfa?next=%2Finvite%2FSuperSecretInviteToken123", "/mfa?next=%2Finvite%2F***"],
     ["/api/auth/reset-password/SuperSecretResetToken123", "/api/auth/reset-password/***"],
-    ["/reset-password?token=SuperSecretResetToken123", "/reset-password?token=***"],
+    ["/reset-password?token=SuperSecretResetToken123", "/reset-password"],
   ])("erişim günlüğü %s → maskeli; Referrer-Policy no-referrer", (path, masked) => {
     const res = proxy(req(path));
     const entry = JSON.parse(lines[0] ?? "{}") as { path: string };
     expect(entry.path).toBe(masked);
     expect(lines[0]).not.toContain("SuperSecret");
     expect(res.headers.get("referrer-policy")).toBe("no-referrer");
+  });
+
+  it("erişim günlüğü: izinli olmayan sorgu anahtarları düşer (serbest metin/e-posta yazılmaz), sayısı droppedParams", () => {
+    proxy(req("/login?q=ayse%40example.com&utm_source=x&next=%2Ft%2Facme"));
+    const entry = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+    expect(entry).toMatchObject({ path: "/login?next=%2Ft%2Facme", droppedParams: 2 });
+    expect(lines[0]).not.toMatch(/ayse|example|utm/);
+  });
+
+  it("çok uzun yol/sorgu: günlük satırı sınırlı", () => {
+    proxy(req(`/${"a.".repeat(20_000)}?${"a=1&".repeat(5_000)}`));
+    expect((lines[0] ?? "").length).toBeLessThan(1500);
   });
 
   it("belirteç içermeyen yolda Referrer-Policy eklenmez", () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { MASK, createConsoleLogger, createJsonLogger, isSensitiveKey, maskFields, maskString, requestIdFrom } from "./log.ts";
+import { MASK, MAX_ENTRIES, MAX_LOG_STRING, createConsoleLogger, createJsonLogger, isSensitiveKey, maskAccessPath, maskFields, maskString, requestIdFrom } from "./log.ts";
 
 const U1 = "3f2b8c1e-9d4a-4e6b-8a57-1c2d3e4f5a6b";
 const U2 = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
@@ -144,7 +144,9 @@ describe("maskeleme: dizeler (URL, yol, sorgu)", () => {
   });
 
   it("Bearer/Basic ve çerez benzeri dize", () => {
-    expect(maskString("Authorization: Bearer abc.def-ghi_jkl=")).toBe(`Authorization: Bearer ${MASK}`);
+    // `authorization` anahtarının TÜM değeri maskelenir (şema sözcüğü dahil: daha sıkı); yalın Bearer değeri şema korunarak.
+    expect(maskString("Authorization: Bearer abc.def-ghi_jkl=")).toBe(`Authorization: ${MASK}`);
+    expect(maskString("sent Bearer abc.def-ghi_jkl= ok")).toBe(`sent Bearer ${MASK} ok`);
     expect(maskString("Basic dXNlcjpwYXNz")).toBe(`Basic ${MASK}`);
     expect(maskString("a=1; better-auth.session_token=SESS; b=2")).toBe(`a=1; better-auth.session_token=${MASK}; b=2`);
   });
@@ -171,5 +173,138 @@ describe("requestIdFrom", () => {
     expect(requestIdFrom(new Headers({ "x-request-id": "abc" }))).toBeUndefined();
     expect(requestIdFrom(new Headers({ "x-request-id": `${U1}-x` }))).toBeUndefined();
     expect(requestIdFrom(new Headers())).toBeUndefined();
+  });
+});
+
+describe("ReDoS: doğrusal tarayıcılar ve sabit uzunluk sınırı (BLOCKER)", () => {
+  const BIG = 100_000;
+  const patho: Record<string, string> = {
+    email: "/" + "a.".repeat(BIG / 2),
+    emailAt: "a@".repeat(BIG / 2),
+    emailLocal: "a".repeat(BIG),
+    urlScheme: "a.".repeat(BIG / 2),
+    urlSlashes: "a://".repeat(BIG / 4),
+    urlAuthority: "http://" + "@".repeat(BIG),
+    param: "a=".repeat(BIG / 2),
+    paramName: "x".repeat(BIG) + "token",
+    paramColon: ":".repeat(BIG),
+    paramEncoded: "%3D".repeat(BIG / 3),
+    bearer: "Bearer" + " ".repeat(BIG),
+    tokenPath: "/invite/".repeat(BIG / 8),
+    spaces: " ".repeat(BIG),
+    quotes: 'password":"' + "\\".repeat(BIG),
+  };
+  it.each(Object.entries(patho))("%s: 100 KB girdi < 50 ms ve çıktı sınırlı", (_n, input) => {
+    const t0 = performance.now();
+    const out = maskString(input);
+    const ms = performance.now() - t0;
+    expect(out.length).toBeLessThanOrEqual(MAX_LOG_STRING + 64);
+    expect(ms).toBeLessThan(50);
+  });
+
+  it("uzunluk sınırı doğrudan: sınırı aşan girdi kesilir ve işaretlenir; sınırdaki girdi aynen", () => {
+    const exact = "a".repeat(MAX_LOG_STRING);
+    expect(maskString(exact)).toBe(exact);
+    const out = maskString(exact + "b");
+    expect(out).toBe(exact + "…[truncated]");
+    expect(out).not.toContain("b");
+  });
+
+  it("kesilen kuyruktaki sır loga girmez (sınırdan sonra gelen belirteç)", () => {
+    const out = maskString("x".repeat(MAX_LOG_STRING + 10) + " password=hunter2");
+    expect(out).not.toContain("hunter2");
+  });
+
+  it("proxy yolu: erişim günlüğü yolu/sorgusu da sınırlı", () => {
+    const t0 = performance.now();
+    const r = maskAccessPath("/" + "a.".repeat(50_000), "?" + "a=1&".repeat(50_000));
+    expect(performance.now() - t0).toBeLessThan(50);
+    expect(r.path.length).toBeLessThan(1200);
+    expect(r.droppedParams).toBeGreaterThan(0);
+  });
+});
+
+describe("anahtar/değer biçimleri dize içinde (MAJOR-2)", () => {
+  it.each([
+    ['{"password":"hunter2","a":1}', `{"password":"${MASK}","a":1}`],
+    ["{'password': 'hunter2'}", `{'password': '${MASK}'}`],
+    ['body {"apiKey" : "k-123", "ok": true}', `body {"apiKey" : "${MASK}", "ok": true}`],
+    ["x-api-key: abc123DEF", `x-api-key: ${MASK}`],
+    ["X-API-Key=abc123DEF&b=1", `X-API-Key=${MASK}&b=1`],
+    ["password: hunter2", `password: ${MASK}`],
+    ["Cookie: a=b; session=SESSVAL", `Cookie: ${MASK}; session=${MASK}`],
+    ['{"token":"a\\"b-still-secret"}', `{"token":"${MASK}"}`],
+    ["DSN=https://x@sentry.example/1 next", `DSN=${MASK} next`],
+    ["jwt=eyJ.a.b sid=abc", `jwt=${MASK} sid=${MASK}`],
+  ])("%s", (input, expected) => expect(maskString(input)).toBe(expected));
+
+  it("stack dizesi içindeki gömülü JSON/başlık maskelenir (worker describeError stack alanı)", () => {
+    const { logger, lines } = capture();
+    logger.error("shutdown hook failed", { error: { name: "E", message: "m", stack: 'Error: bad\n    at x\n  body={"password":"hunter2"} authorization: Bearer abc' } });
+    expect(lines[0]).not.toMatch(/hunter2|abc"/);
+    expect(JSON.parse(lines[0] ?? "{}").error.stack).toContain(MASK);
+  });
+
+  it("zararsız `ad: değer` metni değişmez", () => {
+    for (const s of ["status: ok", "GET /x HTTP/1.1", "monkey=1&keyboard=2", "https://example.com:8080/a"]) expect(maskString(s)).toBe(s);
+  });
+});
+
+describe("ek sertleştirme (MINOR)", () => {
+  it.each(["pass", "userPass", "session", "sessionId", "sid", "jwt", "dsn", "x-signature"])("%s hassas", (k) => expect(isSensitiveKey(k)).toBe(true));
+  it.each(["errorCode", "statusCode", "sqlstate", "passenger", "dsnCount_"])("%s güvenli/hassas değil", (k) => expect(isSensitiveKey(k)).toBe(k === "dsnCount_"));
+
+  it("URL kimlik bilgisi: parola `#`/`@`/`:` içerse de tam maskelenir", () => {
+    expect(maskString("postgres://u:p#a@ss:w@host:5432/db")).toBe(`postgres://${MASK}@host:5432/db`);
+    expect(maskString("conn failed redis://:p@ss@h:6379 end")).toBe(`conn failed redis://${MASK}@h:6379 end`);
+    expect(maskString("https://example.com/a@b#c")).toBe("https://example.com/a@b#c");
+  });
+
+  it("yüzde kodlu e-posta ve parametre adı (kod çözülmüş biçim, en çok 2 tur)", () => {
+    expect(maskString("to=ayse%40example.com")).not.toMatch(/ayse|example/);
+    expect(maskString("/x?%74oken=SECRETVAL")).not.toContain("SECRETVAL");
+    expect(maskString("/x?api%5Fkey=SECRETVAL")).not.toContain("SECRETVAL");
+    expect(maskString("mail ayse%2540example.com")).not.toMatch(/ayse/);
+    expect(maskString("100%25 ok %zz")).toBe("100%25 ok %zz");
+  });
+
+  it("log çağrısı asla fırlatmaz: BigInt, fırlatan getter, toJSON, Symbol, döngü", () => {
+    const { logger, lines } = capture();
+    const evil = {
+      get boom(): string {
+        throw new Error("getter");
+      },
+      toJSON() {
+        throw new Error("toJSON");
+      },
+    };
+    expect(() => logger.info("a", { n: 10n, s: Symbol("x"), f: () => 1 })).not.toThrow();
+    expect(JSON.parse(lines[0] ?? "{}")).toMatchObject({ n: "[bigint]", s: "[symbol]", f: "[function]" });
+    expect(() => logger.info("b", { evil })).not.toThrow();
+    expect(lines).toHaveLength(2);
+    const throwingWrite = createJsonLogger(() => {
+      throw new Error("sink");
+    });
+    expect(() => throwingWrite.error("x", { a: 1 })).not.toThrow();
+  });
+
+  it("genişlik sınırı: çok anahtar/dizi öğesi kısaltılır", () => {
+    const wide = Object.fromEntries(Array.from({ length: 500 }, (_, i) => [`k${i}`, i]));
+    const out = maskFields({ wide, arr: Array.from({ length: 500 }, (_, i) => i) }) as { wide: Record<string, unknown>; arr: unknown[] };
+    expect(Object.keys(out.wide).length).toBeLessThanOrEqual(MAX_ENTRIES + 1);
+    expect(out.arr).toHaveLength(MAX_ENTRIES + 1);
+    expect(out.arr.at(-1)).toBe("[+450 more]");
+  });
+
+  it("Error: yalnızca ad + maskeli ileti (stack/cause yazılmaz)", () => {
+    const err = new Error("outer", { cause: new Error("password=hunter2") });
+    expect(maskFields({ err })).toEqual({ err: { name: "Error", message: "outer" } });
+  });
+
+  it("erişim günlüğü sorgusu: yalnızca izinli anahtarlar (değer maskeli), diğerleri düşer ve sayılır", () => {
+    expect(maskAccessPath("/login", "?next=%2Finvite%2FTOK123&q=ayse%40example.com&token=abc")).toEqual({ path: "/login?next=%2Finvite%2F***", droppedParams: 2 });
+    expect(maskAccessPath("/api/health", "")).toEqual({ path: "/api/health", droppedParams: 0 });
+    expect(maskAccessPath("/invite/TOK123", "?utm=1")).toEqual({ path: "/invite/***", droppedParams: 1 });
+    expect(maskAccessPath("/reset-password", "?token=R3s3t")).toEqual({ path: "/reset-password", droppedParams: 1 });
   });
 });

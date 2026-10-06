@@ -76,5 +76,5 @@ export { consumeRateLimit } from "./rate-limit.ts";
 export type { ConsumeRateLimitParams, ConsumeRateLimitResult } from "./rate-limit.ts";
 export { sameConnectionTarget } from "./connection-target.ts";
 // Sağlık yoklamaları (T-129): `/api/health` DB ve kuyruk şeması erişimi (satır okumaz).
-export { pingDatabase, pingQueueSchema } from "./health.ts";
-export type { ProbeResult } from "./health.ts";
+export { createHealthProbe, getHealthProbe } from "./health.ts";
+export type { HealthProbe, HealthProbeOptions, HealthSnapshot, ProbeResult } from "./health.ts";

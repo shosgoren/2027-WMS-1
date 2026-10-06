@@ -2,9 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const ok = { ok: true } as const;
 const mocks = vi.hoisted(() => ({
-  getAppDb: vi.fn(() => ({ handle: true })),
-  pingDatabase: vi.fn(),
-  pingQueueSchema: vi.fn(),
+  check: vi.fn(),
+  getHealthProbe: vi.fn(),
 }));
 vi.mock("@wms/db", () => mocks);
 
@@ -17,9 +16,10 @@ describe("GET /api/health", () => {
   beforeEach(() => {
     lines = [];
     vi.spyOn(console, "log").mockImplementation((l: unknown) => void lines.push(String(l)));
-    mocks.getAppDb.mockClear();
-    mocks.pingDatabase.mockResolvedValue(ok);
-    mocks.pingQueueSchema.mockResolvedValue(ok);
+    mocks.check.mockReset();
+    mocks.getHealthProbe.mockReset();
+    mocks.getHealthProbe.mockReturnValue({ check: mocks.check });
+    mocks.check.mockResolvedValue({ db: ok, queue: ok });
   });
   afterEach(() => {
     vi.restoreAllMocks();
@@ -37,7 +37,7 @@ describe("GET /api/health", () => {
   });
 
   it("DB başarısızsa 503 + degraded; gövdede hata metni yok, log'da sınıf adı ve istek kimliği var", async () => {
-    mocks.pingDatabase.mockResolvedValue({ ok: false, reason: "error", errorName: "PostgresError" });
+    mocks.check.mockResolvedValue({ db: { ok: false, reason: "error", errorName: "PostgresError" }, queue: ok });
     const res = await GET(req({ "x-request-id": REQUEST_ID }));
     expect(res.status).toBe(503);
     const text = await res.text();
@@ -48,27 +48,26 @@ describe("GET /api/health", () => {
   });
 
   it("kuyruk başarısızsa 503 (zaman aşımı dahil)", async () => {
-    mocks.pingQueueSchema.mockResolvedValue({ ok: false, reason: "timeout" });
+    mocks.check.mockResolvedValue({ db: ok, queue: { ok: false, reason: "timeout" } });
     const res = await GET(req());
     expect(res.status).toBe(503);
     expect(await res.json()).toMatchObject({ status: "degraded", db: "ok", queue: "fail" });
     expect(JSON.parse(lines[0] ?? "{}")).toMatchObject({ check: "queue", reason: "timeout" });
   });
 
-  it("getAppDb fırlatırsa (DATABASE_URL yok) 503; URL/ayrıntı gövdede yok", async () => {
-    mocks.getAppDb.mockImplementation(() => {
-      throw new Error("getAppDb: DATABASE_URL is not configured");
+  it("getHealthProbe fırlatırsa (DATABASE_URL yok) 503; URL/ayrıntı gövdede yok", async () => {
+    mocks.getHealthProbe.mockImplementation(() => {
+      throw new Error("getHealthProbe: DATABASE_URL is not configured");
     });
     const res = await GET(req());
     expect(res.status).toBe(503);
     const text = await res.text();
     expect(JSON.parse(text)).toMatchObject({ status: "degraded", db: "fail", queue: "fail" });
     expect(text).not.toContain("DATABASE_URL");
-    mocks.getAppDb.mockImplementation(() => ({ handle: true }));
   });
 
   it("UUID olmayan x-request-id log'a girmez", async () => {
-    mocks.pingDatabase.mockResolvedValue({ ok: false, reason: "timeout" });
+    mocks.check.mockResolvedValue({ db: { ok: false, reason: "timeout" }, queue: ok });
     await GET(req({ "x-request-id": "evil value <script>" }));
     expect(JSON.parse(lines[0] ?? "{}")).not.toHaveProperty("requestId");
   });
