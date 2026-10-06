@@ -172,12 +172,16 @@ const RE_STATE_WORD = /^[a-z_-]{1,20}$/;
 // içeren uzun büyük harf/rakam dizileri (base32 TOTP sırrı, kart no) ve uzun tek sözcükler reddedilir.
 const RE_CODE = /^(?=.{1,32}$)(?:[A-Z][A-Z_]{2,11}|[A-Z]+(?:_[A-Z]+)+|[0-9A-Z]{5})$/;
 // msg: serbest metin YOK; yalnızca worker/kuyruk kodunun yazdığı sabit iletiler (tam eşleşme).
-const ALLOWED_MSGS = new Set([
+export const ALLOWED_MSGS = new Set([
   "started", "queue started", "queue start failed", "queue error", "invalid configuration", "mail configured",
   "job types without handler", "demo disabled", "demo.reseed done", "demo.reseed failed", "demo.reseed enqueued",
   "demo.reseed enqueue failed", "email sent", "email.send failed", "invitation email sent", "invitation.deliver failed",
-  "invitation.deliver skipped", "job handler failed (permanent)", "deadletter", "shutdown started", "shutdown complete",
-  "shutdown completed with errors", "shutdown hook failed", "shutdown timed out", "second signal during shutdown", "forced exit",
+  "invitation.deliver skipped", "job handler failed (permanent)", "job handler failed (transient; will retry)", "shutdown started", "shutdown complete",
+  "shutdown completed with errors", "shutdown hook failed", "shutdown timed out", "forced exit", "uncaught exception", "unhandled rejection",
+  // Sabit iletiler (parantez/büyük harf içerir; tam eşleşme):
+  "BETTER_AUTH_URL not set (warning); invitation.deliver jobs will fail until configured",
+  "demo disabled: account adapter configuration missing (AUTH_DATABASE_URL); demo.reseed not registered",
+  "demo disabled: account adapter configuration missing (DEMO_EMAIL_DOMAIN); demo.reseed not registered",
 ]);
 const RE_ERRCLASS = /^[A-Za-z]{1,40}(?:Error|Exception)$/;
 // Worker açılış hatası: yalnızca ortam DEĞİŞKENİ ADI + sabit ifade (değer içermez; main.ts requireEnv).
@@ -243,7 +247,9 @@ function allowBody(line) {
     const err = typeof r["err"] === "object" && r["err"] !== null ? /** @type {Record<string, unknown>} */ (r["err"]) : {};
     const code = str(r["code"], RE_CODE) ?? str(r["errorCode"], RE_CODE) ?? str(err["code"], RE_CODE);
     if (code !== undefined) out["code"] = code;
-    const errName = str(err["name"], RE_ERRCLASS) ?? str(r["error"], RE_ERRCLASS);
+    // `error`: düz sınıf adı (dize) ya da lifecycle `describeError` nesnesi {name,message,stack} → yalnızca `.name`.
+    const errObj = typeof r["error"] === "object" && r["error"] !== null ? /** @type {Record<string, unknown>} */ (r["error"]) : {};
+    const errName = str(err["name"], RE_ERRCLASS) ?? str(r["error"], RE_ERRCLASS) ?? str(errObj["name"], RE_ERRCLASS);
     if (errName !== undefined) out["error"] = errName;
     else {
       const missing = str(r["error"], RE_MISSING_ENV);

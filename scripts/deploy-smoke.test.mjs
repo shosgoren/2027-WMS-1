@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { checkHealth, checkProcessGroup, allowLine, describeStoppedMachines, evaluateHealth, maskLogs, parseArgs, summaryLine } from "./deploy-smoke.mjs";
+import { ALLOWED_MSGS, checkHealth, checkProcessGroup, allowLine, describeStoppedMachines, evaluateHealth, maskLogs, parseArgs, summaryLine } from "./deploy-smoke.mjs";
 
 const URL_OK = "https://etkin-wms-staging.fly.dev/api/health";
 
@@ -482,3 +482,43 @@ describe("diagCommand CLI (T-106c)", () => {
 function rnd2() {
   return randomBytes(12).toString("hex");
 }
+
+describe("ALLOWED_MSGS kaynak senkron bekçisi (T-106c)", () => {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  /** @param {string} dir @returns {string[]} */
+  const walk = (dir) =>
+    readdirSync(dir).flatMap((n) => {
+      const f = path.join(dir, n);
+      if (n === "node_modules" || n === "dist") return [];
+      return statSync(f).isDirectory() ? walk(f) : /\.ts$/.test(n) && !/\.test\.ts$/.test(n) ? [f] : [];
+    });
+
+  it("kaynaktaki sabit logger iletileri ile ALLOWED_MSGS birebir aynı", () => {
+    const found = new Set();
+    for (const dir of ["apps/worker/src", "packages/queue-adapter/src"]) {
+      for (const f of walk(path.join(root, dir))) {
+        const src = readFileSync(f, "utf8");
+        for (const m of src.matchAll(/\blogger\??\.(?:info|warn|error|debug)\(\s*"([^"\\]+)"/g)) found.add(m[1]);
+      }
+    }
+    expect(found.size).toBeGreaterThan(10); // tarama gerçekten çalıştı
+    // lifecycle.ts `logger.error(kind, …)` ile `uncaught exception` / `unhandled rejection` yazar (onFatal çağrıları).
+    const dynamic = new Set(["uncaught exception", "unhandled rejection"]);
+    const lifecycle = readFileSync(path.join(root, "apps/worker/src/lifecycle.ts"), "utf8");
+    for (const d of dynamic) expect(lifecycle).toContain(`onFatal("${d}"`);
+    const expected = new Set([...found, ...dynamic]);
+    expect([...expected].filter((m) => !ALLOWED_MSGS.has(m)).sort()).toEqual([]);
+    expect([...ALLOWED_MSGS].filter((m) => !expected.has(m)).sort()).toEqual([]);
+  });
+
+  it("lifecycle describeError nesnesi: yalnızca error.name yazılır; message/stack asla", () => {
+    const secret = randomBytes(12).toString("hex");
+    const line = JSON.stringify({ level: "error", msg: "uncaught exception", error: { name: "TypeError", message: secret, stack: secret } });
+    const out = allowLine(line) ?? "";
+    expect(JSON.parse(out)).toEqual({ level: "error", msg: "uncaught exception", error: "TypeError" });
+    expect(out).not.toContain(secret);
+    const bad = allowLine(JSON.stringify({ msg: "unhandled rejection", error: { name: `x ${secret}`, value: secret } })) ?? "";
+    expect(bad).not.toContain(secret);
+    expect(JSON.parse(bad).error).toBeUndefined();
+  });
+});
