@@ -353,6 +353,92 @@ describe("enqueue + worker tüketimi", () => {
   });
 });
 
+describe("kalıcı / geçici hata (T-116b)", () => {
+  // `fail` yolu pg-boss'ta DELETE + INSERT ile çalışır; `wms_app`'te job DELETE yetkisi yoktur (T-115 en dar yetki).
+  // Tüketici yetkileri `wms_worker` ile T-115c'de tanımlanır; o zamana dek bu testler tüketiciyi migration rolüyle
+  // bağlar (sınıflama ve durum geçişleri doğrulanır, yetki modeli değil). Bkz. T-116b raporu bulgusu.
+  const failPathWorker = (): PgBossJobQueue => {
+    const q = createJobQueue({
+      connectionString: env.databaseUrlDirect,
+      max: 3,
+      pollingIntervalSeconds: 0.5,
+      stopTimeoutMs: 5000,
+      runInTenant: (tenantId, _reason, fn) => withTenant(createTenantContext(client, tenantId), fn),
+    });
+    queues.push(q);
+    return q;
+  };
+  const stateOf = async (tenantId: string) => {
+    const r = await admin.query(`SELECT state, retry_count, retry_limit, output FROM ${QUEUE_SCHEMA}.job WHERE data->>'tenantId' = $1`, [tenantId]);
+    return r.rows as { state: string; retry_count: number; retry_limit: number; output: Record<string, unknown> | null }[];
+  };
+
+  it("kalıcı hata (permanent: true) yeniden denenmeden failed olur; çıktıda yalnızca ad/kod, mesaj yok", async () => {
+    const tenantId = randomUUID();
+    const calls: string[] = [];
+    const secret = `secret-${randomUUID()}`;
+    const worker = failPathWorker();
+    await worker.work("demo.reseed", async (ctx) => {
+      if ((await tenantOfCtx(ctx)) !== tenantId) return;
+      calls.push(ctx.jobId);
+      throw Object.assign(new Error(secret), { name: "MailError", code: "MAIL_DELIVERY_DISABLED", permanent: true });
+    });
+    const producer = await startedQueue();
+    await withTenant(tenantCtx(tenantId), (tx) => producer.enqueue(tx, reseed()));
+    await waitFor(async () => (await stateOf(tenantId))[0]?.state === "failed", "kalıcı hata -> failed");
+    const row = (await stateOf(tenantId))[0];
+    expect(row?.retry_limit).toBeGreaterThan(0);
+    expect(row?.retry_count).toBe(0);
+    expect(row?.output).toMatchObject({ permanent: true, name: "MailError", code: "MAIL_DELIVERY_DISABLED" });
+    expect(JSON.stringify(row?.output)).not.toContain(secret);
+    await sleep(2000);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("bozuk zarf kalıcı hata: handler çağrılmaz, iş VALIDATION_FAILED ile failed olur", async () => {
+    const tenantId = randomUUID();
+    const producer = await startedQueue();
+    await withTenant(tenantCtx(tenantId), (tx) => producer.enqueue(tx, reseed()));
+    await admin.query(`UPDATE ${QUEUE_SCHEMA}.job SET data = data || '{"v": 9}'::jsonb WHERE data->>'tenantId' = $1`, [tenantId]);
+    let calls = 0;
+    const worker = failPathWorker();
+    await worker.work("demo.reseed", async () => {
+      calls += 1;
+    });
+    await waitFor(async () => (await stateOf(tenantId))[0]?.state === "failed", "bozuk zarf -> failed");
+    const row = (await stateOf(tenantId))[0];
+    expect(row?.retry_count).toBe(0);
+    expect(row?.output).toMatchObject({ permanent: true, code: "VALIDATION_FAILED" });
+    expect(calls).toBe(0);
+  });
+
+  it("geçici hata yeniden denenir (state retry, tamamlanmış sayılmaz)", async () => {
+    const tenantId = randomUUID();
+    let calls = 0;
+    const worker = failPathWorker();
+    await worker.work("demo.reseed", async (ctx) => {
+      if ((await tenantOfCtx(ctx)) !== tenantId) return;
+      calls += 1;
+      throw Object.assign(new Error("transient"), { permanent: false });
+    });
+    const producer = await startedQueue();
+    await withTenant(tenantCtx(tenantId), (tx) => producer.enqueue(tx, reseed()));
+    await waitFor(async () => (await stateOf(tenantId))[0]?.state === "retry", "geçici hata -> retry");
+    const row = (await stateOf(tenantId))[0];
+    expect(row?.retry_count).toBeLessThan(row?.retry_limit ?? 0); // kalan deneme hakkı var (sayaç bir sonraki alımda artar)
+    expect(calls).toBe(1);
+  });
+
+  it("başarılı iş completed olur (perJobResults yolu)", async () => {
+    const tenantId = randomUUID();
+    const worker = newQueue();
+    await worker.work("demo.reseed", async () => undefined);
+    const producer = await startedQueue();
+    await withTenant(tenantCtx(tenantId), (tx) => producer.enqueue(tx, reseed()));
+    await waitFor(async () => (await stateOf(tenantId))[0]?.state === "completed", "completed");
+  });
+});
+
 describe("tenant bağlamı ve yük güvenliği", () => {
   it("işlemde kimlik bağlamı varsa actorUserId ondan türetilir; çelişen actor reddedilir", async () => {
     const tenantId = randomUUID();
