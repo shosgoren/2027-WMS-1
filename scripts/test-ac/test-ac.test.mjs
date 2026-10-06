@@ -1,7 +1,7 @@
 // T-007 `pnpm test:ac` testleri. Fixture depolar geçici dizinde üretilir; iç içe gerçek Vitest koşar.
 // Not: Bu dosyadaki test başlıkları etiket deseni içermez; fixture etiketleri `TAG` ile kurulur ki
 // gerçek repoda `collect.mjs` bu dosyayı AC testi saymasın.
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -68,14 +68,41 @@ afterEach(() => {
 });
 
 /**
- * @param {{ acceptance?: string, conditions?: string, pilot?: string | null, files?: Record<string, string> }} spec
+ * @param {string} root
+ * @param {string[]} skip
+ */
+function linkNodeModules(root, skip) {
+  const real = path.join(REPO_ROOT, "node_modules");
+  const target = path.join(root, "node_modules");
+  if (skip.length === 0) {
+    symlinkSync(real, target, "dir");
+    return;
+  }
+  mkdirSync(target);
+  for (const entry of readdirSync(real)) {
+    if (entry.startsWith("@")) {
+      mkdirSync(path.join(target, entry));
+      for (const inner of readdirSync(path.join(real, entry))) {
+        if (skip.includes(`${entry}/${inner}`)) continue;
+        symlinkSync(path.join(real, entry, inner), path.join(target, entry, inner));
+      }
+    } else if (!skip.includes(entry)) {
+      symlinkSync(path.join(real, entry), path.join(target, entry));
+    }
+  }
+}
+
+/**
+ * `withoutPackages`: gerçek `node_modules` bütünüyle symlink'lenmek yerine dizin olarak kurulur (her girdi ayrı symlink;
+ * `@scope/` dizinlerinde içteki girdiler ayrı ayrı) ve listedeki paketler atlanır ("kurulu değil" önkoşulu için).
+ * @param {{ acceptance?: string, conditions?: string, pilot?: string | null, files?: Record<string, string>, withoutPackages?: string[] }} spec
  * @returns {string}
  */
 function makeRepo(spec) {
   const root = mkdtempSync(path.join(os.tmpdir(), "test-ac-"));
   tmpDirs.push(root);
   mkdirSync(path.join(root, "docs"), { recursive: true });
-  symlinkSync(path.join(REPO_ROOT, "node_modules"), path.join(root, "node_modules"), "dir");
+  linkNodeModules(root, spec.withoutPackages ?? []);
   writeFileSync(path.join(root, "docs/ACCEPTANCE.md"), spec.acceptance ?? ACCEPTANCE);
   writeFileSync(path.join(root, "docs/ACCEPTANCE.conditions.json"), spec.conditions ?? conditionsJson());
   const pilot = spec.pilot === undefined ? pilotMd("NONE") : spec.pilot;
@@ -337,9 +364,22 @@ describe("koşturucu fixture senaryoları", { timeout: 60_000 }, () => {
         "tests/e2e/a.spec.ts": `import { test } from "@playwright/test";\ntest(${JSON.stringify(`a ${TAG}05`)}, async () => {});\n`,
         "tests/b.test.mjs": testFile(`b ${TAG}28`, "pass"),
       },
+      withoutPackages: ["@playwright/test"],
     });
     const r = runCli(root, ["--phase", "0"]);
     expect(lineFor(r.lines, "AC-05")).toMatch(/FAIL — Playwright etiketi bulundu ama @playwright\/test kurulu değil/);
+    expect(r.code).toBe(1);
+  });
+
+  it("Playwright etiketi varken Playwright kuruluysa da FAIL (koşturma yolu yok, fail-closed)", () => {
+    const root = makeRepo({
+      files: {
+        "tests/e2e/a.spec.ts": `import { test } from "@playwright/test";\ntest(${JSON.stringify(`a ${TAG}05`)}, async () => {});\n`,
+        "tests/b.test.mjs": testFile(`b ${TAG}28`, "pass"),
+      },
+    });
+    const r = runCli(root, ["--phase", "0"]);
+    expect(lineFor(r.lines, "AC-05")).toMatch(/FAIL — Playwright koşturma yolu henüz yok/);
     expect(r.code).toBe(1);
   });
 

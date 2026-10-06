@@ -12,7 +12,7 @@ Durum: `var` = yol repoda mevcut; `planlı: <kart>` = henüz yok, ilgili kart a�
 | packages/queue-adapter/ | var | Kuyruk sağlayıcı kütüphanesinin tek import noktası |
 | packages/ui/ | var | Ortak bileşenler (T-110): TaskCard, Button, TextField, ConfirmDialog, Banner, EmptyState, ActivityList; dynamic-form, scanner, virtualized ilk kullanan kartta |
 | tests/integration/ | var | Testcontainers PostgreSQL entegrasyon testleri (`pnpm test:int`) |
-| tests/e2e/ | planlı: ilk kullanan kart | Playwright uçtan uca testler |
+| tests/e2e/ | var | Playwright uçtan uca testler (T-131): `demo-flow.spec.ts`, `global-setup.ts` (yerel yığın: migration + worker reseed + web + TLS vekili) |
 | tests/load/ | planlı: ilk kullanan kart | k6 yük testleri |
 | infra/ | var | Yerel/CI altyapı yapılandırması |
 | infra/postgres/init/ | var | PostgreSQL ilk açılış betikleri (roller) |

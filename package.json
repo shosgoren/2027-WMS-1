@@ -12,9 +12,10 @@
     "db:rollback": "pnpm --filter @wms/db db:rollback",
     "infra:smoke": "node scripts/compose-smoke.mjs",
     "test:int": "vitest run -c vitest.int.config.ts",
+    "test:e2e": "playwright test",
     "test:int:neon": "WMS_INT_TARGET=neon vitest run -c vitest.int.config.ts",
     "spike:neon": "node scripts/neon-spike.mjs",
-    "test:ac":"node scripts/test-ac/cli.mjs",
+    "test:ac": "node scripts/test-ac/cli.mjs",
     "check:scope": "node scripts/guards/cli.mjs scope",
     "check:tests": "node scripts/guards/cli.mjs tests",
     "check:ac-ratchet": "node scripts/guards/cli.mjs ac-ratchet",
@@ -25,6 +26,7 @@
     "prepare": "git config core.hooksPath .githooks"
   },
   "devDependencies": {
+    "@playwright/test": "1.56.1",
     "@types/node": "24.19.1",
     "@types/pg": "8.23.1",
     "eslint": "10.12.0",
