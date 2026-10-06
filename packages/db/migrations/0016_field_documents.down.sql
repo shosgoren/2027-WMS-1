@@ -21,6 +21,8 @@ BEGIN
     END IF;
   END LOOP;
 
+  -- Bekçi ile DELETE arasındaki yarış: eşzamanlı ACTIVE rezervasyon eklenemesin (tablo kilidi transaction sonuna kadar tutulur).
+  LOCK TABLE public.reservations IN SHARE ROW EXCLUSIVE MODE;
   ALTER TABLE public.reservations NO FORCE ROW LEVEL SECURITY;
   IF EXISTS (SELECT 1 FROM public.reservations WHERE order_line_id IS NOT NULL AND status = 'ACTIVE') THEN
     RAISE EXCEPTION '0016_field_documents down: sipariş satırına bağlı ACTIVE rezervasyon var; önce serbest bırakılmalı (bayraktan bağımsız ret)';
@@ -58,7 +60,8 @@ ALTER TABLE public.tenant_settings DROP COLUMN receiving_qc_enabled;
 
 -- reservations: önce sipariş satırına bağlı SONLANMIŞ satırlar (yalnızca bayrak açıksa buraya gelinir; ACTIVE olanlar yukarıda reddedildi).
 -- Silme tetikleyicisi yok; ertelenmiş denetim yalnızca INSERT/UPDATE'tedir ve sonlanmış satır toplama girmez.
-DELETE FROM public.reservations WHERE order_line_id IS NOT NULL;
+-- Çift savunma: ACTIVE satır silinmez; kalırsa aşağıdaki SET NOT NULL fail-closed düşer.
+DELETE FROM public.reservations WHERE order_line_id IS NOT NULL AND status <> 'ACTIVE';
 -- 0013 gövdesi geri yazılır.
 CREATE OR REPLACE FUNCTION public.reservations_guard_update() RETURNS trigger
   LANGUAGE plpgsql
@@ -125,6 +128,10 @@ ALTER TABLE public.documents
   DROP COLUMN source_kind;
 
 -- Yeni tablolar (bağımlılık sırasıyla).
+DROP TRIGGER customer_return_lines_guard_closed ON public.customer_return_lines;
+DROP TRIGGER sales_order_lines_guard_closed ON public.sales_order_lines;
+DROP TRIGGER inbound_receipt_lines_guard_closed ON public.inbound_receipt_lines;
+DROP FUNCTION public.field_docs_lines_guard_closed();
 DROP TRIGGER customer_return_lines_guard_keys ON public.customer_return_lines;
 DROP TRIGGER sales_order_lines_guard_keys ON public.sales_order_lines;
 DROP TRIGGER inbound_receipt_lines_guard_keys ON public.inbound_receipt_lines;

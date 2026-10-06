@@ -245,6 +245,44 @@ CREATE TRIGGER sales_order_lines_guard_keys BEFORE UPDATE ON public.sales_order_
 CREATE TRIGGER customer_return_lines_guard_keys BEFORE UPDATE ON public.customer_return_lines
   FOR EACH ROW EXECUTE FUNCTION public.field_docs_guard_keys('tenant_id', 'id', 'return_id', 'line_no', 'sales_order_line_id', 'item_id', 'created_at');
 
+-- 2c. Kapanmış saha belgesinin satırı değişmez (0012 document_lines_guard deseni): üst başlık FOR SHARE ile okunur (başlığı CLOSED/
+--     CANCELLED yapan işlem commit olmadan eşzamanlı satır yazımı bloklanır; commit sonrası kapanmış durum görülüp reddedilir).
+--     Tek istisna: sales_order_lines.returned_quantity — iade, sevk sonrası (sipariş kapanmış olabilir) gelir ve açık miktara girmez
+--     (16 kural 6); başka hiçbir sütun kapanmış siparişte değişmez. Satır INSERT'ü kapsam dışıdır (satırlar başlıkla birlikte açılır).
+CREATE FUNCTION public.field_docs_lines_guard_closed() RETURNS trigger
+  LANGUAGE plpgsql
+  SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+  parent_status text;
+BEGIN
+  IF TG_TABLE_NAME = 'inbound_receipt_lines' THEN
+    SELECT h.status INTO parent_status FROM public.inbound_receipts h WHERE h.tenant_id = OLD.tenant_id AND h.id = OLD.receipt_id FOR SHARE;
+  ELSIF TG_TABLE_NAME = 'sales_order_lines' THEN
+    SELECT h.status INTO parent_status FROM public.sales_orders h WHERE h.tenant_id = OLD.tenant_id AND h.id = OLD.order_id FOR SHARE;
+    IF (pg_catalog.to_jsonb(NEW) - 'returned_quantity') IS NOT DISTINCT FROM (pg_catalog.to_jsonb(OLD) - 'returned_quantity') THEN
+      RETURN NEW;
+    END IF;
+  ELSIF TG_TABLE_NAME = 'customer_return_lines' THEN
+    SELECT h.status INTO parent_status FROM public.customer_returns h WHERE h.tenant_id = OLD.tenant_id AND h.id = OLD.return_id FOR SHARE;
+  ELSE
+    RAISE EXCEPTION 'field_docs_lines_guard_closed: beklenmeyen tablo %', TG_TABLE_NAME USING ERRCODE = '23514';
+  END IF;
+  IF parent_status IN ('CLOSED', 'CANCELLED') THEN
+    RAISE EXCEPTION 'DOCUMENT_CLOSED: kapanmış saha belgesinin satırı değiştirilemez (belge %)', parent_status USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END
+$fn$;
+REVOKE ALL ON FUNCTION public.field_docs_lines_guard_closed() FROM PUBLIC;
+-- Alfabetik sıra: guard_closed, guard_keys'ten ÖNCE çalışır; her iki ret de 23514.
+CREATE TRIGGER inbound_receipt_lines_guard_closed BEFORE UPDATE ON public.inbound_receipt_lines
+  FOR EACH ROW EXECUTE FUNCTION public.field_docs_lines_guard_closed();
+CREATE TRIGGER sales_order_lines_guard_closed BEFORE UPDATE ON public.sales_order_lines
+  FOR EACH ROW EXECUTE FUNCTION public.field_docs_lines_guard_closed();
+CREATE TRIGGER customer_return_lines_guard_closed BEFORE UPDATE ON public.customer_return_lines
+  FOR EACH ROW EXECUTE FUNCTION public.field_docs_lines_guard_closed();
+
 -- ---------------------------------------------------------------------------------------------
 -- 3. Genişletmeler (mevcut tablolar; hepsi nullable/varsayılanlı, mevcut satırlar geçerli kalır)
 -- ---------------------------------------------------------------------------------------------
