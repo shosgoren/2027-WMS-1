@@ -6,7 +6,8 @@
 // `// katman: <ad>[, <ad>…]` satırıyla bildirir (ilk `katman:` satırı; ` — ` sonrası açıklamadır). Yeni bir katman
 // (arama, worker işi, ...) eklendiğinde: (1) LAYERS ve ALIASES genişletilir, (2) o katmanın `@AC-04` testi yazılır.
 // Tanınmayan etiket ve etiketsiz `@AC-04` dosyası görünür kılınır (yeni katman sessizce kapsam dışı kalmasın).
-// Bu dosyanın kendi testleri `@AC-04` etiketi TAŞIMAZ (aksi halde kendi kapsamını sayardı).
+// Bu dosyanın kendi test başlıkları etiket-algılanır biçimde AC-04 yazmaz (aksi halde kendi kapsamını sayardı).
+// SINIR: kapsam dosya başlığı beyanına dayanır; katmanın gerçekten çalıştırıldığını/geçtiğini sınamaz (bunu test:ac yapar).
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -70,24 +71,18 @@ export function missingLayers(files: readonly FileLayers[]): Layer[] {
 }
 
 describe("AC-04 katman kapsamı (makinece)", () => {
-  it("@AC-04 katman kapsamı: her katman en az bir @AC-04 testine sahip (eksik katman = FAIL)", () => {
+  it("AC-04 katman kapsamı: her katman en az bir etiketli teste sahip (eksik katman = FAIL)", () => {
     const files = scan(ROOT);
     const table = LAYERS.map((l) => `${l}: ${files.filter((f) => f.layers.includes(l)).map((f) => path.basename(f.file)).join(", ") || "YOK"}`);
     console.log(`[ac-04-coverage]\n${table.join("\n")}`);
+    const unlabeled = files.filter((f) => !f.declared).map((f) => f.file);
+    if (unlabeled.length > 0) console.warn(`[ac-04-coverage] katman etiketi YOK (kapsam sayımına girmez): ${unlabeled.join(", ")}`);
     expect(missingLayers(files), `AC-04 katman tablosu:\n${table.join("\n")}`).toEqual([]);
   });
 
   it("tanınmayan katman etiketi yok (yeni katman LAYERS'a eklenmeden bildirilemez)", () => {
     const bad = scan(ROOT).flatMap((f) => f.unknown.map((u) => `${f.file}: ${u}`));
     expect(bad).toEqual([]);
-  });
-
-  it("katman etiketi olmayan @AC-04 dosyaları görünür kılınır (bilgi: sayım dışı kalırlar; başarısızlık nedeni değildir)", () => {
-    const unlabeled = scan(ROOT)
-      .filter((f) => !f.declared)
-      .map((f) => f.file);
-    if (unlabeled.length > 0) console.warn(`[ac-04-coverage] katman etiketi YOK (kapsam sayımına girmez): ${unlabeled.join(", ")}`);
-    expect(Array.isArray(unlabeled)).toBe(true);
   });
 
   it("tarayıcı kendini sınar: katman eksikse eksik listelenir, tam kümede boştur", () => {
