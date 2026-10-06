@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Dağıtım sonrası duman testi (T-010 / ADR-013). `deploy-staging.yml` dağıtımdan sonra koşar:
 //   node scripts/deploy-smoke.mjs --url https://etkin-wms-staging.fly.dev/api/health \
-//     --status-file "$RUNNER_TEMP/fly-status.json"
+//     --status-file "$RUNNER_TEMP/fly-status.json" --before-file "$RUNNER_TEMP/fly-status-before.json" \
+//     --recheck-file "$RUNNER_TEMP/fly-status-recheck.json"   (iki bayrak ZORUNLU: kararlılık denetimi atlanamaz)
 // 1) web: URL → HTTP 200 ve gövde `{"status":"ok"}` (varsa `db` alanı da `ok`, T-106); yeniden deneme + istek başına zaman aşımı
 //    (web makinesi `auto_stop_machines` ile durmuş olabilir; ilk istek onu başlatır).
 // 2) worker: `flyctl status --json` çıktısında (dosya) `worker` süreç grubunda en az bir makine
@@ -119,6 +120,17 @@ function processGroupOf(machine) {
   return typeof group === "string" ? group : "";
 }
 
+/** Çıktıya yazılan makine kimliği/durumu: dar desene uymazsa `?` (iş akışı komutu `::` enjeksiyonunu önler). */
+const RE_MACHINE_ID = /^[a-z0-9]{8,20}$/;
+/** @param {unknown} v */
+function safeId(v) {
+  return typeof v === "string" && RE_MACHINE_ID.test(v) ? v : "?";
+}
+/** @param {unknown} v */
+function safeState(v) {
+  return typeof v === "string" && /^[a-z_-]{1,20}$/.test(v) ? v : "?";
+}
+
 /**
  * `flyctl status --json` çıktısında süreç grubunun tüm makineleri `started` mı.
  * @param {string} statusJson
@@ -143,7 +155,7 @@ export function checkProcessGroup(statusJson, group = DEFAULTS.group) {
   }
   const states = inGroup.map((m) => {
     const s = /** @type {{ state?: unknown, id?: unknown }} */ (m);
-    return { id: typeof s.id === "string" ? s.id : "?", state: typeof s.state === "string" ? s.state : "?" };
+    return { id: safeId(s.id), state: safeState(s.state) };
   });
   const notStarted = states.filter((s) => s.state !== "started");
   if (notStarted.length > 0) {
@@ -271,7 +283,7 @@ function allowBody(line) {
  * Çıktı `worker| ` ile başlar → `::`/`##[`/`#` ile başlayan satır oluşamaz.
  * @param {string} text
  * @param {{ maxLines?: number }} [opts]
- * @returns {{ lines: string[], total: number, hidden: number }}
+ * @returns {{ lines: string[], total: number, hidden: number, categories: Record<string, number> }}
  */
 export function maskLogs(text, opts = {}) {
   const max = opts.maxLines ?? DIAG_MAX_LINES;
@@ -280,12 +292,43 @@ export function maskLogs(text, opts = {}) {
   /** @type {string[]} */
   const lines = [];
   let hidden = 0;
+  /** @type {Record<string, number>} */
+  const categories = {};
   for (const l of tail) {
     const a = allowLine(l);
-    if (a === null) hidden++;
-    else lines.push(`worker| ${a}`);
+    if (a === null) {
+      hidden++;
+      const c = classifyHidden(l);
+      categories[c] = (categories[c] ?? 0) + 1;
+    } else lines.push(`worker| ${a}`);
   }
-  return { lines, total: all.length, hidden };
+  return { lines, total: all.length, hidden, categories };
+}
+
+/**
+ * Gizlenen satırın TÜRÜ (içerik yazılmaz): `empty` (önek sonrası gövde boş), `fly-system` (Fly öneki var, sağlayıcı
+ * `app` değil), `app-json` (gövde geçerli JSON nesnesi ama izin listesinden geçmedi — bu durumda ise izinli alanları
+ * olmayan satır), `json-invalid` (`{` ile başlar, JSON değil), `app-text` (Fly öneki, sağlayıcı `app`, düz metin),
+ * `unparsed` (Fly öneki yok, JSON değil).
+ * @param {string} rawLine
+ * @returns {"empty" | "fly-system" | "app-json" | "json-invalid" | "app-text" | "unparsed"}
+ */
+export function classifyHidden(rawLine) {
+  const line = rawLine.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "");
+  const pm = RE_FLY_PREFIX.exec(line);
+  const body = (pm === null ? line : (pm[6] ?? "")).trim();
+  if (body === "") return "empty";
+  if (body.startsWith("{")) {
+    try {
+      const o = JSON.parse(body);
+      if (typeof o === "object" && o !== null && !Array.isArray(o)) return "app-json";
+    } catch {
+      /* geçersiz JSON */
+    }
+    return "json-invalid";
+  }
+  if (pm === null) return "unparsed";
+  return pm[2] === "app" ? "app-text" : "fly-system";
 }
 
 /**
@@ -293,9 +336,11 @@ export function maskLogs(text, opts = {}) {
  * ASLA yazılmaz). Olay alanları (`events[].request.exit_event`) Fly Machines API şemasındandır; yoksa atlanır.
  * @param {string} statusJson
  * @param {string} [group]
+ * @param {readonly string[]} [onlyStates] verilirse yalnızca bu durumdaki makineler (ör. ["stopped"])
+ * @param {boolean} [includeStarted] true ise `started` makineler de (çökme döngüsü teşhisi)
  * @returns {{ id: string, summary: string[] }[]}
  */
-export function describeStoppedMachines(statusJson, group = DEFAULTS.group) {
+export function describeStoppedMachines(statusJson, group = DEFAULTS.group, onlyStates, includeStarted = false) {
   /** @type {unknown} */
   let parsed;
   try {
@@ -310,7 +355,8 @@ export function describeStoppedMachines(statusJson, group = DEFAULTS.group) {
   for (const m of machines) {
     if (processGroupOf(m) !== group) continue;
     const mm = /** @type {Record<string, any>} */ (m);
-    if (mm["state"] === "started") continue;
+    if (mm["state"] === "started" && !includeStarted) continue;
+    if (onlyStates !== undefined && !onlyStates.includes(mm["state"])) continue;
     const id = typeof mm["id"] === "string" ? mm["id"] : "";
     if (!/^[a-z0-9]{8,20}$/.test(id)) continue;
     const word = (/** @type {unknown} */ v) => (typeof v === "string" && RE_STATE_WORD.test(v) ? v : "?");
@@ -337,15 +383,120 @@ export function describeStoppedMachines(statusJson, group = DEFAULTS.group) {
 }
 
 /**
+ * @param {unknown} machine
+ * @returns {{ type: string, status: string, timestamp: number }[]}  (geçersiz/pozitif olmayan zaman damgası → 0)
+ */
+function eventsOf(machine) {
+  const ev = /** @type {{ events?: unknown } | null} */ (machine)?.events;
+  if (!Array.isArray(ev)) return [];
+  return ev.map((e) => {
+    const x = /** @type {{ type?: unknown, status?: unknown, timestamp?: unknown }} */ (e ?? {});
+    return { type: String(x.type), status: String(x.status), timestamp: typeof x.timestamp === "number" && Number.isFinite(x.timestamp) && x.timestamp > 0 ? x.timestamp : 0 };
+  });
+}
+
+/**
+ * `later` içinde `earlier`'da bulunmayan olaylar (çoklu küme farkı). Zamana DAYANMAZ: Machines olayında kimlik yok;
+ * `Timestamp` ms epoch'tur (fly-go v0.11.2 machine_types.go:294-304) ama saat karşılaştırması yerine anahtar
+ * `tür+durum+zaman damgası` ile fark alınır (runner/Fly saat farkından bağımsız).
+ * @param {{ type: string, status: string, timestamp: number }[]} later
+ * @param {{ type: string, status: string, timestamp: number }[]} earlier
+ */
+function newEvents(later, earlier) {
+  /** @type {Map<string, number>} */
+  const seen = new Map();
+  const key = (/** @type {{ type: string, status: string, timestamp: number }} */ e) => `${e.type}|${e.status}|${e.timestamp}`;
+  // Zaman damgası geçersiz/pozitif değilse (0) olay HER ZAMAN yeni sayılır (güvenli taraf).
+  for (const e of earlier) if (e.timestamp > 0) seen.set(key(e), (seen.get(key(e)) ?? 0) + 1);
+  return later.filter((e) => {
+    if (e.timestamp <= 0) return true;
+    const n = seen.get(key(e)) ?? 0;
+    if (n > 0) {
+      seen.set(key(e), n - 1);
+      return false;
+    }
+    return true;
+  });
+}
+
+/**
+ * Worker kararlılığı (T-106c): yanlış yeşili önler. Üç örnek: `before` (başlatma adımından önce), `after` (başlatma +
+ * bekleme sonrası), `recheck` (kısa aralıkla ikinci örnek). Her worker makinesi için: `recheck`'te de `started`;
+ * `before`'dan beri `exit`/`restart` olayı YOK; `start` olayı en çok 1 (bizim başlattığımız; 2+ = çökme döngüsü);
+ * `after` ile `recheck` arasında yeni start/exit/restart olayı YOK.
+ * @param {string} beforeJson
+ * @param {string} afterJson
+ * @param {string} recheckJson
+ * @param {string} [group]
+ * @returns {CheckResult}
+ */
+export function checkWorkerStability(beforeJson, afterJson, recheckJson, group = DEFAULTS.group) {
+  /** @param {string} j */
+  const load = (j) => {
+    try {
+      const ms = /** @type {{ Machines?: unknown } | null} */ (JSON.parse(j))?.Machines;
+      if (!Array.isArray(ms)) return null;
+      return ms.filter((m) => processGroupOf(m) === group);
+    } catch {
+      return null;
+    }
+  };
+  const before = load(beforeJson);
+  const after = load(afterJson);
+  const recheck = load(recheckJson);
+  if (before === null || after === null || recheck === null) return { ok: false, reason: "kararlılık denetimi: durum dosyası okunamadı" };
+  /** @param {unknown[]} ms @param {string} id */
+  const find = (ms, id) => ms.find((m) => /** @type {{ id?: unknown }} */ (m).id === id);
+  /** @type {string[]} */
+  const problems = [];
+  const idsOf = (/** @type {unknown[]} */ ms) => ms.map((m) => String(/** @type {{ id?: unknown }} */ (m).id)).sort();
+  const afterIds = idsOf(after);
+  const recheckIds = idsOf(recheck);
+  if (afterIds.length === 0) problems.push("worker makinesi yok");
+  if (afterIds.join(",") !== recheckIds.join(",")) {
+    problems.push(`makine kümesi örnekler arasında farklı (${afterIds.map(safeId).join(",")} ≠ ${recheckIds.map(safeId).join(",")})`);
+  }
+  // Hem after hem recheck makineleri taranır (küme farkı varsa da her biri denetlenir).
+  for (const r of recheck) {
+    const rawId = String(/** @type {{ id?: unknown }} */ (r).id);
+    const id = safeId(rawId);
+    const m = find(after, rawId);
+    if (/** @type {{ state?: unknown }} */ (r).state !== "started") {
+      problems.push(`${id}: ikinci örnekte started değil`);
+      continue;
+    }
+    if (m === undefined) continue; // küme farkı yukarıda raporlandı
+    if (!Array.isArray(/** @type {{ events?: unknown }} */ (m).events) || !Array.isArray(/** @type {{ events?: unknown }} */ (r).events)) {
+      problems.push(`${id}: olay listesi (events) yok`);
+      continue;
+    }
+    const prior = find(before, rawId);
+    const sinceBefore = newEvents(eventsOf(r), eventsOf(prior));
+    const bad = sinceBefore.filter((e) => e.type === "exit" || e.type === "restart").length;
+    const starts = sinceBefore.filter((e) => e.type === "start").length;
+    const between = newEvents(eventsOf(r), eventsOf(m)).filter((e) => ["start", "exit", "restart"].includes(e.type)).length;
+    if (bad > 0) problems.push(`${id}: başlatmadan sonra ${bad} exit/restart olayı`);
+    if (starts > 1) problems.push(`${id}: ${starts} start olayı (çökme döngüsü)`);
+    // before'da yok (yeni makine) ya da started değildi → şimdi started: en az bir yeni start olayı ŞART.
+    if ((prior === undefined || /** @type {{ state?: unknown }} */ (prior).state !== "started") && /** @type {{ state?: unknown }} */ (m).state === "started" && starts < 1) {
+      problems.push(`${id}: önce durmuş, sonra started ama yeni start olayı yok`);
+    }
+    if (between > 0) problems.push(`${id}: örnekler arasında ${between} yeni start/exit/restart olayı`);
+  }
+  if (problems.length > 0) return { ok: false, reason: `"${group}" kararsız: ${problems.join("; ")}` };
+  return { ok: true, reason: `"${group}" kararlı (exit/restart yok, start ≤ 1, iki örnekte started)` };
+}
+
+/**
  * @param {string[]} argv
- * @returns {{ url: string, statusFile: string, group: string }}
+ * @returns {{ url: string, statusFile: string, group: string, beforeFile: string, recheckFile: string }}
  */
 export function parseArgs(argv) {
   /** @type {Record<string, string>} */
   const out = {};
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i] ?? "";
-    const m = /^--(url|status-file|group)(?:=(.*))?$/.exec(a);
+    const m = /^--(url|status-file|group|before-file|recheck-file)(?:=(.*))?$/.exec(a);
     if (m === null) throw new Error(`bilinmeyen argüman "${a}"`);
     const key = m[1] ?? "";
     const v = m[2] ?? argv[++i];
@@ -355,10 +506,21 @@ export function parseArgs(argv) {
   const url = out["url"];
   const statusFile = out["status-file"];
   if (url === undefined || statusFile === undefined) {
-    throw new Error("kullanım: deploy-smoke.mjs --url <health-url> --status-file <flyctl-status.json> [--group worker]");
+    throw new Error("kullanım: deploy-smoke.mjs --url <health-url> --status-file <flyctl-status.json> --before-file <json> --recheck-file <json> [--group worker]");
   }
   if (!/^https:\/\//.test(url)) throw new Error(`--url https olmalı: ${url}`);
-  return { url, statusFile, group: out["group"] ?? DEFAULTS.group };
+  const before = out["before-file"];
+  const recheck = out["recheck-file"];
+  if (before === undefined || recheck === undefined) {
+    throw new Error("--before-file ve --recheck-file zorunlu (kararlılık denetimi atlanamaz)");
+  }
+  return {
+    url,
+    statusFile,
+    group: out["group"] ?? DEFAULTS.group,
+    beforeFile: before,
+    recheckFile: recheck,
+  };
 }
 
 /**
@@ -368,6 +530,30 @@ export function parseArgs(argv) {
  */
 export function summaryLine(web, worker) {
   return `deploy-smoke: web ${web.ok ? "OK" : "FAIL"} · worker ${worker.ok ? "OK" : "FAIL"}`;
+}
+
+/**
+ * Worker denetimi: süreç grubu `started` + (önce/sonra dosyaları verilmişse) kararlılık. Dosya okunamazsa FAIL.
+ * @param {{ statusFile: string, group: string, beforeFile?: string, recheckFile?: string }} args
+ * @returns {CheckResult}
+ */
+export function evaluateWorker(args) {
+  try {
+    const worker = checkProcessGroup(readFileSync(args.statusFile, "utf8"), args.group);
+    if (!worker.ok) return worker;
+    if (args.beforeFile === undefined || args.recheckFile === undefined) {
+      return { ok: false, reason: "kararlılık denetimi için --before-file/--recheck-file verilmedi (atlanamaz)" };
+    }
+    const stable = checkWorkerStability(
+      readFileSync(args.beforeFile, "utf8"),
+      readFileSync(args.statusFile, "utf8"),
+      readFileSync(args.recheckFile, "utf8"),
+      args.group,
+    );
+    return stable.ok ? { ok: true, reason: `${worker.reason}; ${stable.reason}` } : stable;
+  } catch (err) {
+    return { ok: false, reason: `status dosyası okunamadı: ${err instanceof Error ? err.message : String(err)}` };
+  }
 }
 
 /** T-106c alt komutları (teşhis; sağlık/durum denetimini DEĞİŞTİRMEZ). */
@@ -380,10 +566,21 @@ async function diagCommand(/** @type {string[]} */ argv) {
       console.error("kullanım: deploy-smoke.mjs worker-ids --status-file <json>");
       return 2;
     }
-    for (const m of describeStoppedMachines(readFileSync(file, "utf8"))) {
+    for (const m of describeStoppedMachines(readFileSync(file, "utf8"), DEFAULTS.group, undefined, rest.includes("--all"))) {
       for (const l of m.summary) console.error(`worker| ${m.id} ${l}`);
       console.log(m.id);
     }
+    return 0;
+  }
+  if (cmd === "worker-stopped-ids") {
+    // `flyctl machine start` için: YALNIZCA `stopped` worker makineleri; kimlik deseni describeStoppedMachines'te doğrulanır.
+    const i = rest.indexOf("--status-file");
+    const file = i >= 0 ? rest[i + 1] : undefined;
+    if (file === undefined) {
+      console.error("kullanım: deploy-smoke.mjs worker-stopped-ids --status-file <json>");
+      return 2;
+    }
+    for (const m of describeStoppedMachines(readFileSync(file, "utf8"), DEFAULTS.group, ["stopped"])) console.log(m.id);
     return 0;
   }
   if (cmd === "mask-logs") {
@@ -395,9 +592,9 @@ async function diagCommand(/** @type {string[]} */ argv) {
     }
     const chunks = [];
     for await (const c of process.stdin) chunks.push(c);
-    const { lines, total, hidden } = maskLogs(Buffer.concat(chunks).toString("utf8"), { maxLines: max });
+    const { lines, total, hidden, categories } = maskLogs(Buffer.concat(chunks).toString("utf8"), { maxLines: max });
     for (const l of lines) console.log(l);
-    console.log(`worker-diag: ${lines.length} satır yazıldı (toplam ${total}; gizlenen satır: ${hidden}; izin listesi)`);
+    console.log(`worker-diag: ${lines.length} satır yazıldı (toplam ${total}; gizlenen satır: ${hidden}${hidden > 0 ? ` [${Object.entries(categories).sort().map(([k, v]) => `${k}=${v}`).join(", ")}]` : ""}; izin listesi)`);
     return 0;
   }
   console.error(`deploy-smoke: bilinmeyen alt komut "${cmd}"`);
@@ -406,7 +603,7 @@ async function diagCommand(/** @type {string[]} */ argv) {
 
 async function main() {
   const first = process.argv[2];
-  if (first === "worker-ids" || first === "mask-logs") return diagCommand(process.argv.slice(2));
+  if (first === "worker-ids" || first === "worker-stopped-ids" || first === "mask-logs") return diagCommand(process.argv.slice(2));
   let args;
   try {
     args = parseArgs(process.argv.slice(2));
@@ -416,13 +613,7 @@ async function main() {
   }
   const web = await checkHealth(args.url, { log: (l) => console.log(l) });
   console.log(`web: ${web.ok ? "OK" : "FAIL"} — ${web.reason} (${web.attempts} deneme)`);
-  /** @type {CheckResult} */
-  let worker;
-  try {
-    worker = checkProcessGroup(readFileSync(args.statusFile, "utf8"), args.group);
-  } catch (err) {
-    worker = { ok: false, reason: `status dosyası okunamadı: ${err instanceof Error ? err.message : String(err)}` };
-  }
+  const worker = evaluateWorker(args);
   console.log(`worker: ${worker.ok ? "OK" : "FAIL"} — ${worker.reason}`);
   console.log(summaryLine(web, worker));
   return web.ok && worker.ok ? 0 : 1;

@@ -5,7 +5,7 @@ import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ALLOWED_MSGS, checkHealth, checkProcessGroup, allowLine, describeStoppedMachines, evaluateHealth, maskLogs, parseArgs, summaryLine } from "./deploy-smoke.mjs";
+import { ALLOWED_MSGS, checkWorkerStability, evaluateWorker, classifyHidden, checkHealth, checkProcessGroup, allowLine, describeStoppedMachines, evaluateHealth, maskLogs, parseArgs, summaryLine } from "./deploy-smoke.mjs";
 
 const URL_OK = "https://etkin-wms-staging.fly.dev/api/health";
 
@@ -189,10 +189,10 @@ describe("checkProcessGroup", () => {
 
   it("worker makinesi started değil → FAIL, makine ve durum nedende", () => {
     const json = statusJson([
-      { id: "w1", state: "started", group: "worker" },
-      { id: "w2", state: "stopped", group: "worker" },
+      { id: "8d96110c222577", state: "started", group: "worker" },
+      { id: "8d96110c222578", state: "stopped", group: "worker" },
     ]);
-    expect(checkProcessGroup(json)).toEqual({ ok: false, reason: '"worker" başlamamış makine: w2=stopped' });
+    expect(checkProcessGroup(json)).toEqual({ ok: false, reason: '"worker" başlamamış makine: 8d96110c222578=stopped' });
   });
 
   it("worker grubunda makine yok → FAIL", () => {
@@ -222,10 +222,12 @@ describe("checkProcessGroup", () => {
 
 describe("parseArgs", () => {
   it("zorunlu argümanlar ve varsayılan grup", () => {
-    expect(parseArgs(["--url", URL_OK, "--status-file=/tmp/s.json"])).toEqual({
+    expect(parseArgs(["--url", URL_OK, "--status-file=/tmp/s.json", "--before-file=/tmp/b.json", "--recheck-file=/tmp/r.json"])).toEqual({
       url: URL_OK,
       statusFile: "/tmp/s.json",
       group: "worker",
+      beforeFile: "/tmp/b.json",
+      recheckFile: "/tmp/r.json",
     });
   });
 
@@ -403,7 +405,7 @@ describe("worker teşhisi (T-106c) — izin listesi", () => {
   });
 
   it("boş log → sıfır satır", () => {
-    expect(maskLogs("")).toEqual({ lines: [], total: 0, hidden: 0 });
+    expect(maskLogs("")).toEqual({ lines: [], total: 0, hidden: 0, categories: {} });
   });
 });
 
@@ -473,7 +475,7 @@ describe("diagCommand CLI (T-106c)", () => {
     expect(r.status).toBe(0);
     expect(r.stdout).not.toContain(secret);
     expect(r.stdout).toContain('worker| {"level":"info","msg":"queue started"}');
-    expect(r.stdout).toContain("worker-diag: 1 satır yazıldı (toplam 2; gizlenen satır: 1; izin listesi)");
+    expect(r.stdout).toContain("worker-diag: 1 satır yazıldı (toplam 2; gizlenen satır: 1 [unparsed=1]; izin listesi)");
     for (const bad of ["0", "abc", "-1", "1.5"]) expect(node(["mask-logs", "--max-lines", bad], input).status).toBe(2);
     expect(node(["bilinmeyen"]).status).not.toBe(0);
   });
@@ -520,5 +522,191 @@ describe("ALLOWED_MSGS kaynak senkron bekçisi (T-106c)", () => {
     const bad = allowLine(JSON.stringify({ msg: "unhandled rejection", error: { name: `x ${secret}`, value: secret } })) ?? "";
     expect(bad).not.toContain(secret);
     expect(JSON.parse(bad).error).toBeUndefined();
+  });
+});
+
+describe("gizlenen satır kategorileri (T-106c faz 2)", () => {
+  const secret = randomBytes(12).toString("hex");
+  const pre = (/** @type {string} */ provider) => `2026-10-06T11:32:00Z ${provider}[80e32da6490958] fra [info] `;
+
+  it("her tür doğru sınıflanır (içerik kullanılmaz)", () => {
+    expect(classifyHidden(`${pre("app")}   `)).toBe("empty");
+    expect(classifyHidden(`${pre("runner")}Pulling container image ${secret}`)).toBe("fly-system");
+    expect(classifyHidden(`${pre("app")}{"msg":"${secret}"}`)).toBe("app-json");
+    expect(classifyHidden(`${pre("app")}{"msg":`)).toBe("json-invalid");
+    expect(classifyHidden(`${pre("app")}plain text ${secret}`)).toBe("app-text");
+    expect(classifyHidden(`plain text ${secret}`)).toBe("unparsed");
+    expect(classifyHidden(`{"msg":"${secret}"}`)).toBe("app-json");
+  });
+
+  it("maskLogs sayıları ve özet satırı; çıktıda içerik yok", () => {
+    const text = [
+      `${pre("runner")}a ${secret}`,
+      `${pre("runner")}b ${secret}`,
+      `${pre("app")}{"msg":"${secret}"}`,
+      `${pre("app")}text ${secret}`,
+      `raw ${secret}`,
+      `${pre("app")}{"msg":"started"}`,
+    ].join("\n");
+    const r = maskLogs(text);
+    // JSON nesnesi satırları izin listesiyle (msg gizlenerek) yazılır → gizli sayılmaz.
+    expect(r.hidden).toBe(4);
+    expect(r.categories).toEqual({ "fly-system": 2, "app-text": 1, unparsed: 1 });
+    expect(r.lines).toHaveLength(2);
+    const cli = spawnSync(process.execPath, [fileURLToPath(new URL("./deploy-smoke.mjs", import.meta.url)), "mask-logs"], { input: text, encoding: "utf8", env: { PATH: process.env["PATH"] ?? "" } });
+    expect(cli.stdout).toContain("gizlenen satır: 4 [app-text=1, fly-system=2, unparsed=1]; izin listesi)");
+    expect(cli.stdout).not.toContain(secret);
+  });
+});
+
+describe("worker-stopped-ids (T-106c faz 2)", () => {
+  it("yalnızca stopped worker makineleri; created/started/web ve geçersiz kimlik yok", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "smoke-"));
+    const file = path.join(dir, "s.json");
+    const m = (/** @type {string} */ id, /** @type {string} */ state, /** @type {string} */ group) => ({ id, state, config: { metadata: { fly_process_group: group } } });
+    writeFileSync(file, JSON.stringify({ Machines: [
+      m("8d96110c222578", "stopped", "worker"), m("aaaa1111bbbb22", "started", "worker"), m("bbbb1111cccc22", "created", "worker"),
+      m("cccc1111dddd22", "stopped", "web"), m("x; rm -rf", "stopped", "worker"),
+    ] }));
+    const r = spawnSync(process.execPath, [fileURLToPath(new URL("./deploy-smoke.mjs", import.meta.url)), "worker-stopped-ids", "--status-file", file], { encoding: "utf8", env: { PATH: process.env["PATH"] ?? "" } });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe("8d96110c222578\n");
+  });
+});
+
+describe("checkWorkerStability (T-106c yanlış yeşil önleme)", () => {
+  const ev = (/** @type {string} */ type, /** @type {number} */ ts, status = "x") => ({ type, status, timestamp: ts });
+  const snap = (/** @type {string} */ state, /** @type {any[]} */ events) =>
+    JSON.stringify({ Machines: [{ id: "8d96110c222578", state, config: { metadata: { fly_process_group: "worker" } }, events }] });
+  const old = [ev("launch", 1000, "created"), ev("update", 2000, "stopped")];
+  const before = snap("stopped", old);
+  const withStart = [ev("start", 3000, "started"), ...old];
+
+  it("tek start, exit yok, iki örnekte started → OK", () => {
+    expect(checkWorkerStability(before, snap("started", withStart), snap("started", withStart)).ok).toBe(true);
+  });
+
+  it("başlatmadan sonra exit olayı → FAIL (recheck'te started görünse bile)", () => {
+    const crashed = [ev("exit", 3500, "stopped"), ...withStart];
+    const r = checkWorkerStability(before, snap("started", withStart), snap("started", crashed));
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/exit\/restart/);
+  });
+
+  it("iki start (çökme döngüsü) → FAIL", () => {
+    const loop = [ev("start", 4000, "started"), ev("exit", 3500, "stopped"), ...withStart];
+    const r = checkWorkerStability(before, snap("started", loop), snap("started", loop));
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/2 start|çökme döngüsü/);
+  });
+
+  it("started ama örnekler arasında yeni start/restart → FAIL", () => {
+    const again = [ev("start", 5000, "started"), ...withStart];
+    const r = checkWorkerStability(before, snap("started", withStart), snap("started", [ev("restart", 4500), ...again]));
+    expect(r.ok).toBe(false);
+  });
+
+  it("ikinci örnekte durmuş → FAIL; okunamayan dosya → FAIL", () => {
+    expect(checkWorkerStability(before, snap("started", withStart), snap("stopped", withStart)).ok).toBe(false);
+    expect(checkWorkerStability(before, "{", snap("started", withStart)).ok).toBe(false);
+  });
+
+  it("parseArgs + evaluateWorker: kararsız worker FAIL", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "smoke-"));
+    const f = (/** @type {string} */ n, /** @type {string} */ c) => {
+      writeFileSync(path.join(dir, n), c);
+      return path.join(dir, n);
+    };
+    expect(parseArgs(["--url", URL_OK, "--status-file", "s", "--before-file", "b", "--recheck-file", "r"])).toMatchObject({ beforeFile: "b", recheckFile: "r" });
+    expect(() => parseArgs(["--url", URL_OK, "--status-file", "s", "--before-file", "b"])).toThrow(/zorunlu/);
+    expect(() => parseArgs(["--url", URL_OK, "--status-file", "s"])).toThrow(/zorunlu/);
+    const crashed = [ev("exit", 3500, "stopped"), ...withStart];
+    const sFile = f("s.json", snap("started", withStart));
+    const ok = { statusFile: sFile, group: "worker", beforeFile: f("b.json", before), recheckFile: f("r.json", snap("started", withStart)) };
+    expect(evaluateWorker(ok).ok).toBe(true);
+    expect(evaluateWorker({ ...ok, recheckFile: f("r2.json", snap("started", crashed)) })).toMatchObject({ ok: false, reason: expect.stringContaining('"worker" kararsız') });
+    expect(evaluateWorker({ ...ok, recheckFile: path.join(dir, "yok.json") }).ok).toBe(false);
+    // bayraksız (eski) yol artık FAIL: denetim atlanamaz
+    expect(evaluateWorker({ statusFile: sFile, group: "worker" })).toMatchObject({ ok: false, reason: expect.stringContaining("atlanamaz") });
+  });
+});
+
+describe("worker-ids --all (T-106c)", () => {
+  it("started makineleri de listeler (çökme döngüsü logları için)", () => {
+    const st = JSON.stringify({ Machines: [{ id: "aaaa1111bbbb22", state: "started", config: { metadata: { fly_process_group: "worker" } } }] });
+    expect(describeStoppedMachines(st)).toEqual([]);
+    expect(describeStoppedMachines(st, "worker", undefined, true).map((m) => m.id)).toEqual(["aaaa1111bbbb22"]);
+  });
+});
+
+describe("checkWorkerStability sıkılaştırma (fail-open kapatma)", () => {
+  const rid = () => randomBytes(7).toString("hex"); // 14 karakter [0-9a-f]
+  const ev = (/** @type {string} */ type, /** @type {number} */ ts) => ({ type, status: "x", timestamp: ts });
+  const mach = (/** @type {string} */ id, /** @type {string} */ state, /** @type {any} */ events = undefined) => {
+    /** @type {any} */
+    const m = { id, state, config: { metadata: { fly_process_group: "worker" } } };
+    if (events !== undefined) m.events = events;
+    return m;
+  };
+  const snap = (/** @type {any[]} */ ms) => JSON.stringify({ Machines: ms });
+  const id = rid();
+  const old = [ev("launch", 1000), ev("update", 2000)];
+  const start = [ev("start", 3000), ...old];
+
+  it("after/recheck'te events yok ya da dizi değil → FAIL", () => {
+    const before = snap([mach(id, "stopped", old)]);
+    expect(checkWorkerStability(before, snap([mach(id, "started")]), snap([mach(id, "started", start)])).ok).toBe(false);
+    expect(checkWorkerStability(before, snap([mach(id, "started", start)]), snap([mach(id, "started")])).ok).toBe(false);
+    expect(checkWorkerStability(before, snap([mach(id, "started", start)]), snap([mach(id, "started", "x")])).reason).toMatch(/events/);
+  });
+
+  it("stopped → started ama yeni start olayı yok → FAIL", () => {
+    const before = snap([mach(id, "stopped", old)]);
+    const r = checkWorkerStability(before, snap([mach(id, "started", old)]), snap([mach(id, "started", old)]));
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/start olayı yok/);
+  });
+
+  it("makine before'da yok, after/recheck'te started ama events boş → FAIL; start olayı varsa OK", () => {
+    const none = snap([]);
+    const r = checkWorkerStability(none, snap([mach(id, "started", [])]), snap([mach(id, "started", [])]));
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/start olayı yok/);
+    expect(checkWorkerStability(none, snap([mach(id, "started", start)]), snap([mach(id, "started", start)])).ok).toBe(true);
+  });
+
+  it("makine kümesi örnekler arasında farklıysa (ek/eksik makine) → FAIL", () => {
+    const other = rid();
+    const before = snap([mach(id, "stopped", old)]);
+    expect(checkWorkerStability(before, snap([mach(id, "started", start)]), snap([mach(id, "started", start), mach(other, "started", start)])).ok).toBe(false);
+    expect(checkWorkerStability(before, snap([mach(id, "started", start), mach(other, "started", start)]), snap([mach(id, "started", start)])).ok).toBe(false);
+    expect(checkWorkerStability(before, snap([mach(id, "started", start)]), snap([mach(other, "started", start)])).ok).toBe(false);
+  });
+
+  it("geçersiz/pozitif olmayan zaman damgası her zaman yeni sayılır", () => {
+    const before = snap([mach(id, "stopped", [ev("launch", 0), ev("exit", -5)])]);
+    const withBad = [ev("start", 3000), ev("launch", 0), ev("exit", -5)];
+    const r = checkWorkerStability(before, snap([mach(id, "started", withBad)]), snap([mach(id, "started", withBad)]));
+    expect(r.ok).toBe(false); // before'daki aynı exit(-5) önceden varmış sayılmaz → yeni exit
+    expect(r.reason).toMatch(/exit\/restart/);
+  });
+
+  it("çıktıya yazılan makine kimliği dar desene uymazsa `?` (:: enjeksiyonu)", () => {
+    const evil = `::error::${rid()}`;
+    const st = JSON.stringify({ Machines: [{ id: evil, state: "::stop-commands::x", config: { metadata: { fly_process_group: "worker" } } }] });
+    const pg = checkProcessGroup(st);
+    expect(pg.ok).toBe(false);
+    expect(pg.reason).not.toContain("::");
+    expect(pg.reason).toContain("?=?");
+    const evilEvents = [ev("start", 3000), ev("exit", 3500), ...old];
+    const r = checkWorkerStability(
+      snap([mach(evil, "stopped", old)]),
+      snap([mach(evil, "started", evilEvents)]),
+      snap([mach(evil, "started", evilEvents)]),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reason).not.toContain("::");
+    expect(r.reason).not.toContain(evil);
+    expect(r.reason).toContain("?:");
   });
 });

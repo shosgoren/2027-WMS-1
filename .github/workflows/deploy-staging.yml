@@ -8,9 +8,9 @@
 # environment + dal kuralı (sırrı yalnızca main'e açma) özel repoda ücretsiz planda yok; repoya yazma
 # yetkisi olan herkes (main'i değiştirebilen) güvenilen taraftır.
 #
-# Sır kapsamı (G-09): FLY_API_TOKEN YALNIZCA "Deploy" ve (Smoke kırmızıysa) "Worker diagnostics"
-# adımlarının env'indedir; ikincisinde yalnız `flyctl logs` süreci token'ı görür, node alt süreçleri görmez. Checkout kimlik
-# bilgisi saklamaz; diğer adımlar (kurulum, smoke) sırrı görmez. Smoke, deploy adımının yazdığı
+# Sır kapsamı (G-09): FLY_API_TOKEN YALNIZCA "Deploy", "Start stopped worker machines" ve (başlatma ya da Smoke
+# kırmızıysa) "Worker diagnostics" adımlarının env'indedir; son ikisinde yalnız flyctl süreçleri token'ı görür,
+# node alt süreçleri görmez. Checkout kimlik bilgisi saklamaz; diğer adımlar (kurulum, smoke) sırrı görmez. Smoke, deploy adımının yazdığı
 # `flyctl status --json` dosyasını okur.
 # Token türü: uygulama mevcutsa iş akışı org düzeyinde HİÇBİR komut (orgs list / apps create) koşmaz;
 # uygulama düzeyinde deploy token'ı (`fly tokens create deploy -a etkin-wms-staging`) yeterlidir.
@@ -237,21 +237,55 @@ jobs:
             --image-label "git-${GITHUB_SHA}"
           flyctl status --app "$FLY_APP"
           flyctl status --app "$FLY_APP" --json > "$RUNNER_TEMP/fly-status.json"
+      # T-106c faz 2: flyctl, `stopped` bir makineyi güncellerken durmuş bırakır (shouldSkipLaunch,
+      # internal/command/deploy/machines_launchinput.go:283-300; machines_deploymachinesapp.go:222-236) ve worker'ın HTTP
+      # hizmeti olmadığından başka hiçbir şey onu başlatmaz. Worker süreç grubunda `stopped` makineler açıkça başlatılır.
+      # Kimlikler betikte `^[a-z0-9]{8,20}$` ile doğrulanır; token yalnız flyctl süreçlerinin ortamındadır (node'a geçmez).
+      # `machine start` durumu beklemez (internal/command/machine/start.go:73-74) → `machine wait --state started` (sınırlı),
+      # (bayraklar flyctl v0.4.111 internal/command/machine/wait.go: kullanım :25 `wait [id]`, `--state` :41, `--wait-timeout`/`-w` :46).
+      # Sonra durum iki kez örneklenir (20 sn ve +15 sn); hemen çöken süreç "started" görünüp Smoke'u yanıltmasın.
+      # Başlatma/bekleme hatası adımı kırmızı yapar (fail-closed); hata Smoke'tan önce görünür.
+      - name: Start stopped worker machines
+        id: start
+        shell: bash
+        env:
+          FLY_TOKEN_STEP: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          cp "$RUNNER_TEMP/fly-status.json" "$RUNNER_TEMP/fly-status-before.json"
+          ids=$(env -u FLY_TOKEN_STEP node scripts/deploy-smoke.mjs worker-stopped-ids --status-file "$RUNNER_TEMP/fly-status.json")
+          if [ -z "$ids" ]; then
+            echo "worker-start: durmuş worker makinesi yok"
+          fi
+          for id in $ids; do
+            case "$id" in
+              *[!a-z0-9]*) echo "::error::worker-start: geçersiz makine kimliği"; exit 1 ;;
+            esac
+            echo "worker-start: makine $id başlatılıyor"
+            FLY_API_TOKEN="$FLY_TOKEN_STEP" flyctl machine start "$id" --app "$FLY_APP"
+            FLY_API_TOKEN="$FLY_TOKEN_STEP" flyctl machine wait "$id" --app "$FLY_APP" --state started --wait-timeout 90s
+          done
+          # Yanlış yeşil önleme: iki örnek (kısa aralıkla). Smoke üçünü karşılaştırır (başlatmadan önce / sonra / yeniden):
+          # exit/restart olayı, 2+ start (döngü) ya da örnekler arası yeni olay → worker FAIL.
+          sleep 20
+          FLY_API_TOKEN="$FLY_TOKEN_STEP" flyctl status --app "$FLY_APP" --json > "$RUNNER_TEMP/fly-status.json"
+          sleep 15
+          FLY_API_TOKEN="$FLY_TOKEN_STEP" flyctl status --app "$FLY_APP" --json > "$RUNNER_TEMP/fly-status-recheck.json"
       - name: Smoke
         id: smoke
-        run: node scripts/deploy-smoke.mjs --url "$HEALTH_URL" --status-file "$RUNNER_TEMP/fly-status.json"
+        run: node scripts/deploy-smoke.mjs --url "$HEALTH_URL" --status-file "$RUNNER_TEMP/fly-status.json" --before-file "$RUNNER_TEMP/fly-status-before.json" --recheck-file "$RUNNER_TEMP/fly-status-recheck.json"
       # T-106c: Smoke kırmızıysa başlamamış worker makinelerinin olay özeti + son loglar. Ham log YAZILMAZ: betik izin
       # listesi uygular (JSON: time/level/msg/code/hata sınıfı; Fly sistem satırları: sabit ifadeler); kalanı sayılır.
       # Kart sapması: `exit 0` — teşhis adımı işi yeşile çevirmez (iş Smoke adımı yüzünden kırmızı kalır); teşhis hatası
       # yalnızca not düşer. Token yalnız `flyctl logs` ortamında (FLY_TOKEN_DIAG node alt süreçlerinden kaldırılır).
       - name: Worker diagnostics (allowlist)
-        if: always() && steps.smoke.outcome == 'failure'
+        if: always() && (steps.smoke.outcome == 'failure' || steps.start.outcome == 'failure')
         shell: bash
         env:
           FLY_TOKEN_DIAG: ${{ secrets.FLY_API_TOKEN }}
         run: |
           set -o pipefail
-          ids=$(env -u FLY_TOKEN_DIAG node scripts/deploy-smoke.mjs worker-ids --status-file "$RUNNER_TEMP/fly-status.json" || true)
+          ids=$(env -u FLY_TOKEN_DIAG node scripts/deploy-smoke.mjs worker-ids --all --status-file "$RUNNER_TEMP/fly-status.json" || true)
           if [ -z "$ids" ]; then
             echo "worker-diag: başlamamış worker makinesi bulunamadı (grup boş ya da durum dosyası okunamadı)"
           fi
