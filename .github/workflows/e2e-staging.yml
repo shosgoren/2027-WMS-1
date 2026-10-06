@@ -42,6 +42,20 @@ jobs:
           mkdir -p .artifacts/e2e
           set -o pipefail
           pnpm test:e2e 2>&1 | tee .artifacts/e2e/run.log
+      # T-245: artifact indirilemeyen ortamlarda kök neden için hata bağlamı (sayfa erişilebilirlik anlık görüntüsü) loga.
+      # İçerik demo verisidir (sentetik, example.invalid); iş akışı sır kullanmaz (G-09).
+      - name: Print Playwright error context
+        if: failure()
+        run: |
+          # İçerikteki `::` satırları iş akışı komutu olarak yorumlanmasın (stop-commands, rastgele belirteç).
+          tok="$(openssl rand -hex 16)"
+          find .artifacts/e2e -type f -name error-context.md -print0 | while IFS= read -r -d '' f; do
+            echo "::group::$f"
+            echo "::stop-commands::${tok}"
+            cat -- "$f"
+            echo "::${tok}::"
+            echo "::endgroup::"
+          done
       - name: Upload .artifacts/e2e
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
