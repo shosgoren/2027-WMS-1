@@ -144,6 +144,14 @@ type Actions = Record<string, (arg: unknown) => Promise<ActionResult>>;
 let members: Actions;
 let settings: { saveSettingsAction: (f: FormData) => Promise<void> };
 let inviteAccept: Actions;
+let itemActions: Actions;
+/** T-216: her tenant için sentetik birim/ürün/barkod kimlikleri (eylem tablosu B'nin kimlikleriyle çağırır). */
+let fx: { A: ItemFx; B: ItemFx };
+interface ItemFx {
+  unit: string;
+  item: string;
+  barcode: string;
+}
 
 /** Yanıtın karşılaştırılabilir yüzü (requestId çıkarılır). */
 function face(r: ActionResult): unknown {
@@ -181,6 +189,14 @@ beforeAll(async () => {
   members = (await load("app/t/[slug]/members/actions.ts")) as Actions;
   settings = (await load("app/t/[slug]/settings/actions.ts")) as typeof settings;
   inviteAccept = (await load("app/invite/[token]/actions.ts")) as Actions;
+  itemActions = (await load("app/t/[slug]/items/actions.ts")) as Actions;
+  const mkFx = async (t: Fx): Promise<ItemFx> => {
+    const unit = (await adm.query<{ id: string }>("INSERT INTO public.units (tenant_id, id, code, name) VALUES ($1, gen_random_uuid(), $2, 'Birim') RETURNING id", [t.tenant, `U${rnd()}`])).rows[0]!.id;
+    const item = (await adm.query<{ id: string }>("INSERT INTO public.items (tenant_id, id, code, name, base_unit_id) VALUES ($1, gen_random_uuid(), $2, 'Fx urun', $3) RETURNING id", [t.tenant, `FX-${rnd()}`, unit])).rows[0]!.id;
+    const barcode = (await adm.query<{ id: string }>("INSERT INTO public.item_barcodes (tenant_id, id, item_id, barcode) VALUES ($1, gen_random_uuid(), $2, $3) RETURNING id", [t.tenant, item, `8${rnd()}`])).rows[0]!.id;
+    return { unit, item, barcode };
+  };
+  fx = { A: await mkFx(A), B: await mkFx(B) };
 
   // B yöneticisi (meşru) bir davet üretir: hem olumlu kontrol hem de çapraz tenant kabul denemesi için belirteç.
   as(B.admin);
@@ -345,6 +361,24 @@ describe("ürün ayrıntı sayfası (/t/<slug>/items/<itemId>) — T-216", () =>
     }
   });
 
+  it("@AC-04 sayfa items ve items/[itemId]: stock.view izni olmayan (rolsüz) üye hata değil kilitli görünüm alır (500 yok)", async () => {
+    const u = await mkUser("norole");
+    await adm.query("INSERT INTO public.tenant_memberships (tenant_id, user_id, status, is_owner) VALUES ($1, $2, 'ACTIVE', false)", [A.tenant, u.id]);
+    for (const [rel, itemId] of [["items/page.tsx", undefined], [ITEM_DETAIL, itemA.id]] as const) {
+      as(u.id);
+      const r = await runLoader(rel, A.slug, itemId);
+      expect(`${r.outcome} ${r.to ?? ""}`, rel).toBe("render ");
+      // Sayfa kilitli görünüm bileşenini (async sunucu bileşeni) döndürür; çizilince neden + sonraki eylem anahtarları görünür.
+      const el = r.value as { type: () => Promise<unknown> };
+      expect(typeof el.type, rel).toBe("function");
+      const json = JSON.stringify(await el.type());
+      expect(json, rel).toContain('"locked"');
+      expect(json, rel).toContain("lockedAction");
+      expect(json, rel).not.toContain(itemA.code);
+      expect(json, rel).not.toContain(itemA.name);
+    }
+  });
+
   it("@AC-04 sayfa items/[itemId]: olumlu kontrol — A kullanıcısı kendi ürününü kendi slug'ında çizer (testin geçersiz kılınmadığının kanıtı)", async () => {
     as(A.admin);
     const r = await runLoader(ITEM_DETAIL, A.slug, itemA.id);
@@ -368,14 +402,25 @@ const ACTIONS: Record<string, Call> = {
   issuePasswordResetLinkAction: (slug, v) => members.issuePasswordResetLinkAction!({ slug, memberId: v.membership }),
 };
 
+/** T-216: ürün kartı eylemleri; hepsi B'nin birim/ürün/barkod kimlikleriyle çağrılır (A veya B slug'ında). */
+const ITEM_ACTIONS: Record<string, Call> = {
+  createItemAction: (slug) => itemActions.createItemAction!({ slug, code: `X-${rnd()}`, name: "Ele geçirme", baseUnitId: fx.B.unit }),
+  updateItemAction: (slug) => itemActions.updateItemAction!({ slug, itemId: fx.B.item, name: "Ele Gecirildi" }),
+  archiveItemAction: (slug) => itemActions.archiveItemAction!({ slug, itemId: fx.B.item }),
+  setConversionAction: (slug) => itemActions.setConversionAction!({ slug, itemId: fx.B.item, unitId: fx.B.unit, factor: "12" }),
+  addBarcodeAction: (slug) => itemActions.addBarcodeAction!({ slug, itemId: fx.B.item, unitId: null, barcode: `9${rnd()}`, quantity: null }),
+  removeBarcodeAction: (slug) => itemActions.removeBarcodeAction!({ slug, barcodeId: fx.B.barcode }),
+};
+
 describe("Server Action'lar", () => {
   it("@AC-04 kapsam: members/actions.ts dışa aktarımlarının tamamı tabloda; ayarlar eylemi ayrıca sınanır", () => {
     expect(Object.keys(members).sort()).toEqual(Object.keys(ACTIONS).sort());
+    expect(Object.keys(itemActions).sort()).toEqual(Object.keys(ITEM_ACTIONS).sort());
     expect(Object.keys(settings)).toEqual(["saveSettingsAction"]);
     expect(Object.keys(inviteAccept)).toEqual(["acceptInvitationAction"]);
   });
 
-  for (const [name, call] of Object.entries(ACTIONS)) {
+  for (const [name, call] of Object.entries({ ...ACTIONS, ...ITEM_ACTIONS })) {
     it(`@AC-04 ${name}: A yöneticisi B'nin slug'ıyla -> NOT_FOUND (var olmayan slug ile aynı yanıt); B'de hiçbir değişiklik yok`, async () => {
       const victim = { membership: B.managerMembership, invitation: bInvite.invitationId };
       const beforeB = await snapshot(B);

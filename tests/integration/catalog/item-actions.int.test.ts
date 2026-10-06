@@ -39,6 +39,7 @@ type Actions = Record<string, (arg: unknown) => Promise<Result>>;
 let app: DbClient;
 let adm: pg.Client;
 let A: TenantWorld;
+let B: TenantWorld;
 let actions: Actions;
 const saved: Record<string, string | undefined> = {};
 const ENV_KEYS = ["BETTER_AUTH_URL", "BETTER_AUTH_SECRET", "WMS_ENV"] as const;
@@ -52,8 +53,8 @@ function as(user: string | null, origin: string | null = ORIGIN): void {
 }
 
 /** Tenant'ın ürün/dönüşüm/barkod durumu ve ilgili denetim kayıtları (etki yok kanıtı için önce/sonra). */
-async function state(): Promise<unknown> {
-  const q = async (text: string): Promise<unknown[]> => (await adm.query(text, [A.tenantId])).rows;
+async function state(w: TenantWorld = A): Promise<unknown> {
+  const q = async (text: string): Promise<unknown[]> => (await adm.query(text, [w.tenantId])).rows;
   return {
     items: await q("SELECT id, code, name, status, pick_policy, tracking_mode, quantity_scale FROM public.items WHERE tenant_id = $1 ORDER BY id"),
     conversions: await q("SELECT item_id, unit_id, to_base_factor::text AS factor FROM public.unit_conversions WHERE tenant_id = $1 ORDER BY item_id, unit_id"),
@@ -71,6 +72,7 @@ beforeAll(async () => {
   await adm.connect();
   h.db = app;
   A = await seedWorld(adm, reg, "A216");
+  B = await seedWorld(adm, reg, "B216");
   actions = (await import(/* @vite-ignore */ path.join(WEB, "app/t/[slug]/items/actions.ts"))) as Actions;
 }, 180_000);
 
@@ -160,5 +162,65 @@ describe("items/actions.ts yetki ve köken (gerçek sorgu yolu)", () => {
       if (!res.ok) expect(res.error.code, name).toBe("UNAUTHENTICATED");
     }
     expect(await state()).toEqual(before);
+  });
+});
+
+describe("items/actions.ts tenant'lar arası (gerçek sorgu yolu)", () => {
+  /** Altı eylem; `ids` hangi tenant'ın kimlikleriyle çağrılacağını belirler. */
+  function calls(slug: string, ids: { itemId: string; unitId: string; barcodeId: string }): Array<[string, () => Promise<Result>]> {
+    return [
+      ["createItemAction", () => actions.createItemAction!({ slug, code: `X-${rnd()}`, name: "Çapraz", baseUnitId: ids.unitId })],
+      ["updateItemAction", () => actions.updateItemAction!({ slug, itemId: ids.itemId, name: `Çapraz ${rnd()}` })],
+      ["archiveItemAction", () => actions.archiveItemAction!({ slug, itemId: ids.itemId })],
+      ["setConversionAction", () => actions.setConversionAction!({ slug, itemId: ids.itemId, unitId: ids.unitId, factor: "3" })],
+      ["addBarcodeAction", () => actions.addBarcodeAction!({ slug, itemId: ids.itemId, unitId: ids.unitId, barcode: `8${rnd()}${rnd()}`, quantity: null })],
+      ["removeBarcodeAction", () => actions.removeBarcodeAction!({ slug, barcodeId: ids.barcodeId })],
+    ];
+  }
+  const face = (r: Result): unknown => (r.ok ? r : { ok: false, error: { code: r.error.code, detail: r.error.detail } });
+
+  it("A yöneticisi B'nin slug'ıyla: her eylem NOT_FOUND ve var olmayan slug'la aynı yanıt; A ve B'de değişiklik yok", async () => {
+    // B'de silinecek bir barkod bulunsun (removeBarcodeAction gerçekten bir şeyi hedefleyebilsin).
+    const bBarcode = (await adm.query<{ id: string }>("INSERT INTO public.item_barcodes (tenant_id, id, item_id, barcode) VALUES ($1, gen_random_uuid(), $2, $3) RETURNING id", [B.tenantId, B.itemNoneId, `7${rnd()}${rnd()}`])).rows[0]!.id;
+    const ids = { itemId: B.itemNoneId, unitId: B.boxUnitId, barcodeId: bBarcode };
+    const beforeA = await state(A);
+    const beforeB = await state(B);
+    const cross = calls(B.slug, ids);
+    const missing = calls(`yok-${rnd()}`, ids);
+    for (const [i, [name, call]] of cross.entries()) {
+      as(A.ownerUserId);
+      const c = await call();
+      as(A.ownerUserId);
+      const m = await (missing[i] as [string, () => Promise<Result>])[1]();
+      expect(c.ok, name).toBe(false);
+      if (!c.ok) expect(c.error.code, name).toBe("NOT_FOUND");
+      expect(face(c), name).toEqual(face(m));
+      expect(JSON.stringify(c), name).not.toContain(B.slug);
+    }
+    expect(await state(A)).toEqual(beforeA);
+    expect(await state(B)).toEqual(beforeB);
+  });
+
+  it("A slug'ında B'nin itemId/barcodeId/unitId'si: her eylem NOT_FOUND, B ve A'da değişiklik yok", async () => {
+    const bBarcode = (await adm.query<{ id: string }>("INSERT INTO public.item_barcodes (tenant_id, id, item_id, barcode) VALUES ($1, gen_random_uuid(), $2, $3) RETURNING id", [B.tenantId, B.itemNoneId, `6${rnd()}${rnd()}`])).rows[0]!.id;
+    const beforeA = await state(A);
+    const beforeB = await state(B);
+    for (const [name, call] of calls(A.slug, { itemId: B.itemNoneId, unitId: B.boxUnitId, barcodeId: bBarcode })) {
+      as(A.ownerUserId);
+      const r = await call();
+      expect(r.ok, name).toBe(false);
+      if (!r.ok) expect(r.error.code, name).toBe("NOT_FOUND");
+    }
+    // Karışık: A'nın ürünü + B'nin birimi (dönüşüm/barkod) de reddedilir.
+    as(A.ownerUserId);
+    const mixedConv = await actions.setConversionAction!({ slug: A.slug, itemId: A.itemNoneId, unitId: B.boxUnitId, factor: "3" });
+    as(A.ownerUserId);
+    const mixedBc = await actions.addBarcodeAction!({ slug: A.slug, itemId: A.itemNoneId, unitId: B.boxUnitId, barcode: `5${rnd()}${rnd()}`, quantity: null });
+    for (const r of [mixedConv, mixedBc]) {
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error.code).toBe("NOT_FOUND");
+    }
+    expect(await state(A)).toEqual(beforeA);
+    expect(await state(B)).toEqual(beforeB);
   });
 });
