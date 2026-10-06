@@ -20,6 +20,8 @@ BEGIN
 END
 $guard$;
 
+DROP TRIGGER serials_guard_lot ON public.serials;
+DROP TRIGGER items_guard_tracking_mode ON public.items;
 DROP TRIGGER reservations_set_item_id ON public.reservations;
 DROP TRIGGER stock_ledger_set_item_id ON public.stock_ledger;
 DROP TRIGGER stock_dimensions_check_tracking ON public.stock_dimensions;
@@ -35,6 +37,8 @@ DROP TRIGGER stock_ledger_append_only ON public.stock_ledger;
 DROP TRIGGER stock_dimensions_no_truncate ON public.stock_dimensions;
 DROP TRIGGER stock_dimensions_immutable ON public.stock_dimensions;
 
+DROP FUNCTION public.stock_guard_serial_lot();
+DROP FUNCTION public.stock_guard_item_tracking();
 DROP FUNCTION public.stock_dimensions_check_tracking();
 DROP FUNCTION public.stock_set_item_id();
 DROP FUNCTION public.stock_assert_trigger();
