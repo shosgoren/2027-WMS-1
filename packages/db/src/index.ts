@@ -1,9 +1,28 @@
 // `@wms/db` genel yüzeyi (T-005b). Bilerek dar: ham istemci, TenantContext oluşturucusu ve
 // sürücü ayarları yalnızca `@wms/db/internal` alt yolundadır (lint ile korunur).
+import { DB_CLIENT_SETTINGS, createDbClient, type DbClient } from "./client.ts";
 export { createDbClient } from "./client.ts";
 export type { TenantContext } from "./client.ts";
+
+const APP_DB_KEY = Symbol.for("@wms/db/app-db");
+
+/**
+ * Web sürecinin veritabanına eriştiği TEK nokta (T-117 / T-127a): `DATABASE_URL` (yalnızca uygulama rolü `wms_app`,
+ * pooler) ile süreç başına tek havuz. Tekil `globalThis` üzerinde tutulur (dev hot-reload modülü yeniden yükleyince yeni
+ * havuz açılmaz). Ayarlar `DB_CLIENT_SETTINGS`. `DATABASE_URL` yoksa hata (URL değeri mesaja girmez, G-09).
+ */
+export function getAppDb(): DbClient {
+  const g = globalThis as { [APP_DB_KEY]?: DbClient };
+  const existing = g[APP_DB_KEY];
+  if (existing !== undefined) return existing;
+  const url = process.env.DATABASE_URL;
+  if (url === undefined || url.trim() === "") throw new Error("getAppDb: DATABASE_URL is not configured");
+  const client = createDbClient({ url, ...DB_CLIENT_SETTINGS });
+  g[APP_DB_KEY] = client;
+  return client;
+}
 export { currentTenantId, currentUserId, withTenant } from "./with-tenant.ts";
-export { MembershipError, lockOwners, withMembership, withNewTenant, withSystemTenant, withUser } from "./with-membership.ts";
+export { MembershipError, lockOwners, withMembership, withInvitationTenant, withNewTenant, withSystemTenant, withUser } from "./with-membership.ts";
 export type {
   Membership,
   MembershipErrorCode,

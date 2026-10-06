@@ -352,3 +352,64 @@ describe(`audit schema (T-107, target=${env.target})`, () => {
     expect(trg[0]?.proconfig).toEqual(["search_path=pg_catalog, pg_temp"]);
   });
 });
+
+describe(`invitation_tenant_for_token (0006, T-117; target=${env.target})`, () => {
+  async function query<T extends pg.QueryResultRow>(sql: string, params: unknown[] = []): Promise<T[]> {
+    const client = new pg.Client({ connectionString: env.databaseUrlDirect });
+    try {
+      await client.connect();
+      return (await client.query<T>(sql, params)).rows;
+    } catch (e) {
+      throw new Error(redactErrorChain(e, secretUrls(env)));
+    } finally {
+      await client.end();
+    }
+  }
+  const FN = "wms_probe.invitation_tenant_for_token(text)";
+
+  it("sahibi wms_identity_probe, SECURITY DEFINER, sabit search_path, proacl NULL degil ve PUBLIC girdisi yok; yalnizca uuid doner", async () => {
+    const r = await query<{ owner: string; prosecdef: boolean; proconfig: string[] | null; acl_null: boolean; public_acl: boolean; ret: string }>(
+      `SELECT p.proowner::regrole::text AS owner, p.prosecdef, p.proconfig, p.proacl IS NULL AS acl_null,
+              EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = 0) AS public_acl,
+              p.prorettype::regtype::text AS ret
+         FROM pg_proc p WHERE p.oid = $1::regprocedure`,
+      [FN],
+    );
+    expect(r).toHaveLength(1);
+    expect(r[0]).toEqual({
+      owner: "wms_identity_probe",
+      prosecdef: true,
+      proconfig: ["search_path=pg_catalog, pg_temp"],
+      acl_null: false,
+      public_acl: false,
+      ret: "uuid",
+    });
+  });
+
+  it("EXECUTE yalnizca wms_app; wms_auth ve PUBLIC yok", async () => {
+    const r = await query<{ app: boolean; auth: boolean }>(
+      `SELECT has_function_privilege('wms_app', $1, 'EXECUTE') AS app, has_function_privilege('wms_auth', $1, 'EXECUTE') AS auth`,
+      [FN],
+    );
+    expect(r[0]).toEqual({ app: true, auth: false });
+    const grantees = await query<{ grantee: string }>(
+      `SELECT DISTINCT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE a.grantee::regrole::text END AS grantee
+         FROM pg_proc p, aclexplode(p.proacl) a WHERE p.oid = $1::regprocedure ORDER BY 1`,
+      [FN],
+    );
+    expect(grantees.map((g) => g.grantee).filter((g) => g !== "wms_identity_probe")).toEqual(["wms_app"]);
+  });
+
+  it("probe salt okunur kalir: tenant tablolarinda yazma yetkisi ve yazma politikasi yok", async () => {
+    const r = await query<{ w: boolean }>(
+      `SELECT bool_or(has_table_privilege('wms_identity_probe', t, 'INSERT, UPDATE, DELETE, TRUNCATE')
+                      OR has_any_column_privilege('wms_identity_probe', t, 'UPDATE')) AS w
+         FROM unnest(ARRAY['public.invitations', 'public.tenant_memberships', 'public.membership_roles', 'public.tenants']) AS t`,
+    );
+    expect(r[0]?.w).toBe(false);
+    const writes = await query<{ polname: string }>(
+      `SELECT polname FROM pg_policy p WHERE p.polroles = ARRAY[(SELECT oid FROM pg_roles WHERE rolname = 'wms_identity_probe')] AND p.polcmd <> 'r'`,
+    );
+    expect(writes).toEqual([]);
+  });
+});

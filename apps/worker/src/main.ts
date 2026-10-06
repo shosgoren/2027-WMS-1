@@ -4,6 +4,7 @@ import { createJobQueue } from "@wms/queue-adapter";
 import { loadMailConfig } from "@wms/shared/mailer";
 import { createSealer } from "@wms/shared/seal";
 import { JOB_TYPES, type JobHandler, type JobType } from "@wms/shared/queue";
+import { createDeliverInvitationHandler } from "./jobs/deliver-invitation.js";
 import { createMailer, createSendEmailHandler } from "./jobs/send-email.js";
 import { createJsonLogger, createLifecycle, EXIT_FAILURE, parseShutdownTimeoutMs } from "./lifecycle.js";
 
@@ -45,6 +46,14 @@ try {
     config: mailConfig,
     mailer: createMailer(mailConfig),
     logger,
+  });
+  const appBaseUrl = process.env.BETTER_AUTH_URL?.trim() || undefined;
+  if (appBaseUrl === undefined) logger.info("BETTER_AUTH_URL not set (warning); invitation.deliver jobs will fail until configured");
+  HANDLERS["invitation.deliver"] = createDeliverInvitationHandler({
+    config: mailConfig,
+    mailer: createMailer(mailConfig),
+    logger,
+    appBaseUrl,
   });
   logger.info("mail configured", { mode: mailConfig.mode });
 } catch (err) {

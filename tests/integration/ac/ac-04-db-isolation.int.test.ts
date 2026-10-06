@@ -572,6 +572,7 @@ describe("AC-04 DB — SECURITY DEFINER katalog taraması", () => {
     "wms_probe.consume_admin_reset_grant",
     "wms_probe.identity_exclusive_to_tenant",
     "wms_probe.invitation_for_account_creation",
+    "wms_probe.invitation_tenant_for_token", // T-117 migration 0006: salt okunur, yalnızca wms_app EXECUTE
   ];
 
   it("@AC-04 prosecdef=true işlevler tam olarak izinli liste; wms_meta'da hiç yok", () => {
@@ -581,7 +582,7 @@ describe("AC-04 DB — SECURITY DEFINER katalog taraması", () => {
   });
 
   it("@AC-04 probe işlevleri yalnızca wms_probe şemasında; admin_reset_still_valid yok", () => {
-    for (const name of ["identity_exclusive_to_tenant", "consume_admin_reset_grant", "invitation_for_account_creation", "admin_reset_cleanup_on_membership"]) {
+    for (const name of ["identity_exclusive_to_tenant", "consume_admin_reset_grant", "invitation_for_account_creation", "admin_reset_cleanup_on_membership", "invitation_tenant_for_token"]) {
       expect(fns.filter((f) => f.name === name).map(key), name).toEqual([`wms_probe.${name}`]);
     }
     expect(fns.filter((f) => f.name === "admin_reset_still_valid").map(key)).toEqual([]);
@@ -606,6 +607,7 @@ describe("AC-04 DB — SECURITY DEFINER katalog taraması", () => {
       "wms_probe.identity_exclusive_to_tenant": [APP_ROLE],
       "wms_probe.consume_admin_reset_grant": [AUTH_ROLE],
       "wms_probe.invitation_for_account_creation": [AUTH_ROLE],
+      "wms_probe.invitation_tenant_for_token": [APP_ROLE],
       "wms_probe.admin_reset_cleanup_on_membership": [migrator],
     };
     for (const [k, grantees] of Object.entries(expected)) {
@@ -614,7 +616,7 @@ describe("AC-04 DB — SECURITY DEFINER katalog taraması", () => {
       const others = (f as Fn).grantees.filter((g) => g !== PROBE_ROLE).sort();
       expect(others, `${k} EXECUTE alıcıları`).toEqual([...grantees].sort());
     }
-    for (const k of ["wms_probe.identity_exclusive_to_tenant", "wms_probe.consume_admin_reset_grant", "wms_probe.invitation_for_account_creation"]) {
+    for (const k of ["wms_probe.identity_exclusive_to_tenant", "wms_probe.consume_admin_reset_grant", "wms_probe.invitation_for_account_creation", "wms_probe.invitation_tenant_for_token"]) {
       expect((fns.find((x) => key(x) === k) as Fn).grantees, `${k} proacl'inde migration rolü`).not.toContain(migrator);
     }
     const trig = fns.find((x) => key(x) === "wms_probe.admin_reset_cleanup_on_membership") as Fn;
