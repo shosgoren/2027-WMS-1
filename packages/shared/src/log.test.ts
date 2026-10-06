@@ -318,7 +318,7 @@ describe("T-129 yeniden inceleme: maskeleme boşlukları", () => {
       ["token=abcdefghijkl", /abcd/],
     ];
     for (const [secret, leak] of cases) {
-      for (let cutAt = 3; cutAt < secret.length; cutAt += 4) {
+      for (let cutAt = 1; cutAt < secret.length; cutAt += 1) {
         const input = pad.padEnd(MAX_LOG_STRING - cutAt, "x").replace(/x$/, " ") + secret;
         const out = maskString(input);
         expect(out).toContain("…[truncated]");
@@ -381,5 +381,43 @@ describe("T-129 yeniden inceleme: maskeleme boşlukları", () => {
     const out = maskFields({ "ayse@example.com": 1, "/invite/TOK12345": 2, ok: 3 });
     expect(JSON.stringify(out)).not.toMatch(/ayse|TOK12345/);
     expect(out.ok).toBe(3);
+  });
+});
+
+describe("T-129 son tur: doğrusal URL taraması ve e-posta kuyruğu", () => {
+  // Yük altında kırılganlığı azaltmak için 7 grubun EN KÜÇÜK ortalaması (tek çağrı başına ms).
+  const perCall = (fn: () => void, n = 10): number => {
+    let best = Infinity;
+    for (let r = 0; r < 7; r++) {
+      const t0 = performance.now();
+      for (let i = 0; i < n; i++) fn();
+      best = Math.min(best, (performance.now() - t0) / n);
+    }
+    return best;
+  };
+  it("kimlik bilgisi içermeyen çok sayıda `://`: dize başına < 2 ms (en iyi grup; boştaki ölçüm ~0,5 ms)", () => {
+    for (const input of ["a://".repeat(512), "http://x:y/".repeat(200), "http://x:y/ ".repeat(200), "a://b".repeat(400)]) {
+      expect(perCall(() => maskString(input))).toBeLessThan(2);
+    }
+  });
+  it("500 düğüm doldurulmuş maskFields < 50 ms", () => {
+    const fields: Record<string, unknown> = {};
+    for (let i = 0; i < 10; i++) fields[`k${i}`] = Array.from({ length: 50 }, (_v, n) => (n % 2 === 0 ? "x ".repeat(1024) : "a=b&".repeat(512)));
+    const t0 = performance.now();
+    maskFields(fields);
+    expect(performance.now() - t0).toBeLessThan(50);
+  });
+  it("iç içe URL: yönlendirme parametresindeki kimlik bilgisi yine maskelenir", () => {
+    expect(maskString("https://example.com/r?u=postgres://u:p@h/db")).not.toMatch(/u:p@/);
+    expect(maskString("a://b a://u:p@h")).toBe(`a://b a://${MASK}@h`);
+  });
+  it("kesilen düz harf kuyruğu ham metinde `@` ile devam ediyorsa atılır (her kesme noktası)", () => {
+    const email = "john.doe@example.com";
+    for (let cutAt = 1; cutAt < email.length; cutAt++) {
+      const out = maskString(("x ".repeat(2048)).slice(0, MAX_LOG_STRING - cutAt) + email);
+      expect(out).not.toMatch(/john|doe|exam/);
+    }
+    // `@` içermeyen düz kuyruk korunur.
+    expect(maskString("a ".repeat(1000) + "b".repeat(100))).toMatch(/b{10}…\[truncated\]$/);
   });
 });

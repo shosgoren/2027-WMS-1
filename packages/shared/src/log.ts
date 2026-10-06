@@ -9,6 +9,11 @@
 // (düzenli ifade geri izlemesi yok: sınırlı geriye bakışlı elle tarama). Nesne anahtarı/dizi öğesi sayısı `MAX_ENTRIES` (50),
 // derinlik 6. `Error` yalnızca `name` + maskeli `message` olarak yazılır (`stack`/`cause` YAZILMAZ; çağıran gerekirse maskeli
 // dize olarak kendi `stack` alanını verir, o da kesilir). Log çağrısı ASLA fırlatmaz (BigInt/getter/toJSON hataları yer tutucuya düşer).
+// BİLİNEN SINIRLAR: (a) http(s)/ws(s)/ftp URL'sinde SAYISAL parola (`https://user:1234/x@host`) ya da `/` içeren, `@` ile bitmeyen
+// RFC dışı parola bağlantı noktası/yol sayılır ve maskelenmez; boşluk içeren URL parolası boşlukta biter (diğer şemalarda son `@`'e
+// kadar maskelenir). (b) Anahtar adı maskelenince iki farklı anahtar aynı adda birleşebilir (`{"a@x.com":1,"b@x.com":2}` → tek `***@***`,
+// sonraki değer öncekini ezer); sayım/ilişki log'dan çıkarılamaz, sır sızmaz. (c) Hassas anahtardan sonraki serbest metin satır
+// sonuna kadar maskelenir (fazla maskeleme bilinçli).
 // Kimlik alanları (`requestId`, `tenantId`, `userId`) yalnızca UUID olabilir; değilse `invalid-id` yazılır (kişisel veri yok).
 
 export type LogLevel = "info" | "warn" | "error";
@@ -61,7 +66,19 @@ const SENSITIVE_COMPACT = /password|passwd|secret|token|apikey|setcookie|authori
 const SAFE_KEYS = new Set(["errorcode", "statuscode", "sqlstate", "exitcode", "keycount", "sessioncount"]);
 
 /** `camelCase`/`snake_case`/`kebab-case`/`a.b` adlarını sözcüklere böler; herhangi biri hassas kümedeyse true. */
+const KEY_CACHE = new Map<string, boolean>();
 export function isSensitiveKey(key: string): boolean {
+  const cached = KEY_CACHE.get(key);
+  if (cached !== undefined) return cached;
+  const r = computeSensitiveKey(key);
+  if (key.length <= 64) {
+    if (KEY_CACHE.size >= 512) KEY_CACHE.clear();
+    KEY_CACHE.set(key, r);
+  }
+  return r;
+}
+
+function computeSensitiveKey(key: string): boolean {
   const k = key.length > 128 ? key.slice(0, 128) : key;
   const words = k
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
@@ -83,25 +100,43 @@ const isWs = (c: string): boolean => c === " " || c === "\t" || c === "\n" || c 
 function maskUrlCredentials(s: string): string {
   let out = "";
   let i = 0;
+  // Aynı boşluk/tırnak sınırlı parça içindeki her `://` aynı bitiş (`chunkEnd`) ve son `@` (`chunkLastAt`) değerini paylaşır:
+  // parça başına BİR tarama (`a://a://…` gibi girdilerde karesel tarama yok). Kimlik bilgisi yoksa yalnızca `://` sonrasına ilerlenir
+  // (iç içe `…?u=postgres://u:p@h` gibi sonraki şema yine taranır).
+  let chunkEnd = -1;
+  let chunkLastAt = -1;
   for (;;) {
     const at = s.indexOf("://", i);
     if (at < 0) break;
     // Şema: geriye en çok 32 karakter [a-z0-9+.-], ilki harf.
     let st = at;
-    while (st > i && at - st < 32 && /[A-Za-z0-9+.-]/.test(s.charAt(st - 1))) st--;
-    while (st < at && !/[A-Za-z]/.test(s.charAt(st))) st++;
+    while (st > i && at - st < 32 && isSchemeChar(s.charCodeAt(st - 1))) st--;
+    while (st < at && !isAlpha(s.charCodeAt(st))) st++;
     const scheme = s.slice(st, at).toLowerCase();
     const authStart = at + 3;
     // Aralık: boşluk/tırnak/<> ya da dize sonuna kadar (parola kodlanmamış `/`, `?`, `#`, `@` içerebilir); SON `@`'e kadar.
-    let j = authStart;
-    let lastAt = -1;
+    if (authStart >= chunkEnd) {
+      let k = authStart;
+      let last = -1;
+      while (k < s.length) {
+        const c = s.charAt(k);
+        if (isWs(c) || c === '"' || c === "'" || c === "<" || c === ">") break;
+        if (c === "@") last = k;
+        k++;
+      }
+      chunkEnd = k + 1;
+      chunkLastAt = last;
+    }
+    const j = chunkEnd - 1;
+    const lastAt = chunkLastAt >= authStart ? chunkLastAt : -1;
+    // İlk bölüm sonu (`/` ya da `?`): yalnızca bu aralıkta aranır.
     let firstSegEnd = -1;
-    while (j < s.length) {
-      const c = s.charAt(j);
-      if (isWs(c) || c === '"' || c === "'" || c === "<" || c === ">") break;
-      if ((c === "/" || c === "?") && firstSegEnd < 0) firstSegEnd = j;
-      if (c === "@") lastAt = j;
-      j++;
+    for (let k = authStart; k < j; k++) {
+      const c = s.charAt(k);
+      if (c === "/" || c === "?") {
+        firstSegEnd = k;
+        break;
+      }
     }
     let creds = false;
     if (st < at && lastAt >= 0) {
@@ -125,6 +160,8 @@ function maskUrlCredentials(s: string): string {
   return out + s.slice(i);
 }
 
+const isAlpha = (c: number): boolean => (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+const isSchemeChar = (c: number): boolean => isAlpha(c) || (c >= 48 && c <= 57) || c === 43 || c === 46 || c === 45;
 const WEB_SCHEMES = new Set(["http", "https", "ws", "wss", "ftp"]);
 
 const BEARER = /\b(Bearer|Basic)[ \t]{1,8}[A-Za-z0-9._~+/=%-]{1,2048}/g;
@@ -238,12 +275,18 @@ function decodeAscii(v: string): string {
 
 /**
  * Kesme sırrın ortasına düşebilir (`postgres://u:supersec`, `john.doe@exam`): son boşluk/ayraçtan sonraki KESİK belirteç,
- * yalnızca harf/rakam/`_`/`-` değilse (yani `: / @ . = %` gibi bir yapı içeriyorsa) tümden atılır.
+ * harf/rakam/`_`/`-` dışında bir yapı içeriyorsa (`: / @ . = %`) ya da kesilen ham belirteç `@` içeriyorsa tümden atılır.
  */
-function dropPartialTail(cut: string): string {
+function dropPartialTail(raw: string): string {
+  const cut = raw.slice(0, MAX_LOG_STRING);
   let i = cut.length;
   while (i > 0 && !/[\s,;"'<>()[\]{}]/.test(cut.charAt(i - 1))) i--;
-  return /[^A-Za-z0-9_-]/.test(cut.slice(i)) ? cut.slice(0, i) : cut;
+  const tail = cut.slice(i);
+  if (/[^A-Za-z0-9_-]/.test(tail)) return cut.slice(0, i);
+  // Düz harf/rakam kuyruğu e-posta yerel kısmı olabilir (`john` | `.doe@example.com`): kesilen ham belirteç `@` içeriyorsa at.
+  let end = MAX_LOG_STRING;
+  while (end < raw.length && end < MAX_LOG_STRING + 512 && !/[\s,;"'<>()[\]{}]/.test(raw.charAt(end))) end++;
+  return raw.slice(i, end).includes("@") ? cut.slice(0, i) : cut;
 }
 
 /**
@@ -255,7 +298,7 @@ export function maskString(value: string): string {
   let s = value;
   let truncated = false;
   if (s.length > MAX_LOG_STRING) {
-    s = dropPartialTail(s.slice(0, MAX_LOG_STRING));
+    s = dropPartialTail(s);
     truncated = true;
   }
   s = passes(s);
