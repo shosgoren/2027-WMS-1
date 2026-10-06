@@ -667,6 +667,14 @@ describe("checkWorkerStability sıkılaştırma (fail-open kapatma)", () => {
     expect(r.reason).toMatch(/start olayı yok/);
   });
 
+  it("makine before'da yok, after/recheck'te started ama events boş → FAIL; start olayı varsa OK", () => {
+    const none = snap([]);
+    const r = checkWorkerStability(none, snap([mach(id, "started", [])]), snap([mach(id, "started", [])]));
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/start olayı yok/);
+    expect(checkWorkerStability(none, snap([mach(id, "started", start)]), snap([mach(id, "started", start)])).ok).toBe(true);
+  });
+
   it("makine kümesi örnekler arasında farklıysa (ek/eksik makine) → FAIL", () => {
     const other = rid();
     const before = snap([mach(id, "stopped", old)]);

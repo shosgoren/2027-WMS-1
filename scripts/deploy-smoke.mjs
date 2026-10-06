@@ -477,7 +477,8 @@ export function checkWorkerStability(beforeJson, afterJson, recheckJson, group =
     const between = newEvents(eventsOf(r), eventsOf(m)).filter((e) => ["start", "exit", "restart"].includes(e.type)).length;
     if (bad > 0) problems.push(`${id}: başlatmadan sonra ${bad} exit/restart olayı`);
     if (starts > 1) problems.push(`${id}: ${starts} start olayı (çökme döngüsü)`);
-    if (prior !== undefined && /** @type {{ state?: unknown }} */ (prior).state !== "started" && /** @type {{ state?: unknown }} */ (m).state === "started" && starts < 1) {
+    // before'da yok (yeni makine) ya da started değildi → şimdi started: en az bir yeni start olayı ŞART.
+    if ((prior === undefined || /** @type {{ state?: unknown }} */ (prior).state !== "started") && /** @type {{ state?: unknown }} */ (m).state === "started" && starts < 1) {
       problems.push(`${id}: önce durmuş, sonra started ama yeni start olayı yok`);
     }
     if (between > 0) problems.push(`${id}: örnekler arasında ${between} yeni start/exit/restart olayı`);
