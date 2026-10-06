@@ -17,6 +17,10 @@ export interface GuardPrincipal {
   readonly mfaVerified: boolean;
 }
 
+declare const verifiedTenantBrand: unique symbol;
+/** Üyelik/izin çözümünden (`runTenantQuery`) çıkmış tenant kimliği; yalnızca `limitVerifiedTenant` üretir. */
+export type VerifiedTenantId = string & { readonly [verifiedTenantBrand]: true };
+
 export interface ActionContext {
   readonly requestId: string;
   readonly principal: GuardPrincipal | null;
@@ -26,7 +30,7 @@ export interface ActionContext {
    * Tenant başına yazma sınırını tüketir. YALNIZCA üyelik/izin çözüldükten SONRA, DOĞRULANMIŞ tenant kimliğiyle çağrılır
    * (istemci slug'ı ile asla: üye olmayan kullanıcı başka tenant'ın kovasını tüketemez, MAJOR-1).
    */
-  readonly limitTenant: (verifiedTenantId: string) => Promise<void>;
+  readonly limitTenant: (verifiedTenantId: VerifiedTenantId) => Promise<void>;
 }
 
 export type SafeError = AppErrorBody["error"] & { readonly requestId: string; readonly retryAfterSeconds?: number };
@@ -43,7 +47,7 @@ export interface GuardDeps {
   readonly limiter?: RateLimiter;
   /** Yerelde `Fly-Client-IP` yokken kullanılacak soket adresi (M6). */
   readonly socketIp?: (headers: Headers) => string | undefined;
-  /** Varsayılan: `NODE_ENV === "production"` (Fly-Client-IP/soket yoksa üretimde fail-closed). */
+  /** Varsayılan: `isProductionEnv()` (Fly-Client-IP/soket yoksa üretimde fail-closed). */
   readonly production?: boolean;
 }
 
@@ -97,10 +101,16 @@ async function limit(deps: GuardDeps, kind: "ip" | "user" | "tenant", subject: s
 }
 
 function ipOf(deps: GuardDeps, headers: Headers): string {
-  return clientIp(headers, {
-    socketIp: deps.socketIp?.(headers),
-    ...(deps.production === undefined ? {} : { production: deps.production }),
-  });
+  try {
+    return clientIp(headers, {
+      socketIp: deps.socketIp?.(headers),
+      ...(deps.production === undefined ? {} : { production: deps.production }),
+    });
+  } catch (e) {
+    // Yapılandırılmış günlük: yalnızca neden (IP/başlık değeri yok, G-09). Fly edge dışı erişim ya da yanlış yapılandırma işareti.
+    if (e instanceof AppError) deps.log({ level: "error", msg: "request rejected", reason: "client-ip-unresolved", code: e.code });
+    throw e;
+  }
 }
 
 export function createActionGuard(deps: GuardDeps) {
@@ -138,7 +148,7 @@ export function createActionGuard(deps: GuardDeps) {
  * tüketmez), sonra DOĞRULANMIŞ tenant kimliğiyle tüketilir; istemci slug'ı sayaç anahtarı değildir.
  */
 export async function limitVerifiedTenant(access: TenantAccessParams, ctx: Pick<ActionContext, "limitTenant">): Promise<void> {
-  const tenantId = await runTenantQuery(access, (_tx, membership) => Promise.resolve(membership.tenantId));
+  const tenantId = await runTenantQuery(access, (_tx, membership) => Promise.resolve(membership.tenantId as VerifiedTenantId));
   await ctx.limitTenant(tenantId);
 }
 
@@ -146,7 +156,7 @@ export interface RouteContext {
   readonly requestId: string;
   readonly principal: GuardPrincipal | null;
   /** Bkz. `ActionContext.limitTenant`. */
-  readonly limitTenant: (verifiedTenantId: string) => Promise<void>;
+  readonly limitTenant: (verifiedTenantId: VerifiedTenantId) => Promise<void>;
 }
 
 function jsonResponse(err: AppError, requestId: string): Response {

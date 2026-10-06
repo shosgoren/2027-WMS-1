@@ -1,9 +1,34 @@
 // T-127 birim testleri: CSP dizesi, origin eşleşmesi (Origin'siz ret), hata maskeleme, hız sınırı mantığı, IP kaynağı.
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AppError } from "@wms/shared/errors";
 import { buildCsp } from "../proxy.ts";
-import { createActionGuard, createRouteGuard, type GuardDeps } from "./action-guard.ts";
-import { RATE_LIMITS, RateLimitedError, clientIp, createRateLimiter, deriveKey, hashKey, normalizeIp, type RateLimitStore } from "./rate-limit.ts";
+import { createActionGuard, createRouteGuard, limitVerifiedTenant, type GuardDeps } from "./action-guard.ts";
+import { RATE_LIMITS, RateLimitedError, clientIp, createRateLimiter, deriveKey, hashKey, isProductionEnv, normalizeIp, type RateLimitStore } from "./rate-limit.ts";
 import { z } from "zod";
+
+// Eylem düzeyi testler için bağımlılık taklitleri (iş kuralı `@wms/domain` ve DB gerçek ortamda int testlerde sınanır).
+const h = vi.hoisted(() => ({
+  headers: new Headers(),
+  principal: null as { userId: string; mfaVerified: boolean } | null,
+  runTenantQuery: vi.fn(),
+  inviteMember: vi.fn(),
+  revokeInvitation: vi.fn(),
+  counts: new Map<string, number>(),
+}));
+vi.mock("@wms/domain/identity/access", () => ({ runTenantQuery: h.runTenantQuery }));
+vi.mock("@wms/domain/identity/invitations", () => ({ inviteMember: h.inviteMember, revokeInvitation: h.revokeInvitation }));
+vi.mock("@wms/db", () => ({
+  getAppDb: () => ({}),
+  consumeRateLimit: (_c: unknown, p: { scope: string; keyHash: string; limit: number }) => {
+    const k = `${p.scope}|${p.keyHash}`;
+    const n = (h.counts.get(k) ?? 0) + 1;
+    h.counts.set(k, n);
+    return Promise.resolve({ allowed: n <= p.limit, count: n, retryAfterSeconds: 30 });
+  },
+}));
+vi.mock("next/headers", () => ({ headers: () => Promise.resolve(h.headers) }));
+vi.mock("./queue.ts", () => ({ getSenderQueue: () => Promise.resolve(undefined) }));
+vi.mock("@wms/auth", () => ({ getAuthService: () => ({ getPrincipal: () => Promise.resolve(h.principal) }) }));
 
 const APP = "https://app.example.test";
 const logs: Record<string, unknown>[] = [];
@@ -72,17 +97,33 @@ describe("action guard", () => {
     expect(await g({})).toMatchObject({ ok: true });
     expect(await g({})).toMatchObject({ ok: false, error: { code: "RATE_LIMITED", retryable: true, retryAfterSeconds: expect.any(Number) as unknown } });
   });
-  it("ctx.limitTenant tenant kimliğine göre ayrı sayar", async () => {
+  it("limitVerifiedTenant: doğrulanmış tenant kimliğine göre ayrı sayar; reddedilen üyelik sayaç tüketmez", async () => {
     const limiter = createRateLimiter({ store: memStore(), secret: "s", limits: { tenant: 1 } });
-    const g = createActionGuard(deps({ limiter }))({ schema: z.object({ t: z.string() }) }, (i, ctx) => ctx.limitTenant(i.t).then(() => 1));
+    h.runTenantQuery.mockImplementation((a: { tenantSlug: string }, fn: (tx: unknown, m: { tenantId: string }) => Promise<unknown>) =>
+      a.tenantSlug === "nope" ? Promise.reject(new AppError("NOT_FOUND")) : fn({}, { tenantId: `tenant-of-${a.tenantSlug}` }),
+    );
+    const g = createActionGuard(deps({ limiter }))({ schema: z.object({ t: z.string() }) }, (i, ctx) =>
+      limitVerifiedTenant({ db: {} as never, principal: null, tenantSlug: i.t, permission: "users.manage" }, ctx).then(() => 1),
+    );
     expect(await g({ t: "a" })).toMatchObject({ ok: true });
     expect(await g({ t: "b" })).toMatchObject({ ok: true });
     expect(await g({ t: "a" })).toMatchObject({ ok: false, error: { code: "RATE_LIMITED" } });
+    for (let i = 0; i < 5; i++) expect(await g({ t: "nope" })).toMatchObject({ ok: false, error: { code: "NOT_FOUND" } });
   });
   it("üretimde IP kaynağı yoksa fail-closed (FORBIDDEN), ortak kova yok", async () => {
     const limiter = createRateLimiter({ store: memStore(), secret: "s" });
-    const r = await act(deps({ limiter, production: true }))({});
+    const log: Record<string, unknown>[] = [];
+    const r = await act(deps({ limiter, production: true, log: (e) => void log.push(e) }))({});
     expect(r).toMatchObject({ ok: false, error: { code: "FORBIDDEN" } });
+    // Yapılandırılmış günlük: yalnızca neden; IP/başlık değeri yok.
+    expect(log).toEqual([{ level: "error", msg: "request rejected", reason: "client-ip-unresolved", code: "FORBIDDEN" }]);
+  });
+  it("üretim tespiti packages/auth ile tutarlı: NODE_ENV=production veya WMS_ENV staging/production", () => {
+    expect(isProductionEnv({ NODE_ENV: "production" })).toBe(true);
+    expect(isProductionEnv({ WMS_ENV: "staging" })).toBe(true);
+    expect(isProductionEnv({ WMS_ENV: "production" })).toBe(true);
+    expect(isProductionEnv({ WMS_ENV: "ci", NODE_ENV: "test" })).toBe(false);
+    expect(isProductionEnv({})).toBe(false);
   });
 });
 
@@ -147,5 +188,65 @@ describe("rate-limit", () => {
   });
   it("boş sır reddedilir", () => {
     expect(() => createRateLimiter({ store: memStore(), secret: " " })).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Eylem düzeyi: inviteMemberAction / revokeInvitationAction (gerçek guard + gerçek limiter, taklit domain/DB)
+// ---------------------------------------------------------------------------------------------
+describe("members actions: tenant sayacı üyelik çözüldükten sonra", () => {
+  const SLUG = "victim";
+  const TENANT = "11111111-1111-4111-8111-111111111111";
+  const tenantKeyHash = (): string => hashKey(deriveKey("test-secret"), "web.tenant", TENANT);
+  const tenantCount = (): number => h.counts.get(`web.tenant|${tenantKeyHash()}`) ?? 0;
+  const inviteArg = { slug: SLUG, email: "a@example.test", roleKey: "PICKER" };
+  const revokeArg = { slug: SLUG, invitationId: "22222222-2222-4222-8222-222222222222" };
+
+  beforeEach(() => {
+    vi.stubEnv("BETTER_AUTH_URL", APP);
+    vi.stubEnv("BETTER_AUTH_SECRET", "test-secret");
+    h.counts.clear();
+    h.headers = new Headers({ origin: APP, "fly-client-ip": "203.0.113.7" });
+    h.principal = { userId: "u-1", mfaVerified: true };
+    h.inviteMember.mockReset().mockResolvedValue({ invitationId: "i", expiresAt: new Date(0), delivery: "SCREEN" });
+    h.revokeInvitation.mockReset().mockResolvedValue(undefined);
+    h.runTenantQuery.mockReset().mockImplementation((_a: unknown, fn: (tx: unknown, m: { tenantId: string }) => Promise<unknown>) => fn({}, { tenantId: TENANT }));
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("yetkili üye: sayaç doğrulanmış tenant kimliğiyle tüketilir ve komut çalışır", async () => {
+    const { inviteMemberAction, revokeInvitationAction } = await import("../app/t/[slug]/members/actions.ts");
+    expect(await inviteMemberAction(inviteArg)).toMatchObject({ ok: true });
+    expect(await revokeInvitationAction(revokeArg)).toMatchObject({ ok: true });
+    expect(tenantCount()).toBe(2);
+    expect([...h.counts.keys()].some((k) => k.includes(SLUG))).toBe(false); // slug anahtar değil (özet zaten ham değer içermez)
+    expect(h.inviteMember).toHaveBeenCalledTimes(1);
+    expect(h.revokeInvitation).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["üye olmayan", "NOT_FOUND"],
+    ["izni olmayan üye", "FORBIDDEN"],
+  ] as const)("%s: komut ve tenant sayacı çalışmaz (%s)", async (_label, code) => {
+    h.runTenantQuery.mockReset().mockRejectedValue(new AppError(code));
+    const { inviteMemberAction, revokeInvitationAction } = await import("../app/t/[slug]/members/actions.ts");
+    for (let i = 0; i < 5; i++) {
+      expect(await inviteMemberAction(inviteArg)).toMatchObject({ ok: false, error: { code } });
+      expect(await revokeInvitationAction(revokeArg)).toMatchObject({ ok: false, error: { code } });
+    }
+    expect(tenantCount()).toBe(0);
+    expect([...h.counts.keys()].some((k) => k.startsWith("web.tenant|"))).toBe(false);
+    expect(h.inviteMember).not.toHaveBeenCalled();
+    expect(h.revokeInvitation).not.toHaveBeenCalled();
+  });
+
+  it("tenant eşiği + 1: RATE_LIMITED + retryAfterSeconds, komut çalışmaz", async () => {
+    h.counts.set(`web.tenant|${tenantKeyHash()}`, RATE_LIMITS.tenant.limit);
+    const { inviteMemberAction } = await import("../app/t/[slug]/members/actions.ts");
+    const r = await inviteMemberAction(inviteArg);
+    expect(r).toMatchObject({ ok: false, error: { code: "RATE_LIMITED", retryable: true, retryAfterSeconds: 30 } });
+    expect(h.inviteMember).not.toHaveBeenCalled();
   });
 });

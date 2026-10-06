@@ -3,6 +3,10 @@
 // Tek ifadeli `INSERT … ON CONFLICT DO UPDATE … RETURNING count` atomiktir (okuma-sonra-yazma yarışı yok).
 // Anahtar = HMAC-SHA-256(HKDF(sır, "wms/rate-limit/v1"), kapsam|değer): düşük entropili IP'nin sözlükle geri çevrilmesini önler (0004 notu).
 // İstemci IP'si YALNIZCA `Fly-Client-IP`'den (M6); `X-Forwarded-For` istemci tarafından sahtelenebilir, yok sayılır.
+// GÜVEN VARSAYIMI: `Fly-Client-IP`'yi Fly edge proxy'si üzerine yazar (istemcinin gönderdiği değer korunmaz). Bu yalnızca
+// trafik Fly edge'inden geçtiğinde doğrudur: uygulamaya 6PN (özel ağ) veya flycast ile edge ATLANARAK erişilirse başlık
+// istemci denetimindedir ve sınır atlatılabilir. Bu yüzden uygulama genel kullanıma yalnızca edge üzerinden açılır;
+// edge'i atlayan bir erişim yolu eklenirse bu varsayım yeniden değerlendirilmelidir (ADR notu T-105'te).
 // Better Auth'un kendi uç nokta sınırları ayrıdır ve burada değiştirilmez.
 import { createHmac, hkdfSync } from "node:crypto";
 import { consumeRateLimit, getAppDb, type DbClient } from "@wms/db";
@@ -46,10 +50,18 @@ export function createDbRateLimitStore(client: DbClient): RateLimitStore {
   };
 }
 
+/**
+ * Üretim tespiti `packages/auth` (`readAuthEnv`, index.ts) ile aynı kural: `NODE_ENV=production` VEYA `WMS_ENV` staging/production.
+ * (Ortak yardımcı yok; auth paketi tüm ortamı doğrulayan `readAuthEnv`'i dışa aktarır, burada yalnızca bu kural gerekir.)
+ */
+export function isProductionEnv(env: Readonly<Record<string, string | undefined>> = process.env): boolean {
+  return env.NODE_ENV === "production" || env.WMS_ENV === "staging" || env.WMS_ENV === "production";
+}
+
 export interface ClientIpOptions {
   /** Yerelde/yedek olarak soket adresi (Next Server Action'da yoktur; çağıran sağlarsa kullanılır). */
   readonly socketIp?: string | undefined;
-  /** Varsayılan: `NODE_ENV === "production"`. */
+  /** Varsayılan: `isProductionEnv()`. */
   readonly production?: boolean;
 }
 
@@ -82,7 +94,7 @@ export function clientIp(headers: Headers, opts: ClientIpOptions = {}): string {
   if (fly !== undefined && fly !== "") return normalizeIp(fly);
   const sock = opts.socketIp?.trim();
   if (sock !== undefined && sock !== "") return normalizeIp(sock);
-  if (opts.production ?? process.env.NODE_ENV === "production") throw new AppError("FORBIDDEN");
+  if (opts.production ?? isProductionEnv()) throw new AppError("FORBIDDEN");
   return "local-dev";
 }
 

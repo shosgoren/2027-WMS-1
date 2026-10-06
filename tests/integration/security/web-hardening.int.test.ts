@@ -2,10 +2,10 @@
 // = çok süreç benzetimi). Fikstürler sentetik (G-09).
 import { randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
-import { createDbClient, type DbClient } from "../../../packages/db/src/index.ts";
+import { createDbClient, getAppDb, type DbClient } from "../../../packages/db/src/index.ts";
 import { DB_CLIENT_SETTINGS } from "../../../packages/db/src/client.ts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createActionGuard, createProductionGuard, limitVerifiedTenant, type GuardDeps } from "../../../apps/web/lib/action-guard.ts";
+import { createActionGuard, createProductionGuard, limitVerifiedTenant, type GuardDeps, type VerifiedTenantId } from "../../../apps/web/lib/action-guard.ts";
 import { createDbRateLimitStore, createRateLimiter, deriveKey, hashKey } from "../../../apps/web/lib/rate-limit.ts";
 import { JOB_PAYLOAD_SCHEMAS } from "../../../packages/shared/src/queue.ts";
 import { readAuthDatabaseUrl, readIntEnv, redactErrorChain } from "../harness/env.ts";
@@ -15,6 +15,8 @@ const authUrl = readAuthDatabaseUrl(process.env);
 const APP = "http://localhost:3000";
 const SECRET = randomBytes(32).toString("hex");
 const RUN = randomBytes(6).toString("hex");
+// Sabit saat: tüm limiter'lar aynı 60 sn penceresinde çalışır; gerçek saat dakika sınırını aşsa da sonuç değişmez (deterministik).
+const NOW = new Date(Math.floor(Date.now() / 60_000) * 60_000 + 1_000);
 let a: DbClient;
 let b: DbClient;
 let adm: pg.Client;
@@ -49,7 +51,10 @@ afterAll(async () => {
   await Promise.all([a.close(), b.close(), adm.end()].map((p) => p.catch(() => undefined)));
 });
 
-function guardDeps(headers: Record<string, string>, limiter = createRateLimiter({ store: createDbRateLimitStore(a), secret: SECRET })): GuardDeps {
+const limiterOf = (client: DbClient, limits?: Partial<Record<"ip" | "user" | "tenant", number>>) =>
+  createRateLimiter({ store: createDbRateLimitStore(client), secret: SECRET, now: () => NOW, ...(limits === undefined ? {} : { limits }) });
+
+function guardDeps(headers: Record<string, string>, limiter = limiterOf(a)): GuardDeps {
   return {
     getHeaders: () => Promise.resolve(new Headers(headers)),
     resolvePrincipal: () => Promise.resolve({ userId: `user-${RUN}`, mfaVerified: true }),
@@ -79,19 +84,22 @@ async function mkUser(): Promise<string> {
   return (r.rows[0] as { id: string }).id;
 }
 async function mkTenantWithAdmin(): Promise<{ tenantId: string; slug: string; admin: string }> {
+  return mkTenantWithMember("TENANT_ADMIN");
+}
+async function mkTenantWithMember(role: string): Promise<{ tenantId: string; slug: string; admin: string }> {
   const tenantId = randomUUID();
   const slug = `t127-${randomBytes(6).toString("hex")}`;
   await adm.query("INSERT INTO public.tenants (id, slug, name, is_demo) VALUES ($1, $2, 'T127', false)", [tenantId, slug]);
   const admin = await mkUser();
   const m = await adm.query<{ id: string }>("INSERT INTO public.tenant_memberships (tenant_id, user_id, status, is_owner) VALUES ($1, $2, 'ACTIVE', false) RETURNING id", [tenantId, admin]);
-  await adm.query("INSERT INTO public.membership_roles (tenant_id, membership_id, role_key) VALUES ($1, $2, 'TENANT_ADMIN')", [tenantId, (m.rows[0] as { id: string }).id]);
+  await adm.query("INSERT INTO public.membership_roles (tenant_id, membership_id, role_key) VALUES ($1, $2, $3)", [tenantId, (m.rows[0] as { id: string }).id, role]);
   return { tenantId, slug, admin };
 }
 
 describe("web hardening (AC)", () => {
   it("eşik + 1 -> RATE_LIMITED; sayaç iki bağlantı arasında paylaşılır", async () => {
-    const l1 = createRateLimiter({ store: createDbRateLimitStore(a), secret: SECRET, limits: { tenant: 3 } });
-    const l2 = createRateLimiter({ store: createDbRateLimitStore(b), secret: SECRET, limits: { tenant: 3 } });
+    const l1 = limiterOf(a, { tenant: 3 });
+    const l2 = limiterOf(b, { tenant: 3 });
     const k = `tenant-share-${RUN}`;
     await l1.check("tenant", k);
     await l2.check("tenant", k);
@@ -101,34 +109,44 @@ describe("web hardening (AC)", () => {
 
   it("paralel istekler tek ifadeli UPSERT ile kaybolmadan sayılır", async () => {
     const store = createDbRateLimitStore(a);
-    const o = { limit: 10, windowSeconds: 60, now: new Date() };
+    const o = { limit: 10, windowSeconds: 60, now: NOW };
     const key = hashKey(deriveKey(SECRET), "web.ip", `par-${RUN}`);
     const hits = await Promise.all([store.hit("web.ip", key, o), createDbRateLimitStore(b).hit("web.ip", key, o)]);
     expect(hits.map((h) => h.count).sort()).toEqual([1, 2]);
   });
 
-  it("farklı tenant sayaçları bağımsız (ctx.limitTenant, doğrulanmış kimlik)", async () => {
-    const lim = createRateLimiter({ store: createDbRateLimitStore(a), secret: SECRET, limits: { tenant: 1 } });
-    const g = createActionGuard(guardDeps({ origin: APP, "fly-client-ip": uniqueIp(1) }, lim))({ schema }, (i, ctx) => ctx.limitTenant(i.invitationId).then(() => "ok"));
+  it("farklı tenant sayaçları bağımsız (limitVerifiedTenant, doğrulanmış kimlik)", async () => {
+    const t1 = await mkTenantWithAdmin();
+    const t2 = await mkTenantWithAdmin();
+    const lim = limiterOf(a, { tenant: 1 });
+    const g = createActionGuard(guardDeps({ origin: APP, "fly-client-ip": uniqueIp(1) }, lim))({ schema }, (i, ctx) => {
+      const t = i.invitationId === id(1) ? t1 : t2;
+      return limitVerifiedTenant({ db: a, principal: { userId: t.admin, mfaVerified: true }, tenantSlug: t.slug, permission: "users.manage" }, ctx).then(() => "ok");
+    });
     expect(await g({ invitationId: id(1) })).toMatchObject({ ok: true });
     expect(await g({ invitationId: id(2) })).toMatchObject({ ok: true });
     expect(await g({ invitationId: id(1) })).toMatchObject({ ok: false, error: { code: "RATE_LIMITED" } });
     expect(await g({ invitationId: id(2) })).toMatchObject({ ok: false, error: { code: "RATE_LIMITED" } });
   });
 
-  it("MAJOR-1: üye olmayan 601 istek kurban tenant kovasını tüketmez; kurban üyesinin eylemi geçer", async () => {
+  it("MAJOR-1: üye olmayan ve izni olmayan üyenin 601 isteği kurban tenant kovasını tüketmez; yönetici üyenin eylemi geçer", async () => {
     const victim = await mkTenantWithAdmin();
-    const attacker = await mkUser();
-    const lim = createRateLimiter({ store: createDbRateLimitStore(a), secret: SECRET });
-    const ctx = { limitTenant: (t: string) => lim.check("tenant", t) };
+    const attacker = await mkUser(); // üye değil
+    const picker = await mkUser(); // üye ama users.manage izni yok
+    const pm = await adm.query<{ id: string }>("INSERT INTO public.tenant_memberships (tenant_id, user_id, status, is_owner) VALUES ($1, $2, 'ACTIVE', false) RETURNING id", [victim.tenantId, picker]);
+    await adm.query("INSERT INTO public.membership_roles (tenant_id, membership_id, role_key) VALUES ($1, $2, 'PICKER')", [victim.tenantId, (pm.rows[0] as { id: string }).id]);
+    const lim = limiterOf(a);
+    const ctx = { limitTenant: (t: VerifiedTenantId) => lim.check("tenant", t) };
     const access = (userId: string) => ({ db: a, principal: { userId, mfaVerified: true }, tenantSlug: victim.slug, permission: "users.manage" as const });
-    for (let i = 0; i < 601; i++) await expect(limitVerifiedTenant(access(attacker), ctx)).rejects.toMatchObject({ name: "AppError" });
+    // Beklenen kodlar sabit: üye olmayan -> NOT_FOUND (tenant varlığı sızmaz), izni olmayan üye -> FORBIDDEN.
+    for (let i = 0; i < 601; i++) await expect(limitVerifiedTenant(access(attacker), ctx)).rejects.toMatchObject({ name: "AppError", code: "NOT_FOUND" });
+    for (let i = 0; i < 601; i++) await expect(limitVerifiedTenant(access(picker), ctx)).rejects.toMatchObject({ name: "AppError", code: "FORBIDDEN" });
     expect(await counterOf("web.tenant", victim.tenantId)).toBe(0);
     await expect(limitVerifiedTenant(access(victim.admin), ctx)).resolves.toBeUndefined();
     expect(await counterOf("web.tenant", victim.tenantId)).toBe(1);
     // İstemci slug'ı sayaç anahtarı değildir.
     expect(await counterOf("web.tenant", victim.slug)).toBe(0);
-  }, 120_000);
+  }, 240_000);
 
   it("yabancı Origin ve Origin'siz eylem -> FORBIDDEN; hiçbir sayaç tüketilmez", async () => {
     const ip = uniqueIp(2);
@@ -143,7 +161,7 @@ describe("web hardening (AC)", () => {
   });
 
   it("sahte X-Forwarded-For ile IP sınırı aşılmaz (aynı Fly-Client-IP aynı sayaç)", async () => {
-    const lim = createRateLimiter({ store: createDbRateLimitStore(a), secret: SECRET, limits: { ip: 2, user: 1000 } });
+    const lim = limiterOf(a, { ip: 2, user: 1000 });
     const ip = uniqueIp(3);
     const mk = (xff: string) => action(guardDeps({ origin: APP, "fly-client-ip": ip, "x-forwarded-for": xff }, lim));
     expect(await mk("1.1.1.1")({ invitationId: id(4) })).toMatchObject({ ok: true });
@@ -158,12 +176,12 @@ describe("web hardening (AC)", () => {
   it("üretim guard'ı (createProductionGuard, gerçek DB): IP eşiği+1'de RATE_LIMITED + retryAfterSeconds", async () => {
     Object.assign(process.env, { DATABASE_URL: env.databaseUrl, AUTH_DATABASE_URL: authUrl, BETTER_AUTH_SECRET: SECRET, BETTER_AUTH_URL: APP });
     const ip = uniqueIp(4);
-    const guard = createProductionGuard(() => Promise.resolve(new Headers({ origin: APP, "fly-client-ip": ip })));
+    const guard = createProductionGuard(() => Promise.resolve(new Headers({ origin: APP, "fly-client-ip": ip })), limiterOf(getAppDb()));
     const act = guard({ schema, requireAuth: false }, () => Promise.resolve("ok"));
     const arg = { invitationId: id(9) };
     for (let i = 0; i < 300; i++) expect(await act(arg)).toMatchObject({ ok: true });
     const r = await act(arg);
     expect(r).toMatchObject({ ok: false, error: { code: "RATE_LIMITED", retryable: true } });
-    expect((r as { error: { retryAfterSeconds: number } }).error.retryAfterSeconds).toBeGreaterThanOrEqual(1);
+    expect((r as { error: { retryAfterSeconds: number } }).error.retryAfterSeconds).toBe(59); // sabit saat: pencere başlangıcından 1 sn sonra
   }, 120_000);
 });
