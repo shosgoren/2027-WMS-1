@@ -167,8 +167,10 @@ jobs:
           tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" gitleaks
           "$RUNNER_TEMP/gitleaks" version
       # Bulgu → çıkış 1 → iş kırmızı. --redact: bulunan değer loga basılmaz (G-09).
+      # --ignore-gitleaks-allow: satır içi `gitleaks:allow` yorumlarıyla muafiyet kapalı (T-017);
+      # muafiyet yalnızca korunan `.gitleaksignore` dosyasında yaşar.
       - name: gitleaks (git history)
-        run: '"$RUNNER_TEMP/gitleaks" git --redact --no-banner --exit-code 1 .'
+        run: '"$RUNNER_TEMP/gitleaks" git --redact --no-banner --ignore-gitleaks-allow --exit-code 1 .'
 
   deps:
     name: deps

@@ -45,6 +45,15 @@ export const PROTECTED_GLOBS = Object.freeze([
   "scripts/test-ac/**",
   "scripts/lib/**",
   ".githooks/**",
+  // Gizli bilgi taraması muafiyet listesi (T-017): parmak izi eklemek taramayı susturur
+  ".gitleaksignore",
+  "**/.gitleaksignore",
+  // gitleaks yapılandırması: 8.30.1 yalnızca `(hedef yol)/.gitleaks.toml` dosyasını otomatik yükler
+  // (`gitleaks git --help`); `gitleaks.toml` savunma amaçlı eklendi (kural kapatma/allowlist).
+  ".gitleaks.toml",
+  "**/.gitleaks.toml",
+  "gitleaks.toml",
+  "**/gitleaks.toml",
   // Karantina kaydı
   "tests/QUARANTINE.md",
   // pnpm kancaları (kurulumda kod çalıştırır; T-003 security-reviewer MAJOR)
