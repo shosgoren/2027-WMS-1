@@ -68,9 +68,29 @@ describe("buildPostingPlan", () => {
     for (const [k, l] of bad) expect(() => buildPostingPlan(k, [l])).toThrow(AppError);
   });
 
-  it("durum değişimi (kaynak ≠ hedef durum) aynı lokasyonda geçerli hareket (A-217-1: yükleyici henüz doldurmaz)", () => {
+  it("durum değişimi (kaynak ≠ hedef durum) aynı lokasyonda geçerli hareket (T-248: yükleyici hedef durumu doldurur)", () => {
     const p = buildPostingPlan("STOCK_MOVE", [line(1, { sourceLocationId: L1, targetLocationId: L1, sourceStatus: "QUARANTINE", targetStatus: "AVAILABLE" })]);
     expect(p.dimensions.map((d) => d.stockStatus).sort()).toEqual(["AVAILABLE", "QUARANTINE"]);
+  });
+
+  it("T-248: kaynak ve hedef boyutlar ayrı anahtarlanır (−kaynak durum, +hedef durum); AVAILABLE→QUARANTINE ve geri izinli", () => {
+    for (const [from, to] of [["QUARANTINE", "AVAILABLE"], ["AVAILABLE", "QUARANTINE"]] as const) {
+      const p = buildPostingPlan("STOCK_MOVE", [line(1, { sourceLocationId: L1, targetLocationId: L1, sourceStatus: from, targetStatus: to })]);
+      expect(p.entries.map((e) => [e.key.stockStatus, e.delta])).toEqual([[from, -1_000_000n], [to, 1_000_000n]]);
+    }
+  });
+
+  it("T-248 A-248-1: izinli çift dışındaki durum geçişleri VALIDATION_FAILED; IN/OUT'ta kaynak ≠ hedef durum reddedilir", () => {
+    const all = ["AVAILABLE", "QUARANTINE", "DAMAGED", "BLOCKED"] as const;
+    const allowed = new Set(["QUARANTINE>AVAILABLE", "AVAILABLE>QUARANTINE"]);
+    for (const a of all) for (const b of all) {
+      if (a === b) continue;
+      const t = () => buildPostingPlan("STOCK_MOVE", [line(1, { sourceLocationId: L1, targetLocationId: L1, sourceStatus: a, targetStatus: b })]);
+      if (allowed.has(`${a}>${b}`)) expect(t).not.toThrow();
+      else expect(t).toThrow(AppError);
+    }
+    expect(() => buildPostingPlan("STOCK_IN", [line(1, { targetLocationId: L1, sourceStatus: "QUARANTINE", targetStatus: "AVAILABLE" })])).toThrow(AppError);
+    expect(() => buildPostingPlan("STOCK_OUT", [line(1, { sourceLocationId: L1, sourceStatus: "QUARANTINE", targetStatus: "AVAILABLE" })])).toThrow(AppError);
   });
 });
 
