@@ -6,8 +6,10 @@
 //   ham INSERT kullanılır (varsayılan sütunlar listeye girmez).
 // - Kod: kırp + yalnızca ASCII a-z büyütülür (yerel ayar yok; `ı`/`İ`/`ß` gibi karakterler ham saklanır, karşılaştırma tam
 //   eşleşme). `code` oluşturulduktan sonra değişmez (A-83).
-// - Arşiv: hedef satır `FOR NO KEY UPDATE` (createLocation `FOR SHARE` okur → arşiv/oluşturma yarışı serileşir); aktif lokasyon veya pozitif pozitif bakiye → `IN_USE` (bakiye okuması salt SELECT; arşivle eşzamanlı stok girişi
-//   yarışı lokasyon arşivinde çözülür, arşivli lokasyona stok komutu T-217'de reddedilir).
+// - Arşiv: hedef satır `FOR NO KEY UPDATE` (createLocation `FOR SHARE` okur → arşiv/oluşturma yarışı serileşir); aktif lokasyon veya pozitif bakiye → `IN_USE` (bakiye okuması salt SELECT). Arşivle eşzamanlı stok girişi yarışı:
+//   `archiveLocation` sayım kilidini `acquireStockLocks` ile `FOR SHARE` alır (T-243) — bu, stok komutunun aynı kipteki kilidiyle
+//   ÇAKIŞMAZ. Serileşmeyi stok yazıcısı sağlar: T-217 yazıcıları `acquireStockLocks` sonrası lokasyon satırını `FOR SHARE` ile okuyup
+//   `ACTIVE` denetler (arşivin `FOR NO KEY UPDATE`'iyle çakışır; sıra sayım kilidi → lokasyon). T-217 kartı + kapı testi zorunlu.
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { appendAudit } from "@wms/db";
