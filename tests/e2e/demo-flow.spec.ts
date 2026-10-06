@@ -56,9 +56,9 @@ test.describe("demo akışı", () => {
     await expect(page).toHaveURL(/\/t\/demo$/);
     await expect(page.getByRole("heading", { level: 1, name: "Ne yapmak istiyorsun?" })).toBeVisible();
 
-    // Kartlar: 3 etkin bağlantı (yönetici), 6 "Yakında" kartı (depo işleri) tıklanamaz; kilitli kart yok.
+    // Kartlar: 4 etkin bağlantı (yönetici), 6 "Yakında" kartı (depo işleri) tıklanamaz; kilitli kart yok.
     const tasks = page.getByRole("list", { name: "İşler" });
-    await expect(tasks.locator('a[data-state="active"]')).toHaveCount(3);
+    await expect(tasks.locator('a[data-state="active"]')).toHaveCount(4);
     await expect(tasks.locator('[data-state="soon"]')).toHaveCount(6);
     await expect(tasks.locator('[data-state="locked"]')).toHaveCount(0);
     await expect(tasks.locator('[data-state="soon"]').first()).toContainText("Yakında");
@@ -127,7 +127,7 @@ test.describe("demo akışı", () => {
     // Yönetim, ayar ve denetim kartları kilitli (bağlantı değil) + gerekçe.
     const tasks = page.getByRole("list", { name: "İşler" });
     await expect(tasks.locator('[data-state="locked"]')).toHaveCount(3);
-    await expect(tasks.locator('a[data-state="active"]')).toHaveCount(0);
+    await expect(tasks.locator('a[data-state="active"]')).toHaveCount(1);
     await expect(tasks.locator('[data-state="locked"]').first()).toContainText("Bu iş için yetkin yok. Sorumluna sorabilirsin.");
     await expectNoHorizontalOverflow(page, "salt okunur ana ekran");
 

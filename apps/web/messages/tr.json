@@ -429,6 +429,10 @@
         "title": "Kim ne yaptı?",
         "description": "Denetim kaydı"
       },
+      "items": {
+        "title": "Ürünlerim",
+        "description": "Ürün kartı, birim ve barkod"
+      },
       "receive": {
         "title": "Depoya mal geldi",
         "description": "Gelen malı kaydet"
@@ -608,5 +612,149 @@
     "locked": "Bu ayarları değiştirme yetkin yok.",
     "lockedAction": "Değişiklik gerekiyorsa çalışma alanı yöneticine (sorumlun) sor.",
     "back": "Ana ekrana dön"
+  },
+  "items": {
+    "title": "Ürünler",
+    "intro": "Ürün kartlarını, birimlerini ve barkodlarını buradan yönet.",
+    "lockedReason": "Bu iş için yetkin yok. Sorumluna sorabilirsin.",
+    "listLabel": "Ürün listesi",
+    "create": "Yeni ürün",
+    "empty": "Henüz ürün yok.",
+    "emptyAction": "“Yeni ürün” ile ilk ürününü ekle.",
+    "emptyReadOnly": "Ürün eklemesi için sorumluna sor.",
+    "emptyFiltered": "Aramana uyan ürün yok.",
+    "emptyFilteredAction": "Kodun ilk harflerini, adı ya da barkodu tam yaz; ya da aramayı temizle.",
+    "codeLabel": "Kod: {code}",
+    "baseUnitLabel": "Temel birim: {unit}",
+    "status": {
+      "ACTIVE": "Aktif",
+      "ARCHIVED": "Arşivli"
+    },
+    "open": "Ayrıntıyı aç",
+    "openFor": "Ayrıntıyı aç: {name}",
+    "paging": "Sayfalama",
+    "more": "Daha fazla",
+    "firstPage": "Başa dön",
+    "search": {
+      "label": "Ürün ara",
+      "hint": "Kodun ya da adın ilk harfleri; barkod için tamamını yaz veya okut.",
+      "status": "Durum",
+      "all": "Hepsi",
+      "submit": "Ara",
+      "clear": "Aramayı temizle"
+    },
+    "tracking": {
+      "NONE": "Takip yok",
+      "LOT": "Lot takibi",
+      "SERIAL": "Seri takibi",
+      "LOT_AND_SERIAL": "Lot ve seri takibi"
+    },
+    "pick": {
+      "FIFO": "İlk giren ilk çıkar (FIFO)",
+      "FEFO": "Son kullanma tarihi yakın olan önce (FEFO)"
+    },
+    "form": {
+      "createTitle": "Yeni ürün",
+      "code": "Ürün kodu",
+      "codeHint": "Sonradan değiştirilemez; sunucu biçimi düzeltir.",
+      "name": "Ürün adı",
+      "baseUnit": "Temel birim",
+      "baseUnitHint": "Stok bu birimle sayılır; sonradan değiştirilemez.",
+      "scale": "Miktar hassasiyeti",
+      "scaleHint": "Miktarın virgülden sonra kaç basamak olacağı; sonradan değiştirilemez.",
+      "scaleInteger": "Tam sayı (0 basamak)",
+      "scaleDecimals": "{count} basamak",
+      "advanced": "Gelişmiş ayarlar",
+      "advancedHint": "Çoğu ürün için değiştirmen gerekmez. Takip modu oluşturulduktan sonra değişmez.",
+      "tracking": "Takip modu",
+      "pick": "Toplama politikası",
+      "submit": "Kaydet",
+      "cancel": "Vazgeç",
+      "noUnits": "Henüz tanımlı birim yok; ürün için önce bir temel birim (ör. ADET) gerekir. Sorumluna ya da destek ekibine sor."
+    },
+    "detail": {
+      "title": "Ürün kartı",
+      "back": "Ürün listesine dön",
+      "archivedNote": "Bu ürün arşivli; değiştirilemez ve yeni barkod ya da dönüşüm eklenemez.",
+      "cardTitle": "Ürün bilgileri",
+      "save": "Değişiklikleri kaydet",
+      "lockedFixed": "Temel birim, miktar hassasiyeti ve takip modu ürün oluşturulduktan sonra değiştirilemez.",
+      "lockedInUse": "Bu üründe stok veya açık rezervasyon var; temel birim, miktar hassasiyeti ve takip modu kilitli.",
+      "conversionsTitle": "Birim dönüşümleri",
+      "conversionsHint": "Koli gibi birimlerin kaç {unit} ettiğini ürün bazında belirt.",
+      "conversionsEmpty": "Bu ürün için dönüşüm tanımlı değil.",
+      "conversionLine": "1 {unit} = {factor} {base}",
+      "conversionUnit": "Birim",
+      "conversionFactor": "Kaç {base} eder?",
+      "conversionFactorHint": "Örnek: 12 ya da 0.5. Aynı birim için yeniden kaydedersen katsayı güncellenir; eski belgeler değişmez.",
+      "conversionSave": "Dönüşümü kaydet",
+      "barcodesTitle": "Barkodlar",
+      "barcodesHint": "Barkodu yazabilir ya da okutabilirsin (okutma metin girişidir).",
+      "barcodesEmpty": "Bu ürüne bağlı barkod yok.",
+      "barcodeMeta": "Birim: {unit} · Okutma başına miktar: {quantity}",
+      "barcodeAmbiguous": "Bu barkod başka ürünlerde de kayıtlı; okutulunca tek bir ürüne otomatik atanmaz. Gerekirse barkodu düzelt.",
+      "barcodeRemove": "Kaldır",
+      "barcodeRemoveFor": "Kaldır: {barcode}",
+      "barcodeValue": "Barkod",
+      "barcodeValueHint": "Okutabilir ya da elle yazabilirsin.",
+      "barcodeUnit": "Barkodun birimi",
+      "barcodeUnitBase": "Temel birim ({unit})",
+      "barcodeQuantity": "Okutma başına miktar",
+      "barcodeQuantityHint": "Boş bırakırsan 1 sayılır.",
+      "barcodeAdd": "Barkodu ekle",
+      "archiveTitle": "Ürünü arşivle",
+      "archiveHint": "Arşivlenen ürün listede arşivli görünür ve değiştirilemez. Stok ya da açık rezervasyon varsa arşivlenmez.",
+      "archive": "Arşivle",
+      "confirmArchive": {
+        "title": "{name} arşivlensin mi?",
+        "description": "{name} ({code}) arşivli olur ve değiştirilemez. Bu üründe stok veya açık rezervasyon varsa arşivlenmez; önce boşalt.",
+        "button": "Arşivle"
+      },
+      "confirmRemove": {
+        "title": "Barkod kaldırılsın mı?",
+        "description": "{barcode} bu üründen silinir. Bu işlem geri alınamaz; gerekirse yeniden ekleyebilirsin.",
+        "button": "Kaldır"
+      },
+      "done": {
+        "saved": "Değişiklikler kaydedildi.",
+        "conversion": "Dönüşüm kaydedildi.",
+        "barcodeAdded": "Barkod eklendi.",
+        "barcodeRemoved": "Barkod kaldırıldı.",
+        "archived": "Ürün arşivlendi."
+      }
+    },
+    "errors": {
+      "code": "Hata kodu: {code}",
+      "mfaLink": "İki adımlı doğrulamayı kur",
+      "loginLink": "Yeniden giriş yap",
+      "forbidden": "Bu işlem için yetkin yok.",
+      "forbiddenAction": "Sorumluna sor.",
+      "forbidden_mfa_required": "Yönetici işlemleri için iki adımlı doğrulama gerekli.",
+      "forbidden_mfa_requiredAction": "Önce doğrulamayı kur, sonra işlemi yinele.",
+      "unauthenticated": "Oturumun sona ermiş.",
+      "unauthenticatedAction": "Yeniden giriş yapıp işlemi yinele.",
+      "unauthenticated_recent_auth_required": "Bu işlem için kimliğini yeniden doğrulaman gerekiyor.",
+      "unauthenticated_recent_auth_requiredAction": "Yeniden giriş yapıp işlemi yinele.",
+      "not_found": "Kayıt bulunamadı; başka biri değiştirmiş olabilir.",
+      "not_foundAction": "Sayfayı yenileyip yeniden dene.",
+      "validation_failed": "Girilen bilgiler geçersiz ya da bu kayıt için uygun değil.",
+      "validation_failedAction": "Alanları kontrol edip yeniden dene; arşivli üründe değişiklik yapılamaz.",
+      "validation_failed_code_taken": "Bu kod ya da barkod kaydı zaten var.",
+      "validation_failed_code_takenAction": "Farklı bir değer gir.",
+      "validation_failed_in_use": "Bu üründe stok veya açık rezervasyon var.",
+      "validation_failed_in_useAction": "Önce stoku boşalt ve rezervasyonları kapat, sonra yeniden dene.",
+      "validation_failed_unit_conversion_invalid": "Temel birim için dönüşüm girilemez.",
+      "validation_failed_unit_conversion_invalidAction": "Temel birimden farklı bir birim seç.",
+      "version_conflict": "Kayıt aynı anda başka bir işlemle değişti.",
+      "version_conflictAction": "Sayfayı yenileyip yeniden dene.",
+      "rate_limited": "Çok fazla işlem yapıldı.",
+      "rate_limitedAction": "Biraz bekleyip yeniden dene.",
+      "tenant_suspended": "Çalışma alanı askıda.",
+      "tenant_suspendedAction": "Sorumluna veya destek ekibine başvur.",
+      "tenant_closing": "Çalışma alanı kapatılıyor.",
+      "tenant_closingAction": "Sorumluna başvur.",
+      "internal": "Bir sorun oluştu.",
+      "internalAction": "Biraz sonra yeniden dene; sürerse hata kodunu destek ekibine ilet."
+    }
   }
 }
