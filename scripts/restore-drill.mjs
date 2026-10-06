@@ -35,6 +35,8 @@ export const BRANCH_PREFIX = "restore-drill-";
 export const TARGETS = Object.freeze({ rpoSeconds: 15 * 60, rtoSeconds: 60 * 60 });
 export const SCOPE_NOTE = "Yalnızca veritabanı; dosya deposu (Tigris) ve silme işaretleri dahil tam tatbikat AC-17 / Faz 4P.";
 /** T ile dal isteği arasındaki asgari bekleme (T'nin Neon tarafında geçmişte kalması / saat kayması payı). */
+/** Ölçülmez: ana dala yazım yolu yok (yalnızca salt-okunur transaction). */
+export const MAIN_WRITES_NOTE = "ölçülmedi (tasarım gereği; ana dala yazım yolu yok)";
 export const POINT_GAP_MS = 3000;
 export const READY_TIMEOUT_MS = 10 * 60_000;
 export const READY_INTERVAL_MS = 5000;
@@ -146,7 +148,8 @@ export async function cleanupBranch(neon, c) {
     if (id === null) return { attempted: false, deleted: false, error: null };
     if (c.mainId !== null && id === c.mainId) throw new DrillError("silinecek dal ana dalla aynı: silme reddedildi");
     const info = await neon.getBranchInfo(id);
-    if (info === null) return { attempted: false, deleted: false, error: null };
+    // Kimlik az önce biliniyordu/listelendi: bilgi yoksa yokluk kanıtlanamaz → fail-open olmasın (kırmızı).
+    if (info === null) throw new DrillError("dal kimliği biliniyor ama dal bilgisi alınamadı: silme doğrulanamadı");
     if (info.isDefault || info.isPrimary || info.isProtected) {
       throw new DrillError("silinecek dal default/primary/protected: silme reddedildi");
     }
@@ -187,7 +190,7 @@ export async function runDrill(deps, cfg) {
     fingerprint_sha256: null,
     sections: null,
     restored_not_after_t: null,
-    main_writes: 0,
+    main_writes: MAIN_WRITES_NOTE,
     roles_ok: null,
     role_problems: null,
     restored_branch_deleted: null,
@@ -287,7 +290,7 @@ export function renderSummaryMd(s) {
     `- Tablo sayıları eşit: ${yn(s.table_counts_equal)} (${s.tables_compared ?? "-"} tablo)`,
     `- Özetler eşit (audit_logs, security_events, şema): ${yn(s.digests_equal)}`,
     `- Parmak izleri eşit: ${yn(s.fingerprints_equal)} (sağlama: ${s.fingerprint_sha256 ?? "-"})`,
-    `- Geri yüklenen en yeni commit T'den sonra değil: ${yn(s.restored_not_after_t)} · ana dala yazma: ${s.main_writes ?? 0}`,
+    `- Geri yüklenen en yeni commit T'den sonra değil: ${yn(s.restored_not_after_t)} · ana dala yazma: ${s.main_writes}`,
     `- Uygulama rolü nitelikleri tamam: ${yn(s.roles_ok)}${s.role_problems && s.role_problems.length > 0 ? ` (${s.role_problems.join("; ")})` : ""}`,
     `- Geçici dal silindi: ${String(s.restored_branch_deleted)}`,
     ...(s.error ? [`- Hata: ${s.error}`] : []),

@@ -323,13 +323,22 @@ describe(`yetki sınırı: defter, DDL, kimlik (target=${env.target})`, () => {
     if (!sg.ok) expect(sg.code).toBe(INSUFFICIENT_PRIVILEGE);
   });
 
-  it("denetim politikaları yalnızca wms_ops için ve RESTRICTIVE (diğer roller etkilenmez)", async () => {
-    const r = await admin.query<{ polname: string; roles: string[]; permissive: boolean }>(
-      `SELECT polname, ARRAY(SELECT rolname::text FROM pg_roles WHERE oid = ANY(polroles)) AS roles, polpermissive AS permissive
-         FROM pg_policy WHERE polname = 'ops_session_required' ORDER BY polrelid::regclass::text`,
+  it("denetim politikaları: tam küme (ad, tablo, roller=[wms_ops], komut, RESTRICTIVE) — yapısal eşleşme", async () => {
+    const r = await admin.query<{ tbl: string; polname: string; roles: string[]; cmd: string; permissive: boolean }>(
+      `SELECT polrelid::regclass::text AS tbl, polname,
+              ARRAY(SELECT rolname::text FROM pg_roles WHERE oid = ANY(polroles)) AS roles, polcmd::text AS cmd, polpermissive AS permissive
+         FROM pg_policy WHERE left(polname, 20) = 'ops_session_required' ORDER BY polrelid::regclass::text COLLATE "C", polname`,
     );
-    expect(r.rows).toHaveLength(5);
-    for (const row of r.rows) expect(row).toMatchObject({ roles: [OPS], permissive: false });
+    const row = (tbl: string, polname: string, cmd: string) => ({ tbl, polname, roles: [OPS], cmd, permissive: false });
+    expect(r.rows).toEqual([
+      row("audit_logs", "ops_session_required_insert", "a"),
+      row("audit_logs", "ops_session_required_select", "r"),
+      row("invitations", "ops_session_required", "*"),
+      row("membership_roles", "ops_session_required", "*"),
+      row("tenant_memberships", "ops_session_required", "*"),
+      row("tenant_settings", "ops_session_required", "*"),
+      row("tenants", "ops_session_required", "*"),
+    ]);
   });
 });
 
@@ -386,12 +395,17 @@ describe(`0009 ileri/geri/ileri (target=${env.target})`, () => {
     expect(down.reverted).toEqual(["0009"]);
     const a = await connect(adminUrl);
     try {
-      await a.query(`CREATE ROLE ${tmp} NOLOGIN`);
+      // A-67 koşulu: ADMIN-only satırı yalnızca BYPASSRLS+CREATEROLE (süper kullanıcı olmayan) sahip rol taşıyabilir.
+      await a.query(`CREATE ROLE ${tmp} NOLOGIN BYPASSRLS CREATEROLE`);
       await a.query(`GRANT ${OPS} TO ${tmp} WITH ADMIN TRUE, SET FALSE, INHERIT FALSE`);
       await a.query(`GRANT ${OPS} TO ${tmp} WITH ADMIN TRUE, SET TRUE, INHERIT FALSE`);
       await expect(migrateUp({ url: scratchUrl })).rejects.toThrow(/SET\/INHERIT/);
       await a.query(`REVOKE ${OPS} FROM ${tmp}`);
       await a.query(`GRANT ${OPS} TO ${tmp} WITH ADMIN TRUE, SET FALSE, INHERIT FALSE`);
+      // MINOR-1: uygulama rolüne ADMIN-only → ret (SET ROLE wms_ops yoluna kapı)
+      await a.query(`GRANT ${OPS} TO wms_app WITH ADMIN TRUE, SET FALSE, INHERIT FALSE`);
+      await expect(migrateUp({ url: scratchUrl })).rejects.toThrow(/yetkisiz üye/);
+      await a.query(`REVOKE ${OPS} FROM wms_app`);
       const up = await migrateUp({ url: scratchUrl });
       expect(up.applied).toEqual(["0009"]);
     } finally {

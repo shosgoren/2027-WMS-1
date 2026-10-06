@@ -149,7 +149,7 @@ export function opsRoleCheckSql() {
  (SELECT count(*) FROM pg_roles g WHERE g.oid <> r.oid AND pg_has_role(r.oid, g.oid, 'MEMBER')),
  (SELECT count(*) FROM pg_shdepend d WHERE d.refclassid = 'pg_authid'::regclass AND d.refobjid = r.oid AND d.deptype = 'o')
 FROM pg_roles r WHERE r.rolname = 'wms_ops';
-SELECT 'opsmember', mr.rolname, m.admin_option, m.inherit_option, m.set_option
+SELECT 'opsmember', mr.rolname, m.admin_option, m.inherit_option, m.set_option, mr.rolbypassrls, mr.rolcreaterole, mr.rolsuper, (mr.rolname = current_user)
 FROM pg_auth_members m JOIN pg_roles pr ON pr.oid = m.roleid JOIN pg_roles mr ON mr.oid = m.member
 WHERE pr.rolname = 'wms_ops' ORDER BY 2;`;
 }
@@ -157,12 +157,15 @@ WHERE pr.rolname = 'wms_ops' ORDER BY 2;`;
 /**
  * `opsmember` satırları: wms_ops'a kimlerin üye olduğu (A-67 deseni).
  * @param {string} stdout
- * @returns {{ member: string, admin: boolean, inherit: boolean, set: boolean }[]}
+ * @returns {{ member: string, admin: boolean, inherit: boolean, set: boolean, bypassrls: boolean, createrole: boolean, super: boolean, me: boolean }[]}
  */
 export function parseOpsMembers(stdout) {
   return rows(stdout)
-    .filter((c) => c[0] === "opsmember" && c.length >= 5)
-    .map((c) => ({ member: String(c[1]), admin: tf(String(c[2])), inherit: tf(String(c[3])), set: tf(String(c[4])) }));
+    .filter((c) => c[0] === "opsmember" && c.length >= 9)
+    .map((c) => ({
+      member: String(c[1]), admin: tf(String(c[2])), inherit: tf(String(c[3])), set: tf(String(c[4])),
+      bypassrls: tf(String(c[5])), createrole: tf(String(c[6])), super: tf(String(c[7])), me: tf(String(c[8])),
+    }));
 }
 
 /**
@@ -176,7 +179,11 @@ export function parseOpsMembers(stdout) {
 export function opsRoleDeviations(r, members = []) {
   if (!r) return ["missing"];
   const d = appRoleDeviations({ ...r, login: true }).concat(r.login ? ["login"] : []);
-  for (const m of members) if (m.set || m.inherit) d.push(`granted-to:${m.member}`);
+  for (const m of members) {
+    if (m.set || m.inherit) d.push(`granted-to:${m.member}`);
+    // MINOR-1: ADMIN satırı yalnızca migration rolünde ya da A-67 koşulunu (BYPASSRLS+CREATEROLE, süper kullanıcı değil) sağlayan sahip rolde kabul.
+    else if (!m.me && !(m.bypassrls && m.createrole && !m.super)) d.push(`admin-to:${m.member}`);
+  }
   return d;
 }
 
