@@ -599,6 +599,154 @@ const noClientServerLoader = {
     );
   },
 };
+/**
+ * T-210 (I-04, I-15, G-01): stok tablolarında kilit/yazma SQL'i ve şema nesnesi erişimi yalnızca izinli DOSYALARDA (dizin değil).
+ * Mevcut kuralları gevşetmeyen, benzersiz adlı EK kuraldır (flat config'te aynı kural adı değiştirilir, birleşmez).
+ * (a) `FOR UPDATE|SHARE` (+ NO KEY / KEY SHARE) ve (b)/(c)/(d) maddeleri kart T-210 §4'tedir; `serials` yalnızca (a)'ya tabidir.
+ * Kapsam: `packages/**`, `apps/**` (tests/** ve *.sql dışarıda). İzinli yollar depo-göreli, dosya düzeyindedir; genişletme yalnızca korunan PR'la.
+ */
+const STOCK_LOCK_FILE = "packages/db/src/locking.ts";
+const STOCK_WRITE_FILES = [
+  STOCK_LOCK_FILE,
+  "packages/domain/src/stock/posting.ts",
+  "packages/domain/src/stock/reservations.ts",
+  "packages/domain/src/stock/reversal.ts",
+];
+const STOCK_LOCK_TABLES = ["stock_ledger", "stock_balances", "reservations", "serials", "location_count_locks", "stock_dimensions"];
+const STOCK_WRITE_TABLES = ["stock_ledger", "stock_balances", "reservations", "location_count_locks", "stock_dimensions"];
+const STOCK_SCHEMA_OBJECTS = new Set(["stockLedger", "stockBalances", "reservations", "locationCountLocks", "stockDimensions"]);
+/**
+ * Mevcut istisna (T-210 bulgusu): `packages/auth/src/index.ts` kimlik şemasını Better Auth sürücüsüne `import * as schema` ile verir
+ * (T-102/ADR-014). YALNIZCA bu dosyada ve YALNIZCA ad alanı importu serbesttir; adlandırılmış stok nesnesi importu orada da yasaktır.
+ * Daraltma (yalnızca kimlik tabloları) ayrı karttadır.
+ */
+const STOCK_SCHEMA_NAMESPACE_FILES = ["packages/auth/src/index.ts"];
+const STOCK_LOCK_VALUE_EXPORTS = new Set(["acquireStockLocks"]);
+/** Tablo adı (isteğe bağlı `public.` ve çift tırnak). */
+/** @param {string[]} tables */
+const tableRe = (tables) => `(?:"?public"?\\s*\\.\\s*)?"?(?:${tables.join("|")})"?(?![\\w])`;
+const STOCK_LOCK_SQL_RE = new RegExp(`\\bFOR\\s+(?:NO\\s+KEY\\s+UPDATE|UPDATE|KEY\\s+SHARE|SHARE)\\b`, "i");
+const STOCK_LOCK_TABLE_RE = new RegExp(`(?<![\\w])${tableRe(STOCK_LOCK_TABLES)}`, "i");
+const STOCK_WRITE_SQL_RE = new RegExp(
+  `(?<![\\w])(?:INSERT\\s+INTO|UPDATE|DELETE\\s+FROM|TRUNCATE(?:\\s+TABLE)?)\\s+(?:ONLY\\s+)?${tableRe(STOCK_WRITE_TABLES)}`,
+  "i",
+);
+const MSG_STOCK_LOCK = "Stok tablolarında FOR UPDATE/FOR SHARE yalnızca packages/db/src/locking.ts içindedir (`acquireStockLocks`; I-15, T-210).";
+const MSG_STOCK_WRITE = "Stok tablolarına INSERT/UPDATE/DELETE yalnızca STOCK_WRITE_FILES dosyalarındadır (G-01, I-04, T-210).";
+const MSG_STOCK_SCHEMA =
+  "Stok tablosu şema nesneleri (stockLedger, stockBalances, reservations, locationCountLocks, stockDimensions) STOCK_WRITE_FILES ve packages/db/src dışında import edilemez; okuma ham SQL SELECT ile yapılır (G-01, T-210).";
+const MSG_STOCK_EXPORT = "locking.ts yalnızca `acquireStockLocks` ve tip dışa aktarır; kilit alt adımları export edilemez (I-15, T-210).";
+/** `@wms/db/internal/schema` ya da şema dosyası yolları (normalize edilmiş, depo-göreli). */
+const STOCK_SCHEMA_SPEC_RE = /^(?:@wms\/db\/internal\/schema|packages\/db\/src\/schema(?:\/(?:index|stock|warehouse|catalog)(?:\.[cm]?[jt]s)?)?)(?:[?#].*)?$/iu;
+/** @param {string} filename */
+const repoRelative = (filename) => {
+  const f = filename.replaceAll("\\", "/");
+  return f.startsWith(`${REPO_ROOT_POSIX}/`) ? f.slice(REPO_ROOT_POSIX.length + 1) : f;
+};
+/** Düğümün (dize/şablon/`+` zinciri) statik metni; bilinmeyen parça `\u0000`. Dize olmayan düğüm için `null`. @param {any} n @returns {string | null} */
+const staticText = (n) => {
+  if (n?.type === "Literal" && typeof n.value === "string") return n.value;
+  if (n?.type === "TemplateLiteral") return n.quasis.map((/** @type {any} */ q) => q.value.cooked ?? q.value.raw).join("\u0000");
+  if (n?.type === "BinaryExpression" && n.operator === "+") {
+    const l = staticText(n.left);
+    const r = staticText(n.right);
+    return l === null && r === null ? null : `${l ?? "\u0000"}${r ?? "\u0000"}`;
+  }
+  return null;
+};
+/** @type {import("eslint").Rule.RuleModule} */
+const stockSqlGuard = {
+  meta: { type: "problem", schema: [], messages: { lock: MSG_STOCK_LOCK, write: MSG_STOCK_WRITE, schema: MSG_STOCK_SCHEMA, exports: MSG_STOCK_EXPORT } },
+  create(context) {
+    const rel = path.posix.normalize(repoRelative(context.filename));
+    const isLockFile = rel === STOCK_LOCK_FILE;
+    const writeAllowed = STOCK_WRITE_FILES.includes(rel);
+    const schemaAllowed = writeAllowed || rel.startsWith("packages/db/src/");
+    /** @param {any} node */
+    const checkText = (node) => {
+      const parent = node.parent;
+      if (parent?.type === "BinaryExpression" && parent.operator === "+") return; // üst zincir denetler
+      if (parent?.type === "ImportDeclaration" || parent?.type === "ExportAllDeclaration" || parent?.type === "ExportNamedDeclaration") return;
+      const text = staticText(node);
+      if (text === null) return;
+      if (!isLockFile && STOCK_LOCK_SQL_RE.test(text) && STOCK_LOCK_TABLE_RE.test(text)) context.report({ node, messageId: "lock" });
+      if (!writeAllowed && STOCK_WRITE_SQL_RE.test(text)) context.report({ node, messageId: "write" });
+    };
+    /** @param {any} src */
+    const isSchemaSource = (src) => {
+      let spec = null;
+      if (src?.type === "Literal" && typeof src.value === "string") spec = src.value;
+      else if (src?.type === "TemplateLiteral" && src.expressions.length === 0 && src.quasis.length === 1) spec = src.quasis[0].value.cooked;
+      if (spec === null) return false;
+      let target;
+      try {
+        target = decodeURIComponent(spec).replaceAll("\\", "/");
+      } catch {
+        return true;
+      }
+      if (/^\.\.?(?:\/|$)/.test(target)) target = path.posix.join(path.posix.dirname(repoRelative(context.filename)), target);
+      target = path.posix.normalize(target).replace(/^\.\//, "");
+      return STOCK_SCHEMA_SPEC_RE.test(target);
+    };
+    /** @param {any} spec */
+    const importedName = (spec) => spec.imported?.name ?? spec.imported?.value ?? spec.local?.name;
+    /** @param {any} node @param {any[]} specifiers */
+    const specifiersHit = (node, specifiers) =>
+      specifiers.some((s) => {
+        if (s.type === "ImportNamespaceSpecifier" && STOCK_SCHEMA_NAMESPACE_FILES.includes(rel)) return false;
+        return s.type !== "ImportSpecifier" && s.type !== "ExportSpecifier" ? true : STOCK_SCHEMA_OBJECTS.has(importedName(s) ?? s.local?.name);
+      });
+    const dynamicSchema = (/** @type {any} */ n, /** @type {any} */ src) => {
+      if (!schemaAllowed && isSchemaSource(src)) context.report({ node: n, messageId: "schema" });
+    };
+    /** @type {import("eslint").Rule.RuleListener} */
+    const listener = {
+      Literal: checkText,
+      TemplateLiteral: checkText,
+      BinaryExpression: checkText,
+      ImportDeclaration: (/** @type {any} */ n) => {
+        if (!schemaAllowed && isSchemaSource(n.source) && specifiersHit(n, n.specifiers)) context.report({ node: n, messageId: "schema" });
+      },
+      ExportNamedDeclaration: (/** @type {any} */ n) => {
+        if (n.source) {
+          if (!schemaAllowed && isSchemaSource(n.source) && specifiersHit(n, n.specifiers)) context.report({ node: n, messageId: "schema" });
+        }
+        if (isLockFile && !n.source) {
+          const d = n.declaration;
+          if (d) {
+            const typeOnly = d.type === "TSTypeAliasDeclaration" || d.type === "TSInterfaceDeclaration" || n.exportKind === "type";
+            const names = d.type === "VariableDeclaration" ? d.declarations.map((/** @type {any} */ x) => x.id?.name) : [d.id?.name];
+            if (!typeOnly && !names.every((/** @type {string} */ x) => STOCK_LOCK_VALUE_EXPORTS.has(x))) context.report({ node: n, messageId: "exports" });
+          } else if (n.exportKind !== "type") {
+            for (const s of n.specifiers) {
+              const exported = s.exported?.name ?? s.exported?.value;
+              if (s.exportKind !== "type" && !STOCK_LOCK_VALUE_EXPORTS.has(exported)) context.report({ node: s, messageId: "exports" });
+            }
+          }
+        }
+        if (isLockFile && n.source && n.exportKind !== "type") context.report({ node: n, messageId: "exports" });
+      },
+      ExportAllDeclaration: (/** @type {any} */ n) => {
+        if (!schemaAllowed && isSchemaSource(n.source)) context.report({ node: n, messageId: "schema" });
+        if (isLockFile && n.exportKind !== "type") context.report({ node: n, messageId: "exports" });
+      },
+      ExportDefaultDeclaration: (/** @type {any} */ n) => {
+        if (isLockFile) context.report({ node: n, messageId: "exports" });
+      },
+      ImportExpression: (/** @type {any} */ n) => dynamicSchema(n, n.source),
+      TSExternalModuleReference: (/** @type {any} */ n) => dynamicSchema(n, n.expression),
+      CallExpression: (/** @type {any} */ n) => {
+        const c = n.callee;
+        const loader =
+          (c.type === "Identifier" && REQUIRE_NAME_JS_RE.test(c.name)) ||
+          (c.type === "MemberExpression" && c.property.type === "Identifier" && REQUIRE_NAME_JS_RE.test(c.property.name)) ||
+          (c.type === "CallExpression" && (c.callee.name === "createRequire" || c.callee.property?.name === "createRequire"));
+        if (loader && n.arguments.length > 0) dynamicSchema(n, n.arguments[0]);
+      },
+    };
+    return listener;
+  },
+};
 const WMS_PLUGIN = {
   meta: { name: "wms-local" },
   rules: {
@@ -606,6 +754,7 @@ const WMS_PLUGIN = {
     "no-normalized-path-import": noNormalizedPathImport,
     "no-client-server-import": noClientServerImport,
     "no-client-server-loader": noClientServerLoader,
+    "stock-sql-guard": stockSqlGuard,
   },
 };
 
@@ -810,6 +959,13 @@ export default defineConfig(
     files: ["apps/web/**/*.{js,mjs,cjs,ts,mts,cts,tsx}", "packages/ui/**/*.{js,mjs,cjs,ts,mts,cts,tsx}"],
     plugins: { wms: WMS_PLUGIN },
     rules: { "wms/no-client-server-import": "error", "wms/no-client-server-loader": "error" },
+  },
+  {
+    // T-210 (I-04, I-15, G-01): stok tablolarında kilit/yazma SQL'i ve şema nesnesi erişimi yalnızca izinli dosyalarda.
+    // Yalnızca EK kural (`wms/stock-sql-guard`); mevcut hiçbir kural değiştirilmedi. tests/** ve *.sql kapsam dışıdır.
+    files: ["packages/**/*.{js,mjs,cjs,ts,mts,cts,tsx}", "apps/**/*.{js,mjs,cjs,ts,mts,cts,tsx}"],
+    plugins: { wms: WMS_PLUGIN },
+    rules: { "wms/stock-sql-guard": "error" },
   },
   {
     // T-015: bekçi giriş noktası `scripts/guards/<ad>.mjs` modülünü `import(pathToFileURL(file).href)`
