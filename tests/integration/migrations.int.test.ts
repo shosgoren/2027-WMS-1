@@ -292,6 +292,206 @@ describe(`migrations (target=${env.target})`, () => {
     }
   });
 
+  it("session state hidden from the in-transaction check is caught after COMMIT and names the version (MINOR 1, 2)", async () => {
+    // `SET LOCAL` maskeler: transaction İÇİNDE temiz görünür, COMMIT'ten sonra oturum değeri kalır.
+    const cases: readonly (readonly [string, string])[] = [
+      ["session-config-masked", "SELECT set_config('app.current_tenant_id', 'leak', false);\nSET LOCAL app.current_tenant_id = '';"],
+      ["session-role-masked", `SET ROLE ${APP_ROLE};\nSET LOCAL ROLE NONE;`],
+      ["search-path", "SET search_path = pg_catalog;"],
+      ["search-path-config", "SELECT set_config('search_path', 'pg_catalog', false);"],
+      ["replication-role", "SET session_replication_role = replica;"],
+      ["read-only-default", "SET default_transaction_read_only = on;"],
+      ["temp-table", "CREATE TEMP TABLE t_leak (id integer);"],
+      ["prepare", "PREPARE leak_stmt AS SELECT 1;"],
+      ["listen", "LISTEN leak_channel;"],
+      ["advisory-lock", "SELECT pg_advisory_lock(42);"],
+    ];
+    for (const [tag, body] of cases) {
+      const url = await freshDatabase();
+      const dir = copyMigrations();
+      writeFileSync(path.join(dir, "0002_leak.up.sql"), `${body}\n`);
+      writeFileSync(path.join(dir, "0002_leak.down.sql"), "SELECT 1;\n");
+      const err = await migrateUp({ url, dir }).then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+      expect(err, `variant ${tag}`).toMatchObject({ code: "MIGRATION_SESSION_STATE" });
+      expect((err as Error).message, `variant ${tag}`).toMatch(/migration 0002 .*commit sonrası/);
+      // Maskelenen değişiklik transaction içinde görünmediği için migration commit edilmiştir; koşu durur,
+      // sızıntı bağlantıyla birlikte atılır: yeni bağlantı temizdir ve sonraki koşu başka bir şey uygulamaz.
+      expect(await ledger(url), `variant ${tag}`).toEqual(["0001", "0002"]);
+      expect((await migrateUp({ url, dir })).applied, `variant ${tag}`).toEqual([]);
+    }
+  });
+
+  it("a migration's leaked session value cannot reach the next migration (each runs on its own connection)", async () => {
+    const url = await freshDatabase();
+    const dir = copyMigrations();
+    writeFileSync(path.join(dir, "0002_leak.up.sql"), "SET search_path = pg_catalog;\n");
+    writeFileSync(path.join(dir, "0002_leak.down.sql"), "SELECT 1;\n");
+    writeFileSync(path.join(dir, "0003_probe.up.sql"), "CREATE TABLE public.t_sp AS SELECT current_setting('search_path') AS v;\n");
+    writeFileSync(path.join(dir, "0003_probe.down.sql"), "DROP TABLE public.t_sp;\n");
+    await expect(migrateUp({ url, dir })).rejects.toMatchObject({ code: "MIGRATION_SESSION_STATE" });
+    expect(await ledger(url)).toEqual(["0001", "0002"]);
+    await migrateUp({ url, dir });
+    const v = await withClient(url, (c) => c.query<{ v: string }>("SELECT v FROM public.t_sp"));
+    expect(v.rows[0]?.v).not.toContain("pg_catalog,");
+    expect(v.rows[0]?.v).toContain("public");
+  });
+
+  it("a transaction-local change that does not outlive the migration (SET LOCAL search_path) is allowed", async () => {
+    const url = await freshDatabase();
+    const dir = copyMigrations();
+    writeFileSync(path.join(dir, "0002_local.up.sql"), "SET LOCAL search_path = pg_catalog, public;\nCREATE TABLE public.t_local (id integer);\n");
+    writeFileSync(path.join(dir, "0002_local.down.sql"), "DROP TABLE public.t_local;\n");
+    expect((await migrateUp({ url, dir })).applied).toEqual(["0001", "0002"]);
+  });
+
+  it("post-run ownership audit: wms_app owning an object 0001 does not scan is rejected and rolled back (MINOR 7)", async () => {
+    const owned: readonly (readonly [string, readonly string[], string])[] = [
+      ["pg_type", ["CREATE DOMAIN public.d_arr AS integer[]", `ALTER DOMAIN public.d_arr OWNER TO ${APP_ROLE}`], "pg_type"],
+      ["pg_collation", ["CREATE COLLATION public.c_probe (provider = libc, locale = 'C')", `ALTER COLLATION public.c_probe OWNER TO ${APP_ROLE}`], "pg_collation"],
+      [
+        "pg_operator",
+        [
+          "CREATE OPERATOR public.=== (LEFTARG = int4, RIGHTARG = int4, FUNCTION = int4eq)",
+          `ALTER OPERATOR public.=== (int4, int4) OWNER TO ${APP_ROLE}`,
+        ],
+        "pg_operator",
+      ],
+      [
+        "pg_ts_config",
+        ["CREATE TEXT SEARCH CONFIGURATION public.ts_probe (COPY = simple)", `ALTER TEXT SEARCH CONFIGURATION public.ts_probe OWNER TO ${APP_ROLE}`],
+        "pg_ts_config",
+      ],
+      [
+        "pg_largeobject_metadata",
+        ["SELECT lo_create(424242)", `ALTER LARGE OBJECT 424242 OWNER TO ${APP_ROLE}`],
+        "pg_largeobject_metadata",
+      ],
+    ];
+    for (const [tag, statements, catalog] of owned) {
+      const url = await freshDatabase();
+      await withClient(url, async (c) => {
+        for (const st of statements) await c.query(st);
+      });
+      const err = await migrateUp({ url, dir: baseDir() }).then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+      expect(err, tag).toMatchObject({ code: "MIGRATION_APP_OWNERSHIP" });
+      expect((err as Error).message, tag).toContain(catalog);
+      expect(await withClient(url, (c) => c.query("SELECT to_regclass('wms_meta.schema_migrations') AS r")), tag).toMatchObject({
+        rows: [{ r: null }],
+      });
+    }
+  });
+
+  it("a deviating session baseline at connect time (database-level search_path / read-only / replication role) is refused", async () => {
+    for (const [tag, setting] of [
+      ["search_path", "search_path = pg_catalog"],
+      ["read-only", "default_transaction_read_only = on"],
+      ["replication-role", "session_replication_role = replica"],
+    ] as const) {
+      const url = await freshDatabase();
+      const db = new URL(url).pathname.slice(1);
+      await withClient(env.databaseUrlDirect, (c) => c.query(`ALTER DATABASE ${db} SET ${setting}`));
+      await expect(migrateUp({ url, dir: baseDir() }), tag).rejects.toMatchObject({ code: "MIGRATION_SESSION_STATE" });
+      await expect(migrateUp({ url, dir: baseDir() }), tag).rejects.toThrow(/\[başlangıç\]/);
+    }
+  });
+
+  it("post-run audit: role-level settings, attribute changes and memberships of wms_app are rejected and rolled back", async () => {
+    // Veritabanına özgü rol ayarı: veritabanı silinince ayar da gider (kümeyi kirletmez).
+    const url = await freshDatabase();
+    const db = new URL(url).pathname.slice(1);
+    await withClient(env.databaseUrlDirect, (c) => c.query(`ALTER ROLE ${APP_ROLE} IN DATABASE ${db} SET work_mem = '8MB'`));
+    await expect(migrateUp({ url, dir: baseDir() })).rejects.toMatchObject({ code: "MIGRATION_APP_OWNERSHIP" });
+    expect(await withClient(url, (c) => c.query("SELECT to_regclass('wms_meta.schema_migrations') AS r"))).toMatchObject({ rows: [{ r: null }] });
+
+    // Rol DDL'i transactional: ihlal eden migration geri alınınca küme durumu değişmez.
+    for (const [tag, body] of [
+      ["createdb", `ALTER ROLE ${APP_ROLE} CREATEDB;`],
+      ["membership", `GRANT pg_monitor TO ${APP_ROLE};`],
+    ] as const) {
+      const fresh = await freshDatabase();
+      const dir = copyMigrations();
+      writeFileSync(path.join(dir, "0002_role.up.sql"), `${body}\n`);
+      writeFileSync(path.join(dir, "0002_role.down.sql"), "SELECT 1;\n");
+      await expect(migrateUp({ url: fresh, dir }), tag).rejects.toMatchObject({ code: "MIGRATION_APP_OWNERSHIP" });
+      expect(await ledger(fresh), tag).toEqual(["0001"]);
+    }
+    const attrs = await withClient(env.databaseUrlDirect, (c) =>
+      c.query<{ rolcreatedb: boolean; n: string }>(
+        `SELECT rolcreatedb, (SELECT count(*) FROM pg_auth_members m WHERE m.member = r.oid)::text AS n FROM pg_roles r WHERE rolname = $1`,
+        [APP_ROLE],
+      ),
+    );
+    expect(attrs.rows[0]).toEqual({ rolcreatedb: false, n: "0" });
+  });
+
+  it("post-run audit: attributes of the probe role and database-level (role-independent) settings are rejected", async () => {
+    // Probe rolü altyapı adımıdır (T-101b/T-105); bu dalda yoksa test süresince yaratılır ve silinir.
+    const existed = (await withClient(env.databaseUrlDirect, (c) => c.query("SELECT 1 FROM pg_roles WHERE rolname = 'wms_identity_probe'"))).rowCount === 1;
+    if (!existed) {
+      await withClient(env.databaseUrlDirect, (c) => c.query("CREATE ROLE wms_identity_probe NOLOGIN NOSUPERUSER NOBYPASSRLS"));
+    }
+    try {
+      const url = await freshDatabase();
+      const dir = copyMigrations();
+      writeFileSync(path.join(dir, "0002_probe.up.sql"), "ALTER ROLE wms_identity_probe BYPASSRLS;\n");
+      writeFileSync(path.join(dir, "0002_probe.down.sql"), "SELECT 1;\n");
+      await expect(migrateUp({ url, dir })).rejects.toMatchObject({ code: "MIGRATION_APP_OWNERSHIP" });
+      expect(await ledger(url)).toEqual(["0001"]);
+      const flag = await withClient(env.databaseUrlDirect, (c) => c.query("SELECT rolbypassrls FROM pg_roles WHERE rolname = 'wms_identity_probe'"));
+      expect(flag.rows[0]).toEqual({ rolbypassrls: false });
+    } finally {
+      if (!existed) await withClient(env.databaseUrlDirect, (c) => c.query("DROP ROLE IF EXISTS wms_identity_probe"));
+    }
+    // Rol-bağımsız veritabanı ayarı (izin listesi boş): her ayar ret; her biri ayrı veritabanında.
+    for (const setting of ["work_mem = '8MB'", "statement_timeout = '5min'", "session_replication_role = origin"]) {
+      const url = await freshDatabase();
+      const db = new URL(url).pathname.slice(1);
+      await withClient(env.databaseUrlDirect, (c) => c.query(`ALTER DATABASE ${db} SET ${setting}`));
+      const err = await migrateUp({ url, dir: baseDir() }).then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+      expect(err, setting).toBeDefined();
+      expect(["MIGRATION_APP_OWNERSHIP", "MIGRATION_SESSION_STATE"], setting).toContain((err as { code: string }).code);
+    }
+  });
+
+  it("refuses URL query parameters outside the allowlist (user/database/options override the startup message)", async () => {
+    for (const q of ["user=wms_app", "database=postgres", "options=-c%20role%3Dwms_app", "unknown=1"]) {
+      const u = new URL(env.databaseUrlDirect);
+      u.search = q;
+      await expect(migrateUp({ url: u.toString() }), q).rejects.toMatchObject({ code: "MIGRATION_POOLER_URL" });
+    }
+  });
+
+  it("the ownership audit also runs on the down path: a down that leaves wms_app owning an object is rejected", async () => {
+    const url = await freshDatabase();
+    const dir = copyMigrations();
+    writeFileSync(path.join(dir, "0002_own.up.sql"), "SELECT 1;\n");
+    writeFileSync(path.join(dir, "0002_own.down.sql"), `CREATE TABLE public.t_own (id integer);\nALTER TABLE public.t_own OWNER TO ${APP_ROLE};\n`);
+    expect((await migrateUp({ url, dir })).applied).toEqual(["0001", "0002"]);
+    await expect(migrateDown({ url, dir, to: "0001", wmsEnv: "ci" })).rejects.toMatchObject({ code: "MIGRATION_APP_OWNERSHIP" });
+    expect(await ledger(url)).toEqual(["0001", "0002"]);
+    expect((await catalogShape(url)).relations).toEqual([]);
+  });
+
+  it("refuses the parser-differential URLs from the CLI without connecting (no password in output)", async () => {
+    const lines: string[] = [];
+    const io = { log: (x: string) => lines.push(x), logError: (x: string) => lines.push(x) };
+    for (const url of ["postgres://u:pw-diff-secret@pooler-host:6432,a@direct:5432/db", "postgres://u:pw-diff-secret@direct:5432#,pooler:6432/db"]) {
+      expect(await main(["up"], { DATABASE_URL_DIRECT: url }, io)).toBe(1);
+    }
+    const text = lines.join("\n");
+    expect(text).toContain("MIGRATION_POOLER_URL");
+    expect(text).not.toContain("pw-diff-secret");
+  });
+
   it("a rollback whose down changes session state is rejected and rolled back", async () => {
     const url = await freshDatabase();
     const dir = copyMigrations();
