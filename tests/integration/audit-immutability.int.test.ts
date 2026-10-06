@@ -236,7 +236,7 @@ describe("T-108 madde 2 — tenant izolasyonu", () => {
       adm,
       `SELECT p.polcmd::text AS cmd, pg_get_expr(p.polqual, p.polrelid) AS using_expr, pg_get_expr(p.polwithcheck, p.polrelid) AS check_expr,
               c.relrowsecurity AS en, c.relforcerowsecurity AS fo
-         FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid WHERE p.polrelid = 'public.audit_logs'::regclass`,
+         FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid WHERE p.polrelid = 'public.audit_logs'::regclass AND p.polpermissive`, // RESTRICTIVE wms_ops politikaları (0009) ops-role.int.test.ts'te sınanır
     );
     expect(pol.ok && pol.rows.length).toBe(1);
     if (pol.ok) {

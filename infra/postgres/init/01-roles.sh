@@ -8,6 +8,9 @@
 # wms_auth: ayrı kimlik rolü (ADR-014 §10); wms_app ile aynı kısıtlı nitelikler, hiçbir role üye değil.
 # wms_worker: kuyruk tüketicisi (T-115c); wms_app ile aynı kısıtlı nitelikler, hiçbir role üye değil, hiçbir
 # tablonun sahibi değil. pgboss iş tablosundaki yetkileri `installQueueSchema` (migration rolü) verir.
+# wms_ops: operasyon rolü (T-105c, Q-32 (c), A-80); aynı kısıtlı nitelikler, hiçbir role üye değil. NOLOGIN ve PAROLASIZ
+# yaratılır (staging ile aynı; db-fingerprint LOGIN'i reddeder); destek işinde geçici `ALTER ROLE wms_ops LOGIN PASSWORD ...`
+# ve iş bitince `NOLOGIN` + `PASSWORD NULL` (docs/RUNBOOK-ops.md). Yetkileri 0009_ops_role migration'ı verir.
 # wms_identity_probe: NOLOGIN işlev sahibi rol (ADR-015 §4, ADR-016 §9); migration rolüne yalnızca
 # SET (sahiplik devri/SET ROLE) verilir; ADMIN ve INHERIT verilmez (PG16+ sözdizimi).
 set -euo pipefail
@@ -62,6 +65,14 @@ CREATE ROLE wms_worker
   NOREPLICATION
   PASSWORD :'worker_password';
 
+CREATE ROLE wms_ops
+  NOLOGIN
+  NOSUPERUSER
+  NOBYPASSRLS
+  NOCREATEDB
+  NOCREATEROLE
+  NOREPLICATION;
+
 CREATE ROLE wms_identity_probe
   NOLOGIN
   NOSUPERUSER
@@ -73,4 +84,4 @@ CREATE ROLE wms_identity_probe
 GRANT wms_identity_probe TO :"migrator" WITH ADMIN FALSE, SET TRUE, INHERIT FALSE;
 SQL
 
-echo "01-roles.sh: wms_app, wms_auth, wms_worker (LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION) ve wms_identity_probe (NOLOGIN) oluşturuldu"
+echo "01-roles.sh: wms_app, wms_auth, wms_worker (LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION) ile wms_ops ve wms_identity_probe (NOLOGIN) oluşturuldu"
