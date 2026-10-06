@@ -56,6 +56,8 @@ Q-51 | Stok defteri `actor_user_id` zorunlu mu (sistem/worker hareketleri)? Şim
 Q-52 | Stok defteri satırı hangi belge durumunda yazılabilir (senkron yol ≤200 satır `posting_job_id`'siz; asenkron yol APPROVED+posting_job_id; ters kayıt belgesi)? DB şimdilik belge durumuna bakmıyor | T-232 inceleme MINOR-5, ADR-018 §2 | açık — T-213/T-217 posting akışıyla DB kuralı (tetikleyici, FOR SHARE) eklenir
 Q-54 | Barkod çözümlemesi birden çok adayla sonuçlanınca (BARCODE_AMBIGUOUS) adaylar istemciye nasıl döner: `AppError` gövdesine alan mı, ayrı uç mu? | T-208 | açık — API katmanı kartında karar
 Q-55 | GS1 değişken uzunluklu AI'lar için tam AI uzunluk tablosu (GS ayracı olmadığında ayrıştırma) hangi kaynaktan, hangi kapsamda? | T-208, GS1 Genel Spesifikasyonları | açık — şimdilik tanımsız AI ayrıştırmayı durdurur
+Q-58 | Taşıma birimi iç içe koyma kuralları: KOLI içine KOLI/PALET, kapalı/boşaltılmış ebeveyne alt bağlama serbest mi? Şimdilik yalnız varlık ve konum denetleniyor | T-212 | açık — T-217 nest kuralıyla
+Q-59 | `SERIAL_SCOPE_TENANT_ENABLED` bayrağı hangi mekanizmayla okunur (ortam değişkeni / tenant_settings)? Şimdilik çağıran parametre veriyor, varsayılan kapalı | T-212, Q-39 | açık
 
 ## Varsayımlar
 A-01 | Neon pooler'ı transaction-mode PgBouncer'dır (kullanıcı kararı kaydı, 2026-10-05) — **teyit edildi 2026-10-05, sürüm hariç** (belge + T-005d koşu 3 çoklama gözlemi, https://github.com/shosgoren/2027-WMS-1/actions/runs/37388724069); PgBouncer sürümü gözlenemedi | Neon pooler türünü/kipini değiştirdiğini duyurana veya yeniden spike aksini gösterene kadar | Q-02
@@ -158,3 +160,7 @@ A-97 | Seri boyutu yoksa `stock_balances.serial_key` sıfır UUID sentinelidir (
 A-107 | `updateItem` değişmez alan (takip modu, temel birim, ölçek) değişimi: stoklu üründe IN_USE, stoksuzda VALIDATION_FAILED (A-87); arşivli ürün güncellenmez, barkod eklenmez ve barkod çözümlemesine girmez; temel birim dışı barkod birimi için dönüşüm satırı zorunlu değil | Pilot katalog akışı | T-208
 A-108 | Barkod tam eşleşmezse ve girdi GTIN içeren GS1 dizgisiyse, GTIN'in kısa biçimleri (14/13/12/8 hane, baştaki sıfırlar atılarak) ile eşleştirilir | GS1 kuralı / pilot barkodları | T-208
 A-109 | GS1 SKT (AI 17) YY → 20YY; DD=00 ayın son günü; GS1 yüzyıl penceresi uygulanmaz | Pilot ürün SKT aralığı | T-208
+A-115 | Taşıma birimini başka birimin içine koyma (nest) ayrı kart komutu değildir; T-217 stok komutu içinde defter çiftiyle yapılır (A-89). T-212 kartının 3. maddesi (`nestHandlingUnit`) T-217'ye taşındı; `createHandlingUnit` ebeveyni yalnız INSERT anında (yeni ve boş birim) bağlar | — | T-212 (Supervisor kararı)
+A-116 | SERIAL ürüne `lotId` verilirse TRACKING_VIOLATION; arşivli ürüne lot/seri açılamaz (VALIDATION_FAILED) | — | T-212
+A-117 | Taşıma birimi oluştururken ebeveynin konumu varsa çocuğun konumu aynı olmalı (aksi PARENT_INVALID); konum verilmezse ebeveynden devralınır | A-89 komut katmanı | T-212
+A-118 | `lotCode`, `serialNo`, taşıma birimi `code` NFC'ye normalize edilir; kod ≤64, seri no ≤128 karakter | Pilot etiket biçimleri | T-212
