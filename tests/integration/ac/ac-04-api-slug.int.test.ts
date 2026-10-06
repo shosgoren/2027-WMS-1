@@ -410,7 +410,7 @@ describe("ürün ayrıntı sayfası (/t/<slug>/items/<itemId>) — T-216", () =>
     await adm.query("INSERT INTO public.tenant_memberships (tenant_id, user_id, status, is_owner) VALUES ($1, $2, 'ACTIVE', false)", [A.tenant, u.id]);
     for (const [rel, itemId] of [["items/page.tsx", undefined], [ITEM_DETAIL, itemA.id]] as const) {
       as(u.id);
-      const r = await runLoader(rel, A.slug, itemId);
+      const r = await runLoader(rel, A.slug, undefined, itemId);
       expect(`${r.outcome} ${r.to ?? ""}`, rel).toBe("render ");
       // Sayfa kilitli görünüm bileşenini (async sunucu bileşeni) döndürür; çizilince neden + sonraki eylem anahtarları görünür.
       const el = r.value as { type: () => Promise<unknown> };
