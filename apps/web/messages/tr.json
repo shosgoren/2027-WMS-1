@@ -879,5 +879,40 @@
       "internal": "Bir sorun oluştu.",
       "internalAction": "Biraz sonra yeniden dene; sürerse hata kodunu destek ekibine ilet."
     }
+  },
+  "field": {
+    "title": "Saha",
+    "intro": "Bir iş seç; tara, doğrula, miktarı onayla.",
+    "menuLabel": "Saha işleri",
+    "actionBarLabel": "Saha eylemleri",
+    "fieldHome": "Saha işleri",
+    "mainMenu": "Ana ekran",
+    "lockedReason": "Bu ekran henüz açılmadı.",
+    "tasks": {
+      "receive": {
+        "title": "Kabul",
+        "description": "Gelen malı tara ve say."
+      },
+      "putaway": {
+        "title": "Yerleştirme",
+        "description": "Malı rafa yerleştir."
+      },
+      "pick": {
+        "title": "Toplama",
+        "description": "Sipariş için malı topla."
+      },
+      "ship": {
+        "title": "Sevk",
+        "description": "Toplanan malı sevk et."
+      },
+      "return": {
+        "title": "İade",
+        "description": "İade gelen malı kabul et."
+      },
+      "count": {
+        "title": "Sayım",
+        "description": "Rafı say, farkı göster."
+      }
+    }
   }
 }

@@ -879,5 +879,40 @@
       "internal": "Something went wrong.",
       "internalAction": "Try again shortly; if it persists, send the error code to support."
     }
+  },
+  "field": {
+    "title": "Field",
+    "intro": "Pick a job; scan, verify, confirm the quantity.",
+    "menuLabel": "Field jobs",
+    "actionBarLabel": "Field actions",
+    "fieldHome": "Field jobs",
+    "mainMenu": "Home",
+    "lockedReason": "This screen is not open yet.",
+    "tasks": {
+      "receive": {
+        "title": "Receiving",
+        "description": "Scan and count incoming goods."
+      },
+      "putaway": {
+        "title": "Putaway",
+        "description": "Put goods on a shelf."
+      },
+      "pick": {
+        "title": "Picking",
+        "description": "Pick goods for an order."
+      },
+      "ship": {
+        "title": "Shipping",
+        "description": "Ship the picked goods."
+      },
+      "return": {
+        "title": "Returns",
+        "description": "Receive returned goods."
+      },
+      "count": {
+        "title": "Counting",
+        "description": "Count a shelf and show the difference."
+      }
+    }
   }
 }
