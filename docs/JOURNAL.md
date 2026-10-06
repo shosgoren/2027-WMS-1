@@ -50,3 +50,8 @@
 - Hazır: #39 (şema dilimi), #40 (ui dilimi), int/faz1-auth paketi (0·0·2; T-113 × T-115 connection-target çakışması sertleştirilmiş sürümle çözüldü; kuyruk kartları auth dilimine).
 - Yeni kartlar: T-109b (paket bağlantıları ✓), T-116b, T-117c (not), T-105c→0007. Kararlar: T-117 B seçeneği (probe salt okunur; tek okuma işlevi + token bağlı withInvitationTenant). OPEN_QUESTIONS: Q-33, A-57…A-59.
 - T-121 ✓, T-125 MAJOR düzeltiliyor, T-117 inceleniyor.
+
+## 2026-10-06 02:45Z — Supervisor turu
+- E-03 sürüyor (Actions). Yerel hat: T-117 (davet; 0006 tek okuma işlevi + withInvitationTenant; teslim tx dışı; web kuyruğu; getAppDb) ✓, T-118 (kimlik ekranları; Principal isDemo/twoFactorEnabled) ✓, T-121 ✓, T-125 (bağlam üreticisi storage iç modülü) ✓, T-127a lint sınırları ✓ (0·0·0), T-116b ✓ (kritik bulgu → T-115c öncelik).
+- Yeni kartlar: T-116c, T-127a, T-109b; ekler: T-115c (öncelik + job.output), T-129 (log maskeleme), T-118 (QR/önizleme kararları).
+- Tekrarlayan kırılganlık: scripts/guards/protected.test.mjs 5 s zaman aşımı (paralel ajan yükü) → T-008j önceliği.
