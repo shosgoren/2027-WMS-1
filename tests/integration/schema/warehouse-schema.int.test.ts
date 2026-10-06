@@ -218,6 +218,28 @@ describe("T-202 ağaç bütünlüğü", () => {
     });
     expect(noCtx?.code).toBe(INSUFFICIENT_PRIVILEGE);
     expect(noCtx?.message).toMatch(/row-level security/);
+    // RLS'i aşan rol (migration rolü: süper kullanıcı/BYPASSRLS) + eskimiş A bağlamı + B anahtarlı satır: politika koruma sağlamaz,
+    // bu yüzden tetikleyici erken dönmez; ebeveyn/depth denetimleri çalışır (T-202 MAJOR-1 yolları kapalı kalır).
+    const role = await admin.query<{ s: boolean; b: boolean }>("SELECT rolsuper AS s, rolbypassrls AS b FROM pg_roles WHERE rolname = current_user");
+    expect(role.rows[0]?.s === true || role.rows[0]?.b === true, "admin RLS'i aşan rol olmalı").toBe(true);
+    const byp = async (parent: string | null, depth: number): Promise<{ code?: string; message?: string } | undefined> => {
+      await admin.query("BEGIN");
+      try {
+        await admin.query("SELECT set_config('app.current_tenant_id', $1, true)", [A.tenantId]);
+        await admin.query(
+          "INSERT INTO public.locations (tenant_id, id, warehouse_id, parent_id, code, name, depth, kind) VALUES ($1, $2, $3, $4, $5, 'b', $6, 'STORAGE')",
+          [B.tenantId, randomUUID(), B.warehouseId, parent, `T-${randomBytes(3).toString("hex")}`, depth],
+        );
+        return undefined;
+      } catch (e) {
+        return e as { code?: string; message?: string };
+      } finally {
+        await admin.query("ROLLBACK");
+      }
+    };
+    expect((await byp(randomUUID(), 1))?.code, "bypass: var olmayan ebeveyn").toBe(FK_VIOLATION);
+    expect((await byp(null, 3))?.code, "bypass: kök depth ≠ 0").toBe(CHECK_VIOLATION);
+    expect((await byp(B.rootLocationId, 7))?.code, "bypass: depth ≠ ebeveyn+1").toBe(CHECK_VIOLATION);
     // UPDATE: tenant_id sütun yetkisi wms_app'te yok → 42501; B satırı A bağlamında 0 etkilenir (USING).
     const upd = await one(A.tenantId, "UPDATE public.locations SET tenant_id = $2 WHERE id = $1", [A.childLocationId, B.tenantId]);
     expect(upd.ok).toBe(false);
