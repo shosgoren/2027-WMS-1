@@ -15,8 +15,10 @@ import { currentTenantId, currentUserId, type withTenant } from "@wms/db";
 import {
   JOB_PAYLOAD_SCHEMAS,
   JOB_TYPES,
+  PLATFORM_NO_USER_ID,
   QueueError,
   isJobType,
+  isActorMandatory,
   parseJob,
   type EnqueueResult,
   type Job,
@@ -81,6 +83,9 @@ export function isPermanentFailure(err: unknown): boolean {
  * yetki yine üyelik denetimiyle (withMembership) doğrulanır.
  */
 export function workerPrincipal(actorUserId: string | null): { readonly userId: string; readonly mfaVerified: false } | null {
+  if (actorUserId === PLATFORM_NO_USER_ID) {
+    throw new QueueError("VALIDATION_FAILED", "actorUserId is the platform no-user sentinel; not a principal");
+  }
   return actorUserId === null ? null : { userId: actorUserId, mfaVerified: false };
 }
 
@@ -158,8 +163,16 @@ export interface JobQueueOptions {
    * türüdür. Verilmezse handler'larda `inTenant` hata verir.
    */
   readonly runInTenant?: <R>(tenantId: string, reason: string, fn: (tx: TenantTx) => Promise<R>) => Promise<R>;
+  /**
+   * Platform işleri (`enqueuePlatform`) için: tenant bağlamı BOŞ bir `wms_app` transaction'ı açıp `fn`'i çalıştırır
+   * (`processed_events` `tenant_id NULL`, ADR-019 §2). Verilmezse platform işlerinde `inPlatform` hata verir.
+   */
+  readonly runPlatform?: <R>(fn: (tx: TenantTx) => Promise<R>) => Promise<R>;
   readonly logger?: QueueLogger;
 }
+
+export { consumeOnce, deliverExternalOnce } from "./consume.ts";
+export type { ConsumeOnceResult, ExternalOnceContext } from "./consume.ts";
 
 export interface PgBossJobQueue extends JobQueue<TenantTx> {
   /** Bağlanır ve şemanın kurulu olduğunu doğrular (`migrate: false`). Tekrar çağrı aynı sözü döndürür. */
@@ -193,7 +206,7 @@ function scopedKey(tenantId: string | null, key: string): string {
 }
 
 export function createJobQueue(options: JobQueueOptions): PgBossJobQueue {
-  const { connectionString, max = 4, stopTimeoutMs = 10_000, pollingIntervalSeconds = 2, runInTenant, logger } = options;
+  const { connectionString, max = 4, stopTimeoutMs = 10_000, pollingIntervalSeconds = 2, runInTenant, runPlatform, logger } = options;
   const boss = new PgBoss({
     connectionString,
     schema: QUEUE_SCHEMA,
@@ -232,7 +245,13 @@ export function createJobQueue(options: JobQueueOptions): PgBossJobQueue {
     if (tx !== undefined) {
       // İşlemde kimlik bağlamı kuruluysa çağıranın verdiği actor onunla çelişemez; yoksa bağlamdan türetilir.
       const ctxUser = await currentUserId(tx);
-      if (ctxUser !== undefined) {
+      if (ctxUser === PLATFORM_NO_USER_ID) {
+        // Platform işlemi (kimlik yerine sıfır UUID): bu bir kullanıcı değildir, sessizce actor olarak damgalanmaz (MINOR-8).
+        // Açık ve geçerli actor (parseJob sıfır UUID'yi reddeder) kullanılır; yoksa iş reddedilir.
+        if (actor === null) {
+          throw new QueueError("VALIDATION_FAILED", "platform transaction has no user; an explicit actorUserId is required");
+        }
+      } else if (ctxUser !== undefined) {
         if (actor !== null && actor.toLowerCase() !== ctxUser.toLowerCase()) {
           throw new QueueError("VALIDATION_FAILED", "actorUserId conflicts with the transaction user context");
         }
@@ -290,6 +309,12 @@ export function createJobQueue(options: JobQueueOptions): PgBossJobQueue {
             const envelope = parseEnvelope(bossJob.data);
             const payload = parsePayload(type, envelope.payload);
             const { tenantId } = envelope;
+            if (envelope.actorUserId === PLATFORM_NO_USER_ID) {
+              throw new JobParseError("VALIDATION_FAILED", "job envelope actorUserId is the platform no-user sentinel");
+            }
+            if (isActorMandatory(type) && envelope.actorUserId === null) {
+              throw new JobParseError("VALIDATION_FAILED", "job envelope requires actorUserId");
+            }
             await handler({
               jobId: bossJob.id,
               type,
@@ -300,6 +325,11 @@ export function createJobQueue(options: JobQueueOptions): PgBossJobQueue {
                 if (tenantId === null) throw new QueueError("FORBIDDEN", "platform job has no tenant context");
                 if (runInTenant === undefined) throw new QueueError("FORBIDDEN", "no tenant runner configured");
                 return runInTenant(tenantId, type, fn);
+              },
+              inPlatform: async (fn) => {
+                if (tenantId !== null) throw new QueueError("FORBIDDEN", "tenant job must use inTenant");
+                if (runPlatform === undefined) throw new QueueError("FORBIDDEN", "no platform runner configured");
+                return runPlatform(fn);
               },
             } as Parameters<JobHandler<T, TenantTx>>[0]);
             results.push({ id: bossJob.id, status: "completed" });

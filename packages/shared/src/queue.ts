@@ -6,8 +6,9 @@
 // vermesinin yolu yoktur (tipte alan yok; çalışma anında bilinmeyen alan reddedilir).
 import { z } from "zod";
 
-/** Kayıtlı iş türleri. `email.send` T-116, `invitation.deliver` T-117, `demo.reseed` T-123 tarafından doldurulur. */
-export const JOB_TYPES = ["email.send", "invitation.deliver", "demo.reseed"] as const;
+/** Kayıtlı iş türleri. `email.send` T-116, `invitation.deliver` T-117, `demo.reseed` T-123 tarafından doldurulur;
+ * `stock.document.post` T-222, `stock.consistency.check` T-225 (handler'lar o kartlarda; ADR-019 §5). */
+export const JOB_TYPES = ["email.send", "invitation.deliver", "demo.reseed", "stock.document.post", "stock.consistency.check"] as const;
 export type JobType = (typeof JOB_TYPES)[number];
 
 /**
@@ -29,6 +30,10 @@ export const JOB_PAYLOAD_SCHEMAS = {
   /** Davet teslimi (T-117): yalnızca davet kimliği; belirteç worker'da üretilir, yüke/DB'ye düz yazılmaz (A-42). */
   "invitation.deliver": z.object({ invitationId: z.string().uuid() }).strict(),
   "demo.reseed": z.object({}).strict(),
+  /** Belge postalama (T-222): yalnızca kimlikler; istek sahibi zarfın `actorUserId`'sidir (zorunlu, ADR-018 §6, M-5). */
+  "stock.document.post": z.object({ documentId: z.string().uuid(), idempotencyRecordId: z.string().uuid() }).strict(),
+  /** Tutarlılık denetimi (T-225): tenant işi, yük yok; tenant zarftan gelir (ADR-019 §5). */
+  "stock.consistency.check": z.object({}).strict(),
 } as const satisfies Record<JobType, z.ZodType>;
 
 export type JobPayload<T extends JobType> = z.infer<(typeof JOB_PAYLOAD_SCHEMAS)[T]>;
@@ -63,6 +68,8 @@ export type JobContext<T extends JobType = JobType, Tx = unknown> = {
     readonly actorUserId: string | null;
     readonly payload: JobPayload<K>;
     inTenant<R>(fn: (tx: Tx) => Promise<R>): Promise<R>;
+    /** Platform işinde tenant bağlamı BOŞ transaction (`processed_events` `tenant_id NULL`); tenant işinde `FORBIDDEN`. */
+    inPlatform<R>(fn: (tx: Tx) => Promise<R>): Promise<R>;
   };
 }[T];
 
@@ -93,6 +100,19 @@ export class QueueError extends Error {
     super(message);
     this.code = code;
   }
+}
+
+/**
+ * Platform işlerinde tenant bağlamı boş transaction'ı açan çağıranın `app.current_user_id` yerine koyduğu sıfır UUID
+ * (`withUser` yalnızca UUID alır). Hiçbir kullanıcı değildir: actor olarak ASLA kabul edilmez (T-214 MINOR-8).
+ */
+export const PLATFORM_NO_USER_ID = "00000000-0000-0000-0000-000000000000";
+
+/** Zarfta `actorUserId` zorunlu olan türler (istek sahibi adına çalışan işler). */
+const ACTOR_REQUIRED_TYPES: ReadonlySet<JobType> = new Set<JobType>(["stock.document.post"]);
+
+export function isActorMandatory(type: JobType): boolean {
+  return ACTOR_REQUIRED_TYPES.has(type);
 }
 
 export function isJobType(value: unknown): value is JobType {
@@ -155,11 +175,17 @@ export function parseJob(job: unknown): Job {
   if (actorUserId !== undefined && (typeof actorUserId !== "string" || !UUID_RE.test(actorUserId))) {
     throw new QueueError("VALIDATION_FAILED", "actorUserId must be a UUID");
   }
+  if (typeof actorUserId === "string" && actorUserId === PLATFORM_NO_USER_ID) {
+    throw new QueueError("VALIDATION_FAILED", "actorUserId must not be the platform no-user sentinel");
+  }
   if (
     singletonKey !== undefined &&
     (typeof singletonKey !== "string" || singletonKey.length > SINGLETON_KEY_MAX || !SINGLETON_KEY_RE.test(singletonKey))
   ) {
     throw new QueueError("VALIDATION_FAILED", "singletonKey must match [A-Za-z0-9_.-/]+ (max 200)");
+  }
+  if (isActorMandatory(type) && actorUserId === undefined) {
+    throw new QueueError("VALIDATION_FAILED", `${type} requires actorUserId`);
   }
   return { type, payload: parsed.data, actorUserId, singletonKey } as Job;
 }
