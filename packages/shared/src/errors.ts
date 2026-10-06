@@ -1,6 +1,6 @@
 // Uygulama hata sözleşmesi (T-113; docs/spec/15-engineering.md §API sözleşmesi, ADR-016 §11).
 // Yalnızca Faz 1'de kullanılan kodlar burada; kalan kodlar kullanan kartta eklenir. Kullanıcıya dönen yanıt
-// iç ayrıntı / SQL / SQLSTATE taşımaz: yalnızca `code`, isteğe bağlı `detail`, i18n `messageKey`, `retryable`.
+// iç ayrıntı / SQL / SQLSTATE taşımaz (`INTERNAL`: tanınmayan hata; kök neden yalnızca `cause`'da): yalnızca `code`, isteğe bağlı `detail`, i18n `messageKey`, `retryable`.
 
 export const ERROR_CODES = [
   "VALIDATION_FAILED",
@@ -11,6 +11,7 @@ export const ERROR_CODES = [
   "NOT_FOUND",
   "VERSION_CONFLICT",
   "RATE_LIMITED",
+  "INTERNAL",
 ] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
 
@@ -27,6 +28,7 @@ export const HTTP_STATUS: Readonly<Record<ErrorCode, number>> = {
   NOT_FOUND: 404,
   VERSION_CONFLICT: 409,
   RATE_LIMITED: 429,
+  INTERNAL: 500,
 };
 
 /** i18n anahtarı: `errors.<kod>` ya da ayrıntılıysa `errors.<kod>.<ayrıntı>` (küçük harf). */

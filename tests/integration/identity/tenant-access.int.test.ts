@@ -174,13 +174,50 @@ describe("runTenantCommand / runTenantQuery", () => {
     expect(await runTenantQuery({ db: app, principal: principal(ro.user, false), tenantSlug: ro.slug, permission: "stock.view" }, async () => "ok")).toBe("ok");
   });
 
-  it("recentAuth rejection -> UNAUTHENTICATED/RECENT_AUTH_REQUIRED; other errors propagate", async () => {
+  it("recentAuth: only REAUTH_REQUIRED -> RECENT_AUTH_REQUIRED; plain UNAUTHENTICATED stays; infra error -> INTERNAL", async () => {
     const f = await fixture({ role: "TENANT_ADMIN" });
     const base = { db: app, principal: principal(f.user), tenantSlug: f.slug, permission: "users.manage" as const };
-    const e = await failure(runTenantCommand({ ...base, recentAuth: async () => { throw Object.assign(new Error("x"), { code: "UNAUTHENTICATED" }); } }, async () => 1));
-    expect([e.code, e.detail]).toEqual(["UNAUTHENTICATED", "RECENT_AUTH_REQUIRED"]);
-    await expect(runTenantCommand({ ...base, recentAuth: async () => { throw new Error("boom"); } }, async () => 1)).rejects.toThrow("boom");
+    const reauth = await failure(runTenantCommand({ ...base, recentAuth: async () => { throw Object.assign(new Error("x"), { code: "UNAUTHENTICATED", reason: "REAUTH_REQUIRED" }); } }, async () => 1));
+    expect([reauth.code, reauth.detail]).toEqual(["UNAUTHENTICATED", "RECENT_AUTH_REQUIRED"]);
+    const plain = await failure(runTenantCommand({ ...base, recentAuth: async () => { throw Object.assign(new Error("x"), { code: "UNAUTHENTICATED" }); } }, async () => 1));
+    expect([plain.code, plain.detail]).toEqual(["UNAUTHENTICATED", undefined]);
+    const boom = new Error("boom secret");
+    const infra = await failure(runTenantCommand({ ...base, recentAuth: async () => { throw boom; } }, async () => 1));
+    expect(infra.code).toBe("INTERNAL");
+    expect(infra.cause).toBe(boom);
+    expect(JSON.stringify(infra.toBody())).not.toContain("boom");
     expect(await runTenantCommand({ ...base, recentAuth: async () => undefined }, async () => "ok")).toBe("ok");
+  });
+
+  it("recentAuth runs AFTER membership/permission/MFA checks and BEFORE the command", async () => {
+    const calls: string[] = [];
+    const recentAuth = async () => { calls.push("recentAuth"); };
+    const f = await fixture({ role: "READ_ONLY" });
+    const denied = await failure(runTenantCommand({ db: app, principal: principal(f.user), tenantSlug: f.slug, permission: "stock.post", recentAuth }, async () => 1));
+    expect(denied.code).toBe("FORBIDDEN");
+    const susp = await fixture({ role: "READ_ONLY", status: "SUSPENDED" });
+    expect((await failure(runTenantCommand({ db: app, principal: principal(susp.user), tenantSlug: susp.slug, permission: "stock.view", recentAuth }, async () => 1))).code).toBe("TENANT_SUSPENDED");
+    const adm = await fixture({ role: "TENANT_ADMIN" });
+    const mfa = await failure(runTenantCommand({ db: app, principal: principal(adm.user, false), tenantSlug: adm.slug, permission: "users.manage", recentAuth }, async () => 1));
+    expect(mfa.detail).toBe("MFA_REQUIRED");
+    expect(calls).toEqual([]);
+    await runTenantCommand({ db: app, principal: principal(adm.user), tenantSlug: adm.slug, permission: "users.manage", recentAuth }, async () => { calls.push("fn"); });
+    expect(calls).toEqual(["recentAuth", "fn"]);
+  });
+
+  it("unrecognised errors -> INTERNAL (no message/SQLSTATE in body, original in cause); permissions are frozen", async () => {
+    const f = await fixture({ role: "READ_ONLY" });
+    const original = Object.assign(new Error("relation \"secret_table\" does not exist"), { code: "42P01" });
+    const e = await failure(runTenantQuery({ db: app, principal: principal(f.user), tenantSlug: f.slug, permission: "stock.view" }, async () => { throw original; }));
+    expect([e.code, e.httpStatus, e.retryable]).toEqual(["INTERNAL", 500, false]);
+    expect(e.cause).toBe(original);
+    expect(JSON.stringify(e.toBody())).not.toMatch(/secret_table|42P01/);
+    expect(Object.isFrozen(PERMISSIONS)).toBe(true);
+    expect(Object.isFrozen(ROLE_KEYS)).toBe(true);
+    expect(Object.isFrozen(ROLE_PERMISSIONS)).toBe(true);
+    for (const r of ROLE_KEYS) expect(Object.isFrozen(ROLE_PERMISSIONS[r])).toBe(true);
+    expect(() => (ROLE_PERMISSIONS.READ_ONLY as Permission[]).push("users.manage")).toThrow();
+    expect(hasPermission(["READ_ONLY"], "users.manage")).toBe(false);
   });
 });
 
@@ -225,10 +262,11 @@ describe("VERSION_CONFLICT (ADR-016 §11 m13)", () => {
     expect([c.code, c.retryable, n]).toEqual(["VERSION_CONFLICT", true, 1]);
   });
 
-  it("mapAccessError: nested cause SQLSTATE mapped; unknown errors untouched", () => {
+  it("mapAccessError: nested cause SQLSTATE mapped; unknown errors -> INTERNAL", () => {
     const wrapped = Object.assign(new Error("Failed query"), { cause: pgError("40P01") });
     expect((mapAccessError(wrapped) as AppError).code).toBe("VERSION_CONFLICT");
     const other = pgError("23505");
-    expect(mapAccessError(other)).toBe(other);
+    const mapped = mapAccessError(other) as AppError;
+    expect([mapped.code, mapped.cause]).toEqual(["INTERNAL", other]);
   });
 });
