@@ -162,16 +162,27 @@ const HIDDEN_MSG = "[msg gizlendi]";
 // İZİN LİSTESİ (allowlist) — kalıp tabanlı maskeleme tamamlanamaz (kaçışlı JSON, boşluklu/kısa/URL-kodlu değerler,
 // runner'da bulunmayan Fly uygulama sırları). Bu yüzden ham log ASLA yazılmaz; yalnızca aşağıdaki alanlar/sabit
 // ifadeler yeniden üretilir, kalan her satır sayılır ve yazılmaz.
-const RE_TS = /^[0-9T:.+\-Z]{10,40}$/;
+// Gerçek ISO-8601 (tarih T saat[.kesir] Z|±hh:mm); serbest rakam dizisi (telefon vb.) geçmez.
+const RE_TS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
 const RE_LEVEL = /^[a-z]{3,10}$/;
 /** Makine durumu/olay sözcükleri (worker-ids özeti). */
-const RE_STATE_WORD = /^[a-z_]{1,20}$/;
-const RE_MSG = /^[a-z0-9 ._:-]{1,80}$/;
-const RE_CODE = /^[A-Z0-9_]{1,64}$/;
+const RE_STATE_WORD = /^[a-z_-]{1,20}$/;
+// Hata kodu: ≤32 karakter ve YALNIZCA (a) SQLSTATE (5 karakter [0-9A-Z]) ya da (b) harfle başlayan, rakamsız büyük harf
+// adı: ya tek sözcük ≤12 karakter (ECONNREFUSED) ya da alt çizgiyle ayrılmış sözcükler (QUEUE_SCHEMA_MISSING). Rakam
+// içeren uzun büyük harf/rakam dizileri (base32 TOTP sırrı, kart no) ve uzun tek sözcükler reddedilir.
+const RE_CODE = /^(?=.{1,32}$)(?:[A-Z][A-Z_]{2,11}|[A-Z]+(?:_[A-Z]+)+|[0-9A-Z]{5})$/;
+// msg: serbest metin YOK; yalnızca worker/kuyruk kodunun yazdığı sabit iletiler (tam eşleşme).
+const ALLOWED_MSGS = new Set([
+  "started", "queue started", "queue start failed", "queue error", "invalid configuration", "mail configured",
+  "job types without handler", "demo disabled", "demo.reseed done", "demo.reseed failed", "demo.reseed enqueued",
+  "demo.reseed enqueue failed", "email sent", "email.send failed", "invitation email sent", "invitation.deliver failed",
+  "invitation.deliver skipped", "job handler failed (permanent)", "deadletter", "shutdown started", "shutdown complete",
+  "shutdown completed with errors", "shutdown hook failed", "shutdown timed out", "second signal during shutdown", "forced exit",
+]);
 const RE_ERRCLASS = /^[A-Za-z]{1,40}(?:Error|Exception)$/;
 // Worker açılış hatası: yalnızca ortam DEĞİŞKENİ ADI + sabit ifade (değer içermez; main.ts requireEnv).
 const RE_MISSING_ENV = /^[A-Z][A-Z0-9_]{2,60} tanımlı değil$/;
-const RE_ERR_LINE = /^(\w{1,40}(?:Error|Exception))(?:\s\[([A-Z0-9_]{1,40})\])?/;
+const RE_ERR_LINE = /^([A-Za-z]{1,40}(?:Error|Exception))(?:\s\[([^\]\s]{1,40})\])?/;
 /** Fly/sistem satırları: [desen, yazılacak sabit metin (grup 1 = sayısal kod ise eklenir)]. */
 const SYSTEM_PATTERNS = /** @type {const} */ ([
   [/Main child exited normally with code: (\d{1,3})\b/, "Main child exited normally with code: "],
@@ -228,9 +239,7 @@ function allowBody(line) {
     if (ts !== undefined) out["time"] = ts;
     const level = str(r["level"], RE_LEVEL);
     if (level !== undefined) out["level"] = level;
-    const msg = str(r["msg"], RE_MSG);
-    // ≥8 karakterli ve rakam içeren sözcük (kimlik/anahtar benzeri) varsa msg gizlenir.
-    out["msg"] = msg !== undefined && !msg.split(/\s+/).some((w) => w.length >= 8 && /\d/.test(w)) ? msg : HIDDEN_MSG;
+    out["msg"] = typeof r["msg"] === "string" && ALLOWED_MSGS.has(r["msg"]) ? r["msg"] : HIDDEN_MSG;
     const err = typeof r["err"] === "object" && r["err"] !== null ? /** @type {Record<string, unknown>} */ (r["err"]) : {};
     const code = str(r["code"], RE_CODE) ?? str(r["errorCode"], RE_CODE) ?? str(err["code"], RE_CODE);
     if (code !== undefined) out["code"] = code;
@@ -243,7 +252,7 @@ function allowBody(line) {
     return JSON.stringify(out);
   }
   const m = RE_ERR_LINE.exec(line);
-  if (m !== null) return m[2] !== undefined ? `${m[1]} [${m[2]}]` : `${m[1]}`;
+  if (m !== null) return m[2] !== undefined && RE_CODE.test(m[2]) ? `${m[1]} [${m[2]}]` : `${m[1]}`;
   for (const [re, fixed] of SYSTEM_PATTERNS) {
     const x = re.exec(line);
     if (x !== null) return x[1] !== undefined ? `${fixed}${x[1]}` : fixed;

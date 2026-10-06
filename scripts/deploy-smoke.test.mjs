@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { checkHealth, checkProcessGroup, allowLine, describeStoppedMachines, evaluateHealth, maskLogs, parseArgs, summaryLine } from "./deploy-smoke.mjs";
 
 const URL_OK = "https://etkin-wms-staging.fly.dev/api/health";
@@ -309,20 +314,62 @@ describe("worker teşhisi (T-106c) — izin listesi", () => {
     expect(allowLine('2026-10-06T11:32:00Z app[x;rm] fra [error] {"msg":"a"}')).toBeNull();
   });
 
-  it("msg içinde rakamlı uzun sözcük (kimlik/anahtar benzeri) gizlenir", () => {
+  it("msg yalnızca sabit ileti kümesinden; serbest metin gizlenir", () => {
     const k = rnd(8);
-    const o = JSON.parse(allowLine(JSON.stringify({ level: "error", msg: `auth failed for ${k}` })) ?? "{}");
-    expect(o.msg).toBe("[msg gizlendi]");
-    expect(JSON.parse(allowLine(JSON.stringify({ level: "info", msg: "queue started 3 jobs" })) ?? "{}").msg).toBe("queue started 3 jobs");
+    const msgOf = (/** @type {string} */ m) => JSON.parse(allowLine(JSON.stringify({ level: "error", msg: m })) ?? "{}").msg;
+    expect(msgOf(`auth failed for ${k}`)).toBe("[msg gizlendi]");
+    expect(msgOf("login failed user admin password hunter from 8.8.8.8")).toBe("[msg gizlendi]");
+    expect(msgOf(`queue started ${k}`)).toBe("[msg gizlendi]");
+    expect(msgOf("queue started")).toBe("queue started");
+    expect(msgOf("invalid configuration")).toBe("invalid configuration");
+  });
+
+  it("code: rakamlı uzun büyük harf/rakam dizileri (base32 sır, kart no) ve uzun tek sözcük reddedilir", () => {
+    const b32 = Array.from(randomBytes(16), (b) => "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"[b % 32]).join("") + "7";
+    const card = String(4000000000000000 + (randomBytes(4).readUInt32BE() % 999999999));
+    const long = Array.from(randomBytes(20), (b) => "ABCDEFGHIJKLMNOPQRSTUVWXYZ"[b % 26]).join("");
+    const codeOf = (/** @type {string} */ c) => JSON.parse(allowLine(JSON.stringify({ msg: "x", code: c })) ?? "{}").code;
+    for (const bad of [b32, card, long, `A${card}`, "E_X1", "ABC1234567890123"]) expect(codeOf(bad)).toBeUndefined();
+    for (const good of ["QUEUE_SCHEMA_MISSING", "ECONNREFUSED", "42501", "ENV_NOT_ALLOWED"]) expect(codeOf(good)).toBe(good);
+  });
+
+  it("ts: yalnızca gerçek ISO-8601; telefon/serbest rakam dizisi atılır", () => {
+    const phone = `+90${String(5000000000 + (randomBytes(4).readUInt32BE() % 99999999))}`;
+    const tsOf = (/** @type {string} */ v) => JSON.parse(allowLine(JSON.stringify({ msg: "x", ts: v })) ?? "{}").time;
+    expect(tsOf(phone)).toBeUndefined();
+    expect(tsOf("0000000000+00")).toBeUndefined();
+    expect(tsOf("2026-10-06T11:32:00.123Z")).toBe("2026-10-06T11:32:00.123Z");
+  });
+
+  it("JSON olmayan hata satırı: rakam/alt çizgili sınıf adı ve rakamlı köşeli kod reddedilir", () => {
+    const tok = rnd(5);
+    expect(allowLine(`s3cr3tT0k3n_${tok}Error: x`)).toBeNull();
+    expect(allowLine(`s3${tok}Error`)).toBeNull();
+    const digits = String(10000000000 + (randomBytes(4).readUInt32BE() % 80000000000));
+    expect(allowLine(`PostgresError [${digits}]: x`)).toBe("PostgresError");
+    expect(allowLine("PostgresError [QUEUE_SCHEMA_MISSING]")).toBe("PostgresError [QUEUE_SCHEMA_MISSING]");
+  });
+
+  it("OSC ve kontrol karakterleri, gövde içinde sahte ikinci önek", () => {
+    const secret = rnd();
+    const out = maskLogs(`\u001b]0;${secret}\u0007{"msg":"started"}\n\u0000\u0008${secret}\n`).lines.join("\n");
+    expect(out).not.toContain(secret);
+    expect(out).not.toMatch(/[\u0000-\u0008\u001b]/);
+    const pre = "2026-10-06T11:32:00Z app[80e32da6490958] fra [info] ";
+    const fake = allowLine(`${pre}{"msg":"queue started"} ${pre}{"msg":"${secret}"}`);
+    expect(fake).toBeNull();
+    const nested = allowLine(`${pre}${pre}{"msg":"queue started","password":"${secret}"}`);
+    expect(nested ?? "").not.toContain(secret);
+    expect(nested).toBeNull();
   });
 
   it("JSON satırı: yalnızca izinli alanlar; fazlalık ve uygunsuz msg elenir", () => {
     const secret = rnd();
     const out = allowLine(
-      JSON.stringify({ ts: "2026-10-06T11:32:00.000Z", level: "error", msg: "invalid configuration", service: "worker", requestId: secret, code: "E_X1", error: "TypeError", url: secret }),
+      JSON.stringify({ ts: "2026-10-06T11:32:00.000Z", level: "error", msg: "invalid configuration", service: "worker", requestId: secret, code: "ENV_MISSING", error: "TypeError", url: secret }),
     );
     expect(out).not.toBeNull();
-    expect(JSON.parse(out ?? "{}")).toEqual({ time: "2026-10-06T11:32:00.000Z", level: "error", msg: "invalid configuration", code: "E_X1", error: "TypeError" });
+    expect(JSON.parse(out ?? "{}")).toEqual({ time: "2026-10-06T11:32:00.000Z", level: "error", msg: "invalid configuration", code: "ENV_MISSING", error: "TypeError" });
     expect(out).not.toContain(secret);
     expect(JSON.parse(allowLine(JSON.stringify({ level: "info", msg: `Bearer ${secret}` })) ?? "{}").msg).toBe("[msg gizlendi]");
     expect(JSON.parse(allowLine(JSON.stringify({ msg: "x", err: { name: "PostgresError", code: "42501", message: secret } })) ?? "{}")).toMatchObject({ error: "PostgresError" });
@@ -348,11 +395,11 @@ describe("worker teşhisi (T-106c) — izin listesi", () => {
   });
 
   it("yalnızca son N satır işlenir; özet sayıları doğru", () => {
-    const text = Array.from({ length: 250 }, (_, i) => (i % 2 === 0 ? `rastgele ${i}` : `{"level":"info","msg":"satir ${i}"}`)).join("\n") + "\n";
+    const text = Array.from({ length: 250 }, (_, i) => (i % 2 === 0 ? `rastgele ${i}` : `{"level":"info","msg":"queue started"}`)).join("\n") + "\n";
     const r = maskLogs(text, { maxLines: 200 });
     expect(r.total).toBe(250);
     expect(r.lines.length + r.hidden).toBe(200);
-    expect(r.lines.at(-1)).toBe('worker| {"level":"info","msg":"satir 249"}');
+    expect(r.lines.at(-1)).toBe('worker| {"level":"info","msg":"queue started"}');
   });
 
   it("boş log → sıfır satır", () => {
@@ -396,3 +443,42 @@ describe("describeStoppedMachines (T-106c)", () => {
     expect(describeStoppedMachines(bad)).toEqual([]);
   });
 });
+
+describe("diagCommand CLI (T-106c)", () => {
+  const script = fileURLToPath(new URL("./deploy-smoke.mjs", import.meta.url));
+  const node = (/** @type {string[]} */ args, /** @type {string} */ input = "") =>
+    spawnSync(process.execPath, [script, ...args], { input, encoding: "utf8", env: { PATH: process.env["PATH"] ?? "" } });
+
+  it("worker-ids: kimlikler stdout'a, özet stderr'e; yalnızca başlamamış worker", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "smoke-"));
+    const file = path.join(dir, "s.json");
+    writeFileSync(file, JSON.stringify({ Machines: [
+      { id: "80e32da6490958", state: "stopped", config: { metadata: { fly_process_group: "worker" }, restart: { policy: "on-failure" } },
+        events: [{ type: "exit", status: "stopped", request: { exit_event: { exit_code: 1, oom_killed: false } } }] },
+      { id: "aaaa1111bbbb22", state: "started", config: { metadata: { fly_process_group: "worker" } } },
+    ] }));
+    const r = node(["worker-ids", "--status-file", file]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe("80e32da6490958\n");
+    expect(r.stderr).toContain("worker| 80e32da6490958 state=stopped");
+    expect(r.stderr).toContain("restart_policy=on-failure");
+    expect(r.stderr).toContain("exit_code=1");
+    expect(node(["worker-ids"]).status).toBe(2);
+  });
+
+  it("mask-logs: özet satırı ve --max-lines doğrulaması", () => {
+    const secret = rnd2();
+    const input = `{"level":"info","msg":"queue started"}\nrastgele ${secret}\n`;
+    const r = node(["mask-logs", "--max-lines", "5"], input);
+    expect(r.status).toBe(0);
+    expect(r.stdout).not.toContain(secret);
+    expect(r.stdout).toContain('worker| {"level":"info","msg":"queue started"}');
+    expect(r.stdout).toContain("worker-diag: 1 satır yazıldı (toplam 2; gizlenen satır: 1; izin listesi)");
+    for (const bad of ["0", "abc", "-1", "1.5"]) expect(node(["mask-logs", "--max-lines", bad], input).status).toBe(2);
+    expect(node(["bilinmeyen"]).status).not.toBe(0);
+  });
+});
+
+function rnd2() {
+  return randomBytes(12).toString("hex");
+}
