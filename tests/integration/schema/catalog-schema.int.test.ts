@@ -405,7 +405,7 @@ describe("T-204 silme yasağı, yetkiler ve RLS", () => {
 
   it("wms_ops yeni tablolarda hiçbir yetki taşımaz", async () => {
     const role = await admin.query("SELECT 1 FROM pg_roles WHERE rolname = $1", [OPS]);
-    if (role.rowCount === 0) return;
+    expect(role.rowCount, "wms_ops rolü yok (0009 önkoşulu; sessiz geçiş yok)").toBe(1);
     for (const t of NEW_TABLES) {
       const r = await admin.query<{ p: boolean }>("SELECT has_any_column_privilege($1, ('public.' || $2)::regclass, 'SELECT, INSERT, UPDATE, REFERENCES') AS p", [OPS, t]);
       expect(r.rows[0]?.p, t).toBe(false);
@@ -419,6 +419,7 @@ describe("T-204 silme yasağı, yetkiler ve RLS", () => {
       const c = await admin.query(
         `SELECT c.relrowsecurity AS rls, c.relforcerowsecurity AS forced,
                 (SELECT count(*) FROM pg_policy p WHERE p.polrelid = c.oid)::text AS pol,
+                (SELECT p.polpermissive AND p.polcmd = '*' AND p.polroles = '{0}'::oid[] FROM pg_policy p WHERE p.polrelid = c.oid LIMIT 1) AS shape,
                 (SELECT pg_get_expr(p.polqual, p.polrelid) FROM pg_policy p WHERE p.polrelid = c.oid LIMIT 1) AS qual,
                 (SELECT pg_get_expr(p.polwithcheck, p.polrelid) FROM pg_policy p WHERE p.polrelid = c.oid LIMIT 1) AS chk,
                 EXISTS (SELECT 1 FROM aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a WHERE a.grantee = 0) AS pub,
@@ -427,13 +428,15 @@ describe("T-204 silme yasağı, yetkiler ve RLS", () => {
            FROM pg_class c WHERE c.oid = ('public.' || $1)::regclass`,
         [t],
       );
-      const row = c.rows[0] as { rls: boolean; forced: boolean; pol: string; qual: string | null; chk: string | null; pub: boolean; nullable: string; uq: boolean };
+      const row = c.rows[0] as { rls: boolean; forced: boolean; pol: string; shape: boolean; qual: string | null; chk: string | null; pub: boolean; nullable: string; uq: boolean };
       expect(row.pub, t).toBe(false);
       expect(row.rls, t).toBe(true);
       expect(row.forced, t).toBe(true);
       expect(row.pol, t).toBe("1");
-      expect(row.qual, t).toContain("app.current_tenant_id");
-      expect(row.chk, t).toContain("app.current_tenant_id");
+      expect(row.shape, `${t}: politika PERMISSIVE, FOR ALL, TO PUBLIC (polroles={0}) olmalı`).toBe(true);
+      const tenantEq = /^\(tenant_id = \(NULLIF\((?:pg_catalog\.)?current_setting\('app\.current_tenant_id'::text, true\), ''::text\)\)::uuid\)$/;
+      expect(row.qual, t).toMatch(tenantEq);
+      expect(row.chk, t).toMatch(tenantEq);
       expect(row.nullable, t).toBe("NO");
       expect(row.uq, t).toBe(true);
     }
@@ -464,6 +467,34 @@ describe("T-204 silme yasağı, yetkiler ve RLS", () => {
     if (!w.ok) expect(w.message).toMatch(/row-level security/);
     const upd = await one(A.tenantId, "UPDATE public.items SET name = 'hack' WHERE tenant_id = $1", [B.tenantId]);
     expect(upd.ok && upd.rowCount).toBe(0);
+
+    const snapshot = async (sql: string): Promise<Record<string, unknown>[]> => {
+      await admin.query("BEGIN");
+      try {
+        await admin.query("SELECT set_config('app.current_tenant_id', $1, true)", [B.tenantId]);
+        return (await admin.query(sql, [B.tenantId])).rows;
+      } finally {
+        await admin.query("ROLLBACK");
+      }
+    };
+    const bcSql = "SELECT id, item_id, barcode FROM public.item_barcodes WHERE tenant_id = $1 ORDER BY id";
+    const huSql = "SELECT id, parent_id, location_id, status FROM public.handling_units WHERE tenant_id = $1 ORDER BY id";
+    const bcBefore = await snapshot(bcSql);
+    const huBefore = await snapshot(huSql);
+    expect(bcBefore.length).toBeGreaterThan(0);
+    expect(huBefore.length).toBeGreaterThan(0);
+
+    // (a) A bağlamından B'nin item_barcodes satırına DELETE: 0 satır, B satırı duruyor.
+    const del = await one(A.tenantId, "DELETE FROM public.item_barcodes WHERE tenant_id = $1", [B.tenantId]);
+    expect(del.ok && del.rowCount, JSON.stringify(del)).toBe(0);
+    expect(await snapshot(bcSql)).toEqual(bcBefore);
+
+    // (b) A bağlamından B'nin handling_units satırına parent_id / location_id / status UPDATE: 0 satır, değerler değişmemiş.
+    for (const set of ["parent_id = id", "location_id = NULL", "status = 'CLOSED'"]) {
+      const u = await one(A.tenantId, `UPDATE public.handling_units SET ${set} WHERE tenant_id = $1`, [B.tenantId]);
+      expect(u.ok && u.rowCount, `${set} ${JSON.stringify(u)}`).toBe(0);
+    }
+    expect(await snapshot(huSql)).toEqual(huBefore);
   });
 });
 
