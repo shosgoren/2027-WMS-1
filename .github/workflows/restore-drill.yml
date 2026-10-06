@@ -1,9 +1,9 @@
 # Etkin WMS — restore tatbikatı (T-130 / A-48, docs/spec/14-reliability-ops.md). KORUNAN DOSYA (PROTOCOL §3b).
 # `scripts/restore-drill.mjs`: staging Neon ana dalından bir zaman noktasına (T) GEÇİCİ dal `restore-drill-<run_id>`
 # açar, parmak izini (şema sürümü, satır sayıları, audit_logs/security_events özetleri, RLS rolleri; scripts/db-fingerprint.mjs)
-# ana dalla karşılaştırır, T'den sonra yazılan `post` işaretinin geri yüklemede OLMADIĞINI doğrular, RPO/RTO ölçer ve
-# geçici dalı HER DURUMDA siler (silinemezse iş kırmızı). Ana dal değiştirilmez/silinmez; yalnızca iki `drill.marker`
-# olayı (append-only, demo ortamı) eklenir. Hedefler (A-48, varsayım): RPO ≤ 15 dk, RTO ≤ 60 dk — aşılırsa raporlanır.
+# ana dalla karşılaştırır, geri yüklenen en yeni commit'in T'den sonra olmadığını doğrular, RPO/RTO ölçer ve geçici dalı
+# HER DURUMDA siler (silinemezse iş kırmızı). Ana dal değiştirilmez/silinmez ve ana dala HİÇBİR yazma yapılmaz
+# (yalnızca salt-okunur transaction). Hedefler (A-48, varsayım): RPO ≤ 15 dk, RTO ≤ 60 dk — aşılırsa raporlanır.
 # Kapsam: yalnızca veritabanı; dosya deposu (Tigris) ve silme işaretleri dahil tam tatbikat AC-17 / Faz 4P.
 #
 # Tetikleyici: workflow_dispatch + üç ayda bir `schedule` (14 §; zamanlanmış koşular yalnızca varsayılan daldadır).

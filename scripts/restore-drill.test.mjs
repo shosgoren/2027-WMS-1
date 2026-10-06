@@ -28,7 +28,7 @@ function makeFingerprint(over = {}) {
     schema: { columns: 80, digest: hex() },
     rls: { tables: 12, digest: hex() },
     policies: { count: 9, digest: hex() },
-    roles: [role("wms_app"), role("wms_auth"), role("wms_identity_probe", { login: false }), role("wms_worker")],
+    roles: [role("wms_app"), role("wms_auth"), role("wms_identity_probe", { login: false }), role("wms_ops", { login: false }), role("wms_worker")],
     ...over,
   };
 }
@@ -61,6 +61,12 @@ function harness(opts = {}) {
       log.push(["find", n]);
       return existing.has("br-tmp") ? "br-tmp" : null;
     },
+    getBranchInfo: async (/** @type {string} */ id) => {
+      log.push(["info", id]);
+      if (!existing.has(id)) return null;
+      const flags = opts.flags?.[id] ?? {};
+      return { isDefault: id === "br-main", isPrimary: false, isProtected: false, ...flags };
+    },
     deleteBranch: async (/** @type {string} */ id) => {
       log.push(["delete", id]);
       if (opts.deleteFails) throw new Error("delete failed");
@@ -78,11 +84,6 @@ function harness(opts = {}) {
       if (opts.mutateRestored) opts.mutateRestored(r);
       return r;
     },
-    writeMarker: (/** @type {Any} */ _t, /** @type {string} */ _runId, /** @type {string} */ phase) => {
-      log.push(["marker", phase]);
-      return phase === "pre" ? "2026-10-05T09:59:59.000000Z" : (opts.postAt ?? "2026-10-06T10:00:03.000000Z");
-    },
-    markerCounts: () => ({ pre: opts.preCount ?? 1, post: opts.postCount ?? 0 }),
   };
   const deps = /** @type {any} */ ({
     neon,
@@ -103,8 +104,8 @@ describe("runDrill", () => {
     expect(s.fingerprints_equal).toBe(true);
     expect(s.table_counts_equal).toBe(true);
     expect(s.digests_equal).toBe(true);
-    expect(s.post_marker_absent).toBe(true);
-    expect(s.pre_marker_present).toBe(true);
+    expect(s.restored_not_after_t).toBe(true);
+    expect(s.main_writes).toBe(0);
     expect(s.restored_branch_deleted).toBe(true);
     expect(s.point_in_time).toBe("2026-10-06T10:00:00.000000Z");
     expect(s.rpo_seconds).toBe(2); // T 10:00:00 − son commit 09:59:58
@@ -113,7 +114,7 @@ describe("runDrill", () => {
     expect(s.rto_within_target).toBe(true);
     const create = /** @type {any[]} */ (h.log.find((l) => l[0] === "create"));
     expect(create[1]).toEqual({ name: NAME, parentId: "br-main", timestamp: "2026-10-06T10:00:00.000000Z" });
-    expect(h.log.filter((l) => l[0] === "marker").map((l) => l[1])).toEqual(["pre", "post"]);
+    expect(h.log.some((l) => l[0] === "marker")).toBe(false);
     expect(h.existing.has("br-tmp")).toBe(false);
     expect(h.existing.has("br-main")).toBe(true);
   });
@@ -129,16 +130,13 @@ describe("runDrill", () => {
     expect(h.existing.has("br-tmp")).toBe(false);
   });
 
-  it("post işareti geri yüklemede varsa FAIL", async () => {
-    const s = await runDrill(harness({ postCount: 1 }).deps, { runId: RUN, branchName: NAME });
+  it("geri yüklenen en yeni commit T'den sonraysa FAIL", async () => {
+    const s = await runDrill(
+      harness({ mutateRestored: (/** @type {Any} */ r) => { r.security_events.latest_at = "2026-10-06T10:00:01.000000Z"; } }).deps,
+      { runId: RUN, branchName: NAME },
+    );
     expect(s.result).toBe("fail");
-    expect(s.post_marker_absent).toBe(false);
-  });
-
-  it("pre işareti yoksa FAIL", async () => {
-    const s = await runDrill(harness({ preCount: 0 }).deps, { runId: RUN, branchName: NAME });
-    expect(s.result).toBe("fail");
-    expect(s.pre_marker_present).toBe(false);
+    expect(s.restored_not_after_t).toBe(false);
   });
 
   it("geri yüklenen dalda BYPASSRLS uygulama rolü → FAIL", async () => {
@@ -199,12 +197,6 @@ describe("runDrill", () => {
     expect(s.rto_within_target).toBe(false);
   });
 
-  it("post işareti T'den önceyse reddedilir", async () => {
-    const s = await runDrill(harness({ postAt: "2026-10-06T09:59:00.000000Z" }).deps, { runId: RUN, branchName: NAME });
-    expect(s.result).toBe("fail");
-    expect(s.error).toContain("post işareti");
-  });
-
   it("çok kısa geçmiş saklama süresi reddedilir", async () => {
     const s = await runDrill(harness({ retention: 60 }).deps, { runId: RUN, branchName: NAME });
     expect(s.result).toBe("fail");
@@ -237,6 +229,23 @@ describe("dal adı", () => {
     expect(() => drillBranchName({})).toThrow(/GITHUB_RUN_ID/);
     expect(isDrillBranchName("main")).toBe(false);
     expect(isDrillBranchName("restore-drill-42")).toBe(true);
+  });
+  it("artık dal default/primary/protected ise (mainId bilinmeden de) silinmez, hata döner", async () => {
+    for (const flags of [{ isDefault: true }, { isPrimary: true }, { isProtected: true }]) {
+      const h = harness({ flags: { "br-tmp": flags } });
+      h.existing.add("br-tmp");
+      const r = await cleanupBranch(h.deps.neon, { name: NAME, branchId: null, mainId: null });
+      expect(r.deleted).toBe(false);
+      expect(r.error).toContain("default/primary/protected");
+      expect(h.log.some((l) => l[0] === "delete")).toBe(false);
+    }
+  });
+  it("--cleanup: bayraksız artık dal silinir; dal yoksa sorun yok", async () => {
+    const h = harness();
+    h.existing.add("br-tmp");
+    expect(await cleanupBranch(h.deps.neon, { name: NAME, branchId: null, mainId: null })).toEqual({ attempted: true, deleted: true, error: null });
+    expect(h.existing.has("br-main")).toBe(true);
+    expect(await cleanupBranch(h.deps.neon, { name: NAME, branchId: null, mainId: null })).toEqual({ attempted: false, deleted: false, error: null });
   });
   it("öneke uymayan ad silinmez", async () => {
     /** @type {string[]} */
@@ -284,29 +293,19 @@ describe("maskeleme", () => {
   });
 });
 
-describe("createDbFacade işaret SQL'i", () => {
-  const redactor = createRedactor();
-  const t = { host: "h", user: "u", password: "p", database: "d" };
-  it("geçersiz run_id/aşama SQL'e girmeden reddedilir", () => {
-    const db = createDbFacade(redactor, () => {
-      throw new Error("psql çağrılmamalı");
-    });
-    expect(() => db.writeMarker(t, "1; DROP TABLE x", "pre")).toThrow(/geçersiz/);
-    expect(() => db.writeMarker(t, "1", /** @type {any} */ ("mid"))).toThrow(/geçersiz/);
-    expect(() => db.markerCounts(t, "a'b")).toThrow(/geçersiz/);
-  });
-  it("işaret zamanını ve sayımı ayrıştırır", () => {
+describe("createDbFacade", () => {
+  it("yalnızca parmak izi sorgusu; ana dala yazma yok", () => {
     /** @type {string[]} */
     const seen = [];
-    const db = createDbFacade(redactor, (/** @type {any} */ _t, /** @type {string} */ sql) => {
+    const fp = makeFingerprint();
+    const db = createDbFacade(createRedactor(), (/** @type {any} */ _t, /** @type {string} */ sql) => {
       seen.push(sql);
-      return sql.startsWith("INSERT")
-        ? { ok: true, stdout: "2026-10-06T10:00:03.123456Z", sqlstate: null, error: null }
-        : { ok: true, stdout: "MK:1:0", sqlstate: null, error: null };
+      return { ok: true, stdout: `FP:${JSON.stringify(fp)}`, sqlstate: null, error: null };
     });
-    expect(db.writeMarker(t, "77", "pre")).toBe("2026-10-06T10:00:03.123456Z");
-    expect(db.markerCounts(t, "77")).toEqual({ pre: 1, post: 0 });
-    expect(seen[0]).toContain("drill.marker");
+    db.fingerprint({ host: "h", user: "u", password: "p", database: "d" });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toContain("READ ONLY");
+    expect(seen[0]).not.toMatch(/\bINSERT\b/i);
   });
 });
 
