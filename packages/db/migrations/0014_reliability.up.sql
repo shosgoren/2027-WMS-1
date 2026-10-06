@@ -13,7 +13,7 @@
 --   app.system_reason = 'queue.stock.consistency.check' SERT BİR GÜVENLİK SINIRI DEĞİLDİR (ADR-019 §1 MINOR-6): sıradan GUC'tur.
 -- * stock_consistency_signals: tenant kimliği YOK (M-7); append-only (UPDATE/DELETE/TRUNCATE tetikleyiciyle ret, ENABLE ALWAYS).
 --   wms_app yalnızca INSERT (aynı system_reason koşulu, RLS INSERT politikası); SELECT yok → RETURNING kullanılamaz. wms_ops SELECT
---   (yalnızca bu tabloda; politika TO wms_ops FOR SELECT). /api/health bu tabloyu okumaz.
+--   (yalnızca bu tabloda; politika TO wms_ops FOR SELECT + 0009 RESTRICTIVE ops_session_required). /api/health bu tabloyu okumaz.
 -- * wms_ops, tenant tablolarında (processed_events, stock_consistency_runs) hiçbir yetkiye sahip değildir (A-94; 0010-0013 deseni).
 -- * wms_probe.active_tenant_ids(after, lim): SECURITY DEFINER, sahibi wms_identity_probe, SET ROLE kalıbı (ADR-015), sabit
 --   search_path, gövde şema nitelikli. YALNIZ wms_worker EXECUTE (+ şema USAGE); wms_worker'a tenants SELECT/politika VERİLMEZ.
@@ -168,6 +168,11 @@ CREATE POLICY stock_consistency_signals_insert ON public.stock_consistency_signa
   WITH CHECK (pg_catalog.current_setting('app.system_reason', true) = 'queue.stock.consistency.check');
 CREATE POLICY stock_consistency_signals_ops_select ON public.stock_consistency_signals FOR SELECT TO wms_ops
   USING (true);
+-- 0009 deseni: wms_ops okuması AYNI transaction'da, gerekçeli ve operatör adlı ops.session_opened denetim satırı olmadan hiçbir satır
+-- göstermez (signals tenant'sızdır; denetim satırı oturumun tenant bağlamına bağlıdır, ops_open_session zaten bağlam kurar).
+CREATE POLICY ops_session_required ON public.stock_consistency_signals
+  AS RESTRICTIVE FOR ALL TO wms_ops
+  USING (wms_probe.ops_session_audited()) WITH CHECK (wms_probe.ops_session_audited());
 
 -- ---------------------------------------------------------------------------------------------
 -- 4. GRANT'lar (UPDATE/DELETE hiçbir tabloda yok; wms_ops yalnızca signals SELECT)

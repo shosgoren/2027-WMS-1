@@ -167,11 +167,14 @@ describe("T-211 katalog: RLS, yetkiler, sütun bazlı INSERT", () => {
     expect(runs[0]?.with_check).toContain("app.current_tenant_id");
     expect(runs[0]?.with_check).toContain(REASON);
     const sig = r.rows.filter((p) => p.tablename === "stock_consistency_signals");
-    expect(sig.map((p) => [p.policyname, p.cmd, p.roles])).toEqual([
-      ["stock_consistency_signals_insert", "INSERT", ["wms_app"]],
-      ["stock_consistency_signals_ops_select", "SELECT", ["wms_ops"]],
+    expect(sig.map((p) => [p.policyname, p.permissive, p.cmd, p.roles])).toEqual([
+      ["ops_session_required", "RESTRICTIVE", "ALL", ["wms_ops"]],
+      ["stock_consistency_signals_insert", "PERMISSIVE", "INSERT", ["wms_app"]],
+      ["stock_consistency_signals_ops_select", "PERMISSIVE", "SELECT", ["wms_ops"]],
     ]);
-    expect(sig[0]?.with_check).toContain(REASON);
+    expect(sig[0]?.qual).toContain("ops_session_audited");
+    expect(sig[0]?.with_check).toContain("ops_session_audited");
+    expect(sig[1]?.with_check).toContain(REASON);
   });
 
   it("kısıtlar: UNIQUE NULLS NOT DISTINCT (tenant_id, consumer, event_id); UNIQUE (tenant_id, job_id); UNIQUE (tenant_id, id); FK'ler NO ACTION; durum CHECK'leri; RUNNING yok", async () => {
@@ -365,6 +368,20 @@ describe("T-211 stock_consistency_signals (ADR-019 §10, M-7)", () => {
       expectCode(await sp("UPDATE public.stock_consistency_signals SET status = status"), INSUFFICIENT_PRIVILEGE, "UPDATE");
       expectCode(await sp("DELETE FROM public.stock_consistency_signals"), INSUFFICIENT_PRIVILEGE, "DELETE");
       expectCode(await sp("TRUNCATE public.stock_consistency_signals"), INSUFFICIENT_PRIVILEGE, "TRUNCATE");
+    });
+    expect(r.ok, JSON.stringify(r)).toBe(true);
+  });
+
+  it("wms_ops okuması denetim zorunlu (0009 RESTRICTIVE): ops_open_session olmadan 0 satır, oturum açılınca satırlar görünür", async () => {
+    const r = await rolled(admin, {}, async (q, sp) => {
+      await q("INSERT INTO public.stock_consistency_signals (status, mismatch_count) VALUES ('OK', 0)");
+      await q("SET LOCAL ROLE wms_ops");
+      const blind = await q("SELECT count(*)::int AS n FROM public.stock_consistency_signals");
+      expect(blind.rows[0], "denetimsiz ops oturumu satır görmez").toEqual({ n: 0 });
+      expectCode(await sp("INSERT INTO public.stock_consistency_signals (status) VALUES ('OK')"), INSUFFICIENT_PRIVILEGE, "wms_ops INSERT");
+      await q("SELECT public.ops_open_session($1::uuid, 'op-t211', 'T-211 sinyal okuma testi')", [A.tenantId]);
+      const seen = await q("SELECT count(*)::int AS n FROM public.stock_consistency_signals");
+      expect((seen.rows[0] as { n: number }).n, "denetlenmiş oturumda görünür").toBeGreaterThanOrEqual(1);
     });
     expect(r.ok, JSON.stringify(r)).toBe(true);
   });
