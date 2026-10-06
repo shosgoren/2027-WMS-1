@@ -1,10 +1,10 @@
 # STATE (≤80 satır — her görev sonunda Supervisor günceller)
 
-**Oturum kilidi:** session_01C59FRaUynaDdhNGZoRbKsY · 2026-10-06T08:50Z (zamanlanmış oturum: kilit 3 saatten yeniyse ve başka oturumunsa hiçbir şey yapmadan çık; değilse kendi kimliğinle yenile, her push'ta zamanı güncelle)
+**Oturum kilidi:** session_01C59FRaUynaDdhNGZoRbKsY · 2026-10-06T09:55Z (zamanlanmış oturum: kilit 3 saatten yeniyse ve başka oturumunsa hiçbir şey yapmadan çık; değilse kendi kimliğinle yenile, her push'ta zamanı güncelle)
 **Faz:** 1 — Kimlik, tenant, iskelet ekranlar (Faz 0 kapısı GEÇTİ 2026-10-06 00:20Z — JOURNAL)
-**Aktif görev:** Faz 1 kalan: T-126 (HAZIR e6545f0, 0·0·4 sonrası son tur) → `int/faz1-denetim`; T-128 (qa AC-04) + T-131 (e2e) aynı int tabanında; T-105 → T-106 → T-105c/T-130 staging (`int/faz1-staging-db`); sonra T-132 Faz 1 kapısı. #43 (int/faz0-kapanis: T-008l + T-008m bekçi takipleri) CI'da. Supervisor STATE işleri `/home/user/wt-kapanis`.
-**Son tamamlanan:** #42 int/faz1-ekran → main df5205c (08:45Z; 0·0·2) · #41 int/faz1-auth → main 5353a06 · #40 ui-temel 5ac419b · #39 şema 99f2130 · Faz 0 kapısı (main c6103a7) · önceki: JOURNAL
-**Sonraki adım:** #43 yeşilse birleştir · `int/faz1-denetim` = main ← T-126 (verify + test:int + build + paket incelemesi → PR) · T-128/T-131 ajanları bu tabanda · T-105 ajanı (staging DB; Neon/Fly yalnızca Actions'ta) · kullanıcı hesabı gerektiren iş çıkarsa tek mesaj. Migration sırası: 0009 T-105c. Paralel uygulama ajanı ≤4.
+**Aktif görev:** Faz 1 kapanışı. Açık: #45 `int/faz1-izleme` (T-131 e2e; paket 0·0·1) CI'da · `int/faz1-staging-db` (T-105 + A-66/A-67; paket 0·1·3 → T-105 ajanı MAJOR-1 düzeltiyor) · T-106 ajanı (taban staging-db) · T-124 ajanı (AC-04 sayfa/eylem) → sonra `int/faz1-izolasyon` = main ← T-124 ← T-128 (dcc8a5a). Supervisor STATE işleri `/home/user/wt-kapanis`.
+**Son tamamlanan:** #43 int/faz0-kapanis (T-008l, T-008m) → main 7013dc2 · #44 int/faz1-denetim (T-126) → main 474c3b8 · #42 int/faz1-ekran → main df5205c · #41 int/faz1-auth 5353a06 · #40 · #39 · Faz 0 kapısı · önceki: JOURNAL
+**Sonraki adım:** #45 yeşilse birleştir · T-105 düzeltmesi → staging-db yeniden incele → PR → birleşince Actions'ta `provision-staging` (main) tetikle → T-106 → T-105c (0009) / T-130 restore tatbikatı · T-124 → izolasyon dilimi PR · T-132 Faz 1 kapısı (`test:ac --phase 1`). Sonra Faz 2 planı (architect). Kural: testlerde literal sır yok + push öncesi gitleaks (CI tüm dalları tarar). Paralel uygulama ajanı ≤4.
 
 ## Çalışma biçimi (kullanıcı kararı 2026-10-05 — ADR-012 rev., PROTOCOL §Onay kaynağı)
 - Kullanıcı PR incelemez. Birleştirme kapısı: CI/oturumda `pnpm verify` + `check:all` + `test:int` + ilgili `test:ac` yeşil; risk matrisine göre `security-reviewer` ve `qa-verifier` BLOCKER: 0 → Supervisor PR'ı kendisi birleştirir (`mcp__github__merge_pull_request`). Korunan değişiklikte PR açıklamasında `APPROVED-BY: supervisor (ADR-012 rev.)`.
