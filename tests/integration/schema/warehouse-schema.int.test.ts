@@ -36,14 +36,14 @@ async function connect(url: string): Promise<pg.Client> {
 type Attempt = { ok: true; rows: Record<string, unknown>[]; rowCount: number } | { ok: false; code: string | undefined; message: string };
 
 /** Migration rolüyle (tablo sahibi; FORCE RLS tenant bağlamı ister) ROLLBACK'li deneme: UPDATE'in tetikleyici hatasını döndürür. */
-async function ownerUpdateError(tenantId: string, sql: string, p: unknown[]): Promise<{ code?: string } | undefined> {
+async function ownerUpdateError(tenantId: string, sql: string, p: unknown[]): Promise<{ code?: string; message?: string } | undefined> {
   await admin.query("BEGIN");
   try {
     await admin.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
     await admin.query(sql, p);
     return undefined;
   } catch (e) {
-    return e as { code?: string };
+    return e as { code?: string; message?: string };
   } finally {
     await admin.query("ROLLBACK");
   }
@@ -175,9 +175,58 @@ describe("T-202 ağaç bütünlüğü", () => {
       if (!viaApp.ok) expect(viaApp.code, set).toBe(INSUFFICIENT_PRIVILEGE);
       const err = await ownerUpdateError(A.tenantId, `UPDATE public.locations SET ${set} WHERE id = $1`, [A.childLocationId]);
       expect(err?.code, set).toBe(CHECK_VIOLATION);
+      expect(err?.message, set).toMatch(/değiştirilemez/);
     }
     const tenantErr = await ownerUpdateError(B.tenantId, "UPDATE public.locations SET tenant_id = $2 WHERE id = $1", [B.childLocationId, A.tenantId]);
     expect(tenantErr?.code).toBe(CHECK_VIOLATION);
+    expect(tenantErr?.message).toMatch(/değiştirilemez/);
+  });
+
+  it("çok satırlı INSERT: çocuk ebeveynden önce gelirse reddedilir; kökler önce gelirse kabul edilir", async () => {
+    const root = randomUUID();
+    const child = randomUUID();
+    const childFirst = await one(
+      A.tenantId,
+      `INSERT INTO public.locations (tenant_id, id, warehouse_id, parent_id, code, name, depth, kind)
+       VALUES ($1, $3, $2, $4, 'M2', 'c', 1, 'STORAGE'), ($1, $4, $2, NULL, 'M1', 'r', 0, 'STORAGE')`,
+      [A.tenantId, A.warehouseId, child, root],
+    );
+    expect(childFirst.ok).toBe(false);
+    if (!childFirst.ok) expect(childFirst.code).toBe(FK_VIOLATION);
+    const rootFirst = await one(
+      A.tenantId,
+      `INSERT INTO public.locations (tenant_id, id, warehouse_id, parent_id, code, name, depth, kind)
+       VALUES ($1, $4, $2, NULL, 'M1', 'r', 0, 'STORAGE'), ($1, $3, $2, $4, 'M2', 'c', 1, 'STORAGE')`,
+      [A.tenantId, A.warehouseId, child, root],
+    );
+    expect(rootFirst.ok, JSON.stringify(rootFirst)).toBe(true);
+  });
+
+  it("döngü kurulamaz: iki satır birbirine ebeveyn (aynı ifade) ve keyfi depth reddedilir", async () => {
+    const x = randomUUID();
+    const y = randomUUID();
+    const cyc = await one(
+      A.tenantId,
+      `INSERT INTO public.locations (tenant_id, id, warehouse_id, parent_id, code, name, depth, kind)
+       VALUES ($1, $3, $2, $4, 'C1', 'x', 1, 'STORAGE'), ($1, $4, $2, $3, 'C2', 'y', 2, 'STORAGE')`,
+      [A.tenantId, A.warehouseId, x, y],
+    );
+    expect(cyc.ok).toBe(false);
+    if (!cyc.ok) expect(cyc.code).toBe(FK_VIOLATION);
+    // Aynı denemenin migration rolüyle (tablo sahibi) de reddedildiği: bekçi rol bağımsızdır.
+    await admin.query("BEGIN");
+    try {
+      await admin.query("SELECT set_config('app.current_tenant_id', $1, true)", [A.tenantId]);
+      await expect(
+        admin.query(
+          `INSERT INTO public.locations (tenant_id, id, warehouse_id, parent_id, code, name, depth, kind)
+           VALUES ($1, $3, $2, $4, 'C1', 'x', 7, 'STORAGE'), ($1, $4, $2, $3, 'C2', 'y', 9, 'STORAGE')`,
+          [A.tenantId, A.warehouseId, x, y],
+        ),
+      ).rejects.toMatchObject({ code: FK_VIOLATION });
+    } finally {
+      await admin.query("ROLLBACK");
+    }
   });
 
   it("self-parent reddedilir (CHECK); yanlış depth reddedilir", async () => {
@@ -232,7 +281,7 @@ describe("T-202 silme yasağı, yetkiler ve RLS", () => {
 
   it("wms_ops yeni tablolarda hiçbir yetki taşımaz (0009 deseni: yalnızca mevcut yazma yolu tabloları)", async () => {
     const role = await admin.query("SELECT 1 FROM pg_roles WHERE rolname = $1", [OPS]);
-    if (role.rowCount === 0) return; // altyapı rolü yoksa 0009 zaten uygulanamaz
+    expect(role.rowCount, "wms_ops rolü yok (0009 önkoşulu; sessiz geçiş yok)").toBe(1);
     for (const t of NEW_TABLES) {
       const r = await admin.query<{ p: boolean }>("SELECT has_any_column_privilege($1, ('public.' || $2)::regclass, 'SELECT, INSERT, UPDATE, REFERENCES') AS p", [OPS, t]);
       expect(r.rows[0]?.p, t).toBe(false);
@@ -246,19 +295,22 @@ describe("T-202 silme yasağı, yetkiler ve RLS", () => {
       const c = await admin.query(
         `SELECT c.relrowsecurity AS rls, c.relforcerowsecurity AS forced,
                 (SELECT count(*) FROM pg_policy p WHERE p.polrelid = c.oid)::text AS pol,
+                (SELECT p.polpermissive AND p.polcmd = '*' AND p.polroles = '{0}'::oid[] FROM pg_policy p WHERE p.polrelid = c.oid LIMIT 1) AS shape,
                 (SELECT pg_get_expr(p.polqual, p.polrelid) FROM pg_policy p WHERE p.polrelid = c.oid LIMIT 1) AS qual,
                 (SELECT pg_get_expr(p.polwithcheck, p.polrelid) FROM pg_policy p WHERE p.polrelid = c.oid LIMIT 1) AS chk,
                 EXISTS (SELECT 1 FROM aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a WHERE a.grantee = 0) AS pub
            FROM pg_class c WHERE c.oid = ('public.' || $1)::regclass`,
         [t],
       );
-      const row = c.rows[0] as { rls: boolean; forced: boolean; pol: string; qual: string | null; chk: string | null; pub: boolean };
+      const row = c.rows[0] as { rls: boolean; forced: boolean; pol: string; shape: boolean; qual: string | null; chk: string | null; pub: boolean };
       expect(row.pub, t).toBe(false);
       expect(row.rls, t).toBe(true);
       expect(row.forced, t).toBe(true);
       expect(row.pol, t).toBe("1");
-      expect(row.qual, t).toContain("app.current_tenant_id");
-      expect(row.chk, t).toContain("app.current_tenant_id");
+      expect(row.shape, `${t}: politika PERMISSIVE, FOR ALL, TO PUBLIC (polroles={0}) olmalı`).toBe(true);
+      const tenantEq = /^\(tenant_id = \(NULLIF\((?:pg_catalog\.)?current_setting\('app\.current_tenant_id'::text, true\), ''::text\)\)::uuid\)$/;
+      expect(row.qual, t).toMatch(tenantEq);
+      expect(row.chk, t).toMatch(tenantEq);
     }
   });
 
@@ -273,6 +325,15 @@ describe("T-202 silme yasağı, yetkiler ve RLS", () => {
       expect(w.code).toBe(INSUFFICIENT_PRIVILEGE);
       expect(w.message).toMatch(/row-level security/);
     }
+    // Yazma: B satırlarına UPDATE / DELETE A bağlamında 0 satır etkiler (RLS USING).
+    const updLock = await one(A.tenantId, "UPDATE public.location_count_locks SET status = status WHERE location_id = $1", [B.childLocationId]);
+    expect(updLock.ok && updLock.rowCount, "kilit UPDATE").toBe(0);
+    const updLoc = await one(A.tenantId, "UPDATE public.locations SET name = name WHERE id = $1", [B.childLocationId]);
+    expect(updLoc.ok && updLoc.rowCount, "lokasyon UPDATE").toBe(0);
+    const updWh = await one(A.tenantId, "UPDATE public.warehouses SET name = name WHERE id = $1", [B.warehouseId]);
+    expect(updWh.ok && updWh.rowCount, "depo UPDATE").toBe(0);
+    const delScope = await one(A.tenantId, "DELETE FROM public.membership_warehouse_scopes WHERE membership_id = $1", [B.ownerMembershipId]);
+    expect(delScope.ok && delScope.rowCount, "kapsam DELETE").toBe(0);
     const none = await app.query("SELECT count(*)::int AS n FROM public.locations");
     expect(none.rows[0]?.n).toBe(0); // bağlamsız → 0 satır
   });
