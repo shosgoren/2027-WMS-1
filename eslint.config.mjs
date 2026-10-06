@@ -721,54 +721,93 @@ const neutralizeSql = (t) => {
   }
   return out;
 };
-const LIST_START = new Set(["FROM", "JOIN", "USING", "INTO", "UPDATE", "TRUNCATE", "OF"]);
-const LIST_END = new Set(["WHERE", "ON", "SET", "VALUES", "RETURNING", "GROUP", "ORDER", "HAVING", "LIMIT", "OFFSET", "FOR", "WINDOW", "UNION", "INTERSECT", "EXCEPT", "SELECT", "WITH"]);
-/** `FOR UPDATE`, `DO UPDATE`, `NO KEY UPDATE` içindeki UPDATE tablo listesi başlatmaz. */
-const NOT_LIST_UPDATE_PREV = new Set(["FOR", "KEY", "DO"]);
+/** Değer konumu kanıtı BEYAZ LİSTEYE dayanır; listede olmayan her konum kanıt başarısızdır (⇒ main'in sonucu, ihlal, korunur). */
+const VALUE_OPERATORS = new Set(["=", "<>", "!=", "<", ">", "<=", ">=", "+", "-", "*", "/", "%", "||", "::"]);
+const VALUE_PREV_WORDS = new Set(["LIMIT", "OFFSET", "BETWEEN", "LIKE", "ILIKE", "IS", "THEN", "ELSE", "WHEN"]);
+/** `(`'yi açan sözcük bunlardan biriyse (ya da ada bitişik çağrıysa) parantez içi `(`/`,` konumları değer olabilir. */
+const VALUE_PAREN_WORDS = new Set(["VALUES", "IN", "ANY", "ALL"]);
+/** Parantezin en dış düzeyinde bunlar `\u0000`'dan önce geçtiyse o parantez değer parantezi sayılmaz. */
+const TABLE_WORDS = new Set(["SELECT", "FROM", "JOIN", "TABLE", "USING", "LATERAL", "WITH"]);
+/** Ada bitişik `(` yalnızca ad bu kümede DEĞİLSE işlev çağrısıdır. */
+const SQL_KEYWORDS = new Set([
+  "SELECT", "FROM", "JOIN", "ON", "USING", "WHERE", "SET", "AS", "WITH", "TABLE", "LATERAL", "ONLY", "INTO", "UPDATE", "DELETE", "INSERT", "MERGE", "TRUNCATE",
+  "AND", "OR", "NOT", "EXISTS", "CASE", "WHEN", "THEN", "ELSE", "END", "BY", "GROUP", "ORDER", "HAVING", "LIMIT", "OFFSET", "UNION", "INTERSECT", "EXCEPT",
+  "RETURNING", "DISTINCT", "OF", "FOR", "CONFLICT", "DO", "VALUES", "IN", "ANY", "ALL", "LEFT", "RIGHT", "INNER", "OUTER", "FULL", "CROSS", "NATURAL", "NULL",
+  "IS", "LIKE", "ILIKE", "BETWEEN", "OVER", "FILTER", "WITHIN", "ARRAY", "ROW", "ROWS", "KEY", "NO", "SHARE", "NOWAIT", "SKIP", "LOCKED", "CASCADE", "RESTART",
+]);
 /**
- * Tablo-listesi durum makinesi: FROM/JOIN/USING/INTO/UPDATE/TRUNCATE/OF sonrası LİSTE durumu, en dış düzeyde yan tümce sözcüğüne kadar sürer; parantez yeni düzey (OTHER).
- * LİSTE durumundaki, ya da ada yapışık/noktalı `\u0000` tablo konumudur. Yalnızca OTHER durumunda ve yapışık olmayan `\u0000` değer sayılır.
+ * Beyaz liste kanıtı: HER `\u0000` yalnızca hemen önündeki anlamlı belirteç (nötrlenmiş metinde) şunlardan biriyse değerdir:
+ *  - `VALUE_OPERATORS` (karşılaştırma/aritmetik/`||`/`::`) ya da `VALUE_PREV_WORDS` anahtar sözcüğü;
+ *  - `(`/`,` ve en yakın kapanmamış `(` bir VALUES/IN/ANY/ALL ya da ada bitişik (anahtar sözcük olmayan) işlev çağrısı tarafından açılmışsa
+ *    VE o parantezin kendi düzeyinde `\u0000`'dan önce SELECT/FROM/JOIN/TABLE/USING/LATERAL/WITH geçmediyse.
+ * Başka her şey (virgül, FROM/ON/TABLE sonrası, alt sorgu, CTE, bilinmeyen belirteç, ada yapışık ifade) kanıt başarısızdır.
  * @param {string} t @returns {boolean} true = her `\u0000` KESİN değer konumunda
  */
 const provablyValueOnly = (t) => {
   const n = neutralizeSql(t);
   if (n === null) return false;
-  /** @type {boolean[]} true = LİSTE */
-  const stack = [false];
-  let prevWord = "";
-  let prevNonSpace = "";
+  /** @type {{ ok: boolean, bad: boolean }[]} */
+  const stack = [];
+  /** @type {{ k: string, v: string, adj?: boolean }[]} */
+  const toks = [];
+  const prev = () => toks[toks.length - 1];
   for (let i = 0; i < n.length; ) {
     const ch = /** @type {string} */ (n[i]);
-    if (ch === "(") {
-      stack.push(false);
-      prevNonSpace = ch;
+    if (/\s/.test(ch)) {
+      i++;
+    } else if (ch === "(") {
+      const p = prev();
+      const before = n[i - 1] ?? " ";
+      const ok =
+        p !== undefined &&
+        p.k === "w" &&
+        (VALUE_PAREN_WORDS.has(p.v) || (!/\s/.test(before) && !SQL_KEYWORDS.has(p.v) && /[\w"]/.test(before)));
+      stack.push({ ok, bad: false });
+      toks.push({ k: "(", v: "(" });
       i++;
     } else if (ch === ")") {
-      stack.pop();
-      if (stack.length === 0) return false;
-      prevNonSpace = ch;
+      if (stack.pop() === undefined) return false;
+      toks.push({ k: ")", v: ")" });
+      i++;
+    } else if (ch === ",") {
+      toks.push({ k: ",", v: "," });
       i++;
     } else if (ch === "\u0000") {
-      const glued = /[\w"$.]/.test(n[i - 1] ?? " ") || prevNonSpace === ".";
-      if (stack[stack.length - 1] === true || glued) return false;
-      // Sonraki karakter adın devamıysa (`${a}_x`, `${a}.${b}`) ad parçasıdır.
-      if (/[\w"$.]/.test(n[i + 1] ?? " ")) return false;
-      prevNonSpace = ch;
+      if (/[\w"$.]/.test(n[i - 1] ?? " ") || /[\w"$.]/.test(n[i + 1] ?? " ")) return false;
+      const p = prev();
+      let ok = false;
+      if (p?.k === "op") ok = VALUE_OPERATORS.has(p.v);
+      else if (p?.k === "w") ok = VALUE_PREV_WORDS.has(p.v);
+      else if (p?.k === "(" || p?.k === ",") {
+        const top = stack[stack.length - 1];
+        ok = top !== undefined && top.ok && !top.bad;
+      }
+      if (!ok) return false;
+      toks.push({ k: "v", v: "\u0000" });
       i++;
-    } else if (/[A-Za-z_]/.test(ch)) {
-      const m = /^[A-Za-z_][\w$]*/.exec(n.slice(i));
+    } else if (/[=<>!+\-*/%|:]/.test(ch)) {
+      const m = /^[=<>!+\-*/%|:]+/.exec(n.slice(i));
+      const run = m?.[0] ?? ch;
+      toks.push({ k: "op", v: run });
+      i += run.length;
+    } else if (ch === '"') {
+      const j = n.indexOf('"', i + 1);
+      if (j === -1 || n.slice(i, j).includes("\u0000")) return false; // tırnaklı adın içinde ifade = tablo/ad konumu
+      toks.push({ k: "w", v: n.slice(i, j + 1) });
+      i = j + 1;
+    } else if (/[A-Za-z_\d]/.test(ch)) {
+      const m = /^[A-Za-z_\d][\w$]*/.exec(n.slice(i));
       const w = (m?.[0] ?? ch).toUpperCase();
-      if (LIST_END.has(w)) stack[stack.length - 1] = false;
-      else if (LIST_START.has(w) && !(w === "UPDATE" && NOT_LIST_UPDATE_PREV.has(prevWord))) stack[stack.length - 1] = true;
-      prevWord = w;
-      prevNonSpace = "a";
+      const top = stack[stack.length - 1];
+      if (top !== undefined && TABLE_WORDS.has(w)) top.bad = true;
+      toks.push({ k: "w", v: w });
       i += m?.[0].length ?? 1;
     } else {
-      if (!/\s/.test(ch)) prevNonSpace = ch;
+      toks.push({ k: "o", v: ch });
       i++;
     }
   }
-  return stack.length === 1;
+  return stack.length === 0;
 };
 /** @param {string} t main'in (iv) yazma koşulu (+ yorumsuz biçim). */
 const mainDynWrite = (t) => t.includes("\u0000") && testSql(STOCK_WRITE_VERB_RE, t);

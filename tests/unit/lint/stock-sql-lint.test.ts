@@ -432,7 +432,7 @@ describe("T-238: (iv) main'deki dinamik biçimler korunur (inceleme BLOCKER; tab
     expect((await hits(code, CONSISTENCY)).length).toBeGreaterThanOrEqual(1);
   });
   it("değer parametreleri tablo konumu değildir: VALUES/WHERE/SET/ON sonrası ${} temiz", async () => {
-    const code = `${READ}export const q = (a: string, b: string) => \`SELECT 1 FROM public.lots l JOIN public.items i ON i.id = \${a} WHERE l.id = \${b}, \${a} FOR SHARE\`;\nexport const w = (a: string, b: string) => \`INSERT INTO public.warehouses (c, n) VALUES (\${a}, \${b})\`;\n`;
+    const code = `${READ}export const q = (a: string, b: string) => \`SELECT 1 FROM public.lots l JOIN public.items i ON i.id = \${a} WHERE l.id = \${b} AND l.x = \${a} FOR SHARE\`;\nexport const w = (a: string, b: string) => \`INSERT INTO public.warehouses (c, n) VALUES (\${a}, \${b})\`;\n`;
     expect(await hits(code, CONSISTENCY)).toEqual([]);
   });
 });
@@ -490,6 +490,12 @@ const MAIN_VIOLATIONS: [string, string][] = [
   ['UPDATE ${"stock_balances"}', fn('UPDATE ${"stock_balances"} SET a = 1')],
   ['UPDATE ${sql.raw("stock_balances")}', `${RD}import { sql } from "drizzle-orm";\nexport const q = (v: string) => sql\`UPDATE \${sql.raw("stock_balances")} SET a = \${v}\`;\n`],
   ['UPDATE /**/"${t}"', fn('UPDATE /**/"${t}" SET a = 1')],
+  // inceleme turu 5 (@dc79c1d): ON/WITH sonrası virgül, TABLE
+  ["JOIN … ON l.document_id = d.id, ${t} b FOR UPDATE", fn("SELECT 1 FROM documents d JOIN document_lines l ON l.document_id = d.id, ${t} b FOR UPDATE")],
+  ["UPDATE … FROM d JOIN l ON true, ${t} b", fn("UPDATE public.items i SET a = 1 FROM documents d JOIN document_lines l ON true, ${t} b WHERE true")],
+  ["DELETE … USING d JOIN l ON true, ${t} b", fn("DELETE FROM public.items i USING documents d JOIN document_lines l ON true, ${t} b WHERE true")],
+  ["unnest … WITH ORDINALITY AS u(x, n), ${t} b", fn("SELECT 1 FROM unnest(ARRAY[1]) WITH ORDINALITY AS u(x, n), ${t} b FOR UPDATE")],
+  ["TABLE ${t} FOR UPDATE", fn("TABLE ${t} FOR UPDATE")],
   // main'in statik kuralları (a)/(b) ve (c)
   ["UPDATE stock_balances (statik)", 'export const q = "UPDATE stock_balances SET quantity = 0";\n'],
   ["FOR UPDATE stock_balances (statik)", 'export const q = "SELECT 1 FROM stock_balances FOR UPDATE";\n'],
@@ -517,7 +523,7 @@ const MUST_BE_CLEAN: [string, string][] = [
 ];
 describe("MAIN_VIOLATIONS: main'de ihlal veren biçimler bu dalda da ihlaldir (eleman çıkarmak yasak)", () => {
   it("küme boş değildir", () => {
-    expect(MAIN_VIOLATIONS.length).toBeGreaterThanOrEqual(43);
+    expect(MAIN_VIOLATIONS.length).toBeGreaterThanOrEqual(48);
   });
   it.each(MAIN_VIOLATIONS)("MAIN_VIOLATIONS: %s", async (_n, code) => {
     expect((await hits(code, CONSISTENCY)).length).toBeGreaterThanOrEqual(1);
@@ -529,5 +535,59 @@ describe("MUST_BE_CLEAN: meşru SQL temiz kalır (eleman çıkarmak yasak)", () 
   });
   it.each(MUST_BE_CLEAN)("MUST_BE_CLEAN: %s", async (_n, code) => {
     expect(await hits(code, CONSISTENCY)).toEqual([]);
+  });
+});
+
+// T-238 üreteç testi (deterministik, rastgelelik yok): tablo konumlarına `${t}` yerleştirilen dilbilgisi-tabanlı metinler × tırnak/yorum tuzakları.
+// Üretilen HER metinde kural ihlal vermelidir (kanıt başarısız ⇒ main sonucu korunur). Konum ya da tuzak eklemek serbest, çıkarmak yasak.
+describe("üreteç: tablo konumundaki ifade her bağlamda ihlaldir", () => {
+  const POSITIONS = [
+    "SELECT 1 FROM ${t} x FOR UPDATE",
+    "SELECT 1 FROM a, ${t} x FOR UPDATE",
+    "SELECT 1 FROM a JOIN ${t} x ON true FOR UPDATE",
+    "SELECT 1 FROM a LEFT JOIN ${t} x ON true FOR SHARE",
+    "SELECT 1 FROM a JOIN b ON b.x = a.x, ${t} c FOR UPDATE",
+    "SELECT 1 FROM a JOIN b USING (id), ${t} c FOR UPDATE",
+    "DELETE FROM a USING ${t} WHERE true",
+    "DELETE FROM a USING b, ${t} WHERE true",
+    "SELECT 1 FROM unnest(ARRAY[1]) WITH ORDINALITY AS u(x, n), ${t} b FOR UPDATE",
+    "SELECT 1 FROM a CROSS JOIN LATERAL ${t} x FOR UPDATE",
+    "TABLE ${t} FOR UPDATE",
+    "SELECT 1 FROM (SELECT 1 FROM ${t}) s FOR UPDATE",
+    "SELECT 1 FROM a WHERE EXISTS (SELECT 1 FROM ${t}) FOR UPDATE",
+    "WITH c AS (SELECT 1 FROM ${t}) UPDATE a SET x = 1",
+    "WITH c AS (SELECT 1) UPDATE ${t} SET x = 1",
+    "WITH c AS (SELECT 1), d AS (SELECT 2) DELETE FROM ${t}",
+    "UPDATE a SET x = 1 FROM ${t} WHERE true",
+    "UPDATE a SET x = 1 FROM b, ${t} WHERE true",
+    "UPDATE ${t} SET x = 1",
+    "UPDATE ONLY ${t} SET x = 1",
+    "INSERT INTO ${t} (a) VALUES (1)",
+    "INSERT INTO public.${t} (a) VALUES (1)",
+    "INSERT INTO a (x) SELECT x FROM ${t}",
+    "MERGE INTO a USING ${t} ON true WHEN MATCHED THEN DELETE",
+    "TRUNCATE ${t}",
+    "TRUNCATE a, ${t}",
+    "TRUNCATE TABLE ${t} RESTART IDENTITY",
+    'UPDATE "${t}" SET x = 1',
+    "UPDATE stock_${t} SET x = 1",
+  ];
+  const DECOYS = [
+    "",
+    "/* c */ ",
+    "SELECT ')' x; ",
+    "SELECT '(' x, 'it''s' y; ",
+    "SELECT $$)$$ x; ",
+    "SELECT $q$(,$q$ x; ",
+    "SELECT E'\\')' x; ",
+    "SELECT 1 /* ( */ x; ",
+  ];
+  const CASES: [string, string][] = DECOYS.flatMap((d, di) => POSITIONS.map((p, pi): [string, string] => [`d${di}/p${pi}: ${d}${p}`, fn(`${d}${p}`)]));
+  it("üretilen vaka sayısı", () => {
+    expect(CASES).toHaveLength(DECOYS.length * POSITIONS.length);
+    expect(CASES.length).toBeGreaterThanOrEqual(200);
+  });
+  it.each(CASES)("%s → ihlal", async (_n, code) => {
+    expect((await hits(code, CONSISTENCY)).length).toBeGreaterThanOrEqual(1);
   });
 });
