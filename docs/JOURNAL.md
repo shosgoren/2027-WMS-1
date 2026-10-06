@@ -55,3 +55,13 @@
 - E-03 sürüyor (Actions). Yerel hat: T-117 (davet; 0006 tek okuma işlevi + withInvitationTenant; teslim tx dışı; web kuyruğu; getAppDb) ✓, T-118 (kimlik ekranları; Principal isDemo/twoFactorEnabled) ✓, T-121 ✓, T-125 (bağlam üreticisi storage iç modülü) ✓, T-127a lint sınırları ✓ (0·0·0), T-116b ✓ (kritik bulgu → T-115c öncelik).
 - Yeni kartlar: T-116c, T-127a, T-109b; ekler: T-115c (öncelik + job.output), T-129 (log maskeleme), T-118 (QR/önizleme kararları).
 - Tekrarlayan kırılganlık: scripts/guards/protected.test.mjs 5 s zaman aşımı (paralel ajan yükü) → T-008j önceliği.
+
+## 2026-10-06 03:45Z — Supervisor turu
+- E-03 sürüyor (Actions: 03:35Z koşuları 4 s'de logsuz FAIL). Birleştirme yok; yerel hat tam kapasite.
+- T-117b HAZIR @ee15ffa: B1 (saklanan yönetici kimliği belirteç olarak kullanılabiliyordu) → `reset-password:h.<özet>` + before kancasında belirteç biçimi kısıtı (POST ve GET); MINOR 1/2/3/5 ve yeniden inceleme MINOR'ları kapandı; son inceleme 0·0·0, identity 96/96, tam test:int 483/483.
+- T-115c: inceleme 0·1·6 → job.output temizliği (SanitizedJobError, safeErrorName), platform işi görünürlüğü nullif, RLS+yetki tek tx, job üst tablo INSERT kaldırıldı, MFA testi; yeniden 0·0·2 → 0·0·1 (son tek satır). Q-34/A-60 (FORCE RLS altında pg-boss bakımı).
+- T-127: CSP nonce, Origin denetimi, DB hız sınırı üretimde bağlı (`@wms/db consumeRateLimit`). İnceleme 0·2·11 → MAJOR tenant kovası istemci slug'ıyla tüketiliyordu (DoS) → doğrulanmış tenant; server-only worker/vitest'i bozduğu için T-127b (korunan lint kuralı) kartına taşındı.
+- T-119 DUR (okuma verisi yok) → T-119a kartı (domain okuyucuları). T-119a inceleme 0·1·7: liste yolunda `users FOR UPDATE` kilidi (tenant'lar arası login bekletme) → karar: liste probsuz, `resetLinkAvailable` iyimser, kesin karar sıfırlama komutunda; A-61 (üye listesi görünürlüğü).
+- T-008l: protected.test kök nedeni (git spawn 2092→~1550, 4×paralel 5 tur yeşil). İnceleme BLOCKER 2 · MAJOR 2: check:scope gevşemişti (geri alma, sahte merge, uç öneki, iç merge konusu) → kart keşfi değişikliği geri, taban birleştirme düşürmesi yalnızca dar biçimde; negatif testler.
+- T-116c başladı (taban T-116b + T-117).
+- Yeni kayıtlar: T-119a, T-127b kartları; T-115c/T-127/T-117b/T-119 ekleri; T-105, T-129, T-131 notları; Q-34, A-60, A-61.
