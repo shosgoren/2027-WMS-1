@@ -1,10 +1,10 @@
 # STATE (≤80 satır — her görev sonunda Supervisor günceller)
 
-**Oturum kilidi:** session_01C59FRaUynaDdhNGZoRbKsY · 2026-10-06T07:45Z (zamanlanmış oturum: kilit 3 saatten yeniyse ve başka oturumunsa hiçbir şey yapmadan çık; değilse kendi kimliğinle yenile, her push'ta zamanı güncelle)
+**Oturum kilidi:** session_01C59FRaUynaDdhNGZoRbKsY · 2026-10-06T08:50Z (zamanlanmış oturum: kilit 3 saatten yeniyse ve başka oturumunsa hiçbir şey yapmadan çık; değilse kendi kimliğinle yenile, her push'ta zamanı güncelle)
 **Faz:** 1 — Kimlik, tenant, iskelet ekranlar (Faz 0 kapısı GEÇTİ 2026-10-06 00:20Z — JOURNAL)
-**Aktif görev:** Faz 1. **E-03 sürüyor** (Actions; son 07:20Z 4 s'de FAIL; muhtemel neden private repo 2000 dk/ay kotası — kullanıcı kararı bekleniyor: Actions bütçesi ya da public). HAZIR (BLOCKER 0 · MAJOR 0): #39, #40, int/faz1-auth (181756a), T-109b, T-117 395f97b, T-117b ee15ffa, T-118 bcbe9d3, T-121 2dac518, T-125 1fd6840, T-127a a5bd3bb, T-116b 6d13ca5, T-116c 0203602, T-115c 932dab0, T-008l eea351e (korunan), T-119a eb6c733, T-119 0ed52df, T-123 a4a5fb7, T-123a e002035 (korunan), T-127 e11695f, T-127b 6a943ff (korunan), T-129 ce74c03 (korunan), T-122a eeb6c60, T-122 eb64192, T-112d 7d0e0de (0007), T-116d 6263a75. Sürenler: T-126 (denetim ekranı + CSV), T-117d (davet önizlemesi, 0008). Supervisor STATE işleri `/home/user/wt-kapanis`.
-**Son tamamlanan:** #29 Faz 1 planı → main · #38 T-110c · **Faz 0 kapısı** (main c6103a7: test:ac faz 0 5/5 PASS, check:pilot OK, verify OK) · #37 int/faz0-kapanis → main · #36 int/faz0-neon → main · #35 T-005f · #34 T-110b · #33 T-005e · #28 T-110 · #31 neon-spike gecikme bütçesi → main · #26 T-008k → int/faz0-kapanis · #20 `int/faz0-bekciler-2` → `main` (T-008d/e/f/g; bekçiler CI'da taban daldan) · #19 pooler · #13 Fly staging
-**Sonraki adım:** Actions dönünce: #39 → #40 → int/faz1-auth (+T-115c) PR → T-008l PR (korunan) → kart dalları int dallarına (T-109b, T-116b, T-116c, T-116d, T-117, T-117b, T-112d, T-118, T-121, T-125, T-127a, T-127, T-127b, T-119a, T-119, T-123, T-123a, T-129, T-122a, T-122, T-126, T-117d) — dilim birleşiminde entegrasyon düzeltmeleri (JOURNAL 05:45Z). Migration sırası: 0007 T-112d, 0008 T-117d, 0009 T-105c. Sırada: T-131 (e2e + birikmiş notlar), T-008m (protected revParse MINOR); T-105/T-106/T-130 Actions'a bağlı. Paralel uygulama ajanı ≤4.
+**Aktif görev:** Faz 1 kalan: T-126 (HAZIR e6545f0, 0·0·4 sonrası son tur) → `int/faz1-denetim`; T-128 (qa AC-04) + T-131 (e2e) aynı int tabanında; T-105 → T-106 → T-105c/T-130 staging (`int/faz1-staging-db`); sonra T-132 Faz 1 kapısı. #43 (int/faz0-kapanis: T-008l + T-008m bekçi takipleri) CI'da. Supervisor STATE işleri `/home/user/wt-kapanis`.
+**Son tamamlanan:** #42 int/faz1-ekran → main df5205c (08:45Z; 0·0·2) · #41 int/faz1-auth → main 5353a06 · #40 ui-temel 5ac419b · #39 şema 99f2130 · Faz 0 kapısı (main c6103a7) · önceki: JOURNAL
+**Sonraki adım:** #43 yeşilse birleştir · `int/faz1-denetim` = main ← T-126 (verify + test:int + build + paket incelemesi → PR) · T-128/T-131 ajanları bu tabanda · T-105 ajanı (staging DB; Neon/Fly yalnızca Actions'ta) · kullanıcı hesabı gerektiren iş çıkarsa tek mesaj. Migration sırası: 0009 T-105c. Paralel uygulama ajanı ≤4.
 
 ## Çalışma biçimi (kullanıcı kararı 2026-10-05 — ADR-012 rev., PROTOCOL §Onay kaynağı)
 - Kullanıcı PR incelemez. Birleştirme kapısı: CI/oturumda `pnpm verify` + `check:all` + `test:int` + ilgili `test:ac` yeşil; risk matrisine göre `security-reviewer` ve `qa-verifier` BLOCKER: 0 → Supervisor PR'ı kendisi birleştirir (`mcp__github__merge_pull_request`). Korunan değişiklikte PR açıklamasında `APPROVED-BY: supervisor (ADR-012 rev.)`.
@@ -42,7 +42,7 @@ ADR-001 Next.js + ayrı worker · 002 İngilizce kod/DB, Türkçe UI · 003 Driz
 - T-101 Faz 0 kapısından önce başlatıldı (Supervisor kararı: zaman kullanımı); birleştirme kapıdan sonra
 
 ## Engeller
-- E-03 (2026-10-06 00:32Z→) GitHub Actions işleri başlamıyor (logsuz, 2–5 s) — U-08 kullanıcıya bildirildi: Settings → Billing → Actions kullanımı / bütçe. CI yeşil olmadan birleştirme yok; yerel iş sürüyor.
+- E-03 kapandı (2026-10-06 07:55Z): kullanıcı repoyu PUBLIC yaptı; Actions koşuyor (#39–#42 CI yeşil).
 - U-06 kapandı (2026-10-05): kullanıcı `FLY_API_TOKEN`'ı uygulama kapsamlı deploy token'la değiştirdi; doğrulama dispatch koşusu yeşil https://github.com/shosgoren/2027-WMS-1/actions/runs/37356910665. Eski org token'ın iptali kullanıcıya hatırlatıldı.
 - U-07 kapandı (2026-10-05): kullanıcı `NEON_API_KEY`'i `etkin-wms` proje kapsamlı anahtarla değiştirdi; doğrulama ilk neon-spike koşusunda.
 - U-01 Neon: kullanıcı 2026-10-05 tamamladığını bildirdi (proje etkin-wms, AWS Frankfurt, PG 17; `NEON_API_KEY` sırrı + `NEON_PROJECT_ID` değişkeni). Doğrulama T-005d ilk Actions koşusunda → T-005d

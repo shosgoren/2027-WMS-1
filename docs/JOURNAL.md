@@ -95,3 +95,29 @@
 - HAZIR: T-122 eb64192 (landing, demo girişi, sihirbaz, ana ekran, Bugün yaptıkların, ayarlar — inceleme turları 0·1·6 → 0·0·3 → 0·0·2 → kapandı), T-112d 7d0e0de (migration 0007 kimlik olayı sınıfı: account[_.], demo.(account|password)[_.]; demo.action_forbidden wms_app'e açık), T-116d 6263a75 (self-servis sıfırlama e-postası üretimde; kuyruk yalnızca reset isteğinde, backgroundTasks ile zamanlama farkı kapandı — 20/20 ölçüm), T-115c düşük yükte verify OK.
 - Yeni kartlar: T-112d, T-116d, T-117d (davet önizlemesi, 0008). Migration numaraları: 0007 T-112d, 0008 T-117d, 0009 T-105c.
 - Başladı: T-126 (denetim ekranı + CSV export), T-117d.
+
+## 2026-10-06 08:50Z — Supervisor turu
+- E-03 kapandı: kullanıcı repoyu PUBLIC yaptı (07:55Z); Actions koşuyor.
+- MERGED: #39 99f2130, #40 5ac419b, #41 int/faz1-auth 5353a06 (paket 0·0·4), #42 int/faz1-ekran df5205c (paket 0·0·2).
+- #43 int/faz0-kapanis → main açıldı (T-008l + T-008m; güvenlik @f1e2d77 0·0·0). Bulgu: check:scope MERGED_BRANCH `(feat/…` öncesini eşlemez → birleştirme konusunda dal adları boşlukla ayrılır (T-131 notu; bekçi gevşetilmedi).
+- T-126 HAZIR e6545f0: deterministik kesit yarışı testi (dışlama kaldırılınca kırmızı), route testleri (Sec-Fetch-Site 403 sayaç tüketmez, akış ortası oturum düşmesi, maskeli onError). Dev hot-reload havuz kapatma bilerek yapılmadı (canlı kardeş kopyanın havuzunu öldürür; ADR gerekir). Risk: route `@wms/auth` doğrudan içe aktarıyor — #42 sonrası entegrasyonda lint ile kontrol.
+- Birikmiş tur notları (state-pending):
+  - T-008m kartı + ajan (wt-T-008m tabanı T-008l eea351e) — revParse hata ayrımı.
+  - T-117d @34b4122 (0008 invitation_preview_for_token; previewInvitation; sayfa IP sınırı; tam test:int 618/618, verify 1710, build OK; iki allowlist testine yalnızca yeni işlev eki — kart eki) → güvenlik incelemesi.
+  - T-117d inceleme @34b4122 0·0·3 GEÇTİ → IP çözülemezse 500 yerine nötr metin + test son tur; MINOR 2-3 T-131.
+  - T-117d HAZIR @c02ddf5 (invite-guard: IP çözülemezse nötr metin, hız sınırı, beklenmeyen hata fail-closed; verify 1714, build OK).
+  - T-008m @83ccccf (revParse yalnızca çıkış 1 + boş çıktı → null; ^{commit} soyulması kaldırıldı — gerekçeli sapma; guards 545, 4×3 paralel yeşil) → güvenlik incelemesi (korunan).
+  - 07:55Z kullanıcı repoyu PUBLIC yaptı → Actions işleri başlıyor (E-03 çözülüyor). #39 gövdesi APPROVED-BY @041afb6 güncellendi; CI yeniden koşuyor. int/faz1-sema'ya #39 birleşene kadar docs push yok (kart notları beklemede).
+  - T-008m inceleme @83ccccf 0·0·4 GEÇTİ (gevşeme yok, bazı durumlarda daha sıkı) → son tur: GitError ham stdout yok, yorum, findPull/stderr testleri, güçlü silinmiş ebeveyn testi; korunan → son SHA kontrolü gerekecek.
+  - T-126 @6c11483 (listAudit keyset, openAuditExport snapshot kesiti + parça başı tx, csv enjeksiyon kaçışı, route guard 2/dk; tam test:int 594/594, verify 1715, build OK, Playwright) → güvenlik incelemesi. Kart eki BEKLİYOR (int/faz1-sema #39 birleşince yazılacak): packages/db/src/client.ts (rawByClient globalThis — Next çoklu bundle hatası), packages/domain/package.json, apps/web/lib/action-guard.ts. T-128 (qa) önerildi.
+  - T-008m HAZIR @f1e2d77 (son kontrol 0·0·0; korunan). #39 MERGED 99f2130 (08:00Z). #40: main birleştirildi 5672d8d (verify 1034 OK, check:all OK) → CI.
+  - int/faz1-auth hazırlığı (wt-auth yerel d2a55b6, push YOK): T-116b + T-115c tabanında T-117 (+T-109b) ve ui-temel var → check:scope 28 dosya (14 ui-temel, 14 T-117). Plan: #40 main'e birleşince yeniden kur: 181756a ← T-117 (konu T-117, T-109b) ← T-116b ← T-115c ← main; verify + test:int + check:all; paket incelemesi; PR int/faz1-auth → main.
+  - T-126 inceleme @6c11483 1·2·5: BLOCKER client.ts globalThis rawByClient (RLS atlatma yolu) → geri al, serverExternalPackages ya da kopya başı havuz; MAJOR export olayı kesitte görünür (createdXid dışla), CSV ';' enjeksiyonu. Ajan düzeltiyor.
+  - 08:10Z #40 MERGED 5ac419b. int/faz1-auth yeniden kuruldu (wt-auth 5adced9 yerel: 181756a ← T-117 ← T-116b ← T-115c ← main; check:all OK) — verify + test:int arka planda (ilk koşu konteyner yeniden başlatmasında/OOM 137 ile düştü). Konteyner yeniden başladı: T-126 ajanı yeniden başlatıldı (yarım değişikliklerden devam).
+  - int/faz1-auth @5adced9 push + PR #41 → main açıldı (verify 1308, test:int 469/469, check:all OK); paket incelemesi sürüyor; PR etkinliğine abone.
+  - #41 paket incelemesi @5adced9 0·0·4 → gövde APPROVED-BY + security-reviewer eklendi. MINOR takipleri (main birleşince kartlara): deliver-invitation platform/BETTER_AUTH_URL kalıcı hata (T-131 ya da T-116 takibi), staging DATABASE_URL_WORKER/wms_worker/installQueueSchema (T-105/T-106), STACK pg-boss yetki notu düzelt, 15-engineering AppError tablosu VALIDATION_FAILED.
+  - 08:20Z #41 int/faz1-auth MERGED → main 5353a06. T-126 @5da58eb (BLOCKER geri alındı: rawByClient modül yerel, getAppDb kopya başı havuz; serverExternalPackages işe yaramadı; MAJOR'lar + MINOR'lar; tam test:int 596/596) → yeniden inceleme. Kapsam dışı bulgu: workspace.ts Symbol.for('wms.onboarding.appDb') yuvası.
+  - int/faz1-ekran yerel (wt-ekran d1c7cf0): main + T-117d üst kümesi (T-112d, T-123a, T-123, T-117b, T-118, T-121, T-122/a, T-119/a, T-127/a, T-116c, T-125, T-109b) + T-127b + T-129 + T-116d; çakışmalar: .env.example/db index (iki taraf), invite page (önizleme + auth-service yolu); kart eşleme boş-ağaç birleşimi 24a7e5f; kart ekleri d1c7cf0; check:all OK. verify/test:int/build arka planda.
+  - T-126 yeniden inceleme @5da58eb 0·0·4 GEÇTİ (BLOCKER kapandı) → son tur: deterministik yarış testi, dev hot-reload havuz sızıntısı, route testleri.
+  - int/faz1-ekran @d1c7cf0 push; verify 1922, test:int 630/630, build OK; PR #42 → main açıldı, paket incelemesi sürüyor, abone.
+  - #42 paket incelemesi @d1c7cf0 0·0·2 → gövde APPROVED-BY + security-reviewer eklendi. MINOR → T-131: /login demo bandı demo-config yardımcısını kullansın; @wms/auth portsuz dışa aktarım lint koruması (zaten not).
