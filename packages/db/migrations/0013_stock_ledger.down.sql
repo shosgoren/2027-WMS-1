@@ -20,6 +20,9 @@ BEGIN
 END
 $guard$;
 
+DROP TRIGGER reservations_set_item_id ON public.reservations;
+DROP TRIGGER stock_ledger_set_item_id ON public.stock_ledger;
+DROP TRIGGER stock_dimensions_check_tracking ON public.stock_dimensions;
 DROP TRIGGER reservations_assert ON public.reservations;
 DROP TRIGGER stock_ledger_assert ON public.stock_ledger;
 DROP TRIGGER stock_balances_assert ON public.stock_balances;
@@ -32,6 +35,8 @@ DROP TRIGGER stock_ledger_append_only ON public.stock_ledger;
 DROP TRIGGER stock_dimensions_no_truncate ON public.stock_dimensions;
 DROP TRIGGER stock_dimensions_immutable ON public.stock_dimensions;
 
+DROP FUNCTION public.stock_dimensions_check_tracking();
+DROP FUNCTION public.stock_set_item_id();
 DROP FUNCTION public.stock_assert_trigger();
 DROP FUNCTION public.stock_assert_dimension(uuid, uuid);
 DROP FUNCTION public.reservations_guard_update();
@@ -44,3 +49,4 @@ DROP TABLE public.reservations;
 DROP TABLE public.stock_ledger;
 DROP TABLE public.stock_balances;
 DROP TABLE public.stock_dimensions;
+ALTER TABLE public.document_lines DROP CONSTRAINT document_lines_tenant_id_id_item_key;

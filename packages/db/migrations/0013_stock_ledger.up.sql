@@ -19,6 +19,18 @@
 -- * Sunucu alanları: stock_ledger.created_xid ve occurred_at BEFORE INSERT tetikleyicisiyle sunucu değerine zorlanır; wms_app INSERT
 --   yetkisi ikisini kapsamaz (kart yalnızca created_xid der; occurred_at 0012 document_status_history emsaliyle eklendi — sapma).
 -- * Rezervasyon: ACTIVE dışı (CONSUMED/RELEASED) satır sonlanmıştır, değiştirilemez (ADR-009; varsayım). INSERT yalnızca ACTIVE açar.
+-- * Ürün tutarlılığı (ADR-017 §2, M-3 / MAJOR-1): stock_ledger ve reservations'a item_id eklenir. Değer BEFORE INSERT (reservations'ta
+--   ayrıca BEFORE UPDATE) ENABLE ALWAYS tetikleyicisiyle HER ZAMAN boyutun item_id'sinden türetilir (istemci veremez); bileşik FK'ler
+--   (tenant_id, stock_dimension_id, item_id) → stock_dimensions ve (tenant_id, document_line_id, item_id) → document_lines (yeni
+--   UNIQUE (tenant_id, id, item_id)) belge satırının ürününün boyutun ürünüyle eşit olmasını DB'de zorlar. Reservations.stock_dimension_id
+--   UPDATE yetkisi KALIR (ADR-017 §7: toplamada rezervasyon hedef boyuta taşınır); aynı denetim UPDATE'te de çalışır (item_id yeniden
+--   türetilir, satır FK'si başka ürüne taşımayı reddeder). FK'nin yan etkisi: defter/rezervasyonun bağlandığı satırın item_id'si değişemez.
+-- * Takip modu (MAJOR-2): stock_dimensions BEFORE INSERT ENABLE ALWAYS tetikleyicisi ürünün tracking_mode'una göre lot/seri doluluğunu
+--   zorlar (NONE: ikisi NULL; LOT: lot dolu, seri NULL; SERIAL: seri dolu, lot NULL; LOT_AND_SERIAL: ikisi dolu) ve seri doluysa serinin
+--   lot_id'sinin boyutun lot_id'sine eşit olmasını ister (MINOR-6). Bileşik FK yerine tetikleyici: tracking_mode'u boyuta kopyalamak
+--   istemciye ek sütun yükler; boyut değişmez ve items.tracking_mode değişmez (A-87), bu yüzden INSERT anı denetimi yeterlidir.
+-- * MINOR-5 (defter yalnızca APPROVED + posting_job_id dolu belgede): UYGULANMADI — ADR-018 §2 senkron yolda (≤ 200 satır) posting_job_id
+--   hiç yazılmaz ve defter/belge durumu aynı transaction'da sıralanır; kural senkron akışı kırardı. Q önerisi raporda.
 -- * Miktarlar numeric(20,6); float yok (I-09).
 -- Koşturucu tek transaction içinde çalıştırır.
 
@@ -34,6 +46,9 @@ BEGIN
   END IF;
 END
 $pre$;
+
+-- Defter/rezervasyon bileşik FK hedefi (MAJOR-1): satırın ürünü.
+ALTER TABLE public.document_lines ADD CONSTRAINT document_lines_tenant_id_id_item_key UNIQUE (tenant_id, id, item_id);
 
 -- ---------------------------------------------------------------------------------------------
 -- 1. Tablolar
@@ -53,6 +68,7 @@ CREATE TABLE public.stock_dimensions (
   CONSTRAINT stock_dimensions_pkey PRIMARY KEY (id),
   CONSTRAINT stock_dimensions_tenant_id_id_key UNIQUE (tenant_id, id),
   CONSTRAINT stock_dimensions_tenant_id_id_serial_key_key UNIQUE (tenant_id, id, serial_key),
+  CONSTRAINT stock_dimensions_tenant_id_id_item_key UNIQUE (tenant_id, id, item_id),
   CONSTRAINT stock_dimensions_natural_key UNIQUE NULLS NOT DISTINCT
     (tenant_id, item_id, location_id, lot_id, serial_id, stock_status, inventory_owner_id, handling_unit_id),
   CONSTRAINT stock_dimensions_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants (id),
@@ -96,6 +112,7 @@ CREATE TABLE public.stock_ledger (
   document_id        uuid           NOT NULL,
   document_line_id   uuid           NOT NULL,
   stock_dimension_id uuid           NOT NULL,
+  item_id            uuid           NOT NULL,
   quantity           numeric(20, 6) NOT NULL,
   reason             text           NOT NULL,
   business_date      date           NOT NULL,
@@ -105,7 +122,10 @@ CREATE TABLE public.stock_ledger (
   CONSTRAINT stock_ledger_pkey PRIMARY KEY (id),
   CONSTRAINT stock_ledger_tenant_id_id_key UNIQUE (tenant_id, id),
   CONSTRAINT stock_ledger_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants (id),
-  CONSTRAINT stock_ledger_dimension_fkey FOREIGN KEY (tenant_id, stock_dimension_id) REFERENCES public.stock_dimensions (tenant_id, id),
+  CONSTRAINT stock_ledger_dimension_fkey FOREIGN KEY (tenant_id, stock_dimension_id, item_id)
+    REFERENCES public.stock_dimensions (tenant_id, id, item_id),
+  CONSTRAINT stock_ledger_line_item_fkey FOREIGN KEY (tenant_id, document_line_id, item_id)
+    REFERENCES public.document_lines (tenant_id, id, item_id),
   CONSTRAINT stock_ledger_document_line_fkey FOREIGN KEY (tenant_id, document_id, document_line_id)
     REFERENCES public.document_lines (tenant_id, document_id, id),
   CONSTRAINT stock_ledger_quantity_chk CHECK (quantity <> 0),
@@ -121,6 +141,7 @@ CREATE TABLE public.reservations (
   id                 uuid           NOT NULL DEFAULT gen_random_uuid(),
   stock_dimension_id uuid           NOT NULL,
   document_line_id   uuid           NOT NULL,
+  item_id            uuid           NOT NULL,
   quantity           numeric(20, 6) NOT NULL,
   status             text           NOT NULL DEFAULT 'ACTIVE',
   expires_at         timestamptz,
@@ -129,11 +150,15 @@ CREATE TABLE public.reservations (
   CONSTRAINT reservations_pkey PRIMARY KEY (id),
   CONSTRAINT reservations_tenant_id_id_key UNIQUE (tenant_id, id),
   CONSTRAINT reservations_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants (id),
-  CONSTRAINT reservations_dimension_fkey FOREIGN KEY (tenant_id, stock_dimension_id) REFERENCES public.stock_dimensions (tenant_id, id),
+  CONSTRAINT reservations_dimension_fkey FOREIGN KEY (tenant_id, stock_dimension_id, item_id)
+    REFERENCES public.stock_dimensions (tenant_id, id, item_id),
   CONSTRAINT reservations_document_line_fkey FOREIGN KEY (tenant_id, document_line_id) REFERENCES public.document_lines (tenant_id, id),
+  CONSTRAINT reservations_line_item_fkey FOREIGN KEY (tenant_id, document_line_id, item_id)
+    REFERENCES public.document_lines (tenant_id, id, item_id),
   CONSTRAINT reservations_quantity_chk CHECK (quantity > 0),
   CONSTRAINT reservations_status_chk CHECK (status IN ('ACTIVE', 'CONSUMED', 'RELEASED')),
-  CONSTRAINT reservations_closed_chk CHECK ((status = 'ACTIVE') = (closed_at IS NULL))
+  CONSTRAINT reservations_closed_chk CHECK ((status = 'ACTIVE') = (closed_at IS NULL)),
+  CONSTRAINT reservations_expires_chk CHECK (expires_at IS NULL OR expires_at > created_at)
 );
 CREATE INDEX reservations_active_sum_idx ON public.reservations (tenant_id, stock_dimension_id) INCLUDE (quantity) WHERE status = 'ACTIVE';
 CREATE INDEX reservations_dimension_idx ON public.reservations (tenant_id, stock_dimension_id);
@@ -181,6 +206,62 @@ REVOKE ALL ON FUNCTION public.stock_ledger_force_server_fields() FROM PUBLIC;
 CREATE TRIGGER stock_ledger_server_fields BEFORE INSERT ON public.stock_ledger
   FOR EACH ROW EXECUTE FUNCTION public.stock_ledger_force_server_fields();
 ALTER TABLE public.stock_ledger ENABLE ALWAYS TRIGGER stock_ledger_server_fields;
+
+-- 2b'. item_id boyuttan türetilir (istemci değeri HER ZAMAN ezilir). Boyut görünmüyorsa (yok / başka tenant) sıfır UUID sentineli kalır:
+--      bileşik FK 23503 verir (NOT NULL 23502'den önce yanlış sınıf dönmesin).
+CREATE FUNCTION public.stock_set_item_id() RETURNS trigger
+  LANGUAGE plpgsql
+  SET search_path = pg_catalog, pg_temp
+AS $fn$
+BEGIN
+  SELECT d.item_id INTO NEW.item_id FROM public.stock_dimensions d
+   WHERE d.tenant_id = NEW.tenant_id AND d.id = NEW.stock_dimension_id;
+  IF NOT FOUND THEN
+    NEW.item_id := '00000000-0000-0000-0000-000000000000';
+  END IF;
+  RETURN NEW;
+END
+$fn$;
+REVOKE ALL ON FUNCTION public.stock_set_item_id() FROM PUBLIC;
+CREATE TRIGGER stock_ledger_set_item_id BEFORE INSERT ON public.stock_ledger
+  FOR EACH ROW EXECUTE FUNCTION public.stock_set_item_id();
+CREATE TRIGGER reservations_set_item_id BEFORE INSERT OR UPDATE ON public.reservations
+  FOR EACH ROW EXECUTE FUNCTION public.stock_set_item_id();
+ALTER TABLE public.stock_ledger ENABLE ALWAYS TRIGGER stock_ledger_set_item_id;
+ALTER TABLE public.reservations ENABLE ALWAYS TRIGGER reservations_set_item_id;
+
+-- 2b''. Boyut: ürünün takip moduna göre lot/seri doluluğu (MAJOR-2) ve serinin lotu ile boyutun lotu eşitliği (MINOR-6).
+CREATE FUNCTION public.stock_dimensions_check_tracking() RETURNS trigger
+  LANGUAGE plpgsql
+  SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+  mode text;
+  s_lot uuid;
+  s_found boolean;
+BEGIN
+  SELECT i.tracking_mode INTO mode FROM public.items i WHERE i.tenant_id = NEW.tenant_id AND i.id = NEW.item_id;
+  IF NOT FOUND THEN
+    RETURN NEW; -- ürün yok / görünmüyor: bileşik FK 23503 verir
+  END IF;
+  IF (mode IN ('LOT', 'LOT_AND_SERIAL')) <> (NEW.lot_id IS NOT NULL)
+     OR (mode IN ('SERIAL', 'LOT_AND_SERIAL')) <> (NEW.serial_id IS NOT NULL) THEN
+    RAISE EXCEPTION 'TRACKING_VIOLATION: ürün takip modu % ile boyutun lot/seri alanları uyuşmuyor', mode USING ERRCODE = '23514';
+  END IF;
+  IF NEW.serial_id IS NOT NULL THEN
+    SELECT sr.lot_id, true INTO s_lot, s_found FROM public.serials sr
+     WHERE sr.tenant_id = NEW.tenant_id AND sr.item_id = NEW.item_id AND sr.id = NEW.serial_id;
+    IF s_found AND s_lot IS DISTINCT FROM NEW.lot_id THEN
+      RAISE EXCEPTION 'TRACKING_VIOLATION: serinin lotu boyutun lotuyla eşleşmiyor' USING ERRCODE = '23514';
+    END IF;
+  END IF;
+  RETURN NEW;
+END
+$fn$;
+REVOKE ALL ON FUNCTION public.stock_dimensions_check_tracking() FROM PUBLIC;
+CREATE TRIGGER stock_dimensions_check_tracking BEFORE INSERT ON public.stock_dimensions
+  FOR EACH ROW EXECUTE FUNCTION public.stock_dimensions_check_tracking();
+ALTER TABLE public.stock_dimensions ENABLE ALWAYS TRIGGER stock_dimensions_check_tracking;
 
 -- 2c. stock_balances: serial_key boyuttan türetilir (istemci değeri yok sayılır); anahtar sütunlar değişmez.
 CREATE FUNCTION public.stock_balances_fill_serial_key() RETURNS trigger
@@ -234,6 +315,12 @@ BEGIN
   END IF;
   IF OLD.status <> 'ACTIVE' THEN
     RAISE EXCEPTION 'reservations: sonlanmış rezervasyon (%) değiştirilemez', OLD.status USING ERRCODE = '23514';
+  END IF;
+  -- closed_at sunucu değeridir (istemci veremez): terminale geçişte now(), ACTIVE kalırsa NULL.
+  IF NEW.status <> 'ACTIVE' THEN
+    NEW.closed_at := pg_catalog.now();
+  ELSE
+    NEW.closed_at := NULL;
   END IF;
   RETURN NEW;
 END
@@ -346,7 +433,7 @@ GRANT SELECT ON public.stock_ledger TO wms_app;
 GRANT INSERT (tenant_id, id, document_id, document_line_id, stock_dimension_id, quantity, reason, business_date, actor_user_id)
   ON public.stock_ledger TO wms_app;
 
--- closed_at INSERT'te yok: yalnızca ACTIVE rezervasyon açılabilir.
+-- closed_at ne INSERT'te ne UPDATE'te var (sunucu now() yazar); item_id de yok (tetikleyici boyuttan türetir).
 GRANT SELECT ON public.reservations TO wms_app;
 GRANT INSERT (tenant_id, id, stock_dimension_id, document_line_id, quantity, status, expires_at) ON public.reservations TO wms_app;
-GRANT UPDATE (stock_dimension_id, quantity, status, closed_at) ON public.reservations TO wms_app;
+GRANT UPDATE (stock_dimension_id, quantity, status) ON public.reservations TO wms_app;
