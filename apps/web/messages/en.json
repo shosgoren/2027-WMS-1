@@ -426,6 +426,60 @@
     },
     "other": "You did something."
   },
+  "auditLog": {
+    "title": "Who did what?",
+    "intro": "A record of what was done in the workspace. Newest first.",
+    "locked": "You do not have permission to view the audit log.",
+    "lockedAction": "Ask your workspace administrator.",
+    "from": "From date",
+    "to": "To date",
+    "action": "Action",
+    "allActions": "All actions",
+    "filter": "Filter",
+    "export": "Download CSV",
+    "exportNote": "You can download at most 2 times a minute; you may be asked to sign in again first.",
+    "empty": "No records match this filter.",
+    "more": "Load more",
+    "back": "Back to home",
+    "system": "System",
+    "colDate": "Date",
+    "colPerson": "Person",
+    "colAction": "Action",
+    "colRecord": "Record",
+    "colReason": "Reason",
+    "recentAuth": "You need to confirm your identity again to download the CSV.",
+    "recentAuthAction": "Sign in again and retry.",
+    "loginLink": "Sign in again",
+    "actions": {
+      "member": {
+        "invited": "Member invited",
+        "removed": "Member removed",
+        "role_changed": "Member role changed",
+        "left": "Member left"
+      },
+      "ownership": {
+        "transferred": "Ownership transferred"
+      },
+      "invitation": {
+        "revoked": "Invitation revoked",
+        "accepted": "Invitation accepted"
+      },
+      "tenant": {
+        "created": "Workspace created",
+        "settings_changed": "Settings changed"
+      },
+      "onboarding": {
+        "step_completed": "Setup step completed"
+      },
+      "password_reset_link": {
+        "issued": "Password reset link issued"
+      },
+      "audit": {
+        "exported": "Audit log exported"
+      },
+      "other": "Other action"
+    }
+  },
   "settings": {
     "title": "Workspace settings",
     "intro": "Change the workspace name, language and time zone here.",

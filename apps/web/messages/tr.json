@@ -426,6 +426,60 @@
     },
     "other": "Bir işlem yaptın."
   },
+  "auditLog": {
+    "title": "Kim ne yaptı?",
+    "intro": "Çalışma alanında yapılan işlemlerin kaydı. En yeni en üstte.",
+    "locked": "Denetim kaydını görmek için yetkin yok.",
+    "lockedAction": "Çalışma alanı yöneticine sor.",
+    "from": "Başlangıç tarihi",
+    "to": "Bitiş tarihi",
+    "action": "İşlem",
+    "allActions": "Tüm işlemler",
+    "filter": "Süz",
+    "export": "CSV indir",
+    "exportNote": "Dakikada en fazla 2 kez indirebilirsin; indirmeden önce yeniden giriş istenebilir.",
+    "empty": "Bu süzgece uyan kayıt yok.",
+    "more": "Daha fazla",
+    "back": "Ana sayfaya dön",
+    "system": "Sistem",
+    "colDate": "Tarih",
+    "colPerson": "Kişi",
+    "colAction": "İşlem",
+    "colRecord": "Kayıt",
+    "colReason": "Gerekçe",
+    "recentAuth": "CSV indirmek için kimliğini yeniden doğrulaman gerekiyor.",
+    "recentAuthAction": "Yeniden giriş yapıp tekrar dene.",
+    "loginLink": "Yeniden giriş yap",
+    "actions": {
+      "member": {
+        "invited": "Üye davet edildi",
+        "removed": "Üye çıkarıldı",
+        "role_changed": "Üyenin rolü değişti",
+        "left": "Üye ayrıldı"
+      },
+      "ownership": {
+        "transferred": "Sahiplik devredildi"
+      },
+      "invitation": {
+        "revoked": "Davet iptal edildi",
+        "accepted": "Davet kabul edildi"
+      },
+      "tenant": {
+        "created": "Çalışma alanı oluşturuldu",
+        "settings_changed": "Ayarlar değişti"
+      },
+      "onboarding": {
+        "step_completed": "Kurulum adımı tamamlandı"
+      },
+      "password_reset_link": {
+        "issued": "Parola sıfırlama bağlantısı verildi"
+      },
+      "audit": {
+        "exported": "Denetim kaydı dışa aktarıldı"
+      },
+      "other": "Diğer işlem"
+    }
+  },
   "settings": {
     "title": "Çalışma alanı ayarları",
     "intro": "Çalışma alanının adını, dilini ve saat dilimini buradan değiştirebilirsin.",
