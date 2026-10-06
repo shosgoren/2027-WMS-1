@@ -447,12 +447,14 @@ describe("demo kullanıcısı kısıtları (M9)", () => {
     expect((await ba("GET", "/list-sessions", undefined, cookie)).status).toBe(403);
     await ba("POST", "/sign-out", {}, cookie);
     const bad = await ba("POST", "/sign-in/email", { email: DEMO_ROLES.READ_ONLY, password: OTHER_PASSWORD }, "");
-    expect(bad.status).toBeGreaterThanOrEqual(400);
+    expect(bad.status).toBe(401); // gözlenen: yanlış parola → 401
     const ev = await q<{ event_type: string; ip: string | null; user_agent: string | null }>(
       "SELECT event_type, ip, user_agent FROM public.security_events WHERE user_id = ANY($1::uuid[])",
       [Object.values(ids)],
     );
-    expect(ev.length).toBeGreaterThan(0);
+    // Bu testin ürettiği olay türleri gerçekten oluştu (aksi halde sızıntı denetimi boş kümede geçerdi).
+    const types = new Set(ev.map((e) => e.event_type));
+    for (const t of ["login_succeeded", "demo.action_forbidden", "logout", "login_failed"]) expect(types.has(t), t).toBe(true);
     const leaking = ev.filter((e) => e.ip !== null || e.user_agent !== null).map((e) => e.event_type);
     expect([...new Set(leaking)].sort()).toEqual([]);
   }, 60_000);
