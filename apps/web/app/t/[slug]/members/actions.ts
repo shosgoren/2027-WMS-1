@@ -14,8 +14,9 @@ import {
 import { inviteMember, revokeInvitation, type InvitationDeps } from "@wms/domain/identity/invitations";
 import { ROLE_KEYS } from "@wms/domain/identity/permissions";
 import { loadMailConfig } from "@wms/shared/mailer";
+import { getAppDb } from "@wms/db";
 import { headers } from "next/headers";
-import { createProductionGuard, getAppDb } from "../../../../lib/action-guard.ts";
+import { createProductionGuard } from "../../../../lib/action-guard.ts";
 import { getSenderQueue } from "../../../../lib/queue.ts";
 
 const slugSchema = z.string().min(1).max(63);
