@@ -1,10 +1,10 @@
 # STATE (≤80 satır — her görev sonunda Supervisor günceller)
 
-**Oturum kilidi:** session_01C59FRaUynaDdhNGZoRbKsY · 2026-10-05T23:55Z (zamanlanmış oturum: kilit 3 saatten yeniyse ve başka oturumunsa hiçbir şey yapmadan çık; değilse kendi kimliğinle yenile, her push'ta zamanı güncelle)
-**Faz:** 0 — Kararlar & iskelet
-**Aktif görev:** Faz 0 kapısı. **Neon koşu 3 PASS** (run 37388724069: Q-01 aws-eu-central-1 · Q-02 PgBouncer transaction, sürüm gözlenemedi · Q-04 prepare=false 0 hata · Q-05 PG 18.6 · Q-06 yalnızca düz parola; AC-05 pool1/2 + AC-28 + harness PASS; RTT p95 113 ms). #33 T-005e → int/faz0-neon birleşti (0763930). T-005f (architect, wt-T-005f) ADR-004/STACK/OQ'ya işliyor → PR → int/faz0-neon → main; int/faz0-kapanis → main; sonra `pnpm test:ac --phase 0` + check:pilot + JOURNAL kapı raporu. #28 T-110 → int/faz1-ui-temel birleşti (ad6c254); T-110b güvenlik incelemesi sürüyor. Faz 1 yığını (birleştirme kapıdan sonra): T-115 0468d7e (0·0·1) + T-115b 62ec6d2 (0·0·0) hazır · T-112b cd0bf42 (test:int 245/245) inceleme sürüyor · çalışan: T-116 mailer, T-113 (wt-T-113 = T-112b+T-115), T-112c (← T-112b). Bekleyen PR'lar: #29 Faz 1 planı, #30 T-101. Supervisor STATE işleri `/home/user/wt-kapanis`'ta.
-**Son tamamlanan:** #33 T-005e · #28 T-110 · #31 neon-spike gecikme bütçesi → main · #26 T-008k → int/faz0-kapanis · #20 `int/faz0-bekciler-2` → `main` (T-008d/e/f/g; bekçiler CI'da taban daldan) · #19 pooler · #13 Fly staging
-**Sonraki adım:** Faz 1 planı güvenlik 3. tur @b400466 BLOCKER 0 · MAJOR 0 · MINOR 8 → MINOR'lar kartlara → ADR-014/015/016 kabul PR'ı (korunan). #25/#26/#27 CI yeşilse birleştir. T-005d (Neon Actions koşusu; iş akışı main'e girince dispatch) → T-005e/f; T-008j; T-004b; T-009b canlı AC-43; sonra Faz 0 kapısı (`pnpm test:ac --phase 0` + check:pilot + JOURNAL kapı raporu) → Faz 1 kart seti (architect).
+**Oturum kilidi:** session_01C59FRaUynaDdhNGZoRbKsY · 2026-10-06T08:50Z (zamanlanmış oturum: kilit 3 saatten yeniyse ve başka oturumunsa hiçbir şey yapmadan çık; değilse kendi kimliğinle yenile, her push'ta zamanı güncelle)
+**Faz:** 1 — Kimlik, tenant, iskelet ekranlar (Faz 0 kapısı GEÇTİ 2026-10-06 00:20Z — JOURNAL)
+**Aktif görev:** Faz 1 kalan: T-126 (HAZIR e6545f0, 0·0·4 sonrası son tur) → `int/faz1-denetim`; T-128 (qa AC-04) + T-131 (e2e) aynı int tabanında; T-105 → T-106 → T-105c/T-130 staging (`int/faz1-staging-db`); sonra T-132 Faz 1 kapısı. #43 (int/faz0-kapanis: T-008l + T-008m bekçi takipleri) CI'da. Supervisor STATE işleri `/home/user/wt-kapanis`.
+**Son tamamlanan:** #42 int/faz1-ekran → main df5205c (08:45Z; 0·0·2) · #41 int/faz1-auth → main 5353a06 · #40 ui-temel 5ac419b · #39 şema 99f2130 · Faz 0 kapısı (main c6103a7) · önceki: JOURNAL
+**Sonraki adım:** #43 yeşilse birleştir · `int/faz1-denetim` = main ← T-126 (verify + test:int + build + paket incelemesi → PR) · T-128/T-131 ajanları bu tabanda · T-105 ajanı (staging DB; Neon/Fly yalnızca Actions'ta) · kullanıcı hesabı gerektiren iş çıkarsa tek mesaj. Migration sırası: 0009 T-105c. Paralel uygulama ajanı ≤4.
 
 ## Çalışma biçimi (kullanıcı kararı 2026-10-05 — ADR-012 rev., PROTOCOL §Onay kaynağı)
 - Kullanıcı PR incelemez. Birleştirme kapısı: CI/oturumda `pnpm verify` + `check:all` + `test:int` + ilgili `test:ac` yeşil; risk matrisine göre `security-reviewer` ve `qa-verifier` BLOCKER: 0 → Supervisor PR'ı kendisi birleştirir (`mcp__github__merge_pull_request`). Korunan değişiklikte PR açıklamasında `APPROVED-BY: supervisor (ADR-012 rev.)`.
@@ -42,6 +42,7 @@ ADR-001 Next.js + ayrı worker · 002 İngilizce kod/DB, Türkçe UI · 003 Driz
 - T-101 Faz 0 kapısından önce başlatıldı (Supervisor kararı: zaman kullanımı); birleştirme kapıdan sonra
 
 ## Engeller
+- E-03 kapandı (2026-10-06 07:55Z): kullanıcı repoyu PUBLIC yaptı; Actions koşuyor (#39–#42 CI yeşil).
 - U-06 kapandı (2026-10-05): kullanıcı `FLY_API_TOKEN`'ı uygulama kapsamlı deploy token'la değiştirdi; doğrulama dispatch koşusu yeşil https://github.com/shosgoren/2027-WMS-1/actions/runs/37356910665. Eski org token'ın iptali kullanıcıya hatırlatıldı.
 - U-07 kapandı (2026-10-05): kullanıcı `NEON_API_KEY`'i `etkin-wms` proje kapsamlı anahtarla değiştirdi; doğrulama ilk neon-spike koşusunda.
 - U-01 Neon: kullanıcı 2026-10-05 tamamladığını bildirdi (proje etkin-wms, AWS Frankfurt, PG 17; `NEON_API_KEY` sırrı + `NEON_PROJECT_ID` değişkeni). Doğrulama T-005d ilk Actions koşusunda → T-005d
