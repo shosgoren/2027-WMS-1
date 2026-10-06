@@ -9,10 +9,13 @@
 // (`import()`, `require`, `createRequire`) ve tenant bağlam ayarı dizeleri → `no-restricted-syntax`;
 // genişletilmiş küme (pg-pool, drizzle sürücü alt yolları, göreli node_modules) → `no-restricted-imports`;
 // kapsam `scripts/` ve `tests/unit/`; `packages/db/src` altında aynı içerik → hata yok.
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ESLint } from "eslint";
-import { beforeAll, describe, expect, it } from "vitest";
+import ts from "typescript";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const RULE_ID = "no-restricted-imports";
@@ -1020,4 +1023,204 @@ describe("AC-28 lint (T-127b): \"use client\" dosyalarında sunucu paketi import
     },
     60_000,
   );
+});
+
+// T-127b (inceleme MAJOR/MINOR): yönerge çözülmüş değerle, sorgu/parça ekli belirteç, packages/ui kapsamı.
+describe("AC-28 lint (T-127b): yönerge ve belirteç biçimleri", () => {
+  it(
+    "@AC-28 kaçışlı yönerge (\"use \\x63lient\") da \"use client\" sayılır",
+    async () => {
+      const code = '"use \\x63lient";\nimport { withUser } from "@wms/db";\n\nexport const c = withUser;\n';
+      expect(clientHits(await lint(code, CLIENT_PATH))).toHaveLength(1);
+    },
+    60_000,
+  );
+
+  it.each([
+    ['import { a } from "@wms/db?x";\n\nexport const c = a;\n'],
+    ['import { a } from "@wms/db#x";\n\nexport const c = a;\n'],
+    ['import { a } from "@wms/domain/members?x#y";\n\nexport const c = a;\n'],
+    ['import { a } from "../lib/queue.ts?x";\n\nexport const c = a;\n'],
+    ['import { a } from "../lib/action-guard#x";\n\nexport const c = a;\n'],
+    ['export const c = (): Promise<unknown> => import("@wms/auth?x");\n'],
+  ])(
+    "@AC-28 sorgu/parça ekli belirteç yasak: %s",
+    async (body) => {
+      const hits = clientHits(await lint(USE_CLIENT + body, CLIENT_PATH));
+      expect(hits).toHaveLength(1);
+    },
+    60_000,
+  );
+
+  it(
+    "@AC-28 packages/ui/src içindeki \"use client\" dosyaları da kapsamdadır; yönergesiz ui dosyası serbest",
+    async () => {
+      const ui = probe("packages/ui/src/__ac28_client__.tsx");
+      const body = 'import { withUser } from "@wms/db";\n\nexport const c = withUser;\n';
+      expect(clientHits(await lint(USE_CLIENT + body, ui))).toHaveLength(1);
+      expect(clientHits(await lint(body, ui))).toHaveLength(0);
+    },
+    60_000,
+  );
+});
+
+// T-127b: istemci içe aktarım GRAFI. Her `"use client"` dosyasından (apps/web, packages/ui) göreli ve `@wms/*` iş alanı
+// içe aktarımları geçişli çözülür (`"use server"` dosyasında durulur: Next onları RPC referansına çevirir); yasaklı kümeye
+// ulaşan her yol zincirle raporlanır. Doğrudan ihlali lint yakalar; bu test yönergesiz ara modül üzerinden dolaylı yolu yakalar.
+const GRAPH_SPEC_RE = /^@wms\/(?:db|domain|auth|storage|queue-adapter)(?:[/?#]|$)/;
+const GRAPH_FILE_RE = /^(?:apps\/web\/lib\/(?:action-guard|rate-limit|queue)\.[cm]?[jt]sx?|packages\/(?:db|domain|auth|storage|queue-adapter)\/)/;
+const GRAPH_EXTS = [".ts", ".tsx", ".mts", ".js", ".jsx", ".mjs"];
+const toPosix = (p: string): string => p.split(path.sep).join("/");
+
+function readIfFile(file: string): string | null {
+  try {
+    return fs.statSync(file).isFile() ? fs.readFileSync(file, "utf8") : null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveWithExt(base: string): string | null {
+  const swapped = /\.(?:m?js)$/.test(base) ? [base.replace(/\.mjs$/, ".mts").replace(/\.js$/, ".ts"), base.replace(/\.js$/, ".tsx")] : [];
+  const candidates = [base, ...swapped, ...GRAPH_EXTS.map((e) => base + e), ...GRAPH_EXTS.map((e) => path.join(base, `index${e}`))];
+  return candidates.find((c) => readIfFile(c) !== null) ?? null;
+}
+
+/** `@wms/<paket>[/alt]` → package.json `exports` ile kaynak dosya (iş alanı paketi değilse null). */
+function resolveWorkspace(root: string, spec: string): string | null {
+  const m = /^(@wms\/[^/]+)(\/.*)?$/.exec(spec);
+  if (!m) return null;
+  const pkgsDir = path.join(root, "packages");
+  if (!fs.existsSync(pkgsDir)) return null;
+  for (const dir of fs.readdirSync(pkgsDir)) {
+    const raw = readIfFile(path.join(pkgsDir, dir, "package.json"));
+    if (raw === null) continue;
+    const pkg = JSON.parse(raw) as { name?: string; exports?: Record<string, unknown> };
+    if (pkg.name !== m[1]) continue;
+    const target = pkg.exports?.[`.${m[2] ?? ""}`];
+    return typeof target === "string" ? resolveWithExt(path.join(pkgsDir, dir, target)) : null;
+  }
+  return null;
+}
+
+function parseModule(file: string, text: string): { imports: string[]; useServer: boolean; useClient: boolean } {
+  const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, false, file.endsWith("x") ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+  const directives: string[] = [];
+  for (const st of sf.statements) {
+    if (!ts.isExpressionStatement(st) || !ts.isStringLiteral(st.expression)) break;
+    directives.push(st.expression.text);
+  }
+  const pre = ts.preProcessFile(text, true, true);
+  return { imports: pre.importedFiles.map((f) => f.fileName), useServer: directives.includes("use server"), useClient: directives.includes("use client") };
+}
+
+function listSources(dir: string, out: string[] = []): string[] {
+  if (!fs.existsSync(dir)) return out;
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (["node_modules", ".next", "dist"].includes(e.name)) continue;
+    const full = path.join(dir, e.name);
+    if (e.isDirectory()) listSources(full, out);
+    else if (/\.(?:[cm]?[jt]sx?)$/.test(e.name) && !e.name.endsWith(".d.ts")) out.push(full);
+  }
+  return out;
+}
+
+/** Yasaklı kümeye ulaşan zincirler: ["apps/web/…/a.tsx", "apps/web/lib/x.ts", "@wms/db"]. */
+function clientGraphViolations(root: string): string[] {
+  const rel = (f: string): string => toPosix(path.relative(root, f));
+  const roots = [...listSources(path.join(root, "apps/web")), ...listSources(path.join(root, "packages/ui"))].filter((f) => {
+    const text = readIfFile(f);
+    return text !== null && parseModule(f, text).useClient;
+  });
+  const violations: string[] = [];
+  for (const start of roots) {
+    const seen = new Set<string>([start]);
+    const queue: Array<{ file: string; chain: string[] }> = [{ file: start, chain: [rel(start)] }];
+    for (let item = queue.shift(); item !== undefined; item = queue.shift()) {
+      const text = readIfFile(item.file);
+      if (text === null) continue;
+      const info = parseModule(item.file, text);
+      if (info.useServer && item.file !== start) continue;
+      for (const spec of info.imports) {
+        const bare = spec.replace(/[?#].*$/, "");
+        if (GRAPH_SPEC_RE.test(spec)) {
+          violations.push([...item.chain, spec].join(" -> "));
+          continue;
+        }
+        const target = bare.startsWith(".") || path.isAbsolute(bare) ? resolveWithExt(path.resolve(path.dirname(item.file), bare)) : resolveWorkspace(root, bare);
+        if (target === null) continue;
+        if (GRAPH_FILE_RE.test(rel(target))) {
+          violations.push([...item.chain, rel(target)].join(" -> "));
+          continue;
+        }
+        if (seen.has(target)) continue;
+        seen.add(target);
+        queue.push({ file: target, chain: [...item.chain, rel(target)] });
+      }
+    }
+  }
+  return violations;
+}
+
+describe("AC-28 lint (T-127b): istemci içe aktarım grafı", () => {
+  const roots: string[] = [];
+  const fixture = (files: Record<string, string>): string => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ac28-graph-"));
+    roots.push(root);
+    const base: Record<string, string> = {
+      "packages/ui/package.json": JSON.stringify({ name: "@wms/ui", exports: { ".": "./src/index.ts" } }),
+      "packages/db/package.json": JSON.stringify({ name: "@wms/db", exports: { ".": "./src/index.ts" } }),
+      "packages/shared/package.json": JSON.stringify({ name: "@wms/shared", exports: { "./errors": "./src/errors.ts" } }),
+      "packages/db/src/index.ts": "export const db = 1;\n",
+      "packages/shared/src/errors.ts": "export const e = 1;\n",
+    };
+    for (const [rel, text] of Object.entries({ ...base, ...files })) {
+      fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+      fs.writeFileSync(path.join(root, rel), text);
+    }
+    return root;
+  };
+  afterAll(() => {
+    for (const r of roots) fs.rmSync(r, { recursive: true, force: true });
+  });
+
+  it("@AC-28 dolaylı zincir (istemci -> yönergesiz yerel modül -> @wms/db) zincirle raporlanır", () => {
+    const root = fixture({
+      "apps/web/app/c.tsx": '"use client";\nimport { h } from "../lib/helper.ts";\nexport const c = h;\n',
+      "apps/web/lib/helper.ts": 'import { v } from "./deeper";\nexport const h = v;\n',
+      "apps/web/lib/deeper.ts": 'import { db } from "@wms/db";\nexport const v = db;\n',
+    });
+    expect(clientGraphViolations(root)).toEqual(["apps/web/app/c.tsx -> apps/web/lib/helper.ts -> apps/web/lib/deeper.ts -> @wms/db"]);
+  });
+
+  it("@AC-28 dolaylı zincir: iş alanı paketi (@wms/ui) ve yasaklı yerel dosya (apps/web/lib/queue)", () => {
+    const root = fixture({
+      "apps/web/app/c.tsx": '"use client";\nimport { U } from "@wms/ui";\nexport const c = U;\n',
+      "packages/ui/src/index.ts": 'export { U } from "./u.ts";\n',
+      "packages/ui/src/u.ts": 'import { q } from "../../../apps/web/lib/queue.ts";\nexport const U = q;\n',
+      "apps/web/lib/queue.ts": "export const q = 1;\n",
+    });
+    expect(clientGraphViolations(root)).toEqual(["apps/web/app/c.tsx -> packages/ui/src/index.ts -> packages/ui/src/u.ts -> apps/web/lib/queue.ts"]);
+  });
+
+  it("@AC-28 dolaylı zincir: dinamik import ve require ile ulaşılan modül de izlenir; packages/ui kökleri taranır", () => {
+    const root = fixture({
+      "packages/ui/src/k.tsx": "'use client';\nexport const k = () => import(\"./lazy.ts\");\n",
+      "packages/ui/src/lazy.ts": 'const r = require("@wms/db?x");\nexport default r;\n',
+    });
+    expect(clientGraphViolations(root)).toEqual(["packages/ui/src/k.tsx -> packages/ui/src/lazy.ts -> @wms/db?x"]);
+  });
+
+  it("@AC-28 \"use server\" dosyasında durulur; yönergesiz sunucu dosyası kök değildir; temiz grafik boş", () => {
+    const root = fixture({
+      "apps/web/app/c.tsx": '"use client";\nimport { act } from "./actions.ts";\nimport { AppError } from "@wms/shared/errors";\nexport const c = [act, AppError];\n',
+      "apps/web/app/actions.ts": '"use server";\nimport { db } from "@wms/db";\nexport const act = db;\n',
+      "apps/web/app/page.tsx": 'import { db } from "@wms/db";\nexport default db;\n',
+    });
+    expect(clientGraphViolations(root)).toEqual([]);
+  });
+
+  it("@AC-28 gerçek depoda hiçbir \"use client\" dosyası (apps/web, packages/ui) yasaklı kümeye ulaşmaz", () => {
+    expect(clientGraphViolations(REPO_ROOT)).toEqual([]);
+  });
 });

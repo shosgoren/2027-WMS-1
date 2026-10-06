@@ -535,9 +535,9 @@ const noNormalizedPathImport = {
 const MSG_CLIENT_SERVER =
   '"use client" dosyası sunucu paketini/modülünü (@wms/db, @wms/domain, @wms/auth, @wms/storage, @wms/queue-adapter, apps/web/lib/{action-guard,rate-limit,queue}) import edemez; veri/yetki işi sunucu eylemlerindedir (T-127b).';
 const CLIENT_FORBIDDEN_MODULES = /** @type {ForbiddenEntry[]} */ ([
-  { regex: "^@wms\\/(?:db|domain|auth|storage|queue-adapter)(?:\\/|$)", message: MSG_CLIENT_SERVER },
+  { regex: "^@wms\\/(?:db|domain|auth|storage|queue-adapter)(?:[\\/?#]|$)", message: MSG_CLIENT_SERVER },
   {
-    regex: "^(?:apps\\/web\\/lib\\/(?:action-guard|rate-limit|queue)(?:\\.[cm]?[jt]sx?)?|packages\\/(?:db|domain|auth|storage|queue-adapter)(?:\\/.*)?)$",
+    regex: "^(?:apps\\/web\\/lib\\/(?:action-guard|rate-limit|queue)(?:\\.[cm]?[jt]sx?)?|packages\\/(?:db|domain|auth|storage|queue-adapter)(?:\\/.*)?)(?:[?#].*)?$",
     message: MSG_CLIENT_SERVER,
     pathLike: true,
     normalized: true,
@@ -547,7 +547,8 @@ const CLIENT_FORBIDDEN_MODULES = /** @type {ForbiddenEntry[]} */ ([
 const hasUseClientDirective = (program) => {
   for (const st of program.body) {
     if (st.type !== "ExpressionStatement" || typeof st.directive !== "string") return false;
-    if (st.directive === "use client") return true;
+    // Çözülmüş değer (kaçışlı `"use \x63lient"` yazımı da aynı yönergedir); `directive` ham metindir.
+    if (st.expression?.value === "use client") return true;
   }
   return false;
 };
@@ -806,7 +807,7 @@ export default defineConfig(
   {
     // T-127b: "use client" dosyalarında sunucu paketi import yasağı. Kural adları benzersizdir (yukarıdaki profillerin
     // aynı-kural-değiştirme davranışından etkilenmez); hiçbir mevcut kuralı gevşetmez.
-    files: ["apps/web/**/*.{js,mjs,cjs,ts,mts,cts,tsx}"],
+    files: ["apps/web/**/*.{js,mjs,cjs,ts,mts,cts,tsx}", "packages/ui/**/*.{js,mjs,cjs,ts,mts,cts,tsx}"],
     plugins: { wms: WMS_PLUGIN },
     rules: { "wms/no-client-server-import": "error", "wms/no-client-server-loader": "error" },
   },
