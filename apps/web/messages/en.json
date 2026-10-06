@@ -124,5 +124,126 @@
         "mfa_requiredAction": "Set up two-step verification first, then open the invitation again."
       }
     }
+  },
+  "tenantBar": {
+    "label": "Workspace",
+    "roleChip": "{role} · switch",
+    "switchTitle": "Switch workspace",
+    "current": "You are here",
+    "user": "Signed in: {name}"
+  },
+  "roles": {
+    "TENANT_ADMIN": "Administrator",
+    "WAREHOUSE_MANAGER": "Warehouse manager",
+    "PICKER": "Picker",
+    "COUNTER": "Counter",
+    "READ_ONLY": "Read-only"
+  },
+  "members": {
+    "title": "Members",
+    "intro": "People who can work in this workspace.",
+    "lockedReason": "You do not have permission for this. Ask your manager.",
+    "unavailableReason": "This action is not available for this person. They can reset their own password with their own email.",
+    "ownerBadge": "Owner",
+    "selfBadge": "You",
+    "demoBadge": "Demo",
+    "statusActive": "Active",
+    "empty": "There are no members in this workspace yet.",
+    "emptyAction": "Start by inviting someone.",
+    "membersList": "Member list",
+    "invite": "Invite a member",
+    "role": "Role",
+    "applyRole": "Change role",
+    "remove": "Remove",
+    "transfer": "Transfer ownership",
+    "resetLink": "Create password reset link",
+    "actionsFor": "Actions for {name}",
+    "confirmCancel": "Cancel",
+    "confirm": {
+      "role": {
+        "title": "Change role?",
+        "description": "{name} will work as {role} in this workspace from now on; their permissions change accordingly.",
+        "button": "Change role"
+      },
+      "remove": {
+        "title": "Remove member?",
+        "description": "{name} will no longer be able to work in this workspace. Past records are kept.",
+        "button": "Remove"
+      },
+      "transfer": {
+        "title": "Transfer ownership?",
+        "description": "{name} becomes the owner of this workspace; you lose the owner privilege.",
+        "button": "Transfer ownership"
+      },
+      "reset": {
+        "title": "Create a reset link?",
+        "description": "A single-use link valid for 30 minutes is created for {name}. You will see it only once and must pass it on yourself.",
+        "button": "Create link"
+      }
+    },
+    "done": {
+      "role": "Role updated.",
+      "remove": "Member removed.",
+      "transfer": "Ownership transferred."
+    },
+    "pending": {
+      "title": "Pending invitations",
+      "empty": "No pending invitations.",
+      "expires": "Expires: {date}",
+      "invitedBy": "Invited by: {name}",
+      "revoke": "Revoke invitation",
+      "revoked": "Invitation revoked.",
+      "revokeTitle": "Revoke invitation?",
+      "revokeDescription": "{email} will not be able to join with this link.",
+      "locked": "Only people who can manage members can see pending invitations."
+    },
+    "inviteDialog": {
+      "title": "Invite a member",
+      "email": "Email",
+      "emailHint": "The invitation goes to this address.",
+      "role": "Role",
+      "submit": "Send invitation",
+      "close": "Close",
+      "sentEmail": "The invitation was sent by email. It is valid for 72 hours.",
+      "sentScreen": "The invitation email could not be sent. Pass the link below on to the person you invited.",
+      "linkLabel": "Invitation link"
+    },
+    "linkBox": {
+      "copy": "Copy",
+      "copied": "Copied.",
+      "copyFailed": "Could not copy.",
+      "copyFailedAction": "Select the link and copy it manually.",
+      "warning": "Pass this link only to the person you invited; it will not be shown again.",
+      "resetTitle": "Password reset link",
+      "resetWarning": "Pass this link only to the person concerned; it will not be shown again. It is valid for 30 minutes and works once.",
+      "dismiss": "Hide link"
+    },
+    "errors": {
+      "code": "Error code: {code}",
+      "forbidden": "This could not be done.",
+      "forbiddenAction": "Check your permission. If the person is the workspace owner, first transfer ownership to another administrator.",
+      "forbidden_mfa_required": "Two-step verification is required for administrator actions.",
+      "forbidden_mfa_requiredAction": "Set up two-step verification first, then repeat the action.",
+      "mfaLink": "Set up two-step verification",
+      "unauthenticated": "Your session has ended.",
+      "unauthenticatedAction": "Sign in again and repeat the action.",
+      "unauthenticated_recent_auth_required": "You need to confirm your identity again for this action.",
+      "unauthenticated_recent_auth_requiredAction": "Sign in again and repeat the action.",
+      "loginLink": "Sign in again",
+      "not_found": "Record not found; someone else may have changed it.",
+      "not_foundAction": "Reload the page and try again.",
+      "validation_failed": "The information entered is not valid.",
+      "validation_failedAction": "Check the email address and role, then try again.",
+      "version_conflict": "The record was changed by another action at the same time.",
+      "version_conflictAction": "Reload the page and try again.",
+      "rate_limited": "Too many attempts.",
+      "rate_limitedAction": "Wait a moment and try again.",
+      "tenant_suspended": "This workspace is suspended.",
+      "tenant_suspendedAction": "Contact support.",
+      "tenant_closing": "This workspace is being closed.",
+      "tenant_closingAction": "Contact support if you need to export your data.",
+      "internal": "The action could not be completed right now.",
+      "internalAction": "Try again shortly; if it continues, tell your administrator with the error code."
+    }
   }
 }
