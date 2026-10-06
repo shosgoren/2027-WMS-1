@@ -80,8 +80,57 @@ const BETTER_AUTH_ENTRY = { regex: "^better-auth(?:\\/|$)", message: MSG_AUTH_LI
 const BETTER_AUTH_EXCEPT_REACT_ENTRY = { regex: "^better-auth(?:$|\\/(?!react$))", message: MSG_AUTH_LIB, ambiguous: true };
 const AUTH_SCOPED_ENTRY = { regex: "^(?:@better-auth\\/|@node-rs\\/argon2(?:\\/|$))", message: MSG_AUTH_LIB };
 const PG_BOSS_ENTRY = { regex: "^pg-boss(?:\\/|$)", message: MSG_QUEUE_LIB, ambiguous: true };
+/**
+ * T-127a (T-109b/T-125 inceleme takipleri; ADR-006): güvenlik varsayımları kod incelemesine değil lint'e
+ * dayanır. İzinli kapsamlar PROFILES tablosundadır (`packages/storage/**`). Girdiler birbirini dışlar:
+ * `@wms/storage/src/context` yalnızca paket-adı girdisine, `…/storage/src/context` yolları yalnızca yol
+ * girdisine uyar (arkadan bakış `(?<!^@wms\/)`).
+ */
+const MSG_AWS_SDK = "@aws-sdk/* yalnızca packages/storage içinde import edilir (ADR-006, T-127a).";
+const MSG_STORAGE_INTERNAL =
+  "`@wms/storage` iç modülleri (context.ts: bağlam üreticisi) paket dışından hiçbir yoldan import edilmez; yalnızca paket girişi `@wms/storage` (T-125, T-127a).";
+const MSG_CACHE_KEY =
+  "`@wms/shared/cache-key` (`formatTenantCacheKey`) yalnızca packages/storage/src/index.ts içinde import edilir; uygulama kodu marka denetimli `tenantCacheKey` (@wms/storage) kullanır (T-125, T-127a).";
+const AWS_SDK_ENTRY = { regex: "^@aws-sdk\\/", message: MSG_AWS_SDK };
+/** Paket adı derin yolu (`exports` yalnızca `.`; `@wms/storage/src/context`, `@wms/storage/context` …). */
+const STORAGE_DEEP_ENTRY = { regex: "^@wms\\/storage\\/", message: MSG_STORAGE_INTERNAL };
+/** Göreli/mutlak/`file:` yol (`../../storage/src/context.ts`); node_modules yolu ayrıca yasaktır. */
+const STORAGE_CONTEXT_PATH_ENTRY = {
+  regex: "(?:^|\\/)(?<!^@wms\\/)storage\\/src\\/context(?![\\w-])",
+  message: MSG_STORAGE_INTERNAL,
+  pathLike: true,
+};
+/** `packages/storage` içinden ama `src/` dışından: `../src/context.ts` (üstteki girdiyle aynı dizgiye çift rapor vermez). */
+const STORAGE_SRC_CONTEXT_RELATIVE_ENTRY = {
+  regex: "(?:^|\\/)(?<!storage\\/)src\\/context(?![\\w-])",
+  message: MSG_STORAGE_INTERNAL,
+  pathLike: true,
+};
+const CACHE_KEY_ENTRY = { regex: "^@wms\\/shared\\/cache-key(?![\\w-])", message: MSG_CACHE_KEY };
+const CACHE_KEY_PATH_ENTRY = { regex: "(?:^|\\/)shared\\/src\\/cache-key(?![\\w-])", message: MSG_CACHE_KEY, pathLike: true };
+const STORAGE_ENTRIES = [STORAGE_DEEP_ENTRY, STORAGE_CONTEXT_PATH_ENTRY, CACHE_KEY_ENTRY, CACHE_KEY_PATH_ENTRY];
 /** Tüm yasaklı kümenin birleşimi (girdiler birbirini dışlar). */
-const ALL_FORBIDDEN_MODULES = [...FORBIDDEN_MODULES, BETTER_AUTH_ENTRY, AUTH_SCOPED_ENTRY, PG_BOSS_ENTRY];
+const ALL_FORBIDDEN_MODULES = [
+  ...FORBIDDEN_MODULES,
+  BETTER_AUTH_ENTRY,
+  AUTH_SCOPED_ENTRY,
+  PG_BOSS_ENTRY,
+  AWS_SDK_ENTRY,
+  ...STORAGE_ENTRIES,
+];
+
+/**
+ * T-127a: `apps/web/**` için `@wms/db` adlı yasaklar (`packages/db/src/index.ts` dışa aktarımlarından): ham istemci
+ * kuran (`createDbClient`) veya tenant/oturum üyeliği doğrulaması olmadan bağlam kuran/DbClient alan yollar
+ * (`withSystemTenant`, `withNewTenant`, `recordSecurityEvent`). Web veriye yalnızca domain komutlarıyla erişir.
+ * Ad alanı içe aktarımı (`import * as`) ve yeniden dışa aktarım da `no-restricted-imports` ile yakalanır;
+ * dinamik `import("@wms/db")`/`require("@wms/db")` aşağıdaki sözdizimi kurallarıyla yasaktır.
+ */
+const MSG_WEB_DB =
+  "apps/web `@wms/db` sistem/oturumsuz bağlam yollarını (createDbClient, withSystemTenant, withNewTenant, recordSecurityEvent) kullanamaz; DB'ye yalnızca domain komutlarıyla erişilir (T-127a).";
+const WEB_DB_RESTRICTED_NAMES = ["createDbClient", "withSystemTenant", "withNewTenant", "recordSecurityEvent"];
+const WEB_DB_PATHS = [{ name: "@wms/db", importNames: WEB_DB_RESTRICTED_NAMES, message: MSG_WEB_DB }];
+const WEB_DB_DYNAMIC_RE = "/^@wms\\/db$/";
 
 /**
  * Yol biçimli girdinin "modül belirteci konumunda" biçimi: göreli (`./`, `../`), mutlak (`/`) veya
@@ -454,28 +503,47 @@ const PATH_TO_FILE_URL_REBINDING = [
 /** `import(<ifade>)` muafiyetinin tek dosyası (T-015). */
 const GUARD_LOADER_FILE = "scripts/guards/cli.mjs";
 
+const WEB_DB_SYNTAX = [
+  { selector: `ImportExpression > Literal.source[value=${WEB_DB_DYNAMIC_RE}]`, message: MSG_WEB_DB },
+  { selector: `ImportExpression > TemplateLiteral.source > TemplateElement[value.raw=${WEB_DB_DYNAMIC_RE}]`, message: MSG_WEB_DB },
+  { selector: `${REQUIRE_CALL}[arguments.0.value=${WEB_DB_DYNAMIC_RE}]`, message: MSG_WEB_DB },
+];
+
 /**
  * T-111: kapsam profilleri. Flat config'te aynı kural sonraki blokta yeniden tanımlanırsa seçenekler
  * birleşmez, değişir; bu yüzden her profil kendi tam yasaklı kümesini (genel kümeden yalnızca izinli
  * girdiler çıkarılmış) verir. Bloklar ana bloktan SONRA gelir ve birbirinden ayrık dosyalara bakar.
  * Hiçbir profil tenant bağlam ayarı (TENANT_SETTING_SYNTAX), kod yürütme (CODE_EXEC_SYNTAX) veya
  * statik olmayan belirteç denetimini gevşetmez.
- * @param {{ files: string[], allow: ForbiddenEntry[], replace?: ForbiddenEntry[] }} p `allow`: bu kapsamda
+ * @param {{ files: string[], ignores?: string[], allow: ForbiddenEntry[], replace?: ForbiddenEntry[] }} p `allow`: bu kapsamda
  *   serbest girdiler; `replace`: serbest girdi yerine uygulanacak daha dar girdiler.
  */
-const strictProfile = ({ files, allow, replace = [] }) => {
+const strictProfile = ({ files, ignores = [], allow, replace = [] }) => {
   const modules = [...ALL_FORBIDDEN_MODULES.filter((m) => !allow.includes(m)), ...replace];
+  const web = files.every((f) => f.startsWith("apps/web/"));
   return {
     files,
+    ...(ignores.length > 0 ? { ignores } : {}),
     plugins: { wms: WMS_PLUGIN },
     rules: /** @type {import("eslint").Linter.RulesRecord} */ ({
-      "no-restricted-imports": ["error", { patterns: modules.map(({ regex, message }) => ({ regex, message })) }],
-      "no-restricted-syntax": ["error", ...rawClientSyntax(modules), ...CODE_EXEC_SYNTAX, ...TENANT_SETTING_SYNTAX],
+      "no-restricted-imports": [
+        "error",
+        { patterns: modules.map(({ regex, message }) => ({ regex, message })), ...(web ? { paths: WEB_DB_PATHS } : {}) },
+      ],
+      "no-restricted-syntax": [
+        "error",
+        ...rawClientSyntax(modules),
+        ...CODE_EXEC_SYNTAX,
+        ...TENANT_SETTING_SYNTAX,
+        ...(web ? WEB_DB_SYNTAX : []),
+      ],
       "wms/no-aliased-module-loader": ["error", { modules }],
     }),
   };
 };
 const PROFILES = [
+  // T-127a: web kapsamı (önce; daha dar web profilleri sonra gelir ve kendi `paths`/sözdizimini yeniden kurar).
+  strictProfile({ files: ["apps/web/**"], allow: [] }),
   // ADR-014 §Sonuçlar: kimlik paketi ham Drizzle istemcisine (`@wms/db/internal`, `/schema` dahil) erişir;
   // sürücü/bağdaştırıcı yasakları geçerli kalır. Better Auth/Argon2 de burada serbesttir.
   strictProfile({ files: ["packages/auth/**"], allow: [DB_INTERNAL_ENTRY, BETTER_AUTH_ENTRY, AUTH_SCOPED_ENTRY] }),
@@ -484,20 +552,47 @@ const PROFILES = [
   strictProfile({ files: ["apps/web/lib/auth-client.ts"], allow: [BETTER_AUTH_ENTRY], replace: [BETTER_AUTH_EXCEPT_REACT_ENTRY] }),
   // ADR-005: kuyruk sağlayıcısı yalnızca bağdaştırıcı paketinde.
   strictProfile({ files: ["packages/queue-adapter/**"], allow: [PG_BOSS_ENTRY] }),
-  {
-    // `packages/db` ve `tests/integration` ana bloktan muaftır (mevcut); yeni kütüphane yasakları orada da
-    // geçerlidir, statik olmayan import/require muafiyeti değişmez.
-    files: ["packages/db/**", "tests/integration/**"],
-    plugins: { wms: WMS_PLUGIN },
-    rules: /** @type {import("eslint").Linter.RulesRecord} */ ({
-      "no-restricted-imports": [
-        "error",
-        { patterns: [BETTER_AUTH_ENTRY, AUTH_SCOPED_ENTRY, PG_BOSS_ENTRY].map(({ regex, message }) => ({ regex, message })) },
-      ],
-      "no-restricted-syntax": ["error", ...rawClientModuleSyntaxOnly([BETTER_AUTH_ENTRY, AUTH_SCOPED_ENTRY, PG_BOSS_ENTRY])],
-      "wms/no-aliased-module-loader": ["error", { modules: [BETTER_AUTH_ENTRY, AUTH_SCOPED_ENTRY, PG_BOSS_ENTRY], allowNonStatic: true }],
-    }),
-  },
+  // T-127a (ADR-006): @aws-sdk yalnızca depolama paketinde; context.ts yalnızca paket kaynağında (`src/**`);
+  // `@wms/shared/cache-key` yalnızca `src/index.ts`'te. Bloklar daraldıkça sonra gelir (aynı kural: son blok kazanır).
+  // `src/` dışında (ör. `packages/storage/test/`) `../src/context` göreli yolu da yasaktır.
+  strictProfile({
+    files: ["packages/storage/**"],
+    ignores: ["packages/storage/src/**"],
+    allow: [AWS_SDK_ENTRY],
+    replace: [STORAGE_SRC_CONTEXT_RELATIVE_ENTRY],
+  }),
+  strictProfile({
+    files: ["packages/storage/src/**"],
+    ignores: ["packages/storage/src/index.ts"],
+    allow: [AWS_SDK_ENTRY, STORAGE_CONTEXT_PATH_ENTRY],
+  }),
+  strictProfile({
+    files: ["packages/storage/src/index.ts"],
+    allow: [AWS_SDK_ENTRY, STORAGE_CONTEXT_PATH_ENTRY, CACHE_KEY_ENTRY, CACHE_KEY_PATH_ENTRY],
+  }),
+  // `packages/db` ve `tests/integration` ana bloktan muaftır (mevcut); yeni kütüphane yasakları orada da
+  // geçerlidir, statik olmayan import/require muafiyeti değişmez. T-127a: depolama sınırları da burada geçerlidir;
+  // `@aws-sdk` yalnızca depolama fikstürleri (MinIO/STS kurulumu ve nesne deposu entegrasyon testi) için serbesttir.
+  ...[
+    {
+      files: ["packages/db/**", "tests/integration/**"],
+      ignores: ["tests/integration/harness/global-setup.ts", "tests/integration/storage/**"],
+      extra: [AWS_SDK_ENTRY],
+    },
+    { files: ["tests/integration/harness/global-setup.ts", "tests/integration/storage/**"], extra: [] },
+  ].map(({ files, ignores = [], extra }) => {
+    const modules = [BETTER_AUTH_ENTRY, AUTH_SCOPED_ENTRY, PG_BOSS_ENTRY, ...extra, ...STORAGE_ENTRIES];
+    return {
+      files,
+      ...(ignores.length > 0 ? { ignores } : {}),
+      plugins: { wms: WMS_PLUGIN },
+      rules: /** @type {import("eslint").Linter.RulesRecord} */ ({
+        "no-restricted-imports": ["error", { patterns: modules.map(({ regex, message }) => ({ regex, message })) }],
+        "no-restricted-syntax": ["error", ...rawClientModuleSyntaxOnly(modules)],
+        "wms/no-aliased-module-loader": ["error", { modules, allowNonStatic: true }],
+      }),
+    };
+  }),
 ];
 
 export default defineConfig(
