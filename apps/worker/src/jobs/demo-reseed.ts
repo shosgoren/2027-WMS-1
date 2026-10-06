@@ -6,6 +6,8 @@
 // - Zamanlama: pg-boss `schedule` kapalıdır (adaptör `schedule: false`); açılışta bir kez + günlük 03:00 UTC işi
 //   `singletonKey` ile kuyruğa yazan süreç içi zamanlayıcı. Eşzamanlı iki örnekte tek iş oluşur (singleton).
 import { nextDailyRunUtc, reseedDemo, type DemoAccountPort } from "@wms/domain/demo/seed";
+import { createDemoAccountPort, parseDemoDomain } from "@wms/auth/demo-accounts";
+import type { createDbClient } from "@wms/db";
 import type { AccessDbClient } from "@wms/domain/identity/access";
 import type { EnqueueResult, JobHandler } from "@wms/shared/queue";
 import type { Logger } from "../lifecycle.js";
@@ -14,13 +16,17 @@ export const DEMO_RESEED_SINGLETON_KEY = "demo.reseed";
 export const DEMO_RESEED_HOUR_UTC = 3;
 
 /**
- * Gerçek kimlik hesabı bağdaştırıcısı (Better Auth / `wms_auth`) `packages/auth` kapsamındadır ve bu kartın dosya
- * listesinde yoktur (T-123 raporu Bulgu-1): users/accounts yalnızca `wms_auth` ile yazılabilir ve `packages/auth`
- * demo hesabı açma/parola eşitleme yüzeyi sunmaz. Bağdaştırıcı bağlanana kadar `undefined` döner; çağıran demo işini
- * KAYDETMEZ ve açıkça loglar (sahte başarı yok, G-07).
+ * Gerçek kimlik hesabı bağdaştırıcısı (`@wms/auth` `createDemoAccountPort`, `wms_auth` bağlantısı; T-123a). Yalnızca
+ * yapılandırma eksikse (`authDb` yok: `AUTH_DATABASE_URL` tanımsız; veya `DEMO_EMAIL_DOMAIN` geçersiz) `undefined` döner;
+ * çağıran demo işini KAYDETMEZ ve açıkça loglar (sahte başarı yok, G-07). Ortam kapısı (`WMS_ENV`/`DEMO_MODE`) bağdaştırıcının
+ * kendisinde de zorlanır: kapalıysa kurulum fırlatır, `undefined` dönmez (prod'da sessizce geçilmez).
  */
-export function resolveDemoAccountPort(): DemoAccountPort | undefined {
-  return undefined;
+export function resolveDemoAccountPort(
+  env: Readonly<Record<string, string | undefined>>,
+  authDb: ReturnType<typeof createDbClient> | undefined,
+): DemoAccountPort | undefined {
+  if (authDb === undefined || parseDemoDomain(env.DEMO_EMAIL_DOMAIN) === null) return undefined;
+  return createDemoAccountPort({ authDb, env });
 }
 
 export interface DemoReseedDeps {

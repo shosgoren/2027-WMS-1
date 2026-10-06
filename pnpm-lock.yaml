@@ -90,6 +90,12 @@ importers:
 
   apps/worker:
     dependencies:
+      '@node-rs/argon2':
+        specifier: 2.2.1
+        version: 2.2.1
+      '@wms/auth':
+        specifier: workspace:*
+        version: link:../../packages/auth
       '@wms/db':
         specifier: workspace:*
         version: link:../../packages/db

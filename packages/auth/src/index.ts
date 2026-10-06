@@ -40,6 +40,8 @@ import type { CreateInvitedAccountInput } from "./policy.ts";
 
 export { ARGON2_PARAMS, hashPassword, verifyPassword } from "./password.ts";
 export { InvitedAccountError } from "./policy.ts";
+export { DEMO_ACCOUNT_EVENT, DemoAccountError, createDemoAccountPort } from "./demo-accounts.ts";
+export type { DemoAccountPortLike, DemoAccountPortOptions } from "./demo-accounts.ts";
 export type { CreateInvitedAccountInput } from "./policy.ts";
 
 // ---------------------------------------------------------------------------------------------

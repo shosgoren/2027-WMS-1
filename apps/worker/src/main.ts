@@ -86,16 +86,28 @@ const db = createDbClient({ url: databaseUrl, poolMax: 10, prepare: false });
 
 // Demo (T-123): fail-closed. Kapalıysa yalnızca neden loglanır (parola/değer asla); iş türü kaydedilmez.
 let demoEnabled = false;
+let demoAuthDb: ReturnType<typeof createDbClient> | undefined;
 {
   const demo = loadDemoSeedConfig(process.env);
   if (!demo.enabled) {
     logger.info("demo disabled", { reason: demo.reason });
   } else {
-    const accounts = resolveDemoAccountPort();
-    if (accounts === undefined) {
-      logger.error("demo disabled: account adapter is not wired (packages/auth demo account port missing); demo.reseed not registered");
+    // `wms_auth` bağlantısı yalnızca demo açıkken ve AUTH_DATABASE_URL tanımlıysa kurulur (prod'da hiç kurulmaz).
+    const authUrl = process.env.AUTH_DATABASE_URL?.trim();
+    const authDb = authUrl === undefined || authUrl === "" ? undefined : createDbClient({ url: authUrl, poolMax: 2, prepare: false });
+    let accounts: ReturnType<typeof resolveDemoAccountPort>;
+    try {
+      accounts = resolveDemoAccountPort(process.env, authDb);
+    } catch (err) {
+      logger.error("invalid configuration", { error: err instanceof Error ? err.name : "unknown" });
+      process.exit(EXIT_FAILURE);
+    }
+    if (accounts === undefined || authDb === undefined) {
+      logger.error("demo disabled: account adapter configuration missing (AUTH_DATABASE_URL / DEMO_EMAIL_DOMAIN); demo.reseed not registered");
+      if (authDb !== undefined) await authDb.close();
     } else {
       demoEnabled = true;
+      demoAuthDb = authDb;
       HANDLERS["demo.reseed"] = createDemoReseedHandler({ db, accounts, password: demo.password, logger });
     }
   }
@@ -140,6 +152,7 @@ const demoSchedule = demoEnabled
 lifecycle.register({ name: "demo-schedule", run: () => demoSchedule?.stop() });
 lifecycle.register({ name: "job-queue", run: () => queue.stop() });
 lifecycle.register({ name: "db", run: () => db.close() });
+lifecycle.register({ name: "demo-auth-db", run: () => demoAuthDb?.close() });
 
 lifecycle.installProcessHandlers(process);
 lifecycle.start();
