@@ -55,6 +55,7 @@ Q-50 | Stok defteri `reason` için izinli değer kümesi nedir (sabit kod listes
 Q-51 | Stok defteri `actor_user_id` zorunlu mu (sistem/worker hareketleri)? Şimdilik nullable, FK yok | T-232 | açık — 0012 geçmiş yazıcısıyla tutarlı karar T-213'te
 Q-52 | Stok defteri satırı hangi belge durumunda yazılabilir (senkron yol ≤200 satır `posting_job_id`'siz; asenkron yol APPROVED+posting_job_id; ters kayıt belgesi)? DB şimdilik belge durumuna bakmıyor | T-232 inceleme MINOR-5, ADR-018 §2 | açık — T-213/T-217 posting akışıyla DB kuralı (tetikleyici, FOR SHARE) eklenir
 Q-53 | Negatif bakiyeli (I-05 istisnası) lokasyon/depo arşivlenebilir mi? Şimdilik yalnızca pozitif bakiye IN_USE sayılıyor (kart) | T-205 inceleme MINOR-5 | açık
+Q-57 | Terminoloji okuyucusu (`settings.manage` istemeyen), lokasyon sayım ve tek depo okuyucuları T-205'e mi yoksa ayrı bir okuyucu kartına mı? Ayrıca liste sanallaştırma (TanStack Virtual) bağımlılığı | T-207 | açık — ayrı kart
 
 ## Varsayımlar
 A-01 | Neon pooler'ı transaction-mode PgBouncer'dır (kullanıcı kararı kaydı, 2026-10-05) — **teyit edildi 2026-10-05, sürüm hariç** (belge + T-005d koşu 3 çoklama gözlemi, https://github.com/shosgoren/2027-WMS-1/actions/runs/37388724069); PgBouncer sürümü gözlenemedi | Neon pooler türünü/kipini değiştirdiğini duyurana veya yeniden spike aksini gösterene kadar | Q-02
@@ -160,3 +161,5 @@ A-100 | Sayım kilidi COUNTING iken `archiveLocation` IN_USE döner | — | T-20
 A-101 | Arşivli depoya lokasyon eklenemez; arşivli lokasyonda ad/tür değişmez (VALIDATION_FAILED); zaten arşivli kaydı arşivlemek no-op (denetim satırı yok) | — | T-205
 A-102 | TRANSIT türü lokasyon ebeveyn olamaz (PARENT_INVALID) | — | T-205
 A-103 | Depo kapsamı girdisi açıktır: `{ all: true }` (kapsam satırı yok = A-77 tüm depolar) ya da `{ warehouseIds: [...] }`; boş liste VALIDATION_FAILED; demo tenant'ta FORBIDDEN; değişiklik yoksa changed:false, audit yok. Bayrak açılmadan Q-23 kararı ve security-reviewer onayı şart | Q-23 | T-205
+A-113 | Lokasyon düzey etiketleri derinliğe göre sabit (0 Bölge, 1 Raf, 2 Göz, sonrası Alt düzey); terminoloji okuyucusu gelene kadar | Q-57 | T-207
+A-114 | Depo kartındaki lokasyon sayısı `getLocationTree(limit 100)` ile bulunur, aşılırsa "100+"; büyük listeler keyset "Daha fazla" ile sayfalanır (sanallaştırma yok) | Q-57 | T-207
