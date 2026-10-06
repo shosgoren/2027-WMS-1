@@ -733,6 +733,12 @@ describe("start olayı aşamaları: starting + started tek başlatmadır (deploy
     expect(r.reason).toMatch(/2 start\/started/);
   });
 
+  it("starting, started, starting, starting (exit yok) → FAIL", () => {
+    const r = run([ev("start", "starting", 3400), ev("start", "starting", 3300), ev("start", "started", 3100), ev("start", "starting", 3000)]);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/start\/starting/);
+  });
+
   it("starting + started + exit → FAIL", () => {
     const r = run([ev("exit", "stopped", 3500), ev("start", "started", 3100), ev("start", "starting", 3000)]);
     expect(r.ok).toBe(false);
