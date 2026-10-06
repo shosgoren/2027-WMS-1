@@ -1,10 +1,11 @@
 // Worker giriş noktası: `node dist/main.js`. Web'den bağımsız, uzun ömürlü süreç (ADR-001).
-import { createDbClient, withSystemTenant } from "@wms/db";
+import { DEMO_TENANT_ID, createDbClient, withSystemTenant } from "@wms/db";
 import { createJobQueue } from "@wms/queue-adapter";
 import { assertMailModeAllowed, loadMailConfig } from "@wms/shared/mailer";
 import { createSealer } from "@wms/shared/seal";
 import { JOB_TYPES, type JobHandler, type JobType } from "@wms/shared/queue";
 import { createDeliverInvitationHandler } from "./jobs/deliver-invitation.js";
+import { DEMO_RESEED_SINGLETON_KEY, registerDemoReseed } from "./jobs/demo-reseed.js";
 import { createMailer, createSendEmailHandler } from "./jobs/send-email.js";
 import { createJsonLogger, createLifecycle, EXIT_FAILURE, parseShutdownTimeoutMs } from "./lifecycle.js";
 
@@ -27,8 +28,9 @@ const lifecycle = createLifecycle({
 // İş türü başına tüketici. T-116 (`email.send`) ve T-123 (`demo.reseed`) kendi handler'larını buraya ekler;
 // handler'lar bağlamı `withSystemTenant`/`withMembership` ile kurar (ADR-016 §6).
 const HANDLERS: { [T in JobType]?: JobHandler<T> } = {};
-// Handler'ı henüz yazılmamış türler açıkça listelenir: bu türden işler tüketici gelene kadar kuyrukta bekler
-// (kaybolmaz, sahte başarıyla tamamlanmaz). Registry'ye yeni tür eklenirse burada karar verilmeden açılış düşer.
+// Koşullu/henüz yazılmamış türler açıkça listelenir: `demo.reseed` yalnızca demo açıkken (T-123: WMS_ENV local|staging +
+// DEMO_MODE=1 + DEMO_PASSWORD) kaydedilir; aksi halde bu türden işler tüketici gelene kadar kuyrukta bekler (kaybolmaz,
+// sahte başarıyla tamamlanmaz). Registry'ye yeni tür eklenirse burada karar verilmeden açılış düşer.
 const DEFERRED_JOB_TYPES: readonly JobType[] = ["demo.reseed"];
 
 // İki ayrı bağlantı (T-115c): kuyruk tüketimi `DATABASE_URL_WORKER` (wms_worker: yalnızca pgboss iş tablosu, tüm
@@ -81,6 +83,23 @@ if (undecided.length > 0) {
 // denetimli, transaction-local bağlam) kurulur (ADR-016 §6). Havuz ayarları `DB_CLIENT_SETTINGS` ile aynıdır.
 const db = createDbClient({ url: databaseUrl, poolMax: 10, prepare: false });
 
+// Demo (T-123/T-123a, A-63): fail-closed; ayrıntı registerDemoReseed'de. Kapalıyken `wms_auth` havuzu açılmaz, bağdaştırıcı
+// (ve argon2 yerel ikilisi) yüklenmez. Rol/ortam hataları açılışı düşürür.
+let demo: Awaited<ReturnType<typeof registerDemoReseed>>;
+try {
+  demo = await registerDemoReseed({
+    env: process.env,
+    db,
+    logger,
+    openAuthDb: (url) => createDbClient({ url, poolMax: 2, prepare: false }),
+  });
+} catch (err) {
+  const code = (err as { code?: unknown } | null)?.code;
+  logger.error("invalid configuration", { error: err instanceof Error ? err.name : "unknown", ...(typeof code === "string" ? { code } : {}) });
+  process.exit(EXIT_FAILURE);
+}
+if (demo.handler !== undefined) HANDLERS["demo.reseed"] = demo.handler;
+
 const queue = createJobQueue({
   connectionString: workerDatabaseUrl,
   runInTenant: (tenantId, reason, fn) => withSystemTenant(db, tenantId, `queue.${reason}`, fn),
@@ -101,12 +120,22 @@ try {
 }
 logger.info("queue started", {
   registered: JOB_TYPES.filter((t) => HANDLERS[t] !== undefined),
-  deferred: DEFERRED_JOB_TYPES,
+  deferred: DEFERRED_JOB_TYPES.filter((t) => HANDLERS[t] === undefined),
 });
 
-// Kapanış sırası: önce kuyruk (çalışan işler biter), sonra DB havuzu.
+// Demo yeniden tohumlama zamanlaması: açılışta bir kez + günlük 03:00 UTC; `singletonKey` ile tek iş.
+const demoSchedule = demo.startSchedule(() =>
+  // Tenant kimliği sabittir (iş yükünde yok); bağlam withSystemTenant ile kurulur (gerekçe üyelik/rol yazmaz).
+  withSystemTenant(db, DEMO_TENANT_ID, "demo.schedule", (tx) =>
+    queue.enqueue(tx, { type: "demo.reseed", payload: {}, singletonKey: DEMO_RESEED_SINGLETON_KEY }),
+  ),
+);
+
+// Kapanış sırası: önce zamanlayıcı, sonra kuyruk (çalışan işler biter), sonra DB havuzu.
+lifecycle.register({ name: "demo-schedule", run: () => demoSchedule?.stop() });
 lifecycle.register({ name: "job-queue", run: () => queue.stop() });
 lifecycle.register({ name: "db", run: () => db.close() });
+lifecycle.register({ name: "demo-auth-db", run: () => demo.close() });
 
 lifecycle.installProcessHandlers(process);
 lifecycle.start();

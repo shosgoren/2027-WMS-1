@@ -2,7 +2,7 @@
 // Davet kabul eylemi (T-117). Oturum varsa mevcut hesapla (e-posta birebir ve doğrulanmış), yoksa `newAccount` ile hesap
 // açılarak kabul edilir. Dönüş yolu YALNIZCA `safeNext` ile (M10).
 import { z } from "zod";
-import { createInvitedAccount } from "@wms/auth";
+import { createInvitedAccount } from "../../../lib/auth-service.ts";
 import { acceptInvitation } from "@wms/domain/identity/invitations";
 import { getAppDb } from "@wms/db";
 import { headers } from "next/headers";

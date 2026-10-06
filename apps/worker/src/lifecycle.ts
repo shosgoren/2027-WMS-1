@@ -1,6 +1,7 @@
 // Worker yaşam döngüsü: başlatma, sıralı kapanış kancaları, sinyal ve ölümcül hata işleme.
 // Kuyruk tüketimi burada yoktur (T-002c kapsamı); ileride kuyruk/DB havuzu kapanışı
 // `register` ile kanca olarak eklenir.
+import { createJsonLogger as createSharedJsonLogger, type JsonLogger, type Logger } from "@wms/shared/log";
 
 /** Kapanış zaman aşımı varsayılanı (ms); `WORKER_SHUTDOWN_TIMEOUT_MS` ile değiştirilir. */
 export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000;
@@ -8,27 +9,14 @@ export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000;
 /** Kapanış sırasında ikinci sinyal veya ölümcül hata ile çıkış kodu. */
 export const EXIT_FAILURE = 1;
 
-export type LogLevel = "info" | "error";
+export type { LogLevel, Logger } from "@wms/shared/log";
 
-export interface Logger {
-  info(msg: string, fields?: Record<string, unknown>): void;
-  error(msg: string, fields?: Record<string, unknown>): void;
-}
-
-/** Her kaydı tek JSON satırı (`level`, `msg`, `ts` + ek alanlar) olarak yazar. */
-export function createJsonLogger(
-  write: (line: string) => void = (line) => {
-    process.stdout.write(line + "\n");
-  },
-  now: () => Date = () => new Date(),
-): Logger {
-  const emit = (level: LogLevel, msg: string, fields?: Record<string, unknown>): void => {
-    write(JSON.stringify({ ...fields, level, msg, ts: now().toISOString() }));
-  };
-  return {
-    info: (msg, fields) => emit("info", msg, fields),
-    error: (msg, fields) => emit("error", msg, fields),
-  };
+/**
+ * Worker logger'ı: her kaydı tek JSON satırı (`ts`, `level`, `msg`, `service:"worker"` + maskelenmiş ek alanlar) olarak
+ * yazar. Biçim ve maskeleme `@wms/shared/log` içindedir (T-129); burada yalnızca `service` varsayılanı verilir.
+ */
+export function createJsonLogger(write?: (line: string) => void, now?: () => Date): JsonLogger {
+  return createSharedJsonLogger(write, now, { service: "worker" });
 }
 
 /**

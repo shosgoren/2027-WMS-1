@@ -413,3 +413,54 @@ describe(`invitation_tenant_for_token (0006, T-117; target=${env.target})`, () =
     expect(writes).toEqual([]);
   });
 });
+
+describe(`invitation_preview_for_token (0008, T-117d; target=${env.target})`, () => {
+  async function query<T extends pg.QueryResultRow>(sql: string, params: unknown[] = []): Promise<T[]> {
+    const client = new pg.Client({ connectionString: env.databaseUrlDirect });
+    try {
+      await client.connect();
+      return (await client.query<T>(sql, params)).rows;
+    } catch (e) {
+      throw new Error(redactErrorChain(e, secretUrls(env)));
+    } finally {
+      await client.end();
+    }
+  }
+  const FN = "wms_probe.invitation_preview_for_token(text)";
+
+  it("sahibi wms_identity_probe, SECURITY DEFINER, STABLE, sabit search_path, proacl NULL degil, PUBLIC girdisi yok; yalnizca (tenant_name, role_key, expires_at) doner", async () => {
+    const r = await query<{ owner: string; prosecdef: boolean; provolatile: string; proconfig: string[] | null; acl_null: boolean; public_acl: boolean; retset: boolean; cols: string[] | null; modes: string[] | null }>(
+      `SELECT p.proowner::regrole::text AS owner, p.prosecdef, p.provolatile, p.proconfig, p.proacl IS NULL AS acl_null,
+              EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = 0) AS public_acl, p.proretset AS retset,
+              p.proargnames AS cols, p.proargmodes::text[] AS modes
+         FROM pg_proc p WHERE p.oid = $1::regprocedure`,
+      [FN],
+    );
+    expect(r).toHaveLength(1);
+    expect(r[0]).toMatchObject({
+      owner: "wms_identity_probe",
+      prosecdef: true,
+      provolatile: "s",
+      proconfig: ["search_path=pg_catalog, pg_temp"],
+      acl_null: false,
+      public_acl: false,
+      retset: true,
+      cols: ["token_hash", "tenant_name", "role_key", "expires_at"],
+      modes: ["i", "t", "t", "t"],
+    });
+  });
+
+  it("EXECUTE yalnizca wms_app; wms_auth ve PUBLIC yok", async () => {
+    const r = await query<{ app: boolean; auth: boolean }>(
+      `SELECT has_function_privilege('wms_app', $1, 'EXECUTE') AS app, has_function_privilege('wms_auth', $1, 'EXECUTE') AS auth`,
+      [FN],
+    );
+    expect(r[0]).toEqual({ app: true, auth: false });
+    const grantees = await query<{ grantee: string }>(
+      `SELECT DISTINCT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE a.grantee::regrole::text END AS grantee
+         FROM pg_proc p, aclexplode(p.proacl) a WHERE p.oid = $1::regprocedure ORDER BY 1`,
+      [FN],
+    );
+    expect(grantees.map((g) => g.grantee).filter((g) => g !== "wms_identity_probe")).toEqual(["wms_app"]);
+  });
+});

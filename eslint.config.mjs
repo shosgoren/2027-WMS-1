@@ -1,5 +1,6 @@
 // Kök ESLint yapılandırması (flat config). Tüm repo bu dosyayla lint edilir.
 import { createRequire } from "node:module";
+import path from "node:path";
 import { defineConfig, globalIgnores } from "eslint/config";
 import tseslint from "typescript-eslint";
 
@@ -9,6 +10,9 @@ const requireFromWeb = createRequire(new URL("./apps/web/package.json", import.m
 const nextPlugin = requireFromWeb("@next/eslint-plugin-next");
 
 /** Tüm repo kaynakları (lint kapsamı). */
+/** Depo kökü (normalize edilmiş yol denetimi için; T-127a). */
+const REPO_ROOT_POSIX = path.posix.resolve(new URL(".", import.meta.url).pathname).replace(/\/$/, "");
+
 const LINT_FILES = "**/*.{js,mjs,cjs,ts,mts,cts,tsx}";
 
 const MSG_DB = "tenant erişimi `withTenant` (@wms/db) ile yapılır (T-005b/T-005g, I-02).";
@@ -80,8 +84,69 @@ const BETTER_AUTH_ENTRY = { regex: "^better-auth(?:\\/|$)", message: MSG_AUTH_LI
 const BETTER_AUTH_EXCEPT_REACT_ENTRY = { regex: "^better-auth(?:$|\\/(?!react$))", message: MSG_AUTH_LIB, ambiguous: true };
 const AUTH_SCOPED_ENTRY = { regex: "^(?:@better-auth\\/|@node-rs\\/argon2(?:\\/|$))", message: MSG_AUTH_LIB };
 const PG_BOSS_ENTRY = { regex: "^pg-boss(?:\\/|$)", message: MSG_QUEUE_LIB, ambiguous: true };
+/**
+ * T-127a (T-109b/T-125 inceleme takipleri; ADR-006): güvenlik varsayımları kod incelemesine değil lint'e
+ * dayanır. İzinli kapsamlar PROFILES tablosundadır (`packages/storage/**`). Girdiler birbirini dışlar:
+ * `@wms/storage/src/context` yalnızca paket-adı girdisine, `…/storage/src/context` yolları yalnızca yol
+ * girdisine uyar (arkadan bakış `(?<!^@wms\/)`).
+ */
+const MSG_AWS_SDK = "@aws-sdk/* yalnızca packages/storage içinde import edilir (ADR-006, T-127a).";
+const MSG_STORAGE_INTERNAL =
+  "`@wms/storage` iç modülleri (context.ts: bağlam üreticisi) paket dışından hiçbir yoldan import edilmez; yalnızca paket girişi `@wms/storage` (T-125, T-127a).";
+const MSG_CACHE_KEY =
+  "`@wms/shared/cache-key` (`formatTenantCacheKey`) yalnızca packages/storage/src/index.ts içinde import edilir; uygulama kodu marka denetimli `tenantCacheKey` (@wms/storage) kullanır (T-125, T-127a).";
+const AWS_SDK_ENTRY = { regex: "^@aws-sdk\\/", message: MSG_AWS_SDK };
+/** Paket adı derin yolu (`exports` yalnızca `.`; `@wms/storage/src/context`, `@wms/storage/context` …). */
+const STORAGE_DEEP_ENTRY = { regex: "^@wms\\/storage\\/", message: MSG_STORAGE_INTERNAL, normalized: true };
+/** Göreli/mutlak/`file:` yol (`../../storage/src/context.ts`); node_modules yolu ayrıca yasaktır. */
+const STORAGE_CONTEXT_PATH_ENTRY = {
+  regex: "(?:^|\\/)(?<!^@wms\\/)storage\\/src\\/context(?![\\w-])",
+  message: MSG_STORAGE_INTERNAL,
+  pathLike: true,
+  normalized: true,
+};
+/** `packages/storage` içinden ama `src/` dışından: `../src/context.ts` (üstteki girdiyle aynı dizgiye çift rapor vermez). */
+const STORAGE_SRC_CONTEXT_RELATIVE_ENTRY = {
+  regex: "(?:^|\\/)(?<!storage\\/)src\\/context(?![\\w-])",
+  message: MSG_STORAGE_INTERNAL,
+  pathLike: true,
+};
+const CACHE_KEY_ENTRY = { regex: "^@wms\\/shared\\/cache-key(?![\\w-])", message: MSG_CACHE_KEY, normalized: true };
+const CACHE_KEY_PATH_ENTRY = { regex: "(?:^|\\/)shared\\/src\\/cache-key(?![\\w-])", message: MSG_CACHE_KEY, pathLike: true, normalized: true };
+/**
+ * `normalized`: bu girdiler ayrıca belirtecin `path.posix.normalize` edilmiş biçimine ve (göreli/mutlak/`file:` ise)
+ * içe aktaran dosyaya göre çözülmüş depo-göreli yoluna karşı denetlenir (`wms/no-normalized-path-import`):
+ * `src/./context.ts`, `src//context.ts`, `storage/./src/context`, `src/../src/context`, `../src/./context` atlatmaları.
+ */
+const STORAGE_ENTRIES = [STORAGE_DEEP_ENTRY, STORAGE_CONTEXT_PATH_ENTRY, CACHE_KEY_ENTRY, CACHE_KEY_PATH_ENTRY];
 /** Tüm yasaklı kümenin birleşimi (girdiler birbirini dışlar). */
-const ALL_FORBIDDEN_MODULES = [...FORBIDDEN_MODULES, BETTER_AUTH_ENTRY, AUTH_SCOPED_ENTRY, PG_BOSS_ENTRY];
+const ALL_FORBIDDEN_MODULES = [
+  ...FORBIDDEN_MODULES,
+  BETTER_AUTH_ENTRY,
+  AUTH_SCOPED_ENTRY,
+  PG_BOSS_ENTRY,
+  AWS_SDK_ENTRY,
+  ...STORAGE_ENTRIES,
+];
+
+/**
+ * T-127a: `apps/web/**` için `@wms/db` adlı yasaklar (`packages/db/src/index.ts` dışa aktarımlarından): ham istemci
+ * kuran (`createDbClient`) veya tenant/oturum üyeliği doğrulaması olmadan bağlam kuran/DbClient alan yollar
+ * (`withSystemTenant`, `withNewTenant`, `recordSecurityEvent`). Web veriye yalnızca domain komutlarıyla erişir.
+ * Ad alanı içe aktarımı (`import * as`) ve yeniden dışa aktarım da `no-restricted-imports` ile yakalanır;
+ * dinamik/yükleyici biçimleri `WEB_DB_ENTRY` ile yasaktır.
+ */
+const MSG_WEB_DB =
+  "apps/web `@wms/db` sistem/oturumsuz bağlam yollarını (createDbClient, withSystemTenant, withNewTenant, recordSecurityEvent, appendAudit) kullanamaz; DB'ye yalnızca domain komutlarıyla erişilir (T-127a).";
+const WEB_DB_RESTRICTED_NAMES = ["createDbClient", "withSystemTenant", "withNewTenant", "recordSecurityEvent", "appendAudit"];
+const WEB_DB_PATHS = [{ name: "@wms/db", importNames: WEB_DB_RESTRICTED_NAMES, message: MSG_WEB_DB }];
+/**
+ * Web'de `@wms/db` kökünün KENDİSİ statik import için serbesttir (yalnızca adlar yasak, `paths`); ama dinamik/yükleyici
+ * biçimlerinde (`import()`, `require`, `createRequire` ve takma adları, şablon dizgisi, `import x = require()`) hiçbir ad
+ * denetlenemeyeceğinden tümden yasaktır. Bu girdi YALNIZCA sözdizimi ve yükleyici kümesine girer, `no-restricted-imports`
+ * desenlerine girmez. `ambiguous`: takma adlı genel çağrılarda aranmaz; yükleyici izleme kuralı tam kümeyle denetler.
+ */
+const WEB_DB_ENTRY = { regex: "^@wms\\/db$", message: MSG_WEB_DB, ambiguous: true };
 
 /**
  * Yol biçimli girdinin "modül belirteci konumunda" biçimi: göreli (`./`, `../`), mutlak (`/`) veya
@@ -92,7 +157,7 @@ const ALL_FORBIDDEN_MODULES = [...FORBIDDEN_MODULES, BETTER_AUTH_ENTRY, AUTH_SCO
 const asSpecifierPath = (regex) => `^(?=\\.\\.?\\/|\\/|file:).*(?:${regex})`;
 /** @param {Array<{ regex: string }>} list */
 const toSelectorRegex = (list) => `/${list.map(({ regex }) => `(?:${regex})`).join("|")}/i`;
-/** @typedef {{ regex: string, message?: string, ambiguous?: boolean, pathLike?: boolean }} ForbiddenEntry */
+/** @typedef {{ regex: string, message?: string, ambiguous?: boolean, pathLike?: boolean, normalized?: boolean }} ForbiddenEntry */
 /**
  * Bir yasaklı küme için esquery düzenli ifadeleri (kapsam başına ayrı küme: PROFILES, T-111).
  * @param {ForbiddenEntry[]} list
@@ -265,6 +330,7 @@ const noAliasedModuleLoader = {
       unambiguous: FORBIDDEN_UNAMBIGUOUS_JS_RE,
     } = jsRegexes(/** @type {any} */ (context.options[0])?.modules ?? ALL_FORBIDDEN_MODULES);
     const allowNonStatic = /** @type {any} */ (context.options[0])?.allowNonStatic === true;
+    const allModules = /** @type {ForbiddenEntry[]} */ (/** @type {any} */ (context.options[0])?.modules ?? ALL_FORBIDDEN_MODULES);
     /** @type {import("estree").CallExpression[]} */
     const calls = [];
     return {
@@ -376,6 +442,7 @@ const noAliasedModuleLoader = {
           if (arg.type === "Literal") {
             const v = String(arg.value);
             if (FORBIDDEN_JS_RE.test(v) && !FORBIDDEN_ALIAS_CALL_JS_RE.test(v)) context.report({ node: arg, messageId: "forbidden" });
+            else if (normalizedSpecifierHit(v, context.filename, allModules) !== null) context.report({ node: arg, messageId: "forbidden" });
             continue;
           }
           if (arg.type === "TemplateLiteral") {
@@ -392,7 +459,155 @@ const noAliasedModuleLoader = {
     };
   },
 };
-const WMS_PLUGIN = { meta: { name: "wms-local" }, rules: { "no-aliased-module-loader": noAliasedModuleLoader } };
+/**
+ * T-127a (security MAJOR-2): `normalized` girdiler (storage iç modülü, cache-key) belirteç dizgisinin kendisine değil,
+ * `path.posix.normalize` edilmiş biçimine ve içe aktaran dosyaya göre çözülmüş depo-göreli yoluna karşı denetlenir; böylece
+ * `src/./context.ts`, `src//context.ts`, `storage/./src/context.ts`, `src/../src/context.ts`, `../src/./context.ts` yazımları
+ * aynı modül olarak yakalanır. Ham dizgi zaten herhangi bir yasaklı girdiye uyuyorsa burada yinelenmez (tek ihlal = tek rapor).
+ * Kapsam: `import`/`export … from`, `import()`, `import x = require()`, `require`/`createRequire(…)(…)` ve (loader kuralı) yükleyici.
+ * @param {string} spec @param {string} filename mutlak dosya yolu @param {ForbiddenEntry[]} list
+ * @param {ForbiddenEntry[]} [extra] yalnızca yeniden dışa aktarımda ek yasaklar
+ */
+const normalizedSpecifierHit = (spec, filename, list, extra = /** @type {ForbiddenEntry[]} */ ([])) => {
+  const entries = [...list, ...extra].filter((e) => e.normalized);
+  if (entries.length === 0 || typeof spec !== "string") return null;
+  if (list.some((e) => new RegExp(e.regex, "iu").test(spec))) return null; // ham dizgi zaten raporlanır
+  // Yüzde kodlaması (`%2E`, `%63ontext.ts`) çözülür; geçersiz kodlama güvenli tarafta raporlanır.
+  let decoded;
+  try {
+    decoded = decodeURIComponent(spec);
+  } catch {
+    return entries[0] ?? null;
+  }
+  // Ters eğik çizgi `/` sayılır (`..\\src\\context.ts`).
+  let target = decoded.replaceAll("\\", "/");
+  if (target.startsWith("file:")) target = target.slice(5).replace(/^\/\//, "");
+  if (/^\.\.?(?:\/|$)/.test(target)) target = path.posix.join(path.posix.dirname(filename.replaceAll("\\", "/")), target);
+  target = path.posix.normalize(target);
+  if (target.startsWith(`${REPO_ROOT_POSIX}/`)) target = target.slice(REPO_ROOT_POSIX.length + 1);
+  return entries.find((e) => new RegExp(e.regex, "iu").test(target)) ?? null;
+};
+
+/** @type {import("eslint").Rule.RuleModule} */
+const noNormalizedPathImport = {
+  meta: {
+    type: "problem",
+    schema: [{ type: "object", additionalProperties: false, properties: { modules: { type: "array", items: { type: "object" } }, reexportModules: { type: "array", items: { type: "object" } } } }],
+    messages: { forbidden: "{{message}}" },
+  },
+  create(context) {
+    const modules = /** @type {ForbiddenEntry[]} */ (/** @type {any} */ (context.options[0])?.modules ?? ALL_FORBIDDEN_MODULES);
+    const reexportModules = /** @type {ForbiddenEntry[]} */ (/** @type {any} */ (context.options[0])?.reexportModules ?? []);
+    /** @param {any} node @param {any} src @param {ForbiddenEntry[]} [extra] yalnızca bu düğüm türünde ek yasaklar */
+    const check = (node, src, extra = []) => {
+      let spec = null;
+      if (src?.type === "Literal" && typeof src.value === "string") spec = src.value;
+      else if (src?.type === "TemplateLiteral" && src.expressions.length === 0 && src.quasis.length === 1) spec = src.quasis[0].value.cooked;
+      if (spec === null) return;
+      const hit = normalizedSpecifierHit(spec, context.filename, modules, extra);
+      if (hit) context.report({ node, messageId: "forbidden", data: { message: hit.message ?? "" } });
+    };
+    const isLoaderCallee = (/** @type {any} */ c) =>
+      (c.type === "Identifier" && REQUIRE_NAME_JS_RE.test(c.name)) ||
+      (c.type === "MemberExpression" && c.property.type === "Identifier" && REQUIRE_NAME_JS_RE.test(c.property.name)) ||
+      (c.type === "CallExpression" && (c.callee.name === "createRequire" || c.callee.property?.name === "createRequire"));
+    return {
+      ImportDeclaration: (n) => check(n, n.source),
+      ExportNamedDeclaration: (n) => n.source && check(n, n.source, reexportModules),
+      ExportAllDeclaration: (n) => check(n, n.source, reexportModules),
+      ImportExpression: (n) => check(n, n.source),
+      TSExternalModuleReference: (/** @type {any} */ n) => check(n, /** @type {any} */ (n).expression),
+      CallExpression: (n) => {
+        if (isLoaderCallee(n.callee) && n.arguments.length > 0) check(n, n.arguments[0]);
+      },
+    };
+  },
+};
+
+/**
+ * T-127b: `"use client"` dosyaları sunucu paketlerini/modüllerini içe aktaramaz (`server-only` paketi worker/vitest'i
+ * bozduğu için sınır lint'te tutulur; T-127 raporu). Girdiler: `@wms/{db,domain,auth,storage,queue-adapter}` (ve alt yolları)
+ * ile `apps/web/lib/{action-guard,rate-limit,queue}` (ve `packages/<bu paketler>/…` yolları). Yol girdisi `normalized`:
+ * göreli yazımlar (`../lib/./queue.ts`, `lib//queue`) içe aktaran dosyaya göre çözülüp normalize edilerek denetlenir.
+ * Kapsam: `import`/`export … from`/`import()`/`import x = require()`/`require`/`createRequire(…)(…)` (`wms/no-client-server-import`)
+ * ve takma adlı yükleyici (`wms/no-client-server-loader`, `no-aliased-module-loader` kuralının "use client" ile sınırlı örneği).
+ */
+const MSG_CLIENT_SERVER =
+  '"use client" dosyası sunucu paketini/modülünü (@wms/db, @wms/domain, @wms/auth, @wms/storage, @wms/queue-adapter, apps/web/lib/{action-guard,rate-limit,queue}) import edemez; veri/yetki işi sunucu eylemlerindedir (T-127b).';
+const CLIENT_FORBIDDEN_MODULES = /** @type {ForbiddenEntry[]} */ ([
+  { regex: "^@wms\\/(?:db|domain|auth|storage|queue-adapter)(?:[\\/?#]|$)", message: MSG_CLIENT_SERVER },
+  {
+    regex: "^(?:apps\\/web\\/lib\\/(?:action-guard|rate-limit|queue)(?:\\.[cm]?[jt]sx?)?|packages\\/(?:db|domain|auth|storage|queue-adapter)(?:\\/.*)?)(?:[?#].*)?$",
+    message: MSG_CLIENT_SERVER,
+    pathLike: true,
+    normalized: true,
+  },
+]);
+/** Dosya yönerge öncülünde (ilk ifadeler) `"use client"` var mı. @param {any} program */
+const hasUseClientDirective = (program) => {
+  for (const st of program.body) {
+    if (st.type !== "ExpressionStatement" || typeof st.directive !== "string") return false;
+    // Çözülmüş değer (kaçışlı `"use \x63lient"` yazımı da aynı yönergedir); `directive` ham metindir.
+    if (st.expression?.value === "use client") return true;
+  }
+  return false;
+};
+/** @type {import("eslint").Rule.RuleModule} */
+const noClientServerImport = {
+  meta: { type: "problem", schema: [], messages: { forbidden: MSG_CLIENT_SERVER } },
+  create(context) {
+    if (!hasUseClientDirective(context.sourceCode.ast)) return {};
+    const rawRe = new RegExp(CLIENT_FORBIDDEN_MODULES.map((m) => `(?:${m.regex})`).join("|"), "iu");
+    /** @param {any} node @param {any} src */
+    const check = (node, src) => {
+      let spec = null;
+      if (src?.type === "Literal" && typeof src.value === "string") spec = src.value;
+      else if (src?.type === "TemplateLiteral" && src.expressions.length === 0 && src.quasis.length === 1) spec = src.quasis[0].value.cooked;
+      if (spec === null) return;
+      if (rawRe.test(spec) || normalizedSpecifierHit(spec, context.filename, CLIENT_FORBIDDEN_MODULES) !== null) {
+        context.report({ node, messageId: "forbidden" });
+      }
+    };
+    const isLoaderCallee = (/** @type {any} */ c) =>
+      (c.type === "Identifier" && REQUIRE_NAME_JS_RE.test(c.name)) ||
+      (c.type === "MemberExpression" && c.property.type === "Identifier" && REQUIRE_NAME_JS_RE.test(c.property.name)) ||
+      (c.type === "CallExpression" && (c.callee.name === "createRequire" || c.callee.property?.name === "createRequire"));
+    return {
+      ImportDeclaration: (n) => check(n, n.source),
+      ExportNamedDeclaration: (n) => n.source && check(n, n.source),
+      ExportAllDeclaration: (n) => check(n, n.source),
+      ImportExpression: (n) => check(n, n.source),
+      TSExternalModuleReference: (/** @type {any} */ n) => check(n, n.expression),
+      CallExpression: (n) => {
+        if (isLoaderCallee(n.callee) && n.arguments.length > 0) check(n, n.arguments[0]);
+      },
+    };
+  },
+};
+/** Takma adlı yükleyici (`const load = createRequire(…); load("@wms/db")`): mevcut izleme kuralı, yalnızca "use client" dosyalarında. @type {import("eslint").Rule.RuleModule} */
+const noClientServerLoader = {
+  meta: { type: "problem", schema: [], messages: { forbidden: MSG_CLIENT_SERVER } },
+  create(context) {
+    if (!hasUseClientDirective(context.sourceCode.ast)) return {};
+    return /** @type {any} */ (noAliasedModuleLoader).create(
+      Object.create(context, {
+        // `ambiguous`: seçici tabanlı bir kural olmadığından takma adlı çağrıdaki ihlali bu kural raporlar. `(?!)` hiçbir
+        // şeye uymayan yer tutucudur: boş "ambiguous olmayan" küme `new RegExp("")` olup her dizgeye uyardı.
+        options: { value: [{ modules: [...CLIENT_FORBIDDEN_MODULES.map((m) => ({ ...m, ambiguous: true })), { regex: "(?!)" }], allowNonStatic: true }] },
+        report: { value: (/** @type {any} */ d) => context.report({ node: d.node, messageId: "forbidden" }) },
+      }),
+    );
+  },
+};
+const WMS_PLUGIN = {
+  meta: { name: "wms-local" },
+  rules: {
+    "no-aliased-module-loader": noAliasedModuleLoader,
+    "no-normalized-path-import": noNormalizedPathImport,
+    "no-client-server-import": noClientServerImport,
+    "no-client-server-loader": noClientServerLoader,
+  },
+};
 
 // T-005g Yapılacak 4: tenant bağlam ayarı yalnızca packages/db (`withTenant`) içinde. Desenler bu
 // dosyanın kendisi de lint edildiği için karakter sınıfıyla (`confi[g]`) yazılır.
@@ -454,50 +669,90 @@ const PATH_TO_FILE_URL_REBINDING = [
 /** `import(<ifade>)` muafiyetinin tek dosyası (T-015). */
 const GUARD_LOADER_FILE = "scripts/guards/cli.mjs";
 
+
 /**
  * T-111: kapsam profilleri. Flat config'te aynı kural sonraki blokta yeniden tanımlanırsa seçenekler
  * birleşmez, değişir; bu yüzden her profil kendi tam yasaklı kümesini (genel kümeden yalnızca izinli
  * girdiler çıkarılmış) verir. Bloklar ana bloktan SONRA gelir ve birbirinden ayrık dosyalara bakar.
  * Hiçbir profil tenant bağlam ayarı (TENANT_SETTING_SYNTAX), kod yürütme (CODE_EXEC_SYNTAX) veya
  * statik olmayan belirteç denetimini gevşetmez.
- * @param {{ files: string[], allow: ForbiddenEntry[], replace?: ForbiddenEntry[] }} p `allow`: bu kapsamda
+ * @param {{ files: string[], ignores?: string[], allow: ForbiddenEntry[], replace?: ForbiddenEntry[], web?: boolean, reexportForbid?: ForbiddenEntry[] }} p `allow`: bu kapsamda
  *   serbest girdiler; `replace`: serbest girdi yerine uygulanacak daha dar girdiler.
  */
-const strictProfile = ({ files, allow, replace = [] }) => {
+const strictProfile = ({ files, ignores = [], allow, replace = [], web = false, reexportForbid = [] }) => {
   const modules = [...ALL_FORBIDDEN_MODULES.filter((m) => !allow.includes(m)), ...replace];
+  // Web: `@wms/db` kökü yalnızca dinamik/yükleyici biçimlerinde yasak (statik import'ta adlar `paths` ile denetlenir).
+  const loaderModules = web ? [...modules, WEB_DB_ENTRY] : modules;
   return {
     files,
-    plugins: { wms: WMS_PLUGIN },
-    rules: /** @type {import("eslint").Linter.RulesRecord} */ ({
-      "no-restricted-imports": ["error", { patterns: modules.map(({ regex, message }) => ({ regex, message })) }],
-      "no-restricted-syntax": ["error", ...rawClientSyntax(modules), ...CODE_EXEC_SYNTAX, ...TENANT_SETTING_SYNTAX],
-      "wms/no-aliased-module-loader": ["error", { modules }],
-    }),
-  };
-};
-const PROFILES = [
-  // ADR-014 §Sonuçlar: kimlik paketi ham Drizzle istemcisine (`@wms/db/internal`, `/schema` dahil) erişir;
-  // sürücü/bağdaştırıcı yasakları geçerli kalır. Better Auth/Argon2 de burada serbesttir.
-  strictProfile({ files: ["packages/auth/**"], allow: [DB_INTERNAL_ENTRY, BETTER_AUTH_ENTRY, AUTH_SCOPED_ENTRY] }),
-  strictProfile({ files: ["apps/web/app/api/auth/**"], allow: [BETTER_AUTH_ENTRY, AUTH_SCOPED_ENTRY] }),
-  // Yalnızca `better-auth/react` istemcisi.
-  strictProfile({ files: ["apps/web/lib/auth-client.ts"], allow: [BETTER_AUTH_ENTRY], replace: [BETTER_AUTH_EXCEPT_REACT_ENTRY] }),
-  // ADR-005: kuyruk sağlayıcısı yalnızca bağdaştırıcı paketinde.
-  strictProfile({ files: ["packages/queue-adapter/**"], allow: [PG_BOSS_ENTRY] }),
-  {
-    // `packages/db` ve `tests/integration` ana bloktan muaftır (mevcut); yeni kütüphane yasakları orada da
-    // geçerlidir, statik olmayan import/require muafiyeti değişmez.
-    files: ["packages/db/**", "tests/integration/**"],
+    ...(ignores.length > 0 ? { ignores } : {}),
     plugins: { wms: WMS_PLUGIN },
     rules: /** @type {import("eslint").Linter.RulesRecord} */ ({
       "no-restricted-imports": [
         "error",
-        { patterns: [BETTER_AUTH_ENTRY, AUTH_SCOPED_ENTRY, PG_BOSS_ENTRY].map(({ regex, message }) => ({ regex, message })) },
+        { patterns: modules.map(({ regex, message }) => ({ regex, message })), ...(web ? { paths: WEB_DB_PATHS } : {}) },
       ],
-      "no-restricted-syntax": ["error", ...rawClientModuleSyntaxOnly([BETTER_AUTH_ENTRY, AUTH_SCOPED_ENTRY, PG_BOSS_ENTRY])],
-      "wms/no-aliased-module-loader": ["error", { modules: [BETTER_AUTH_ENTRY, AUTH_SCOPED_ENTRY, PG_BOSS_ENTRY], allowNonStatic: true }],
+      "no-restricted-syntax": ["error", ...rawClientSyntax(loaderModules), ...CODE_EXEC_SYNTAX, ...TENANT_SETTING_SYNTAX],
+      "wms/no-aliased-module-loader": ["error", { modules: loaderModules }],
+      "wms/no-normalized-path-import": ["error", { modules, reexportModules: reexportForbid }],
     }),
-  },
+  };
+};
+/** `@aws-sdk` istisnası: yalnızca bu iki dosya (dizin değil; T-127a MINOR-4). */
+const AWS_FIXTURE_FILES = ["tests/integration/harness/global-setup.ts", "tests/integration/storage/object-storage.int.test.ts"];
+const PROFILES = [
+  // T-127a: web kapsamı (önce; daha dar web profilleri sonra gelir ve kendi `paths`/sözdizimini yeniden kurar).
+  strictProfile({ files: ["apps/web/**"], allow: [], web: true }),
+  // ADR-014 §Sonuçlar: kimlik paketi ham Drizzle istemcisine (`@wms/db/internal`, `/schema` dahil) erişir;
+  // sürücü/bağdaştırıcı yasakları geçerli kalır. Better Auth/Argon2 de burada serbesttir.
+  strictProfile({ files: ["packages/auth/**"], allow: [DB_INTERNAL_ENTRY, BETTER_AUTH_ENTRY, AUTH_SCOPED_ENTRY] }),
+  strictProfile({ files: ["apps/web/app/api/auth/**"], allow: [BETTER_AUTH_ENTRY, AUTH_SCOPED_ENTRY], web: true }),
+  // Yalnızca `better-auth/react` istemcisi.
+  strictProfile({ files: ["apps/web/lib/auth-client.ts"], allow: [BETTER_AUTH_ENTRY], replace: [BETTER_AUTH_EXCEPT_REACT_ENTRY], web: true }),
+  // ADR-005: kuyruk sağlayıcısı yalnızca bağdaştırıcı paketinde.
+  strictProfile({ files: ["packages/queue-adapter/**"], allow: [PG_BOSS_ENTRY] }),
+  // T-127a (ADR-006): @aws-sdk yalnızca depolama paketinde; context.ts yalnızca paket kaynağında (`src/**`);
+  // `@wms/shared/cache-key` yalnızca `src/index.ts`'te. Bloklar daraldıkça sonra gelir (aynı kural: son blok kazanır).
+  // `src/` dışında (ör. `packages/storage/test/`) `../src/context` göreli yolu da yasaktır.
+  strictProfile({
+    files: ["packages/storage/**"],
+    ignores: ["packages/storage/src/**"],
+    allow: [AWS_SDK_ENTRY],
+    replace: [STORAGE_SRC_CONTEXT_RELATIVE_ENTRY],
+  }),
+  strictProfile({
+    files: ["packages/storage/src/**"],
+    ignores: ["packages/storage/src/index.ts"],
+    allow: [AWS_SDK_ENTRY, STORAGE_CONTEXT_PATH_ENTRY],
+  }),
+  strictProfile({
+    files: ["packages/storage/src/index.ts"],
+    allow: [AWS_SDK_ENTRY, STORAGE_CONTEXT_PATH_ENTRY, CACHE_KEY_ENTRY, CACHE_KEY_PATH_ENTRY],
+  }),
+  // `packages/db` ve `tests/integration` ana bloktan muaftır (mevcut); yeni kütüphane yasakları orada da
+  // geçerlidir, statik olmayan import/require muafiyeti değişmez. T-127a: depolama sınırları da burada geçerlidir;
+  // `@aws-sdk` yalnızca depolama fikstürleri (MinIO/STS kurulumu ve nesne deposu entegrasyon testi) için serbesttir.
+  ...[
+    {
+      files: ["packages/db/**", "tests/integration/**"],
+      ignores: AWS_FIXTURE_FILES,
+      extra: [AWS_SDK_ENTRY],
+    },
+    { files: AWS_FIXTURE_FILES, extra: [] },
+  ].map(({ files, ignores = [], extra }) => {
+    const modules = [BETTER_AUTH_ENTRY, AUTH_SCOPED_ENTRY, PG_BOSS_ENTRY, ...extra, ...STORAGE_ENTRIES];
+    return {
+      files,
+      ...(ignores.length > 0 ? { ignores } : {}),
+      plugins: { wms: WMS_PLUGIN },
+      rules: /** @type {import("eslint").Linter.RulesRecord} */ ({
+        "no-restricted-imports": ["error", { patterns: modules.map(({ regex, message }) => ({ regex, message })) }],
+        "no-restricted-syntax": ["error", ...rawClientModuleSyntaxOnly(modules)],
+        "wms/no-aliased-module-loader": ["error", { modules, allowNonStatic: true }],
+        "wms/no-normalized-path-import": ["error", { modules }],
+      }),
+    };
+  }),
 ];
 
 export default defineConfig(
@@ -545,9 +800,17 @@ export default defineConfig(
       ],
       "no-restricted-syntax": ["error", ...RAW_CLIENT_SYNTAX, ...CODE_EXEC_SYNTAX, ...TENANT_SETTING_SYNTAX],
       "wms/no-aliased-module-loader": "error",
+      "wms/no-normalized-path-import": "error",
     },
   },
   ...PROFILES,
+  {
+    // T-127b: "use client" dosyalarında sunucu paketi import yasağı. Kural adları benzersizdir (yukarıdaki profillerin
+    // aynı-kural-değiştirme davranışından etkilenmez); hiçbir mevcut kuralı gevşetmez.
+    files: ["apps/web/**/*.{js,mjs,cjs,ts,mts,cts,tsx}", "packages/ui/**/*.{js,mjs,cjs,ts,mts,cts,tsx}"],
+    plugins: { wms: WMS_PLUGIN },
+    rules: { "wms/no-client-server-import": "error", "wms/no-client-server-loader": "error" },
+  },
   {
     // T-015: bekçi giriş noktası `scripts/guards/<ad>.mjs` modülünü `import(pathToFileURL(file).href)`
     // ile yükler; `<ad>` `isGuardName` ile sabit `GUARDS` listesine karşı doğrulanır ve testler
