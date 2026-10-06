@@ -914,5 +914,24 @@
         "description": "Rafı say, farkı göster."
       }
     }
+  },
+  "labels": {
+    "title": "Etiket yazdır",
+    "preview": "Etiket önizleme",
+    "print": "Yazdır",
+    "downloadZpl": "ZPL indir",
+    "bridge": "Yerel köprüyle gönder (hazır değil)",
+    "summary": "{count} etiket · şablon {version}",
+    "noSource": "Etiket için bir ürün ya da lokasyon seçilmedi.",
+    "noSourceAction": "Ürün ayrıntısından ya da lokasyon ağacından bu sayfaya gel.",
+    "locked": "Etiket görme yetkin yok.",
+    "lockedAction": "Çalışma alanı yöneticine sor.",
+    "errors": {
+      "copies": "Adet 1 ile {max} arasında, toplam etiket sayısı {max}'i aşmayan bir sayı olmalı.",
+      "charset": "Barkod içeriği yalnızca ASCII karakter taşıyabilir (Türkçe harf, ö, ş, ğ gibi karakterler olmaz).",
+      "charsetAction": "Ürün kodunu ya da barkodu ASCII karakterlerle düzelt.",
+      "tooLong": "Barkod etiket genişliğine sığmıyor.",
+      "tooLongAction": "Kodu ya da barkodu kısalt."
+    }
   }
 }
