@@ -571,7 +571,23 @@ export async function ensureAppRoles(o) {
   }
 
   const after = read();
-  if (!after.ok) return stop("RED", "rol katalog sorgusu başarısız");
+  if (!after.ok) {
+    // Yazımlar uygulandı ama doğrulama okunamadı: bu koşuda yaratılanlar silinmeye çalışılır; parolası değişenler için
+    // Fly'a yazılamadığı açıkça raporlanır (parola haritası boş döner).
+    for (const role of created) {
+      try {
+        if (o.flags.rolePath === "sql") {
+          const d = o.psql(`DROP ROLE ${quoteIdent(role)};`);
+          if (!d.ok) throw new Error(`SQLSTATE ${d.sqlstate ?? "?"}`);
+        } else await o.api.deleteRole(o.branchId, role);
+        lines.push(`${role}: bu koşuda yaratılan rol silindi`);
+      } catch (e) {
+        lines.push(`${role}: FAIL (yaratılan rol silinemedi — elle silinmeli): ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    if (rotated.length > 0) lines.push(`parolası değişti ama Fly'a yazılamadı: ${rotated.join(", ")} — yeniden --rotate gerekli`);
+    return stop("RED", "rol katalog sorgusu başarısız (doğrulama okunamadı)");
+  }
   for (const s of APP_ROLES) {
     const d = appRoleDeviations(after.roles.find((r) => r.role === s.role));
     if (d.length > 0) deviations[s.role] = d;

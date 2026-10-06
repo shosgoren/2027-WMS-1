@@ -434,6 +434,21 @@ describe("ensureAppRoles", () => {
     expect(sqls.filter((q) => /CREATE ROLE|ALTER ROLE/.test(q))).toHaveLength(1);
     expect(sqls.some((q) => q.startsWith("DROP ROLE"))).toBe(false);
   });
+  it("COMMIT sonrası doğrulama okuması düşerse: yaratılan roller silinir, döndürülenler açıkça raporlanır", async () => {
+    /** @type {string[]} */
+    const sqls = [];
+    let reads = 0;
+    const psql = (/** @type {string} */ sql) => {
+      sqls.push(sql);
+      if (sql.includes("'role'")) return ++reads === 1 ? { ok: true, stdout: roleRow("wms_app"), sqlstate: null, error: null } : { ok: false, stdout: "", sqlstate: "08006", error: "x" };
+      return { ok: true, stdout: "", sqlstate: null, error: null };
+    };
+    const r = await ensureAppRoles({ psql, api: /** @type {any} */ (null), branchId: "br", flags: { ...flags, rolePath: "sql", rotate: true }, flySecrets: new Set(), rand: makeRand(), mask: () => undefined, say: () => undefined });
+    expect(r.status).toBe("RED");
+    expect(r.passwords.size).toBe(0);
+    expect(sqls.filter((q) => q.startsWith("DROP ROLE"))).toEqual(['DROP ROLE "wms_auth";', 'DROP ROLE "wms_worker";']);
+    expect(r.lines).toContain("parolası değişti ama Fly'a yazılamadı: wms_app — yeniden --rotate gerekli");
+  });
   it("salt-okur kip (probe OK değil): CREATE/ALTER/API çağrısı 0, sapmalar yine raporlanır", async () => {
     /** @type {string[]} */
     const sqls = [];
