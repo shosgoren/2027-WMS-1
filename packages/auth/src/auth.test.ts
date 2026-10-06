@@ -15,6 +15,7 @@ import {
   maskLogText,
   maskedDb,
   describeError,
+  shouldSuppressNetworkMeta,
   verifyPassword,
 } from "./index.ts";
 
@@ -238,5 +239,38 @@ describe("maskedDb (drizzle istemci maskeleyici)", () => {
     expect(() => db.query).toThrow(AuthStoreError);
     expect(() => db.$client).toThrow(AuthStoreError);
     expect(() => db._).toThrow(AuthStoreError);
+  });
+});
+
+describe("shouldSuppressNetworkMeta (A-43/ADR-016 §10, T-112e)", () => {
+  const DOMAIN = "demo.example.test";
+  const demoId = "11111111-1111-4111-8111-111111111111";
+  const realId = "22222222-2222-4222-8222-222222222222";
+  const lookup = (id: string): Promise<string | null> =>
+    Promise.resolve(id === demoId ? `picker@${DOMAIN}` : id === realId ? "kisi@example.org" : null);
+  const decide = (userId: string | null, requestEmail?: string, domain: string | null = DOMAIN, explicit?: boolean) =>
+    shouldSuppressNetworkMeta(domain, { userId, requestEmail, lookupEmail: lookup, explicit });
+
+  it("başarılı giriş / çıkış (oturum kullanıcısı): demo bastırılır, demo olmayan korunur", async () => {
+    expect(await decide(demoId)).toBe(true);
+    expect(await decide(realId)).toBe(false);
+  });
+
+  it("başarısız giriş: bilinen demo kullanıcısı ve var olmayan demo adresi bastırılır; diğerleri korunur", async () => {
+    expect(await decide(demoId, `picker@${DOMAIN}`)).toBe(true);
+    expect(await decide(null, `yok-${rnd().slice(0, 6)}@${DOMAIN.toUpperCase()}`)).toBe(true);
+    expect(await decide(realId, "kisi@example.org")).toBe(false);
+    expect(await decide(null, "yok@example.org")).toBe(false);
+    expect(await decide(null)).toBe(false);
+  });
+
+  it("açık bayrak her zaman bastırır; demo alanı tanımsızsa davranış değişmez", async () => {
+    expect(await decide(realId, undefined, DOMAIN, true)).toBe(true);
+    expect(await decide(demoId, `picker@${DOMAIN}`, null)).toBe(false);
+  });
+
+  it("kullanıcı araması başarısızsa gizlilik lehine bastırır", async () => {
+    const r = await shouldSuppressNetworkMeta(DOMAIN, { userId: realId, lookupEmail: () => Promise.reject(new Error("db")) });
+    expect(r).toBe(true);
   });
 });
