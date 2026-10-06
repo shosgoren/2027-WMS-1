@@ -1,4 +1,6 @@
 @import "tailwindcss";
+/* `packages/ui/src` sınıfları (Button, Banner…) Tailwind 4 otomatik algılamasının dışındadır (T-119). Yol bu dosyaya göredir. */
+@source "../../../packages/ui/src";
 
 /* Tasarım belirteçleri (T-109; kaynak: docs/design/stok-takip-prototipi.pdf, Q-09).
    Koyu tema bu kartta yok. Dış font indirilmez: sistem yığını. */

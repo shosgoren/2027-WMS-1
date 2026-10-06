@@ -572,6 +572,7 @@ describe("AC-04 DB — SECURITY DEFINER katalog taraması", () => {
     "wms_probe.consume_admin_reset_grant",
     "wms_probe.identity_exclusive_to_tenant",
     "wms_probe.invitation_for_account_creation",
+    "wms_probe.invitation_preview_for_token", // T-117d migration 0008: salt okunur (ad+rol+süre), yalnızca wms_app EXECUTE
     "wms_probe.invitation_tenant_for_token", // T-117 migration 0006: salt okunur, yalnızca wms_app EXECUTE
   ];
 
@@ -607,6 +608,7 @@ describe("AC-04 DB — SECURITY DEFINER katalog taraması", () => {
       "wms_probe.identity_exclusive_to_tenant": [APP_ROLE],
       "wms_probe.consume_admin_reset_grant": [AUTH_ROLE],
       "wms_probe.invitation_for_account_creation": [AUTH_ROLE],
+      "wms_probe.invitation_preview_for_token": [APP_ROLE],
       "wms_probe.invitation_tenant_for_token": [APP_ROLE],
       "wms_probe.admin_reset_cleanup_on_membership": [migrator],
     };

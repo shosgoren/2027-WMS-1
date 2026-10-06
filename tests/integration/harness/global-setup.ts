@@ -11,9 +11,15 @@
 // neon hedefi: hiçbir şey kaldırılmaz; DATABASE_URL, DATABASE_URL_DIRECT, AUTH_DATABASE_URL ve DATABASE_URL_WORKER zorunludur, eksikse
 // koşu açık hatayla düşer (atlama yok). URL'ler loglanmaz; yalnızca maskeli host (G-09).
 //
+// Depolama (T-125, ADR-006): compose hedefinde `minio` de kaldırılır; koşuya özel rastgele root anahtarıyla bucket
+// oluşturulur ve root OLMAYAN, yalnızca bu bucket'a yetkili geçici anahtar (STS AssumeRole + oturum politikası)
+// STORAGE_* ortam değişkenleriyle testlere verilir (uygulama root anahtarı görmez). neon hedefinde MinIO yoktur:
+// STORAGE_INT_* dışarıdan verilmezse depolama testi AÇIK HATAYLA düşer (atlama yok; bkz. object-storage.int.test.ts).
+//
 // Her iki hedefte testlerden önce `migrate up` (migration rolü, DATABASE_URL_DIRECT) uygulanır
 // (T-101, ADR-015 §8); hata varsa koşu testlerden önce düşer.
 import { randomBytes } from "node:crypto";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DockerComposeEnvironment, Wait, type StartedDockerComposeEnvironment } from "testcontainers";
@@ -21,7 +27,8 @@ import { migrateUp } from "../../../packages/db/src/migrate.ts";
 import { APP_ROLE, AUTH_ROLE, PGBOUNCER_ADMIN_URL_VAR, WORKER_ROLE, maskHost, parsePoolSize, parsePrepare, parseTarget, readAuthDatabaseUrl, readIntEnv, readWorkerDatabaseUrl, redactErrorChain } from "./env.ts";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
-const SERVICES = ["postgres", "pgbouncer"];
+const SERVICES = ["postgres", "pgbouncer", "minio"];
+const STORAGE_BUCKET = "wms-int";
 const STARTUP_TIMEOUT_MS = 300_000;
 
 let environment: StartedDockerComposeEnvironment | undefined;
@@ -56,6 +63,7 @@ export async function setup(): Promise<void> {
   const authPassword = secret();
   const workerPassword = secret();
   const adminPassword = secret();
+  const minioRoot = { user: `root${secret().slice(0, 12)}`, password: secret() };
 
   environment = await new DockerComposeEnvironment(REPO_ROOT, "docker-compose.yml")
     .withProjectName(`wms-int-${randomBytes(4).toString("hex")}`)
@@ -71,6 +79,10 @@ export async function setup(): Promise<void> {
       PGBOUNCER_DEFAULT_POOL_SIZE: String(poolSize),
       POSTGRES_HOST_PORT: "0",
       PGBOUNCER_HOST_PORT: "0",
+      MINIO_ROOT_USER: minioRoot.user,
+      MINIO_ROOT_PASSWORD: minioRoot.password,
+      MINIO_API_HOST_PORT: "0",
+      MINIO_CONSOLE_HOST_PORT: "0",
     })
     .withDefaultWaitStrategy(Wait.forHealthCheck())
     .withStartupTimeout(STARTUP_TIMEOUT_MS)
@@ -79,9 +91,73 @@ export async function setup(): Promise<void> {
   try {
     exportUrls(environment, { migratorUser, migratorPassword, appPassword, authPassword, workerPassword, adminPassword, db, poolSize });
     await applyMigrations(process.env.DATABASE_URL_DIRECT ?? "");
+    await provisionStorage(environment, minioRoot);
   } catch (e) {
     await teardown();
     throw e;
+  }
+}
+
+// SDK yalnızca packages/storage'ın bağımlılığıdır; kökten çözülemez → o paketin çözümleyicisi (CJS require).
+const storageRequire = createRequire(path.join(REPO_ROOT, "packages/storage/package.json"));
+
+interface Sendable {
+  send(command: unknown): Promise<Record<string, unknown>>;
+  destroy(): void;
+}
+interface ClientConfig {
+  endpoint: string;
+  region: string;
+  forcePathStyle?: boolean;
+  credentials: { accessKeyId: string; secretAccessKey: string };
+}
+interface S3Surface {
+  S3Client: new (config: ClientConfig) => Sendable;
+  CreateBucketCommand: new (input: { Bucket: string }) => unknown;
+}
+interface StsSurface {
+  STSClient: new (config: ClientConfig) => Sendable;
+  AssumeRoleCommand: new (input: { RoleArn: string; RoleSessionName: string; DurationSeconds: number; Policy: string }) => unknown;
+}
+
+async function provisionStorage(started: StartedDockerComposeEnvironment, root: { user: string; password: string }): Promise<void> {
+  // Tipler elle daraltılır: SDK tiplerine `packages/storage/node_modules/...` yolundan bakmak kökten çözülemeyen
+  // @smithy/* tiplerini getirir (kök tsconfig), bu yüzden yalnızca kullanılan yüzey bildirilir.
+  const s3 = storageRequire("@aws-sdk/client-s3") as S3Surface;
+  const sts = storageRequire("@aws-sdk/client-sts") as StsSurface;
+  const minio = started.getContainer("minio-1");
+  const endpoint = `http://${minio.getHost()}:${minio.getMappedPort(9000)}`;
+  const region = "us-east-1";
+  const rootCreds = { accessKeyId: root.user, secretAccessKey: root.password };
+  const rootClient = new s3.S3Client({ endpoint, region, forcePathStyle: true, credentials: rootCreds });
+  const stsClient = new sts.STSClient({ endpoint, region, credentials: rootCreds });
+  try {
+    await rootClient.send(new s3.CreateBucketCommand({ Bucket: STORAGE_BUCKET }));
+    const policy = JSON.stringify({
+      Version: "2012-10-17",
+      Statement: [{ Effect: "Allow", Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"], Resource: [`arn:aws:s3:::${STORAGE_BUCKET}/*`] }],
+    });
+    const out = await stsClient.send(
+      new sts.AssumeRoleCommand({ RoleArn: "arn:xxx:xxx:xxx:xxxx", RoleSessionName: "wms-int", DurationSeconds: 3600, Policy: policy }),
+    );
+    const c = out.Credentials as { AccessKeyId?: string; SecretAccessKey?: string; SessionToken?: string } | undefined;
+    if (c?.AccessKeyId === undefined || c.SecretAccessKey === undefined || c.SessionToken === undefined) {
+      throw new Error("MinIO AssumeRole returned no credentials");
+    }
+    process.env.STORAGE_ENABLED = "true";
+    process.env.STORAGE_ENDPOINT = endpoint;
+    process.env.STORAGE_REGION = region;
+    process.env.STORAGE_BUCKET = STORAGE_BUCKET;
+    process.env.STORAGE_FORCE_PATH_STYLE = "true";
+    process.env.STORAGE_ACCESS_KEY_ID = c.AccessKeyId;
+    process.env.STORAGE_SECRET_ACCESS_KEY = c.SecretAccessKey;
+    process.env.STORAGE_SESSION_TOKEN = c.SessionToken;
+    console.log(`[test:int] storage: minio ${maskHost(endpoint)} bucket=${STORAGE_BUCKET} (root olmayan geçici anahtar)`);
+  } catch (e) {
+    throw new Error(`[test:int] storage provisioning failed: ${redactErrorChain(e, [root.user, root.password])}`);
+  } finally {
+    rootClient.destroy();
+    stsClient.destroy();
   }
 }
 

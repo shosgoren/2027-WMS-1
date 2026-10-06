@@ -3,10 +3,16 @@
 // (`migrate: false`; `start()` yalnızca şemanın kurulu olduğunu doğrular). Tüketim `apps/worker`'dadır.
 // `enqueue` işi çağıranın tenant transaction'ında yazar; istemci transaction DIŞINDA önceden başlatılmalıdır.
 import { createJobQueue, type PgBossJobQueue } from "@wms/queue-adapter";
+import { createConsoleLogger } from "@wms/shared/log";
 
+// Yapılandırılmış, maskeli JSON log (T-129): `ts, level, msg, service` + alanlar.
+const logger = createConsoleLogger("web");
 const logError = (msg: string, fields?: Record<string, unknown>): void => {
-  console.error(JSON.stringify({ level: "error", msg, ...fields }));
+  logger.error(msg, fields);
 };
+
+/** `start()` bu süreyi aşarsa başlatma iptal edilir (asılı bağlantı bekleyen sözü sonsuza dek açık tutmaz). */
+export const QUEUE_START_TIMEOUT_MS = 5_000;
 
 /** Süreç başına tek başlatma sözü: eşzamanlı istekler aynı örneği/aynı başlatmayı paylaşır. Başarısızlık önbelleğe alınmaz. */
 let pending: Promise<PgBossJobQueue | undefined> | undefined;
@@ -18,12 +24,19 @@ async function startSender(): Promise<PgBossJobQueue | undefined> {
     return undefined;
   }
   const queue = createJobQueue({ connectionString: url, max: 2, logger: { error: logError } });
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    await queue.start();
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("queue start timeout")), QUEUE_START_TIMEOUT_MS);
+    });
+    const starting = queue.start();
+    // Zaman aşımı kazanırsa asılı `start()` sonradan reddedebilir: işlenmeyen ret olmasın.
+    starting.catch(() => undefined);
+    await Promise.race([starting, timeout]);
     return queue;
   } catch (err) {
     // Hata maskeli loglanır: yalnızca sınıf adı (bağlantı bilgisi/URL sızmaz, G-09).
-    logError("web queue start failed", { error: err instanceof Error ? err.name : "unknown" });
+    logError("web queue start failed", { error: err instanceof Error ? (err.message === "queue start timeout" ? "StartTimeout" : err.name) : "unknown" });
     // Başarısız başlatma havuzu açık bırakmaz (pgbouncer bağlantı tükenmesi): örnek kapatılır.
     try {
       await queue.stop();
@@ -31,6 +44,8 @@ async function startSender(): Promise<PgBossJobQueue | undefined> {
       logError("web queue cleanup failed", { error: stopErr instanceof Error ? stopErr.name : "unknown" });
     }
     return undefined;
+  } finally {
+    clearTimeout(timer);
   }
 }
 

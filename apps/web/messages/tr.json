@@ -17,5 +17,434 @@
       "full": "Yardım çağır",
       "short": "Yardım"
     }
+  },
+  "auth": {
+    "common": {
+      "errorCode": "Hata kodu: {code}",
+      "backToLogin": "Girişe dön",
+      "continue": "Devam et",
+      "waitSomeTime": "birkaç dakika",
+      "waitSeconds": "{seconds} saniye",
+      "waitMinutes": "{minutes} dakika",
+      "rateLimited": "Çok fazla deneme yapıldı.",
+      "rateLimitedAction": "{wait} bekleyip yeniden dene.",
+      "serverError": "İşlem şu an tamamlanamadı.",
+      "serverErrorAction": "Bağlantını kontrol edip biraz sonra yeniden dene; sürerse yöneticine haber ver."
+    },
+    "login": {
+      "title": "Giriş yap",
+      "email": "E-posta",
+      "password": "Parola",
+      "submit": "Giriş yap",
+      "invalid": "E-posta veya parola hatalı.",
+      "invalidAction": "Bilgilerini kontrol edip yeniden dene. Parolanı unuttuysan sıfırla.",
+      "forgot": "Parolamı unuttum",
+      "demoBanner": "Demo ortamı — gerçek kişisel veri girmeyin",
+      "socialLabel": "Diğer giriş yöntemleri",
+      "google": "Google ile giriş",
+      "microsoft": "Microsoft ile giriş"
+    },
+    "reset": {
+      "requestTitle": "Parolamı sıfırla",
+      "requestIntro": "Hesabının e-posta adresini yaz. Parola sıfırlama bağlantısı 30 dakika geçerlidir ve tek kez kullanılır.",
+      "requestSubmit": "Sıfırlama bağlantısı iste",
+      "sent": "Bu adresle kayıtlı bir hesap varsa sıfırlama bağlantısı gönderildi. Birkaç dakika içinde gelmezse yöneticinden sıfırlama bağlantısı iste.",
+      "undeliverable": "Şu an e-posta ile sıfırlama bağlantısı gönderemiyoruz. Yöneticinden sıfırlama bağlantısı iste: yönetici üye ekranından senin için tek kullanımlık bir bağlantı üretip sana iletir.",
+      "newTitle": "Yeni parola belirle",
+      "newPassword": "Yeni parola",
+      "confirmPassword": "Yeni parola (tekrar)",
+      "passwordHint": "En az 12, en çok 128 karakter.",
+      "newSubmit": "Parolayı kaydet",
+      "mismatch": "Parolalar aynı değil.",
+      "mismatchAction": "İki alana aynı parolayı yaz.",
+      "passwordRule": "Parola uzunluk kuralına uymuyor.",
+      "passwordRuleAction": "En az 12, en çok 128 karakterlik bir parola seç.",
+      "invalidLink": "Sıfırlama bağlantısı geçersiz, kullanılmış veya süresi dolmuş.",
+      "invalidLinkAction": "Yeni bir bağlantı iste ya da yöneticinden bağlantı üretmesini iste.",
+      "requestAgain": "Yeni bağlantı iste",
+      "done": "Parolan değişti. Güvenliğin için tüm oturumların kapatıldı; yeni parolayla giriş yap."
+    },
+    "mfa": {
+      "verifyTitle": "İki adımlı doğrulama",
+      "verifyIntro": "Kimlik doğrulama uygulamandaki 6 haneli kodu yaz.",
+      "backupIntro": "Kurulumda kaydettiğin yedek kodlardan birini yaz. Her kod yalnızca bir kez çalışır.",
+      "code": "Doğrulama kodu",
+      "backupCode": "Yedek kod",
+      "codeHint": "Uygulamadaki 6 haneli kod.",
+      "verifySubmit": "Doğrula",
+      "useBackup": "Yedek kod kullan",
+      "useTotp": "Uygulamadaki kodu kullan",
+      "invalid": "Kod hatalı veya süresi dolmuş.",
+      "invalidAction": "Uygulamadaki güncel kodu yeniden yaz.",
+      "locked": "Çok fazla hatalı kod girildi; doğrulama geçici olarak kilitlendi.",
+      "lockedAction": "15 dakika bekleyip yeniden dene.",
+      "setupTitle": "İki adımlı doğrulamayı kur",
+      "setupIntro": "Hesabını korumak için bir kimlik doğrulama uygulaması bağla. Yönetici hesaplarında bu adım zorunludur.",
+      "confirmPassword": "Parolan",
+      "confirmPasswordHint": "Güvenlik için parolanı yeniden yaz.",
+      "setupStart": "Kuruluma başla",
+      "passwordWrong": "Parola hatalı.",
+      "passwordWrongAction": "Parolanı kontrol edip yeniden dene.",
+      "keyTitle": "1. Anahtarı uygulamaya ekle",
+      "keyIntro": "Kimlik doğrulama uygulamanda yeni hesap ekle ve bu anahtarı elle yaz.",
+      "openApp": "Uygulamada aç",
+      "backupTitle": "2. Yedek kodlarını sakla",
+      "backupWarning": "Bu kodlar yalnızca şimdi gösterilir. Telefonunu kaybedersen girişin tek yolu bunlardır; güvenli bir yere kaydet.",
+      "backupSaved": "Yedek kodları kaydettim",
+      "setupFinish": "Kurulumu tamamla",
+      "setupDone": "İki adımlı doğrulama etkinleştirildi. Sonraki girişlerinde uygulamadaki kod istenecek.",
+      "demoDisabled": "Demo ortamında iki adımlı doğrulama kurulamaz.",
+      "demoDisabledAction": "Gerçek hesabınla giriş yapıp kur.",
+      "alreadyEnabled": "İki adımlı doğrulama zaten etkin.",
+      "alreadyEnabledAction": "Değiştirmen gerekiyorsa yöneticine başvur."
+    },
+    "signOut": {
+      "label": "Çıkış yap",
+      "failed": "Çıkış yapılamadı.",
+      "failedAction": "Bağlantını kontrol edip yeniden dene."
+    },
+    "invite": {
+      "title": "Çalışma alanına davet",
+      "intro": "Daveti kabul etmek için adını ve bir parola belirle. Hesabın bu davetle açılır.",
+      "introSignedIn": "Bu daveti şu an giriş yaptığın hesapla kabul edeceksin.",
+      "preview": "{tenant} çalışma alanına {role} rolüyle davet edildin.",
+      "expiresInHours": "Bu davet yaklaşık {hours} saat içinde geçerliliğini yitirir.",
+      "expiresSoon": "Bu davet bir saatten kısa süre içinde geçerliliğini yitirir.",
+      "rateLimited": "Çok fazla deneme yapıldı. Biraz bekleyip sayfayı yeniden aç.",
+      "name": "Adın",
+      "acceptNew": "Hesap oluştur ve kabul et",
+      "acceptSignedIn": "Daveti kabul et",
+      "haveAccount": "Zaten hesabım var, giriş yap",
+      "errors": {
+        "not_found": "Davet bulunamadı, süresi dolmuş veya iptal edilmiş.",
+        "not_foundAction": "Daveti gönderen yöneticiden yeni davet iste.",
+        "forbidden": "Bu davet bu hesapla kabul edilemez; davet başka bir e-posta adresine gönderilmiş olabilir.",
+        "forbiddenAction": "Davetin gönderildiği e-posta adresiyle giriş yap veya yöneticiden doğru adrese yeni davet iste.",
+        "validation_failed": "Girilen bilgiler geçersiz.",
+        "validation_failedAction": "Adını ve en az 12 karakterlik parolanı kontrol edip yeniden dene.",
+        "rate_limited": "Çok fazla deneme yapıldı.",
+        "rate_limitedAction": "Biraz bekleyip yeniden dene.",
+        "mfa_required": "Bu davet için iki adımlı doğrulama gerekli.",
+        "mfa_requiredAction": "Önce iki adımlı doğrulamayı kur, sonra daveti yeniden aç."
+      }
+    }
+  },
+  "tenantBar": {
+    "label": "Çalışma alanı",
+    "roleChip": "{role} · değiştir",
+    "switchTitle": "Çalışma alanı değiştir",
+    "current": "Şu an buradasın",
+    "user": "Giriş yapan: {name}"
+  },
+  "roles": {
+    "TENANT_ADMIN": "Yönetici",
+    "WAREHOUSE_MANAGER": "Depo sorumlusu",
+    "PICKER": "Toplayıcı",
+    "COUNTER": "Sayımcı",
+    "READ_ONLY": "Salt okunur"
+  },
+  "members": {
+    "title": "Üyeler",
+    "intro": "Bu çalışma alanında işlem yapabilen kişiler.",
+    "lockedReason": "Bu iş için yetkin yok. Sorumluna sorabilirsin.",
+    "unavailableReason": "Bu işlem bu kişi için kullanılamıyor. Kişi parolasını kendi e-postasıyla sıfırlayabilir.",
+    "ownerBadge": "Sahip",
+    "selfBadge": "Sen",
+    "demoBadge": "Demo",
+    "statusActive": "Aktif",
+    "empty": "Bu çalışma alanında henüz üye yok.",
+    "emptyAction": "Davet ederek başla.",
+    "membersList": "Üye listesi",
+    "invite": "Üye davet et",
+    "role": "Rol",
+    "applyRole": "Rolü değiştir",
+    "remove": "Çıkar",
+    "transfer": "Sahipliği devret",
+    "resetLink": "Parola sıfırlama bağlantısı oluştur",
+    "actionsFor": "{name} için işlemler",
+    "confirmCancel": "Vazgeç",
+    "confirm": {
+      "role": {
+        "title": "Rol değişsin mi?",
+        "description": "{name} bu çalışma alanında artık {role} olarak çalışır; izinleri bu role göre değişir.",
+        "button": "Rolü değiştir"
+      },
+      "remove": {
+        "title": "Üye çıkarılsın mı?",
+        "description": "{name} artık bu çalışma alanında işlem yapamaz. Geçmiş kayıtları silinmez.",
+        "button": "Çıkar"
+      },
+      "transfer": {
+        "title": "Sahiplik devredilsin mi?",
+        "description": "{name} bu çalışma alanının sahibi olur; sen sahiplik ayrıcalığını kaybedersin.",
+        "button": "Sahipliği devret"
+      },
+      "reset": {
+        "title": "Sıfırlama bağlantısı oluşturulsun mu?",
+        "description": "{name} için tek kullanımlık, 30 dakika geçerli bir bağlantı oluşturulur. Bağlantıyı yalnızca bir kez görürsün; kişiye kendin iletmelisin.",
+        "button": "Bağlantı oluştur"
+      }
+    },
+    "done": {
+      "role": "Rol güncellendi.",
+      "remove": "Üye çıkarıldı.",
+      "transfer": "Sahiplik devredildi."
+    },
+    "pending": {
+      "title": "Bekleyen davetler",
+      "empty": "Bekleyen davet yok.",
+      "expires": "Süre sonu: {date}",
+      "invitedBy": "Davet eden: {name}",
+      "revoke": "Daveti iptal et",
+      "revoked": "Davet iptal edildi.",
+      "revokeTitle": "Davet iptal edilsin mi?",
+      "revokeDescription": "{email} bu bağlantıyla çalışma alanına katılamaz.",
+      "locked": "Bekleyen davetleri yalnızca üye yönetimi yetkisi olanlar görebilir."
+    },
+    "inviteDialog": {
+      "title": "Üye davet et",
+      "email": "E-posta",
+      "emailHint": "Davet bu adrese gider.",
+      "role": "Rol",
+      "submit": "Davet gönder",
+      "close": "Kapat",
+      "sentEmail": "Davet e-posta ile gönderildi. Davet 72 saat geçerlidir.",
+      "sentScreen": "Davet e-postası gönderilemedi. Aşağıdaki bağlantıyı davet ettiğin kişiye kendin ilet.",
+      "linkLabel": "Davet bağlantısı"
+    },
+    "linkBox": {
+      "copy": "Kopyala",
+      "copied": "Kopyalandı.",
+      "copyFailed": "Kopyalanamadı.",
+      "copyFailedAction": "Bağlantıyı elle seçip kopyala.",
+      "warning": "Bu bağlantıyı yalnızca davet ettiğin kişiye ilet; tekrar gösterilmeyecek.",
+      "resetTitle": "Parola sıfırlama bağlantısı",
+      "resetWarning": "Bu bağlantıyı yalnızca ilgili kişiye ilet; tekrar gösterilmeyecek. 30 dakika geçerli ve tek kullanımlıktır.",
+      "dismiss": "Bağlantıyı kapat"
+    },
+    "errors": {
+      "code": "Hata kodu: {code}",
+      "forbidden": "Bu işlem yapılamadı.",
+      "forbiddenAction": "Yetkini kontrol et. Kişi bu çalışma alanının sahibiyse önce sahipliği başka bir yöneticiye devret.",
+      "forbidden_mfa_required": "Yönetici işlemleri için iki adımlı doğrulama gerekli.",
+      "forbidden_mfa_requiredAction": "Önce iki adımlı doğrulamayı kur, sonra işlemi yinele.",
+      "mfaLink": "İki adımlı doğrulamayı kur",
+      "unauthenticated": "Oturumun sona ermiş.",
+      "unauthenticatedAction": "Yeniden giriş yapıp işlemi yinele.",
+      "unauthenticated_recent_auth_required": "Bu işlem için kimliğini yeniden doğrulaman gerekiyor.",
+      "unauthenticated_recent_auth_requiredAction": "Yeniden giriş yapıp işlemi yinele.",
+      "loginLink": "Yeniden giriş yap",
+      "not_found": "Kayıt bulunamadı; başka biri değiştirmiş olabilir.",
+      "not_foundAction": "Sayfayı yenileyip yeniden dene.",
+      "validation_failed": "Girilen bilgiler geçersiz.",
+      "validation_failedAction": "E-posta adresini ve rolü kontrol edip yeniden dene.",
+      "version_conflict": "Kayıt aynı anda başka bir işlemle değişti.",
+      "version_conflictAction": "Sayfayı yenileyip yeniden dene.",
+      "rate_limited": "Çok fazla deneme yapıldı.",
+      "rate_limitedAction": "Biraz bekleyip yeniden dene.",
+      "tenant_suspended": "Bu çalışma alanı askıda.",
+      "tenant_suspendedAction": "Destekle iletişime geç.",
+      "tenant_closing": "Bu çalışma alanı kapatılıyor.",
+      "tenant_closingAction": "Verini dışa aktarman gerekiyorsa destekle iletişime geç.",
+      "internal": "İşlem şu an tamamlanamadı.",
+      "internalAction": "Biraz sonra yeniden dene; sürerse destek koduyla yöneticine haber ver.",
+      "retry": "Yeniden dene",
+      "boundaryTitle": "Bir şeyler ters gitti",
+      "supportCode": "Destek kodu: {code}",
+      "tenantStatusTitle": "Çalışma alanı kullanılamıyor"
+    },
+    "demoLocked": "Demo hesabında bu işlem kapalı."
+  },
+  "serverErrors": {
+    "code": "Hata kodu: {code}",
+    "supportCode": "Destek kodu: {code}",
+    "forbidden": "Bu işlem yapılamadı.",
+    "forbiddenAction": "Yetkini kontrol et; gerekirse çalışma alanı yöneticine sor.",
+    "unauthenticated": "Oturumun yok ya da sona erdi.",
+    "unauthenticatedAction": "Giriş yapıp yeniden dene.",
+    "validation_failed": "Girilen bilgiler geçersiz.",
+    "validation_failedAction": "Alanları kontrol edip yeniden dene. Çalışma alanı adresi başkasında olabilir; adı biraz değiştir.",
+    "rate_limited": "Çok fazla deneme yapıldı.",
+    "rate_limitedAction": "Biraz bekleyip yeniden dene.",
+    "not_found": "Kayıt bulunamadı.",
+    "not_foundAction": "Sayfayı yenileyip yeniden dene.",
+    "tenant_suspended": "Bu çalışma alanı askıda.",
+    "tenant_suspendedAction": "Destekle iletişime geç.",
+    "tenant_closing": "Bu çalışma alanı kapatılıyor.",
+    "tenant_closingAction": "Destekle iletişime geç.",
+    "internal": "İşlem şu an tamamlanamadı.",
+    "internalAction": "Biraz sonra yeniden dene; sürerse destek koduyla yöneticine haber ver.",
+    "unknown": "İşlem tamamlanamadı.",
+    "unknownAction": "Biraz sonra yeniden dene."
+  },
+  "landing": {
+    "valueProp": "Deponuzdaki malı, kimin ne zaman ne yaptığıyla birlikte, adım adım ve yanlışsız takip edin.",
+    "signIn": "Giriş yap",
+    "createWorkspace": "Çalışma alanı oluştur",
+    "actions": "Başlangıç",
+    "demo": {
+      "heading": "Demo olarak dene",
+      "intro": "Bir rol seç; parola istemeden o rolün ekranını gör.",
+      "enter": "{role} olarak gir",
+      "entering": "Giriliyor…",
+      "failed": "Demo girişi yapılamadı.",
+      "failedAction": "Demo hesapları henüz hazır olmayabilir. Biraz sonra yeniden dene; sürerse yöneticine haber ver.",
+      "unavailable": "Demo girişi bu ortamda yapılandırılmamış.",
+      "unavailableAction": "Demo hesabı ayarları eksik ya da hatalı; yöneticine haber ver."
+    }
+  },
+  "help": {
+    "title": "Yardım",
+    "intro": "Takıldığında yapabileceklerin:",
+    "items": {
+      "sign": "Giriş yapamıyorsan: Giriş ekranındaki \"Parolamı unuttum\" bağlantısını kullan.",
+      "access": "Bir işe erişemiyorsan: Kartta \"Bu iş için yetkin yok\" yazıyorsa çalışma alanı yöneticine (sorumlun) sor.",
+      "support": "Hata kodu ya da destek kodu gördüysen: Kodu yöneticine ilet; kodla kaydı hızlıca bulabiliriz."
+    },
+    "back": "Ana sayfaya dön"
+  },
+  "onboarding": {
+    "title": "Çalışma alanını kuralım",
+    "intro": "Bir dakikada hazır: iki kısa adım.",
+    "stepOf": "Adım {current} / {total}",
+    "step1": {
+      "title": "Çalışma alanının adı ne?",
+      "label": "Çalışma alanı adı",
+      "hint": "Firma ya da depo adın; sonra değiştirebilirsin.",
+      "slugPreview": "Adresin: {slug}",
+      "slugEmpty": "Adres, ad yazınca burada görünür.",
+      "next": "Devam",
+      "slugNote": "Bu ad başka bir çalışma alanında kullanılıyorsa adresin sonuna kısa bir kod eklenir."
+    },
+    "step2": {
+      "title": "Ne iş yapıyorsun?",
+      "legend": "Sektör",
+      "back": "Geri",
+      "options": {
+        "PACKAGING_SUPPLIES": "Ambalaj ve sarf toptancısı",
+        "GENERIC": "Genel depo"
+      },
+      "optionHints": {
+        "PACKAGING_SUPPLIES": "Koli, bant, poşet gibi ürünler için hazır terimler.",
+        "GENERIC": "Sektöre özel terim olmadan, sade başlangıç."
+      },
+      "previewTitle": "Bu şablon şunları yükler",
+      "previewTerms": "Kullanacağın terimler",
+      "previewTermRow": "{key}: {label}",
+      "terms": {
+        "unit_carton": "Koli birimi",
+        "location_zone": "Bölge düzeyi",
+        "location_rack": "Raf düzeyi",
+        "location_bin": "Alt göz düzeyi"
+      },
+      "laterNote": "Birimler ve depo yerleşimi (lokasyonlar) depo kurulumu aşamasında eklenecek; şimdi bir şey girmen gerekmiyor.",
+      "create": "Oluştur",
+      "creating": "Oluşturuluyor…"
+    },
+    "closed": {
+      "title": "Yeni çalışma alanı şu an açılamıyor",
+      "body": "Bu ortamda kendi kendine çalışma alanı oluşturma kapalı.",
+      "action": "Çalışma alanına katılmak için yöneticinden davet iste.",
+      "signIn": "Giriş ekranına dön"
+    },
+    "draftRestored": "Kaldığın yerden devam ediyorsun."
+  },
+  "home": {
+    "greeting": "Merhaba {name},",
+    "title": "Ne yapmak istiyorsun?",
+    "intro": "Yapmak istediğin işe dokun. Seni adım adım götüreceğim; yanlış bir şey yapmana izin vermem.",
+    "tasksLabel": "İşler",
+    "lockedReason": "Bu iş için yetkin yok. Sorumluna sorabilirsin.",
+    "soonLabel": "Yakında",
+    "soonWarehouse": "Bu iş depo kurulumundan sonra açılacak.",
+    "soonScreen": "Bu ekran yakında açılacak.",
+    "tasks": {
+      "members": {
+        "title": "Ekibimi yönet",
+        "description": "Kimin hangi işi yapabileceğini belirle"
+      },
+      "settings": {
+        "title": "Çalışma alanı ayarları",
+        "description": "Ad, dil ve saat dilimi"
+      },
+      "audit": {
+        "title": "Kim ne yaptı?",
+        "description": "Denetim kaydı"
+      },
+      "receive": {
+        "title": "Depoya mal geldi",
+        "description": "Gelen malı kaydet"
+      },
+      "issue": {
+        "title": "Depodan mal çıkacak",
+        "description": "Çıkan malı kaydet"
+      },
+      "transfer": {
+        "title": "Malı başka depoya taşıyacağım",
+        "description": "Depolar arası taşıma"
+      },
+      "count": {
+        "title": "Rafı sayacağım",
+        "description": "Raftaki ürünleri tek tek say"
+      },
+      "lookup": {
+        "title": "Bir ürün nerede, kaç tane var?",
+        "description": "Stok ve raf bilgisini gör"
+      },
+      "undo": {
+        "title": "Yanlış bir şey yaptım",
+        "description": "Hatalı kaydı birlikte düzeltelim"
+      }
+    },
+    "today": {
+      "title": "Bugün yaptıkların",
+      "empty": "Bugün henüz bir işlem yapmadın. Yaptıkların burada görünecek."
+    }
+  },
+  "audit": {
+    "member": {
+      "invited": "Bir üyeyi davet ettin.",
+      "removed": "Bir üyeyi çalışma alanından çıkardın.",
+      "role_changed": "Bir üyenin rolünü değiştirdin.",
+      "left": "Çalışma alanından ayrıldın."
+    },
+    "ownership": {
+      "transferred": "Çalışma alanının sahipliğini devrettin."
+    },
+    "invitation": {
+      "revoked": "Bir daveti iptal ettin.",
+      "accepted": "Bir daveti kabul ettin."
+    },
+    "tenant": {
+      "created": "Çalışma alanını oluşturdun.",
+      "settings_changed": "Çalışma alanı ayarlarını değiştirdin."
+    },
+    "onboarding": {
+      "step_completed": "Bir kurulum adımını tamamladın."
+    },
+    "password_reset_link": {
+      "issued": "Bir üye için parola sıfırlama bağlantısı oluşturdun."
+    },
+    "audit": {
+      "exported": "Denetim kaydını dışa aktardın."
+    },
+    "other": "Bir işlem yaptın."
+  },
+  "settings": {
+    "title": "Çalışma alanı ayarları",
+    "intro": "Çalışma alanının adını, dilini ve saat dilimini buradan değiştirebilirsin.",
+    "name": "Çalışma alanı adı",
+    "locale": "Dil",
+    "localeTr": "Türkçe",
+    "localeEn": "English",
+    "timeZone": "Saat dilimi",
+    "timeZoneHint": "Örnek: Europe/Istanbul",
+    "save": "Kaydet",
+    "saved": "Ayarlar kaydedildi.",
+    "unchanged": "Değişiklik yok; ayarlar zaten böyle.",
+    "addressNote": "Çalışma alanı adresi (slug) ad değişince değişmez: {slug}",
+    "locked": "Bu ayarları değiştirme yetkin yok.",
+    "lockedAction": "Değişiklik gerekiyorsa çalışma alanı yöneticine (sorumlun) sor.",
+    "back": "Ana ekrana dön"
   }
 }
