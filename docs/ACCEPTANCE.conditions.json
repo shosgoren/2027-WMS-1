@@ -1,7 +1,7 @@
 {
   "$comment": "pnpm test:ac (scripts/test-ac) okur. Korunan dosya: her değişiklik PROTOCOL §Onay kaynağı (ADR-012 rev.) onayı ister. currentGatePhase: kapısı değerlendirilen faz (--phase verilmezse varsayılan; T-008e karantina kuralı okur). passedGates: kapısı geçilmiş fazlar (test:ac --ci bunlarda NO_TEST'i hata sayar). conditions: ACCEPTANCE.md §Koşullu tablosundaki her AC; phase/fallbackPhase ACCEPTANCE.md ile birebir olmalı. PILOT anahtarları docs/PILOT.md (T-006), FACT anahtarları facts içinde; kaynak yoksa koşul CONDITION_UNKNOWN.",
-  "currentGatePhase": "0",
-  "passedGates": [],
+  "currentGatePhase": "1",
+  "passedGates": ["0"],
   "facts": {
     "adr005_separate_broker": false
   },
