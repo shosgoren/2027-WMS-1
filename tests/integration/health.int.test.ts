@@ -9,8 +9,8 @@ import { readAuthDatabaseUrl, readIntEnv } from "./harness/env.ts";
 
 const env = readIntEnv(process.env);
 const probes: HealthProbe[] = [];
-const open = (url: string, timeoutMs = 2000, cacheMs = 0): HealthProbe => {
-  const p = createHealthProbe({ url, timeoutMs, cacheMs });
+const open = (url: string, timeoutMs = 2000, cacheMs = 0, queries?: { db?: string; queue?: string }): HealthProbe => {
+  const p = createHealthProbe({ url, timeoutMs, cacheMs, ...(queries === undefined ? {} : { queries }) });
   probes.push(p);
   return p;
 };
@@ -78,6 +78,52 @@ describe("health probe (wms_app, gerçek DB)", () => {
       // Önbellek: sonraki istek yeni bağlantı açmaz.
       await probe.check();
       expect(sockets.length).toBeLessThanOrEqual(1);
+    } finally {
+      sockets.forEach((s) => s.destroy());
+      server.close();
+    }
+  });
+
+  it("yoklamanın KENDİ SET LOCAL statement_timeout yolu: yavaş sorgu sunucuda iptal → timeout (gerçek DB, PgBouncer)", async () => {
+    const admin = new pg.Client({ connectionString: env.databaseUrlDirect });
+    admin.on("error", () => undefined);
+    await admin.connect();
+    try {
+      const probe = open(env.databaseUrl, 300, 0, { db: "SELECT pg_sleep(30) /* t129-probe-sleep */" });
+      const t0 = Date.now();
+      const r = await probe.check();
+      // statement_timeout (300 ms) istemci zaman aşımından (550 ms) önce sorguyu iptal eder: 57014 → timeout, ad PostgresError.
+      expect(r.db).toMatchObject({ ok: false, reason: "timeout", errorName: "PostgresError" });
+      expect(r.queue).toMatchObject({ ok: false, reason: "timeout" });
+      expect(Date.now() - t0).toBeLessThan(2000);
+      const { rows } = await admin.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE query LIKE '%t129-probe-sleep%' AND state = 'active' AND pid <> pg_backend_pid()");
+      expect(rows[0].n).toBe(0);
+    } finally {
+      await admin.end();
+    }
+  });
+
+  it("yanıt vermeyen sunucuda ardışık 3 yoklama birikmeden zaman aşımına düşer; takılı bağlantılar kapatılır", async () => {
+    const sockets: net.Socket[] = [];
+    const closed: Promise<void>[] = [];
+    const server = net.createServer((s) => {
+      sockets.push(s);
+      s.resume(); // gelen veriyi tüket (yanıt vermez); istemci kapatınca 'end'/'close' görülebilsin
+      closed.push(new Promise((r) => s.once("close", () => r())));
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    try {
+      const port = (server.address() as net.AddressInfo).port;
+      const probe = open(`postgresql://wms_app:x@127.0.0.1:${port}/wms`, 300, 0);
+      for (let i = 0; i < 3; i++) {
+        const t0 = Date.now();
+        expect((await probe.check()).db).toMatchObject({ ok: false, reason: "timeout" });
+        // Her yoklama KENDİ süresinde biter (takılı önceki bağlantının arkasında beklemez).
+        expect(Date.now() - t0).toBeLessThan(1200);
+      }
+      expect(sockets).toHaveLength(3);
+      // Takılı bağlantılar istemci tarafından kapatıldı (sunucu 'close' görür).
+      await Promise.race([Promise.all(closed), new Promise((_r, rej) => setTimeout(() => rej(new Error("takılı bağlantılar kapatılmadı")), 3000))]);
     } finally {
       sockets.forEach((s) => s.destroy());
       server.close();

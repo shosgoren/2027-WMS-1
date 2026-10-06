@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { MASK, MAX_ENTRIES, MAX_LOG_STRING, createConsoleLogger, createJsonLogger, isSensitiveKey, maskAccessPath, maskFields, maskString, requestIdFrom } from "./log.ts";
+import { MASK, MAX_ENTRIES, MAX_LOG_STRING, MAX_NODES, createConsoleLogger, createJsonLogger, isSensitiveKey, maskAccessPath, maskFields, maskString, requestIdFrom } from "./log.ts";
 
 const U1 = "3f2b8c1e-9d4a-4e6b-8a57-1c2d3e4f5a6b";
 const U2 = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
@@ -232,10 +232,10 @@ describe("anahtar/değer biçimleri dize içinde (MAJOR-2)", () => {
     ["x-api-key: abc123DEF", `x-api-key: ${MASK}`],
     ["X-API-Key=abc123DEF&b=1", `X-API-Key=${MASK}&b=1`],
     ["password: hunter2", `password: ${MASK}`],
-    ["Cookie: a=b; session=SESSVAL", `Cookie: ${MASK}; session=${MASK}`],
+    ["Cookie: a=b; session=SESSVAL", `Cookie: ${MASK}`],
     ['{"token":"a\\"b-still-secret"}', `{"token":"${MASK}"}`],
-    ["DSN=https://x@sentry.example/1 next", `DSN=${MASK} next`],
-    ["jwt=eyJ.a.b sid=abc", `jwt=${MASK} sid=${MASK}`],
+    ["DSN=https://x@sentry.example/1 next", `DSN=${MASK}`],
+    ["jwt=eyJ.a.b sid=abc", `jwt=${MASK}`],
   ])("%s", (input, expected) => expect(maskString(input)).toBe(expected));
 
   it("stack dizesi içindeki gömülü JSON/başlık maskelenir (worker describeError stack alanı)", () => {
@@ -306,5 +306,80 @@ describe("ek sertleştirme (MINOR)", () => {
     expect(maskAccessPath("/api/health", "")).toEqual({ path: "/api/health", droppedParams: 0 });
     expect(maskAccessPath("/invite/TOK123", "?utm=1")).toEqual({ path: "/invite/***", droppedParams: 1 });
     expect(maskAccessPath("/reset-password", "?token=R3s3t")).toEqual({ path: "/reset-password", droppedParams: 1 });
+  });
+});
+
+describe("T-129 yeniden inceleme: maskeleme boşlukları", () => {
+  it("(1) kesme sırrın ortasına düşmez: kesik URL/e-posta/`ad=değer` kuyruğu atılır", () => {
+    const pad = "x ".repeat(MAX_LOG_STRING / 2 - 10);
+    const cases: Array<[string, RegExp]> = [
+      ["postgres://user:supersecretpassword@host/db", /supers|user:/],
+      ["john.doe@example.com", /john|doe|exam/],
+      ["token=abcdefghijkl", /abcd/],
+    ];
+    for (const [secret, leak] of cases) {
+      for (let cutAt = 3; cutAt < secret.length; cutAt += 4) {
+        const input = pad.padEnd(MAX_LOG_STRING - cutAt, "x").replace(/x$/, " ") + secret;
+        const out = maskString(input);
+        expect(out).toContain("…[truncated]");
+        expect(out).not.toMatch(leak);
+      }
+    }
+  });
+
+  it("(1) harf/rakam kuyruğu korunur; kesik kuyruk ayrıştırıcı bir yapı taşıyorsa atılır", () => {
+    expect(maskString("a ".repeat(1000) + "b".repeat(100))).toMatch(/b{10}…\[truncated\]$/);
+    const cut = maskString("w ".repeat(1020) + "postgres://user:supersecretpass@h/db");
+    expect(cut.endsWith("…[truncated]")).toBe(true);
+    expect(cut).not.toMatch(/user|supers/);
+  });
+
+  it("(2) URL parolasında kodlanmamış / ? # @ : — son @'e kadar maskelenir", () => {
+    expect(maskString("postgres://user:ab/cd@host:5432/db")).toBe(`postgres://${MASK}@host:5432/db`);
+    expect(maskString("postgres://user:ab?cd@host/db")).toBe(`postgres://${MASK}@host/db`);
+    expect(maskString("postgres://user:a/b?c#d@e@host/db x")).toBe(`postgres://${MASK}@host/db x`);
+    expect(maskString("https://user:ab/cd@example.com/x")).toBe(`https://${MASK}@example.com/x`);
+    expect(maskString("https://user@example.com/x")).toBe(`https://${MASK}@example.com/x`);
+    // Yol/sorgudaki `@` ve bağlantı noktası kimlik bilgisi değildir.
+    expect(maskString("https://example.com:8080/a@b")).toBe("https://example.com:8080/a@b");
+    expect(maskString("https://example.com/p?x=1@2")).toBe("https://example.com/p?x=1@2");
+  });
+
+  it("(3) Cookie / Set-Cookie başlığında tüm çerez değerleri maskelenir", () => {
+    expect(maskString("Cookie: a=1; better-auth.session_token=ST; theme=dark\nnext line")).toBe(`Cookie: ${MASK}\nnext line`);
+    expect(maskString("Set-Cookie: sid=ABC; Path=/; HttpOnly; Secure")).toBe(`Set-Cookie: ${MASK}`);
+    expect(maskString("Authorization: Basic dXNlcjpwYXNz, extra")).toBe(`Authorization: ${MASK}`);
+  });
+
+  it("(3) boşluklu değer ve %-kodlu belirteç", () => {
+    expect(maskString("password=abc def&next=1")).toBe(`password=${MASK}&next=1`);
+    expect(maskString("login failed password=abc def ghi")).toBe(`login failed password=${MASK}`);
+    expect(maskString("Bearer abc%2Bxyz%3D ok")).toBe(`Bearer ${MASK} ok`);
+    expect(maskString("token=ab%2Bcd&x=1")).toBe(`token=${MASK}&x=1`);
+    expect(maskString("/login?next=%2Freset-password%3Ftoken%3Dabc%26x%3D1")).not.toContain("abc");
+  });
+
+  it("(4) düğüm bütçesi: 50 öğeli kendine-referans dizi < 50 ms ve çıktı sınırlı", () => {
+    const a: unknown[] = [];
+    for (let i = 0; i < 50; i++) a.push(a);
+    const t0 = performance.now();
+    const out = maskFields({ a, b: { a } });
+    const ms = performance.now() - t0;
+    expect(ms).toBeLessThan(50);
+    expect(JSON.stringify(out)).toContain("…[truncated]");
+    let nodes = 0;
+    const count = (v: unknown): void => {
+      nodes++;
+      if (Array.isArray(v)) v.forEach(count);
+      else if (v !== null && typeof v === "object") Object.values(v).forEach(count);
+    };
+    count(out);
+    expect(nodes).toBeLessThanOrEqual(MAX_NODES + 60);
+  });
+
+  it("(4) nesne ANAHTARLARI da maskelenir", () => {
+    const out = maskFields({ "ayse@example.com": 1, "/invite/TOK12345": 2, ok: 3 });
+    expect(JSON.stringify(out)).not.toMatch(/ayse|TOK12345/);
+    expect(out.ok).toBe(3);
   });
 });

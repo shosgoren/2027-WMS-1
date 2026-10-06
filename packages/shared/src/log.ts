@@ -90,16 +90,31 @@ function maskUrlCredentials(s: string): string {
     let st = at;
     while (st > i && at - st < 32 && /[A-Za-z0-9+.-]/.test(s.charAt(st - 1))) st--;
     while (st < at && !/[A-Za-z]/.test(s.charAt(st))) st++;
+    const scheme = s.slice(st, at).toLowerCase();
     const authStart = at + 3;
+    // Aralık: boşluk/tırnak/<> ya da dize sonuna kadar (parola kodlanmamış `/`, `?`, `#`, `@` içerebilir); SON `@`'e kadar.
     let j = authStart;
     let lastAt = -1;
+    let firstSegEnd = -1;
     while (j < s.length) {
       const c = s.charAt(j);
-      if (isWs(c) || c === "/" || c === "?" || c === '"' || c === "'" || c === "<" || c === ">") break;
+      if (isWs(c) || c === '"' || c === "'" || c === "<" || c === ">") break;
+      if ((c === "/" || c === "?") && firstSegEnd < 0) firstSegEnd = j;
       if (c === "@") lastAt = j;
       j++;
     }
+    let creds = false;
     if (st < at && lastAt >= 0) {
+      if (!WEB_SCHEMES.has(scheme)) creds = true;
+      else {
+        // http(s)/ws(s)/ftp: yoldaki `@` (`/a@b`) kimlik bilgisi değildir. İlk bölüm `kullanıcı@`, ya da `kullanıcı:parola` (iki
+        // nokta sonrası yalnızca rakam değilse; aksi halde `host:8080` bağlantı noktasıdır) ise kimlik bilgisidir.
+        const seg = s.slice(authStart, firstSegEnd < 0 ? j : firstSegEnd);
+        const colon = seg.indexOf(":");
+        creds = seg.includes("@") || (colon >= 0 && !/^[0-9]*$/.test(seg.slice(colon + 1)));
+      }
+    }
+    if (creds) {
       out += s.slice(i, authStart) + MASK + "@";
       i = lastAt + 1;
     } else {
@@ -110,12 +125,20 @@ function maskUrlCredentials(s: string): string {
   return out + s.slice(i);
 }
 
-const BEARER = /\b(Bearer|Basic)[ \t]{1,8}[A-Za-z0-9._~+/=-]{1,2048}/g;
+const WEB_SCHEMES = new Set(["http", "https", "ws", "wss", "ftp"]);
+
+const BEARER = /\b(Bearer|Basic)[ \t]{1,8}[A-Za-z0-9._~+/=%-]{1,2048}/g;
 // `/` ya da kodlu biçimi (`%2F`, çift kodlu `%252F`) ile ayrılmış hassas yol parçası + belirteç. Tek sabit önek: geri izleme yok.
 const SEP = "(?:\\/|%2F|%252F)";
 const TOKEN_PATH = new RegExp(`(${SEP}(?:invite|reset-password)${SEP})[^\\s/?#&"'%\\\\]{1,2048}`, "gi");
 
-const VALUE_STOP_PARAM = new Set(["&", "#", ";", '"', "'", "%", " ", "\t", "\n", "\r"]);
+// `ad=değer`: değer `&`, `#`, `;`, tırnak ya da SATIR SONUNA kadar (boşluk içeren `password=abc def` tam maskelenir; `%` dahildir).
+const VALUE_STOP_PARAM = new Set(["&", "#", ";", '"', "'", "\n", "\r"]);
+// Kodlu ayırıcı biçimi (`%3D`): değer `%` (sonraki kodlu ayraç `%26`) ya da `&`'de biter.
+const VALUE_STOP_ENCODED = new Set(["&", "#", ";", '"', "'", "%", " ", "\t", "\n", "\r"]);
+// Başlık satırı değerleri (`Cookie:`, `Set-Cookie:`, `Authorization:`): TÜM değerler, satır sonuna kadar.
+const VALUE_STOP_LINE = new Set(["\n", "\r", '"', "'"]);
+const LINE_HEADERS = /^(?:set-?cookie2?|cookie|authorization|proxy-authorization)$/i;
 const VALUE_STOP_COLON = new Set(["\n", "\r", ",", '"', "'", "}", "]", "&", "#", ";"]);
 
 /**
@@ -165,7 +188,7 @@ function maskKeyValues(s: string): string {
       i = Math.min(end + 1, s.length);
       continue;
     }
-    const stop = colon ? VALUE_STOP_COLON : VALUE_STOP_PARAM;
+    const stop = colon ? (LINE_HEADERS.test(name) ? VALUE_STOP_LINE : VALUE_STOP_COLON) : sepLen === 1 ? VALUE_STOP_PARAM : VALUE_STOP_ENCODED;
     while (end < s.length && !stop.has(s.charAt(end))) end++;
     if (end === v) {
       i += sepLen;
@@ -214,6 +237,16 @@ function decodeAscii(v: string): string {
 }
 
 /**
+ * Kesme sırrın ortasına düşebilir (`postgres://u:supersec`, `john.doe@exam`): son boşluk/ayraçtan sonraki KESİK belirteç,
+ * yalnızca harf/rakam/`_`/`-` değilse (yani `: / @ . = %` gibi bir yapı içeriyorsa) tümden atılır.
+ */
+function dropPartialTail(cut: string): string {
+  let i = cut.length;
+  while (i > 0 && !/[\s,;"'<>()[\]{}]/.test(cut.charAt(i - 1))) i--;
+  return /[^A-Za-z0-9_-]/.test(cut.slice(i)) ? cut.slice(0, i) : cut;
+}
+
+/**
  * URL/yol/sorgu/başlık metnindeki sırları maskeler (günlük değeri, erişim günlüğü yolu). Girdi önce `MAX_LOG_STRING`'e
  * kesilir. Yüzde kodlu biçimler (`%40`, `%3D`, `%2F`) için en çok 2 tur çözülmüş biçim de taranır; çözülmüş biçimde bir şey
  * maskelendiyse sonuç çözülmüş-maskeli biçim olur (güvenli taraf).
@@ -222,7 +255,7 @@ export function maskString(value: string): string {
   let s = value;
   let truncated = false;
   if (s.length > MAX_LOG_STRING) {
-    s = s.slice(0, MAX_LOG_STRING);
+    s = dropPartialTail(s.slice(0, MAX_LOG_STRING));
     truncated = true;
   }
   s = passes(s);
@@ -267,7 +300,14 @@ export function maskAccessPath(pathname: string, search: string): { path: string
   return { path: kept.length > 0 ? `${path}?${kept.join("&")}` : path, droppedParams: dropped };
 }
 
-function maskValue(value: unknown, depth: number): unknown {
+/** Çağrı başına düğüm bütçesi: çoklu/özyinelemeli yapılar (50 öğeli kendine-referans dizi, derinlik 6) üstel patlayamaz. */
+export const MAX_NODES = 500;
+interface Budget {
+  nodes: number;
+}
+
+function maskValue(value: unknown, depth: number, budget: Budget): unknown {
+  if (++budget.nodes > MAX_NODES) return TRUNCATED;
   switch (typeof value) {
     case "string":
       return maskString(value);
@@ -288,32 +328,44 @@ function maskValue(value: unknown, depth: number): unknown {
   try {
     if (value instanceof Error) return { name: maskString(String(value.name)), message: maskString(String(value.message)) };
     if (Array.isArray(value)) {
-      const items = value.slice(0, MAX_ENTRIES).map((v) => maskValue(v, depth + 1));
+      const items: unknown[] = [];
+      for (const v of value.slice(0, MAX_ENTRIES)) {
+        if (budget.nodes >= MAX_NODES) {
+          items.push(TRUNCATED);
+          break;
+        }
+        items.push(maskValue(v, depth + 1, budget));
+      }
       if (value.length > MAX_ENTRIES) items.push(`[+${value.length - MAX_ENTRIES} more]`);
       return items;
     }
-    if (value instanceof Headers) return maskObject(Object.fromEntries(value.entries()), depth);
-    return maskObject(value as Record<string, unknown>, depth);
+    if (value instanceof Headers) return maskObject(Object.fromEntries(value.entries()), depth, budget);
+    return maskObject(value as Record<string, unknown>, depth, budget);
   } catch {
     return "[unserializable]";
   }
 }
 
-function maskObject(obj: Record<string, unknown>, depth: number): Record<string, unknown> {
+function maskObject(obj: Record<string, unknown>, depth: number, budget: Budget): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   let n = 0;
   for (const k of Object.keys(obj)) {
+    if (budget.nodes >= MAX_NODES) {
+      out["[truncated]"] = TRUNCATED;
+      break;
+    }
     if (n++ >= MAX_ENTRIES) {
       out["[truncated]"] = `+${Object.keys(obj).length - MAX_ENTRIES} more`;
       break;
     }
-    const key = k.length > 128 ? k.slice(0, 128) : k;
+    // Anahtar adı da veri taşıyabilir (`{"ayse@example.com":1}`): dize maskelemesinden geçer.
+    const key = maskString(k.length > 128 ? k.slice(0, 128) : k);
     if (isSensitiveKey(key)) {
       out[key] = MASK;
       continue;
     }
     try {
-      out[key] = maskValue(obj[k], depth + 1);
+      out[key] = maskValue(obj[k], depth + 1, budget);
     } catch {
       out[key] = "[unreadable]";
     }
@@ -324,7 +376,7 @@ function maskObject(obj: Record<string, unknown>, depth: number): Record<string,
 /** Alan nesnesini (iç içe dahil) maskeler; girdiyi değiştirmez; asla fırlatmaz. */
 export function maskFields(fields: Record<string, unknown>): Record<string, unknown> {
   try {
-    return maskObject(fields, 0);
+    return maskObject(fields, 0, { nodes: 0 });
   } catch {
     return { logFields: "[unserializable]" };
   }
