@@ -34,7 +34,7 @@ export const ALLOWED_DB_LEVEL_SETTINGS: readonly string[] = [];
 export const OWNERSHIP_ROLE_NAMES: readonly string[] = [APP_ROLE_NAME, "wms_auth"];
 
 /** Migration oturumunda boş kalması gereken bilinen `app.*` ayarları (G-02: tenant bağlamı). */
-export const KNOWN_APP_SETTINGS: readonly string[] = ["app.current_tenant_id"];
+export const KNOWN_APP_SETTINGS: readonly string[] = ["app.current_tenant_id", "app.current_user_id", "app.system_reason"];
 
 /**
  * Kilit bekleme üst sınırı (ADR-015 §3): eşzamanlı koşucu veya uzun süren bir oturum migration'ı

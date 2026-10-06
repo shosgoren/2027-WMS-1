@@ -20,7 +20,7 @@ const env = readIntEnv(process.env);
 
 // `drizzle-orm` yalnızca packages/db'nin bağımlılığıdır; kökten çözülemez → o paketin çözümleyicisi.
 const dbRequire = createRequire(path.resolve(import.meta.dirname, "../../../packages/db/package.json"));
-const pgCore = (await import(pathToFileURL(dbRequire.resolve("drizzle-orm/pg-core")).href)) as typeof import("drizzle-orm/pg-core");
+const pgCore = (await import(pathToFileURL(dbRequire.resolve("drizzle-orm/pg-core")).href)) as typeof import("../../../packages/db/node_modules/drizzle-orm/pg-core/index.js");
 
 type PgTableAny = Parameters<typeof pgCore.getTableConfig>[0];
 const SCHEMA_MODULES: Record<string, unknown>[] = [identity, tenancy];
