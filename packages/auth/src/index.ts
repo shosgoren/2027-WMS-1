@@ -1463,13 +1463,16 @@ export function createAuth(params: CreateAuthParams): AuthService {
 
 let instance: AuthService | undefined;
 
-/** İlk kullanımda `process.env`'den kurar; eksik ortam → `AuthConfigError` (derleme anında değil). */
-export function getAuthService(env: EnvSource = process.env): AuthService {
+/**
+ * İlk kullanımda `process.env`'den kurar (`options.resetMail` yalnızca ilk kurulumda geçerlidir; web `apps/web/lib/auth-service.ts`
+ * üzerinden çağırır, T-116d); eksik ortam → `AuthConfigError` (derleme anında değil). */
+export function getAuthService(env: EnvSource = process.env, options: { readonly resetMail?: ResetMailPort } = {}): AuthService {
   if (instance === undefined) {
     const parsed = readAuthEnv(env);
     instance = createAuth({
       client: createDbClient({ url: parsed.authDatabaseUrl, ...DB_CLIENT_SETTINGS }),
       env: parsed,
+      ...(options.resetMail === undefined ? {} : { resetMail: options.resetMail }),
     });
   }
   return instance;

@@ -18,7 +18,7 @@ export async function generateMetadata(): Promise<Metadata> {
 
 export default async function MembersPage({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
-  const { getAuthService } = await import("@wms/auth");
+  const { getAuthService } = await import("../../../../lib/auth-service.ts");
   const principal = await getAuthService().getPrincipal(await headers());
   if (principal === null) redirect(`/login?next=${encodeURIComponent(`/t/${slug}/members`)}`);
   const db = getAppDb();

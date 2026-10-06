@@ -28,7 +28,7 @@ function first(v: string | string[] | undefined): string | undefined {
 export default async function SettingsPage({ params, searchParams }: { params: Promise<{ slug: string }>; searchParams: Promise<Record<string, string | string[] | undefined>> }) {
   const { slug } = await params;
   const query = await searchParams;
-  const { getAuthService } = await import("@wms/auth");
+  const { getAuthService } = await import("../../../../lib/auth-service.ts");
   const principal = await getAuthService().getPrincipal(await headers());
   if (principal === null) redirect(`/login?next=${encodeURIComponent(`/t/${slug}/settings`)}`);
   const t = await getTranslations("settings");

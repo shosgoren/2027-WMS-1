@@ -17,7 +17,7 @@ const TOUCH = "min-h-12 min-w-12";
 // (`runTenantQuery`); burada yalnızca kullanıcı adı, aktif rol çipi ve tenant değiştirici gösterilir.
 export default async function TenantLayout({ children, params }: { children: ReactNode; params: Promise<{ slug: string }> }) {
   const { slug } = await params;
-  const { getAuthService } = await import("@wms/auth");
+  const { getAuthService } = await import("../../../lib/auth-service.ts");
   const principal = await getAuthService().getPrincipal(await headers());
   if (principal === null) redirect(`/login?next=${encodeURIComponent(`/t/${slug}/members`)}`);
   const db = getAppDb();

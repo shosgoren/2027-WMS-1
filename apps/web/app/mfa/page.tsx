@@ -17,7 +17,7 @@ function first(v: string | string[] | undefined): string | undefined {
 // oturum yok ama geçici 2FA çerezi var → giriş ikinci adımı; hiçbiri yok → giriş.
 export default async function MfaPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
   const next = safeNext(first((await searchParams).next));
-  const { getAuthService } = await import("@wms/auth");
+  const { getAuthService } = await import("../../lib/auth-service.ts");
   const principal = await getAuthService().getPrincipal(await headers());
 
   if (principal === null) {

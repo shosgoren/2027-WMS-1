@@ -29,7 +29,7 @@ function first(v: string | string[] | undefined): string | undefined {
 const SHELL = "mx-auto flex w-full max-w-xl min-w-0 flex-col gap-4 px-4 py-6";
 
 export default async function OnboardingPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
-  const { getAuthService } = await import("@wms/auth");
+  const { getAuthService } = await import("../../lib/auth-service.ts");
   const principal = await getAuthService().getPrincipal(await headers());
   if (principal === null) redirect("/login?next=%2Fonboarding");
   const t = await getTranslations("onboarding");

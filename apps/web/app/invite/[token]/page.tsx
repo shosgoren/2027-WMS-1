@@ -23,7 +23,7 @@ export default async function InvitePage({ params }: { params: Promise<{ token: 
       </main>
     );
   }
-  const { getAuthService } = await import("@wms/auth");
+  const { getAuthService } = await import("../../../lib/auth-service.ts");
   const principal = await getAuthService().getPrincipal(await headers());
   return <InviteAcceptForm token={token} signedIn={principal !== null} />;
 }
