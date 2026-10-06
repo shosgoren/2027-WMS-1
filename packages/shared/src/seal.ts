@@ -56,6 +56,11 @@ export function createSealer(rawKey: string | undefined): Sealer {
     throw new SealConfigError("QUEUE_SEAL_KEY yer tutucu değerde; gerçek rastgele anahtar gerekir (openssl rand -hex 32)");
   }
   const key = decodeKey(trimmed);
+  // Yer tutucu ham metne göre değil çözülmüş bayta göre reddedilir: tüm baytları aynı olan anahtar
+  // (sıfır dahil; hex veya base64 yazımı fark etmez) kabul edilmez.
+  if (key.every((b) => b === key[0])) {
+    throw new SealConfigError("QUEUE_SEAL_KEY tek bayt tekrarından oluşuyor; gerçek rastgele anahtar gerekir (openssl rand -hex 32)");
+  }
   const kid = createHash("sha256").update(key).digest("hex").slice(0, 8);
   const aadOf = (c: SealContext): Buffer => Buffer.from(`${c.jobType}\u0000${c.template}`, "utf8");
 

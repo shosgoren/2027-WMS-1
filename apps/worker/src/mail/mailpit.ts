@@ -1,6 +1,6 @@
 // Mailpit HTTP gönderimi (yerel/CI). Uç nokta ve alanlar Mailpit v1.31.4 swagger/kaynağından doğrulandı:
 // POST {baseUrl}/api/v1/send, JSON { From:{Email,Name}, To:[{Email,Name}], Subject, Text, HTML }, yanıt { ID }.
-import { MailError, type MailMessage, type Mailer } from "@wms/shared/mailer";
+import { MailError, assertBareRecipient, type MailMessage, type Mailer } from "@wms/shared/mailer";
 
 const REQUEST_TIMEOUT_MS = 15_000;
 
@@ -23,6 +23,7 @@ export function createMailpitMailer(options: MailpitOptions): Mailer {
   const base = options.baseUrl.replace(/\/+$/, "");
   return {
     async send(message: MailMessage): Promise<void> {
+      assertBareRecipient(message.to);
       let response: Response;
       try {
         response = await doFetch(`${base}/api/v1/send`, {

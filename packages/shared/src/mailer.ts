@@ -29,7 +29,7 @@ export interface MailConfig {
 /** 15 §Hata kodlarına eklenmesi gereken kod için bkz. rapor bulgusu; T-112 aynı adı kullanır. */
 export class MailError extends Error {
   override name = "MailError";
-  readonly code: "MAIL_DELIVERY_DISABLED" | "MAIL_SEND_FAILED";
+  readonly code: "MAIL_DELIVERY_DISABLED" | "MAIL_SEND_FAILED" | "MAIL_RECIPIENT_INVALID";
   constructor(code: MailError["code"], message: string) {
     super(message);
     this.code = code;
@@ -61,20 +61,34 @@ export function loadMailConfig(env: Readonly<Record<string, string | undefined>>
   };
 }
 
+/** Tek, çıplak `local@domain` adresi: virgül, `<`, `>`, boşluk, CRLF, tırnak vb. içeremez. */
+const BARE_ADDRESS_RE = /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/;
+const ADDRESS_MAX = 254;
+
+export function isBareAddress(value: string): boolean {
+  return value.length <= ADDRESS_MAX && BARE_ADDRESS_RE.test(value);
+}
+
+/** Mühürden çıkan alıcı çıplak adres değilse kalıcı hata (gönderim yok). Değer mesaja girmez (G-09). */
+export function assertBareRecipient(value: string): void {
+  if (!isBareAddress(value)) throw new MailError("MAIL_RECIPIENT_INVALID", "recipient is not a single bare address");
+}
+
 /**
  * Gönderim önceden bildirimi: komutlar (T-117) işi kuyruğa yazmadan önce çağırır; false ise kendi geri dönüş
- * yolunu kullanır (A-42). `resend` kipinde anahtar veya gönderen yoksa false (sahte başarı yok).
+ * yolunu kullanır (A-42). `resend` kipinde anahtar/gönderen, `mailpit` kipinde adres/gönderen yoksa false (sahte başarı yok).
  */
 export function canDeliver(config: MailConfig, recipient: string): boolean {
+  if (!isBareAddress(recipient)) return false;
   switch (config.mode) {
     case "disabled":
       return false;
     case "mailpit":
-      return true;
+      return config.mailpitUrl !== undefined && config.from !== undefined;
     case "resend": {
       if (config.resendApiKey === undefined || config.from === undefined) return false;
       if (config.verifiedDomain !== undefined) return true;
-      return config.restrictedRecipients.has(recipient.trim().toLowerCase());
+      return config.restrictedRecipients.has(recipient.toLowerCase());
     }
   }
 }

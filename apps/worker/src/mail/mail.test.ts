@@ -35,7 +35,9 @@ describe("canDeliver", () => {
   const rows: Array<[string, Record<string, string>, string, boolean]> = [
     ["disabled", { MAIL_MODE: "disabled" }, RECIPIENT, false],
     ["MAIL_MODE yok -> disabled", {}, RECIPIENT, false],
-    ["mailpit", { MAIL_MODE: "mailpit" }, RECIPIENT, true],
+    ["mailpit", { MAIL_MODE: "mailpit", MAILPIT_URL: "http://localhost:8025", MAIL_FROM: "a@b.c" }, RECIPIENT, true],
+    ["mailpit, adres yok", { MAIL_MODE: "mailpit", MAIL_FROM: "a@b.c" }, RECIPIENT, false],
+    ["mailpit, gönderen yok", { MAIL_MODE: "mailpit", MAILPIT_URL: "http://localhost:8025" }, RECIPIENT, false],
     ["resend, alan adı yok, izinli alıcı (büyük/küçük harf duyarsız)", { MAIL_MODE: "resend", RESEND_API_KEY: apiKey, MAIL_FROM: "a@b.c", MAIL_RESTRICTED_RECIPIENTS: `x@y.z, ${RECIPIENT}` }, listed, true],
     ["resend, alan adı yok, izinsiz alıcı", { MAIL_MODE: "resend", RESEND_API_KEY: apiKey, MAIL_FROM: "a@b.c", MAIL_RESTRICTED_RECIPIENTS: "x@y.z" }, RECIPIENT, false],
     ["resend, alan adı yok, liste boş", { MAIL_MODE: "resend", RESEND_API_KEY: apiKey, MAIL_FROM: "a@b.c" }, RECIPIENT, false],
@@ -46,6 +48,19 @@ describe("canDeliver", () => {
   it.each(rows)("%s", (_name, env, recipient, expected) => {
     expect(canDeliver(config(env), recipient)).toBe(expected);
   });
+  it.each(["a@b.c, d@e.f", "Ad <a@b.c>", "a@b.c>", "a b@c.d", "a@b.c\r\nBcc: x@y.z", "a@b.c\n", "a@b", "@b.c", "a@", "a@@b.c", "", "a@b.c;d@e.f", '"a"@b.c'])(
+    "çıplak adres değilse canDeliver false ve gönderim kalıcı hata: %j",
+    async (bad) => {
+      for (const mode of [{ MAIL_MODE: "mailpit", MAILPIT_URL: "http://localhost:8025", MAIL_FROM: "a@b.c" }, { MAIL_MODE: "resend", RESEND_API_KEY: apiKey, MAIL_FROM: "a@b.c", MAIL_VERIFIED_DOMAIN: "b.c" }] as Array<Record<string, string>>) {
+        expect(canDeliver(config(mode), bad)).toBe(false);
+      }
+      const f = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(200));
+      const msg = { to: bad, subject: "S", text: "T", html: "H", idempotencyKey: "k" };
+      await expect(createResendMailer({ apiKey, from: "a@b.c", fetch: f }).send(msg)).rejects.toMatchObject({ code: "MAIL_RECIPIENT_INVALID" });
+      await expect(createMailpitMailer({ baseUrl: "http://x", from: "a@b.c", fetch: f }).send(msg)).rejects.toMatchObject({ code: "MAIL_RECIPIENT_INVALID" });
+      expect(f).not.toHaveBeenCalled();
+    },
+  );
   it("bilinmeyen MAIL_MODE yapılandırma hatasıdır", () => {
     expect(() => config({ MAIL_MODE: "smtp" })).toThrow(/MAIL_MODE/);
   });
@@ -109,6 +124,13 @@ describe("seal", () => {
     const env = readFileSync(new URL("../../../../.env.example", import.meta.url), "utf8");
     const line = env.split("\n").find((l) => l.startsWith("QUEUE_SEAL_KEY="));
     expect(line?.slice("QUEUE_SEAL_KEY=".length).trim()).toBe(QUEUE_SEAL_KEY_PLACEHOLDER);
+  });
+  it("çözülmüş anahtarın tamamı aynı bayt ise reddedilir (hex ve base64, sıfır dahil)", () => {
+    for (const byte of [0x00, 0x41, 0xff]) {
+      const raw = Buffer.alloc(32, byte);
+      expect(() => createSealer(raw.toString("hex"))).toThrow(SealConfigError);
+      expect(() => createSealer(raw.toString("base64"))).toThrow(SealConfigError);
+    }
   });
   it("base64 32 bayt anahtar kabul edilir", () => {
     const s = createSealer(randomBytes(32).toString("base64"));
@@ -197,6 +219,7 @@ describe("Mailpit istemcisi", () => {
 });
 
 describe("email.send işleyicisi", () => {
+  const MAILPIT_ENV = { MAIL_MODE: "mailpit", MAILPIT_URL: "http://localhost:8025", MAIL_FROM: "a@b.c" };
   const key = newKey();
   const sealer = createSealer(key);
   function setup(env: Record<string, string>, opts: { hasTenant?: boolean; inTenant?: () => Promise<void> } = {}) {
@@ -216,7 +239,7 @@ describe("email.send işleyicisi", () => {
   }
 
   it("gönderir; idempotency anahtarı = iş kimliği; log'da tam adres/bağlantı yok", async () => {
-    const t = setup({ MAIL_MODE: "mailpit" });
+    const t = setup(MAILPIT_ENV);
     await t.handler(t.ctx);
     expect(t.send).toHaveBeenCalledTimes(1);
     const sent = t.send.mock.calls[0]?.[0];
@@ -230,10 +253,10 @@ describe("email.send işleyicisi", () => {
     expect(t.inTenant).not.toHaveBeenCalled();
   });
   it("tenant işinde ACTIVE doğrulaması ctx.inTenant ile; reddedilirse gönderilmez ve hata fırlar", async () => {
-    const ok = setup({ MAIL_MODE: "mailpit" }, { hasTenant: true });
+    const ok = setup(MAILPIT_ENV, { hasTenant: true });
     await ok.handler(ok.ctx);
     expect(ok.inTenant).toHaveBeenCalledTimes(1);
-    const bad = setup({ MAIL_MODE: "mailpit" }, { hasTenant: true, inTenant: () => Promise.reject(new Error("tenant status is not active")) });
+    const bad = setup(MAILPIT_ENV, { hasTenant: true, inTenant: () => Promise.reject(new Error("tenant status is not active")) });
     await expect(bad.handler(bad.ctx)).rejects.toThrow("tenant status");
     expect(bad.send).not.toHaveBeenCalled();
   });
@@ -248,13 +271,13 @@ describe("email.send işleyicisi", () => {
     }
   });
   it("Mailer hatası yutulmaz (yeniden deneme için fırlatılır) ve adres loglanmaz", async () => {
-    const t = setup({ MAIL_MODE: "mailpit" });
+    const t = setup(MAILPIT_ENV);
     t.send.mockRejectedValue(new MailError("MAIL_SEND_FAILED", "resend responded with status 500"));
     await expect(t.handler(t.ctx)).rejects.toBeInstanceOf(MailError);
     expect(t.lines.join("\n")).not.toContain(RECIPIENT);
   });
   it("başka şablona taşınan mühür açılmaz", async () => {
-    const t = setup({ MAIL_MODE: "mailpit" });
+    const t = setup(MAILPIT_ENV);
     const moved = { ...t.payload, template: "invitation" as const };
     const ctx = { ...t.ctx, payload: moved } as unknown as typeof t.ctx;
     await expect(t.handler(ctx)).rejects.toBeInstanceOf(SealOpenError);

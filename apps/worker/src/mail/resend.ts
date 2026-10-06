@@ -1,6 +1,6 @@
 // Resend REST gönderimi (yalnızca `fetch`). Uç nokta ve alanlar resend-node SDK kaynağından doğrulandı:
 // POST {baseUrl}/emails, `Authorization: Bearer`, `Idempotency-Key`, gövde { from, to[], subject, html, text }.
-import { MailError, type MailMessage, type Mailer } from "@wms/shared/mailer";
+import { MailError, assertBareRecipient, type MailMessage, type Mailer } from "@wms/shared/mailer";
 
 export const RESEND_BASE_URL = "https://api.resend.com";
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -17,6 +17,7 @@ export function createResendMailer(options: ResendOptions): Mailer {
   const baseUrl = options.baseUrl ?? RESEND_BASE_URL;
   return {
     async send(message: MailMessage): Promise<void> {
+      assertBareRecipient(message.to);
       let response: Response;
       try {
         response = await doFetch(`${baseUrl}/emails`, {
