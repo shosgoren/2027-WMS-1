@@ -23,7 +23,6 @@ let service: AuthService;
 let signupService: AuthService;
 let demoService: AuthService;
 let authClient: DbClient;
-let eventClient: DbClient;
 let adm: pg.Client;
 const tenantIds: string[] = [];
 
@@ -101,7 +100,6 @@ const headersWith = (jar: string): Headers => new Headers({ cookie: jar, "fly-cl
 function newService(overrides: Record<string, string> = {}): AuthService {
   return createAuth({
     client: authClient,
-    eventClient,
     env: readAuthEnv({ BETTER_AUTH_SECRET: SECRET, BETTER_AUTH_URL: BASE, DATABASE_URL: env.databaseUrl, AUTH_DATABASE_URL: authUrl, ...overrides }),
   });
 }
@@ -135,7 +133,6 @@ async function startEnable(jar: string, ip: string): Promise<string> {
 
 beforeAll(async () => {
   authClient = createDbClient({ url: authUrl, poolMax: DB_CLIENT_SETTINGS.poolMax, prepare: env.prepare ?? DB_CLIENT_SETTINGS.prepare });
-  eventClient = createDbClient({ url: env.databaseUrl, poolMax: DB_CLIENT_SETTINGS.poolMax, prepare: env.prepare ?? DB_CLIENT_SETTINGS.prepare });
   service = newService();
   signupService = newService({ WMS_ENV: "local", SIGNUP_ENABLED: "true" });
   demoService = newService({ DEMO_EMAIL_DOMAIN: DEMO_DOMAIN });
@@ -149,7 +146,6 @@ afterAll(async () => {
     await adm.query("DELETE FROM public.tenant_memberships WHERE tenant_id = $1", [t]).catch(() => undefined);
   }
   await authClient.close();
-  await eventClient.close();
   await adm.end().catch(() => undefined);
 }, 60_000);
 

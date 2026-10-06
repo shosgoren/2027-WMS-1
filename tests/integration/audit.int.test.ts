@@ -7,6 +7,9 @@
 // Fikstür notu: audit_logs satırı SİLİNEMEZ (I-12) ve tenants'a FK ile bağlıdır; bu yüzden audit satırı taşıyan
 // fikstür tenant'ları temizlenmez (tek kullanımlık Testcontainers örneği; rastgele slug/UUID, sentetik veri, G-09).
 import { randomBytes, randomUUID } from "node:crypto";
+import { cpSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -17,7 +20,7 @@ import {
   withMembership,
   withSystemTenant,
 } from "../../packages/db/src/index.ts";
-import { migrateDown, migrateUp } from "../../packages/db/src/migrate.ts";
+import { MIGRATIONS_DIR, migrateDown, migrateUp } from "../../packages/db/src/migrate.ts";
 import { DB_CLIENT_SETTINGS, type DbClient } from "../../packages/db/src/client.ts";
 import { readAuthDatabaseUrl, readIntEnv, redactErrorChain } from "./harness/env.ts";
 
@@ -340,7 +343,7 @@ describe("recordSecurityEvent (kendi transaction'ı, tenant bağlamsız)", () =>
   it("olay yazılır, detail maskelenir; ip/user_agent bayrak yokken kalır", async () => {
     const userId = randomUUID();
     const id = await recordSecurityEvent(app, {
-      eventType: "login_failed",
+      eventType: "app.check_failed",
       userId,
       ip: "203.0.113.20",
       userAgent: "UA-sec",
@@ -350,13 +353,13 @@ describe("recordSecurityEvent (kendi transaction'ı, tenant bağlamsız)", () =>
       ip: "203.0.113.20",
       user_agent: "UA-sec",
       detail: { reason: "bad_password", password: "[REDACTED]", otpCode: "[REDACTED]" },
-      event_type: "login_failed",
+      event_type: "app.check_failed",
       user_id: userId,
     });
   });
 
   it("suppressNetworkMeta=true → ip ve user_agent NULL (demo kullanıcıları)", async () => {
-    const id = await recordSecurityEvent(app, { eventType: "login_succeeded", ip: "203.0.113.21", userAgent: "UA-demo", suppressNetworkMeta: true });
+    const id = await recordSecurityEvent(app, { eventType: "app.check_demo", ip: "203.0.113.21", userAgent: "UA-demo", suppressNetworkMeta: true });
     expect(await eventRow(id)).toMatchObject({ ip: null, user_agent: null });
   });
 
@@ -368,7 +371,20 @@ describe("recordSecurityEvent (kendi transaction'ı, tenant bağlamsız)", () =>
 
 describe(`0004_audit ileri/geri/ileri (target=${env.target})`, () => {
   const scratch: string[] = [];
+  // 0001..0004 geçici kopyası (T-112c): sonraki migration'lar (0005+) bu testin "applied/reverted" beklentilerini değiştirmesin.
+  let thru4Dir: string | undefined;
+  const thru4 = (): string => {
+    if (thru4Dir === undefined) {
+      thru4Dir = mkdtempSync(path.join(tmpdir(), "wms-audit-migrations-"));
+      cpSync(MIGRATIONS_DIR, thru4Dir, {
+        recursive: true,
+        filter: (src) => !/[\\/]\d{4}_/.test(src) || (/[\\/](\d{4})_[^\\/]*$/.exec(src)?.[1] ?? "9999") <= "0004",
+      });
+    }
+    return thru4Dir;
+  };
   afterAll(async () => {
+    if (thru4Dir !== undefined) rmSync(thru4Dir, { recursive: true, force: true });
     const c = await connect(env.databaseUrlDirect);
     try {
       for (const name of scratch) await c.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
@@ -405,9 +421,9 @@ describe(`0004_audit ileri/geri/ileri (target=${env.target})`, () => {
 
   it("geri alma audit tablolarini ve islevleri kaldirir; yeniden ileri basarili", async () => {
     const url = await freshUrl();
-    expect((await migrateUp({ url })).applied).toContain("0004");
+    expect((await migrateUp({ url, dir: thru4() })).applied).toContain("0004");
     expect(await tables(url)).toEqual(["audit_logs", "request_rate_limits"]);
-    expect((await migrateDown({ url, to: "0003", wmsEnv: "ci" })).reverted).toEqual(["0004"]);
+    expect((await migrateDown({ url, dir: thru4(), to: "0003", wmsEnv: "ci" })).reverted).toEqual(["0004"]);
     expect(await tables(url)).toEqual([]);
     const c = await connect(url);
     try {
@@ -416,13 +432,13 @@ describe(`0004_audit ileri/geri/ileri (target=${env.target})`, () => {
     } finally {
       await c.end();
     }
-    expect((await migrateUp({ url })).applied).toEqual(["0004"]);
+    expect((await migrateUp({ url, dir: thru4() })).applied).toEqual(["0004"]);
     expect(await tables(url)).toEqual(["audit_logs", "request_rate_limits"]);
   });
 
   it("MINOR-4: tenant satiri gorunmezse (kisitlayici politika) tetikleyici fail-closed ip/user_agent'i NULL yazar; gorunurken yazar", async () => {
     const url = await freshUrl();
-    await migrateUp({ url });
+    await migrateUp({ url, dir: thru4() });
     const tenantId = randomUUID();
     const c = await connect(url);
     try {
@@ -456,7 +472,7 @@ describe(`0004_audit ileri/geri/ileri (target=${env.target})`, () => {
 
   it("audit satiri varken staging geri alma RAISE eder ve veri korunur; ci bayragiyla calisir", async () => {
     const url = await freshUrl();
-    await migrateUp({ url });
+    await migrateUp({ url, dir: thru4() });
     const tenantId = randomUUID();
     const c = await connect(url);
     try {
@@ -468,7 +484,7 @@ describe(`0004_audit ileri/geri/ileri (target=${env.target})`, () => {
     } finally {
       await c.end();
     }
-    await expect(migrateDown({ url, to: "0003", wmsEnv: "staging" })).rejects.toThrow(/0004_audit down:.*satır var/);
+    await expect(migrateDown({ url, dir: thru4(), to: "0003", wmsEnv: "staging" })).rejects.toThrow(/0004_audit down:.*satır var/);
     expect(await tables(url)).toEqual(["audit_logs", "request_rate_limits"]);
     const k = await connect(url);
     try {
@@ -477,7 +493,7 @@ describe(`0004_audit ileri/geri/ileri (target=${env.target})`, () => {
     } finally {
       await k.end();
     }
-    expect((await migrateDown({ url, to: "0003", wmsEnv: "ci" })).reverted).toEqual(["0004"]);
+    expect((await migrateDown({ url, dir: thru4(), to: "0003", wmsEnv: "ci" })).reverted).toEqual(["0004"]);
     expect(await tables(url)).toEqual([]);
   });
 });

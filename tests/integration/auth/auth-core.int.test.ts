@@ -1,6 +1,6 @@
 // @wms/auth çekirdek entegrasyon testi (T-112; ADR-014): gerçek Postgres + PgBouncer, gerçek roller.
 //
-// - Better Auth tabloları `wms_auth` (AUTH_DATABASE_URL), olaylar `wms_app` (DATABASE_URL) ile yazılır.
+// - Better Auth tabloları ve kimlik olayları `wms_auth` (AUTH_DATABASE_URL) ile yazılır (T-112c, migration 0005).
 // - Kayıt ucu kapalıdır (`disableSignUp: true`); kullanıcılar migration rolüyle FİKSTÜR olarak açılır
 //   (parola özeti `hashPassword` ile). Parolalar bu dosyaya özgü sentetik değerlerdir (G-09).
 // - Her senaryo kendi `fly-client-ip` değerini kullanır (IP başına hız sınırı kovaları ayrışır).
@@ -26,7 +26,6 @@ const WRONG_PASSWORD = `W${randomBytes(12).toString("hex")}`;
 
 let service: AuthService;
 let authClient: DbClient;
-let eventClient: DbClient;
 let adm: pg.Client;
 let app: pg.Client;
 
@@ -103,10 +102,9 @@ async function signIn(email: string, ip: string, password = PASSWORD): Promise<{
   return { res, jar: jarFrom(res) };
 }
 
-function newService(client: DbClient, overrides: Record<string, string> = {}, events: DbClient = eventClient): AuthService {
+function newService(client: DbClient, overrides: Record<string, string> = {}): AuthService {
   return createAuth({
     client,
-    eventClient: events,
     env: readAuthEnv({
       BETTER_AUTH_SECRET: SECRET,
       BETTER_AUTH_URL: BASE,
@@ -142,10 +140,8 @@ function totp(secretBase32: string, at = Date.now()): string {
 
 beforeAll(async () => {
   authClient = createDbClient({ url: authUrl, poolMax: DB_CLIENT_SETTINGS.poolMax, prepare: env.prepare ?? DB_CLIENT_SETTINGS.prepare });
-  eventClient = createDbClient({ url: env.databaseUrl, poolMax: DB_CLIENT_SETTINGS.poolMax, prepare: env.prepare ?? DB_CLIENT_SETTINGS.prepare });
   service = createAuth({
     client: authClient,
-    eventClient,
     env: readAuthEnv({
       BETTER_AUTH_SECRET: SECRET,
       BETTER_AUTH_URL: BASE,
@@ -159,7 +155,6 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await authClient.close();
-  await eventClient.close();
   await adm.end().catch(() => undefined);
   await app.end().catch(() => undefined);
 }, 60_000);
@@ -385,8 +380,7 @@ describe(`auth çekirdek (target=${env.target})`, () => {
   it("MINOR-2: üretim yapılandırmasında Fly-Client-IP yoksa istek reddedilir", async () => {
     const strict = createAuth({
       client: authClient,
-      eventClient,
-      env: { ...readAuthEnv({ BETTER_AUTH_SECRET: SECRET, BETTER_AUTH_URL: BASE, DATABASE_URL: env.databaseUrl, AUTH_DATABASE_URL: authUrl }), production: true },
+        env: { ...readAuthEnv({ BETTER_AUTH_SECRET: SECRET, BETTER_AUTH_URL: BASE, DATABASE_URL: env.databaseUrl, AUTH_DATABASE_URL: authUrl }), production: true },
     });
     const res = await strict.handler(
       new Request(`${BASE}/api/auth/sign-in/email`, {
@@ -552,8 +546,14 @@ describe(`auth çekirdek (target=${env.target})`, () => {
     const ok = await signIn(u.email, nextIp()); // normal servisle oturum
     // Casus ÖNCE kurulur; maskeleyici onun üstüne sarılır → casus yalnızca maskeli çağrıları görür.
     const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    const brokenEvents = createDbClient({ url: authUrl, poolMax: 1, prepare: DB_CLIENT_SETTINGS.prepare }); // wms_auth: RETURNING için SELECT yok
-    const svc = newService(authClient, {}, brokenEvents);
+    // T-112c: olaylar da wms_auth ile yazıldığı için "bozuk olay istemcisi" yok; yalnızca BU kullanıcının olay INSERT'ini
+    // 42501 ile reddeden geçici tetikleyici (WHEN user_id = …; paralel dosyaların olaylarını etkilemez).
+    const trg = `t112c_fail_${randomBytes(4).toString("hex")}`;
+    await adm.query(
+      `CREATE FUNCTION public.${trg}() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN RAISE EXCEPTION 'test' USING ERRCODE = 'insufficient_privilege'; END $f$`,
+    );
+    await adm.query(`CREATE TRIGGER ${trg} BEFORE INSERT ON public.security_events FOR EACH ROW WHEN (NEW.user_id = '${u.id}'::uuid) EXECUTE FUNCTION public.${trg}()`);
+    const svc = newService(authClient);
     const ip = nextIp();
     // Giriş olayı yazılamaz → fail-closed (500).
     const login = await post2(svc, "/sign-in/email", { email: u.email, password: PASSWORD }, ip);
@@ -561,7 +561,8 @@ describe(`auth çekirdek (target=${env.target})`, () => {
     const out = await post2(svc, "/sign-out", {}, ip, ok.jar);
     const printed = spy.mock.calls.map((c) => c.map((a) => (a instanceof Error ? `${a.message}` : String(a))).join(" ")).join("\n");
     spy.mockRestore();
-    await brokenEvents.close();
+    await adm.query(`DROP TRIGGER ${trg} ON public.security_events`);
+    await adm.query(`DROP FUNCTION public.${trg}()`);
     expect(out.status).toBe(200);
     expect(await service.getPrincipal(headersWith(ok.jar))).toBeNull();
     expect(printed).toContain("sqlstate=42501");
