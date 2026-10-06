@@ -32,7 +32,7 @@ function makeFingerprint(over = {}) {
     schema: { columns: 80, digest: d.schema },
     rls: { tables: 12, digest: d.rls },
     policies: { count: 9, digest: d.pol },
-    roles: [role("wms_app"), role("wms_auth"), role("wms_identity_probe", { login: false }), role("wms_worker")],
+    roles: [role("wms_app"), role("wms_auth"), role("wms_identity_probe", { login: false }), role("wms_ops", { login: false }), role("wms_worker")],
     ...over,
   };
 }
@@ -107,6 +107,20 @@ describe("fingerprintHash", () => {
 describe("checkRoleAttributes", () => {
   it("sağlıklı roller → sorun yok", () => {
     expect(checkRoleAttributes(makeFingerprint())).toEqual([]);
+  });
+  it("wms_ops: eksik, LOGIN'li, BYPASSRLS'li veya üyeli → sorun (A-80)", () => {
+    const base = makeFingerprint();
+    const without = { ...base, roles: base.roles.filter((r) => r.name !== "wms_ops") };
+    expect(checkRoleAttributes(without)).toContain("wms_ops: rol yok");
+    const bad = { ...base, roles: base.roles.map((r) => (r.name === "wms_ops" ? { ...r, login: true, bypassrls: true, memberships: 2 } : r)) };
+    expect(checkRoleAttributes(bad)).toEqual(
+      expect.arrayContaining(["wms_ops: LOGIN olmamalı (A-80)", "wms_ops: bypassrls=true", "wms_ops: üyelik sayısı 2"]),
+    );
+  });
+  it("db_now anlık görüntüyle aynı zaman: transaction_timestamp()", () => {
+    expect(FINGERPRINT_SQL).toContain("transaction_timestamp()");
+    expect(FINGERPRINT_SQL).not.toContain("clock_timestamp");
+    expect(FINGERPRINT_SQL).toContain("'wms_ops'");
   });
   it("BYPASSRLS, üyelik, eksik rol, LOGIN'li probe yakalanır", () => {
     const fp = makeFingerprint();

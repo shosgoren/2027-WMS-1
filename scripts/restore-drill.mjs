@@ -1,21 +1,21 @@
 #!/usr/bin/env node
 // T-130 — Restore tatbikatı (`.github/workflows/restore-drill.yml`). YALNIZCA GitHub Actions'ta (ajan ortamından
-// Neon'a erişim yok, ADR-013). Staging ANA DALINA YAZMA YAPMAZ, yalnızca iki `drill.marker` olayı ekler (aşağıda).
+// Neon'a erişim yok, ADR-013). Staging ANA DALINA HİÇBİR YAZMA YAPMAZ (yalnızca salt-okunur transaction; işaret satırı yok).
 //
 // Akış (A-48: yalnızca veritabanı; dosya deposu + silme işaretleri dahil tam tatbikat AC-17 / Faz 4P):
-//   1. Ana dalda `pre` işaret satırı (security_events `drill.marker`, append-only) → ana dal parmak izi (db-fingerprint.mjs).
-//      Zaman noktası T = parmak izi transaction'ının veritabanı saati (runner saat kayması etkisiz).
-//   2. T'den sonra `post` işaret satırı: geri yüklemede OLMAMASI RPO sınırının kanıtıdır, `pre` satırının VARLIĞI
-//      T'ye kadar olan son commit'lerin geri geldiğinin kanıtıdır.
-//   3. Neon API ile T anına GEÇİCİ dal `restore-drill-<run_id>`: POST /projects/{id}/branches
+//   1. Ana dalda salt-okunur parmak izi (db-fingerprint.mjs). Zaman noktası T = parmak izi transaction'ının
+//      `transaction_timestamp()` değeri (veritabanı saati; runner saat kayması etkisiz).
+//   2. Neon API ile T anına GEÇİCİ dal `restore-drill-<run_id>`: POST /projects/{id}/branches
 //      {branch:{name, parent_id, parent_timestamp: T}, endpoints:[{type:"read_write"}]} (G-04: @neondatabase/api-client
 //      2.7.3 `CreateProjectBranch` tipi; parent_timestamp ISO 8601). Uç nokta hazır olana dek parmak izi denenir.
-//   4. Geri yüklenen dalda parmak izi: ana dalla birebir eşit + `post` yok + `pre` var + RLS rol nitelikleri.
-//   5. RTO = dal isteği → doğrulama tamam; RPO = T − geri yüklenen son commit (security_events/audit_logs en yeni
-//      occurred_at; `pre` işareti T'den hemen önce yazıldığı için ölçü anlamlıdır). Hedefler A-48: RPO ≤ 15 dk,
-//      RTO ≤ 60 dk; aşılırsa kırmızı DEĞİL, raporlanır (hedef varsayımdır).
-//   6. finally: geçici dal silinir ve yokluğu doğrulanır; silinemezse iş kırmızı (fail-closed). Ana dal asla silinmez
-//      (ad öneki + ana dal kimliği koruması). `--cleanup`: aynı koşunun artık dalını siler (idempotent).
+//   3. Geri yüklenen dalda parmak izi: ana dalla birebir eşit (T'den sonra ana dalda yazma olduysa ve geri
+//      yüklemeye sızdıysa eşitlik bozulur) + geri yüklenen en yeni commit T'den sonra DEĞİL + RLS rol nitelikleri.
+//   4. RTO = dal isteği → doğrulama tamam; RPO = T − geri yüklenen en yeni commit (security_events/audit_logs en
+//      yeni occurred_at; salt-okunur ölçü). Hedefler A-48: RPO ≤ 15 dk, RTO ≤ 60 dk; aşılırsa kırmızı DEĞİL, raporlanır.
+//      Sınır: staging boştayken "T sonrası veri yok" kanıtı yalnızca en yeni commit ≤ T denetimidir.
+//   5. finally: geçici dal silinir ve yokluğu doğrulanır; silinemezse iş kırmızı (fail-closed). Silmeden önce dalın
+//      default/primary/protected OLMADIĞI API'den doğrulanır (ad öneki + ana dal kimliği korumalarına ek);
+//      `--cleanup` aynı koşunun artık dalını aynı korumalarla siler (idempotent).
 //
 // Gizlilik (G-09): her URI/parola/host/dal kimliği elde edildiği anda `::add-mask::` + kendi maskeleyicimiz; özet
 // yalnızca tarih, T, RPO/RTO, eşitlik bayrakları, sayılar ve sonuç içerir; yazıldıktan sonra sızıntı için taranır.
@@ -34,9 +34,8 @@ export const BRANCH_PREFIX = "restore-drill-";
 /** A-48 hedefleri (varsayım; aşılırsa raporlanır, kırmızı değildir). */
 export const TARGETS = Object.freeze({ rpoSeconds: 15 * 60, rtoSeconds: 60 * 60 });
 export const SCOPE_NOTE = "Yalnızca veritabanı; dosya deposu (Tigris) ve silme işaretleri dahil tam tatbikat AC-17 / Faz 4P.";
-export const MARKER_EVENT = "drill.marker";
-/** T ile `post` işareti arasındaki asgari bekleme (Neon zaman damgası çözünürlüğü / saat kayması payı). */
-export const POST_MARKER_GAP_MS = 3000;
+/** T ile dal isteği arasındaki asgari bekleme (T'nin Neon tarafında geçmişte kalması / saat kayması payı). */
+export const POINT_GAP_MS = 3000;
 export const READY_TIMEOUT_MS = 10 * 60_000;
 export const READY_INTERVAL_MS = 5000;
 
@@ -123,13 +122,12 @@ export function safeMessage(redactor, e) {
  *   createRestoreBranch: (a: { name: string, parentId: string, timestamp: string }) => Promise<{ branchId: string }>,
  *   connectTarget: (a: { branchId: string, database: string, ownerRole: string }) => Promise<PsqlTarget>,
  *   findBranchIdByName: (name: string) => Promise<string | null>,
+ *   getBranchInfo: (id: string) => Promise<{ isDefault: boolean, isPrimary: boolean, isProtected: boolean } | null>,
  *   deleteBranch: (id: string) => Promise<void>,
  *   branchExists: (id: string) => Promise<boolean>,
  * }} NeonFacade
  * @typedef {{
  *   fingerprint: (t: PsqlTarget) => Fingerprint,
- *   writeMarker: (t: PsqlTarget, runId: string, phase: "pre" | "post") => string,
- *   markerCounts: (t: PsqlTarget, runId: string) => { pre: number, post: number },
  * }} DbFacade
  * @typedef {{ neon: NeonFacade, db: DbFacade, redactor: import("./neon-spike.mjs").Redactor,
  *   now?: () => number, sleep?: (ms: number) => Promise<unknown>, today?: () => string }} DrillDeps
@@ -147,6 +145,11 @@ export async function cleanupBranch(neon, c) {
     const id = c.branchId ?? (await neon.findBranchIdByName(c.name));
     if (id === null) return { attempted: false, deleted: false, error: null };
     if (c.mainId !== null && id === c.mainId) throw new DrillError("silinecek dal ana dalla aynı: silme reddedildi");
+    const info = await neon.getBranchInfo(id);
+    if (info === null) return { attempted: false, deleted: false, error: null };
+    if (info.isDefault || info.isPrimary || info.isProtected) {
+      throw new DrillError("silinecek dal default/primary/protected: silme reddedildi");
+    }
     await neon.deleteBranch(id);
     if (await neon.branchExists(id)) throw new DrillError("silme sonrası dal hâlâ listede");
     return { attempted: true, deleted: true, error: null };
@@ -183,8 +186,8 @@ export async function runDrill(deps, cfg) {
     fingerprints_equal: null,
     fingerprint_sha256: null,
     sections: null,
-    pre_marker_present: null,
-    post_marker_absent: null,
+    restored_not_after_t: null,
+    main_writes: 0,
     roles_ok: null,
     role_problems: null,
     restored_branch_deleted: null,
@@ -201,7 +204,6 @@ export async function runDrill(deps, cfg) {
     mainId = main.branchId;
     s.history_retention_seconds = await neon.getRetentionSeconds();
 
-    db.writeMarker(main.target, cfg.runId, "pre");
     const fpMain = db.fingerprint(main.target);
     const pointInTime = fpMain.db_now;
     s.point_in_time = pointInTime;
@@ -209,9 +211,7 @@ export async function runDrill(deps, cfg) {
       throw new DrillError("geçmiş saklama süresi tatbikat için çok kısa (<10 dk)");
     }
 
-    await sleep(POST_MARKER_GAP_MS);
-    const postAt = db.writeMarker(main.target, cfg.runId, "post");
-    if (!(Date.parse(postAt) > Date.parse(pointInTime))) throw new DrillError("post işareti T'den sonra değil: saat tutarsız");
+    await sleep(POINT_GAP_MS);
 
     const requestedAtMs = now();
     const created = await neon.createRestoreBranch({ name: cfg.branchName, parentId: main.branchId, timestamp: pointInTime });
@@ -231,11 +231,12 @@ export async function runDrill(deps, cfg) {
         await sleep(READY_INTERVAL_MS);
       }
     }
-    const markers = db.markerCounts(target, cfg.runId);
     const verifiedAtMs = now();
 
     const cmp = compareFingerprints(fpMain, fpRestored);
     const roleProblems = checkRoleAttributes(fpRestored);
+    const restoredLast = latestCommitAt(fpRestored);
+    s.restored_not_after_t = restoredLast === null || Date.parse(restoredLast) <= Date.parse(pointInTime);
     const timing = computeRpoRto({ pointInTime, lastRestoredCommit: latestCommitAt(fpRestored), requestedAtMs, verifiedAtMs });
 
     s.rpo_seconds = timing.rpoSeconds;
@@ -249,11 +250,9 @@ export async function runDrill(deps, cfg) {
     s.fingerprints_equal = cmp.equal;
     s.fingerprint_sha256 = fingerprintHash(fpRestored);
     s.sections = cmp.sections;
-    s.pre_marker_present = markers.pre === 1;
-    s.post_marker_absent = markers.post === 0;
     s.roles_ok = roleProblems.length === 0;
     s.role_problems = roleProblems;
-    ok = cmp.equal && s.pre_marker_present && s.post_marker_absent && s.roles_ok;
+    ok = cmp.equal && s.restored_not_after_t && s.roles_ok;
     if (!cmp.equal) s.error = `parmak izi farkı: ${cmp.diffs.join("; ")}`.slice(0, 300);
   } catch (e) {
     s.error = safeMessage(redactor, e);
@@ -288,7 +287,7 @@ export function renderSummaryMd(s) {
     `- Tablo sayıları eşit: ${yn(s.table_counts_equal)} (${s.tables_compared ?? "-"} tablo)`,
     `- Özetler eşit (audit_logs, security_events, şema): ${yn(s.digests_equal)}`,
     `- Parmak izleri eşit: ${yn(s.fingerprints_equal)} (sağlama: ${s.fingerprint_sha256 ?? "-"})`,
-    `- \`pre\` işareti geri yüklendi: ${yn(s.pre_marker_present)} · \`post\` işareti yok: ${yn(s.post_marker_absent)}`,
+    `- Geri yüklenen en yeni commit T'den sonra değil: ${yn(s.restored_not_after_t)} · ana dala yazma: ${s.main_writes ?? 0}`,
     `- Uygulama rolü nitelikleri tamam: ${yn(s.roles_ok)}${s.role_problems && s.role_problems.length > 0 ? ` (${s.role_problems.join("; ")})` : ""}`,
     `- Geçici dal silindi: ${String(s.restored_branch_deleted)}`,
     ...(s.error ? [`- Hata: ${s.error}`] : []),
@@ -366,6 +365,11 @@ export function createNeonFacade(env, redactor) {
       api.mask(b.id);
       return b.id;
     },
+    async getBranchInfo(id) {
+      const b = (await raw.listBranches()).find((/** @type {any} */ x) => x?.id === id);
+      if (b === undefined) return null;
+      return { isDefault: b.default === true, isPrimary: b.primary === true, isProtected: b.protected === true };
+    },
     async deleteBranch(id) {
       await raw.deleteBranch(id);
     },
@@ -383,31 +387,6 @@ export function createNeonFacade(env, redactor) {
 export function createDbFacade(redactor, psql = runPsql) {
   return {
     fingerprint: (t) => takeFingerprint(t, redactor, { psql }),
-    writeMarker(t, runId, phase) {
-      if (!/^[0-9A-Za-z_-]{1,64}$/.test(runId) || (phase !== "pre" && phase !== "post")) throw new DrillError("işaret girdisi geçersiz");
-      const r = psql(
-        t,
-        `INSERT INTO public.security_events (event_type, detail) VALUES ('${MARKER_EVENT}', json_build_object('run_id', '${runId}', 'phase', '${phase}')::jsonb)\n` +
-          `RETURNING to_char(occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"');\n`,
-        redactor,
-      );
-      if (!r.ok) throw new DrillError(`işaret yazılamadı (${phase})${r.sqlstate ? ` SQLSTATE ${r.sqlstate}` : ""}: ${r.error ?? ""}`);
-      const at = r.stdout.split(/\r?\n/).find((l) => /^\d{4}-\d{2}-\d{2}T/.test(l));
-      if (at === undefined) throw new DrillError(`işaret zamanı okunamadı (${phase})`);
-      return at;
-    },
-    markerCounts(t, runId) {
-      if (!/^[0-9A-Za-z_-]{1,64}$/.test(runId)) throw new DrillError("işaret girdisi geçersiz");
-      const r = psql(
-        t,
-        `SELECT 'MK:' || count(*) FILTER (WHERE detail->>'phase' = 'pre') || ':' || count(*) FILTER (WHERE detail->>'phase' = 'post')\n` +
-          `FROM public.security_events WHERE event_type = '${MARKER_EVENT}' AND detail->>'run_id' = '${runId}';\n`,
-        redactor,
-      );
-      const m = r.ok ? /^MK:(\d+):(\d+)$/m.exec(r.stdout) : null;
-      if (m === null) throw new DrillError(`işaret sayımı okunamadı${r.sqlstate ? ` SQLSTATE ${r.sqlstate}` : ""}`);
-      return { pre: Number(m[1]), post: Number(m[2]) };
-    },
   };
 }
 

@@ -2,12 +2,12 @@
 // T-130 — Veritabanı parmak izi (restore tatbikatı: ana dal ile geri yüklenen dal karşılaştırması).
 //
 // Tek salt-okunur, REPEATABLE READ transaction'da (migration/sahip rolü, psql ile; scripts/** altında PG sürücüsü
-// import'u AC-28 ile yasak) şunlar toplanır:
+// import'u AC-28 ile yasak) şunlar toplanır (`db_now` = transaction_timestamp(): tatbikatın zaman noktası T'si):
 //   * `wms_meta.schema_migrations` listesi (sürüm, ad, sağlama),
 //   * uygulama tablolarının tam satır sayısı (sistem şemaları ve Neon'un `neon` şeması hariç),
 //   * `audit_logs` ve `security_events`: `created_xid, id` sıralı satır özetlerinin SHA-256'sı (değerler değil özet),
 //   * şema özeti: `information_schema.columns` + tablo RLS bayrakları + politikalar (SHA-256),
-//   * rol nitelikleri (wms_app / wms_auth / wms_worker / wms_identity_probe; parola/URL yok).
+//   * rol nitelikleri (wms_app / wms_auth / wms_worker / wms_ops / wms_identity_probe; parola/URL yok).
 // Çıktıda kişisel veri, URL, host, parola YOKTUR; yalnızca tablo adları, sayılar ve özetler.
 //
 // Not: sayımlar ve özetler satır düzeyi güvenliğini (FORCE RLS) atlayan sahip rolü gerektirir (Neon sahip rolü
@@ -19,6 +19,8 @@ import { createHash } from "node:crypto";
 /** Uygulama rolleri (hepsi NOSUPERUSER NOBYPASSRLS LOGIN, üyelik 0) ve NOLOGIN kimlik probu. */
 export const APP_ROLE_NAMES = Object.freeze(["wms_app", "wms_auth", "wms_worker"]);
 export const PROBE_ROLE_NAME = "wms_identity_probe";
+/** Operasyon rolü (T-105c, A-80): NOLOGIN, NOBYPASSRLS, üyelik 0. */
+export const OPS_ROLE_NAME = "wms_ops";
 /** Katalog taramasında dışlanan şemalar (sistem + Neon'un yönettiği `neon`). */
 export const EXCLUDED_SCHEMAS = Object.freeze(["pg_catalog", "information_schema", "neon"]);
 /** Çıktı satırı öneki (psql çıktısındaki başka satırlardan ayırmak için). */
@@ -30,7 +32,7 @@ const EXCLUDED_SQL = EXCLUDED_SCHEMAS.map((s) => `'${s}'`).join(", ");
 /** Parmak izi SQL'i (tek transaction; yalnızca SELECT). */
 export const FINGERPRINT_SQL = `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
 SELECT '${FP_PREFIX}' || json_build_object(
-  'db_now', to_char(clock_timestamp() AT TIME ZONE 'UTC', ${TS_FMT}),
+  'db_now', to_char(transaction_timestamp() AT TIME ZONE 'UTC', ${TS_FMT}),
   'rls_bypass', (SELECT r.rolbypassrls FROM pg_roles r WHERE r.rolname = current_user),
   'server_version_num', current_setting('server_version_num'),
   'migrations', (SELECT coalesce(json_agg(json_build_object('version', m.version, 'name', m.name, 'checksum_sha256', m.checksum_sha256) ORDER BY m.version), '[]'::json)
@@ -62,7 +64,7 @@ SELECT '${FP_PREFIX}' || json_build_object(
   'roles', (SELECT coalesce(json_agg(json_build_object('name', r.rolname, 'login', r.rolcanlogin, 'superuser', r.rolsuper,
                    'bypassrls', r.rolbypassrls, 'createdb', r.rolcreatedb, 'createrole', r.rolcreaterole, 'replication', r.rolreplication,
                    'memberships', (SELECT count(*) FROM pg_auth_members m WHERE m.member = r.oid)) ORDER BY r.rolname), '[]'::json)
-              FROM pg_roles r WHERE r.rolname IN (${[...APP_ROLE_NAMES, PROBE_ROLE_NAME].map((s) => `'${s}'`).join(", ")}))
+              FROM pg_roles r WHERE r.rolname IN (${[...APP_ROLE_NAMES, PROBE_ROLE_NAME, OPS_ROLE_NAME].map((s) => `'${s}'`).join(", ")}))
 )::text;
 COMMIT;
 `;
@@ -196,6 +198,15 @@ export function checkRoleAttributes(fp) {
   const probe = fp.roles.find((x) => x.name === PROBE_ROLE_NAME);
   if (probe === undefined) problems.push(`${PROBE_ROLE_NAME}: rol yok`);
   else if (probe.login) problems.push(`${PROBE_ROLE_NAME}: LOGIN olmamalı`);
+  const ops = fp.roles.find((x) => x.name === OPS_ROLE_NAME);
+  if (ops === undefined) problems.push(`${OPS_ROLE_NAME}: rol yok`);
+  else {
+    if (ops.login) problems.push(`${OPS_ROLE_NAME}: LOGIN olmamalı (A-80)`);
+    for (const attr of /** @type {const} */ (["superuser", "bypassrls", "createdb", "createrole", "replication"])) {
+      if (ops[attr]) problems.push(`${OPS_ROLE_NAME}: ${attr}=true`);
+    }
+    if (ops.memberships !== 0) problems.push(`${OPS_ROLE_NAME}: üyelik sayısı ${ops.memberships}`);
+  }
   return problems;
 }
 
