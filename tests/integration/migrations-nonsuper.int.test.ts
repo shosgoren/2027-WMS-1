@@ -114,6 +114,8 @@ beforeAll(async () => {
     await c.query(`CREATE ROLE ${INFRA} NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION`);
     // wms_ops: 0009 önkoşulu (01-roles.sh / staging ile aynı: NOLOGIN, parolasız, üyelik yok; A-80).
     await c.query(`CREATE ROLE ${OPS} NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION`);
+    // wms_worker: 0014 önkoşulu (01-roles.sh / provision-staging.mjs ile aynı: LOGIN + kısıtlı nitelikler, üyelik yok; parolasız: bu test onunla bağlanmaz).
+    await c.query("CREATE ROLE wms_worker LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION");
     await c.query(`CREATE ROLE ${MIGRATOR} LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD '${migratorPassword}'`);
   });
 }, 300_000);
@@ -667,6 +669,279 @@ describe("0007–0012 — süper kullanıcı olmayan migrator", () => {
       table: "number_sequences",
       insert: "INSERT INTO public.number_sequences (tenant_id, document_kind, period) VALUES ($1, 'STOCK_IN', 'NS-2026')",
       keep: "period = 'NS-2026'",
+    });
+  });
+});
+
+// 0013–0014 (T-236; T-211 security-reviewer MINOR-1): 0001–0014 ileri → 0014, 0013 geri → ileri; dolu tablo down bekçileri;
+// wms_probe.active_tenant_ids (SET ROLE kalıbı) süper kullanıcı olmayan migrator ile.
+describe("0013–0014 — süper kullanıcı olmayan migrator", () => {
+  let thru14Dir: string | undefined;
+  const thru14 = (): string => (thru14Dir ??= copyMigrations("0014"));
+  const ALL14 = ["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014"];
+  const FN = "wms_probe.active_tenant_ids(uuid, integer)";
+
+  /** thru12 describe'ındaki ile aynı kapsamlı şema parmak izi (tetikleyici durumu, sütun ACL, işlev gövdesi dahil). */
+  async function schemaDigest(u: string): Promise<Record<string, string>> {
+    return withClient(u, async (c) => {
+      const q = async (sql: string): Promise<string> => (await c.query<{ d: string }>(sql)).rows[0]?.d ?? "";
+      const nsp = `n.nspname IN ('public', 'wms_probe', 'wms_meta')`;
+      return {
+        columns: await q(
+          `SELECT md5(coalesce(string_agg(concat_ws('|', table_schema, table_name, column_name, ordinal_position, data_type, is_nullable, coalesce(column_default, '')), E'\\n' ORDER BY table_schema, table_name, ordinal_position), '')) AS d
+             FROM information_schema.columns WHERE table_schema IN ('public', 'wms_probe', 'wms_meta')`,
+        ),
+        rls: await q(
+          `SELECT md5(coalesce(string_agg(format('%I.%I:%s:%s', n.nspname, c.relname, c.relrowsecurity, c.relforcerowsecurity), ',' ORDER BY n.nspname, c.relname), '')) AS d
+             FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind = 'r' AND ${nsp}`,
+        ),
+        policies: await q(
+          `SELECT md5(coalesce(string_agg(concat_ws('|', schemaname, tablename, policyname, permissive, roles::text, cmd, qual, with_check), ',' ORDER BY schemaname, tablename, policyname), '')) AS d FROM pg_policies`,
+        ),
+        constraints: await q(
+          `SELECT md5(coalesce(string_agg(concat_ws('|', n.nspname, cl.relname, co.conname, pg_get_constraintdef(co.oid)), ',' ORDER BY n.nspname, cl.relname, co.conname), '')) AS d
+             FROM pg_constraint co JOIN pg_class cl ON cl.oid = co.conrelid JOIN pg_namespace n ON n.oid = cl.relnamespace WHERE ${nsp}`,
+        ),
+        indexes: await q(`SELECT md5(coalesce(string_agg(indexdef, ',' ORDER BY indexname), '')) AS d FROM pg_indexes WHERE schemaname IN ('public', 'wms_probe')`),
+        functions: await q(
+          `SELECT md5(coalesce(string_agg(concat_ws('|', n.nspname, p.oid::regprocedure::text, p.proowner::regrole::text, p.prosecdef, p.proconfig::text, p.proacl::text, md5(p.prosrc)), ',' ORDER BY n.nspname, p.oid::regprocedure::text), '')) AS d
+             FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname IN ('public', 'wms_probe')`,
+        ),
+        triggers: await q(
+          `SELECT md5(coalesce(string_agg(concat_ws('|', t.tgrelid::regclass::text, t.tgname, t.tgenabled, t.tgfoid::regprocedure::text), ',' ORDER BY t.tgrelid::regclass::text, t.tgname), '')) AS d
+             FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE NOT t.tgisinternal AND ${nsp}`,
+        ),
+        columnAcl: await q(
+          `SELECT md5(coalesce(string_agg(concat_ws('|', n.nspname, c.relname, a.attname, x.grantee::regrole::text, x.privilege_type, x.is_grantable), ',' ORDER BY n.nspname, c.relname, a.attname, x.grantee::regrole::text, x.privilege_type), '')) AS d
+             FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+             CROSS JOIN LATERAL aclexplode(a.attacl) x WHERE a.attacl IS NOT NULL AND NOT a.attisdropped AND ${nsp}`,
+        ),
+        tableAcl: await q(
+          `SELECT md5(coalesce(string_agg(concat_ws('|', n.nspname, c.relname, c.relowner::regrole::text, c.relacl::text), ',' ORDER BY n.nspname, c.relname), '')) AS d
+             FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind = 'r' AND ${nsp}`,
+        ),
+        schemaAcl: await q(
+          `SELECT md5(coalesce(string_agg(concat_ws('|', n.nspname, n.nspowner::regrole::text, n.nspacl::text), ',' ORDER BY n.nspname), '')) AS d
+             FROM pg_namespace n WHERE ${nsp}`,
+        ),
+      };
+    });
+  }
+
+  /** active_tenant_ids sahipliği/ACL'i (migrator kataloğundan): birebir karşılaştırma için düz nesne. */
+  async function probeFunction(u: string): Promise<Record<string, unknown>> {
+    return withClient(u, async (c) => {
+      const r = await c.query<Record<string, unknown>>(
+        `SELECT p.proowner::regrole::text AS owner, p.prosecdef AS secdef, p.proconfig AS config, p.proacl::text[] AS acl, p.provolatile AS volatility,
+                has_function_privilege('wms_worker', '${FN}', 'EXECUTE') AS worker_exec,
+                has_function_privilege('wms_app', '${FN}', 'EXECUTE') AS app_exec,
+                has_function_privilege('wms_auth', '${FN}', 'EXECUTE') AS auth_exec,
+                has_function_privilege('wms_ops', '${FN}', 'EXECUTE') AS ops_exec,
+                has_schema_privilege('wms_worker', 'wms_probe', 'USAGE') AS worker_usage,
+                has_schema_privilege('${PROBE}', 'wms_probe', 'CREATE') AS probe_create,
+                has_table_privilege('wms_worker', 'public.tenants', 'SELECT') AS worker_tenants_select,
+                (SELECT nspacl::text FROM pg_namespace WHERE nspname = 'wms_probe') AS schema_acl,
+                current_user = session_user AS same
+           FROM pg_proc p WHERE p.oid = '${FN}'::regprocedure`,
+      );
+      return r.rows[0] as Record<string, unknown>;
+    });
+  }
+
+  function expectProbeFunction(f: Record<string, unknown>): void {
+    expect(f).toMatchObject({
+      owner: PROBE, secdef: true, config: ["search_path=pg_catalog, pg_temp"], volatility: "s",
+      worker_exec: true, app_exec: false, auth_exec: false, ops_exec: false,
+      worker_usage: true, probe_create: false, worker_tenants_select: false, same: true,
+    });
+    expect(f.acl).not.toBeNull();
+    expect(((f.acl as string[]) ?? []).filter((a) => a.startsWith("="))).toEqual([]); // PUBLIC girdisi yok
+  }
+
+  /** Süper kullanıcı bağlantısı (yalnızca ROL DENEMESİ için: SET ROLE ile wms_worker/wms_app olarak çağırır). */
+  function superUrlFor(migratorUrl: string): string {
+    const u = new URL(superUrl);
+    u.pathname = `/${decodeURIComponent(new URL(migratorUrl).pathname.slice(1))}`;
+    return u.toString();
+  }
+
+  it("ileri (0001–0014) → 0014, 0013 geri (to 0012) → ileri; parmak izi ve active_tenant_ids sahip/ACL ilk ileri koşuyla birebir; süper kullanıcı yok", async () => {
+    await setProbeMemberships(STANDARD_GRANT);
+    const u = await freshDatabase();
+    expect((await migrateUp({ url: u, dir: thru14() })).applied).toEqual(ALL14);
+    const before = await schemaDigest(u);
+    const fnBefore = await probeFunction(u);
+    expect(Object.values(before).every((d) => d.length === 32)).toBe(true);
+    expectProbeFunction(fnBefore);
+    await withClient(u, async (c) => {
+      const r = await c.query<{ su: boolean; byp: boolean }>("SELECT rolsuper AS su, rolbypassrls AS byp FROM pg_roles WHERE rolname = current_user");
+      expect(r.rows).toEqual([{ su: false, byp: false }]);
+    });
+
+    expect((await migrateDown({ url: u, dir: thru14(), to: "0012", wmsEnv: "ci" })).reverted).toEqual(["0014", "0013"]);
+    const mid = await schemaDigest(u);
+    expect(mid).not.toEqual(before);
+    await withClient(u, async (c) => {
+      const gone = await c.query(
+        `SELECT 1 FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relname IN ('stock_dimensions', 'stock_ledger', 'processed_events', 'stock_consistency_runs', 'stock_consistency_signals')
+         UNION ALL SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'wms_probe' AND p.proname = 'active_tenant_ids'`,
+      );
+      expect(gone.rows).toEqual([]);
+      // 0014 down: wms_worker'ın şema USAGE'ı geri alınmış.
+      const usage = await c.query<{ u: boolean }>("SELECT has_schema_privilege('wms_worker', 'wms_probe', 'USAGE') AS u");
+      expect(usage.rows).toEqual([{ u: false }]);
+    });
+
+    expect((await migrateUp({ url: u, dir: thru14() })).applied).toEqual(["0013", "0014"]);
+    expect(await schemaDigest(u)).toEqual(before);
+    const fnAfter = await probeFunction(u);
+    expect(fnAfter).toEqual(fnBefore);
+    expectProbeFunction(fnAfter);
+  });
+
+  it("wms_worker rolü yoksa 0014 ön kontrolü RAISE eder (önkoşul testin anlamlı olduğunu kanıtlar); rol geri gelince ileri geçer", async () => {
+    await setProbeMemberships(STANDARD_GRANT);
+    const u = await freshDatabase();
+    expect((await migrateUp({ url: u, dir: copyMigrations("0013") })).applied).toEqual(ALL14.filter((v) => v <= "0013"));
+    // Rol küme geneli: yalnızca bu satırlık pencerede kaldırılır; başka dosya bu örneği paylaşmaz (ayrı container).
+    await asSuper((c) => c.query("ALTER ROLE wms_worker RENAME TO wms_worker_tmp"));
+    try {
+      await expect(migrateUp({ url: u, dir: thru14() })).rejects.toThrow(/0014_reliability: wms_worker rolü yok/);
+    } finally {
+      await asSuper((c) => c.query("ALTER ROLE wms_worker_tmp RENAME TO wms_worker"));
+    }
+    expect((await migrateUp({ url: u, dir: thru14() })).applied).toEqual(["0014"]);
+  });
+
+  it("active_tenant_ids SET ROLE kalıbı gerçekten çalıştı: wms_worker yalnızca ACTIVE tenant kimliklerini sayfalı alır; wms_app/tenants SELECT reddedilir", async () => {
+    await setProbeMemberships(STANDARD_GRANT);
+    const u = await freshDatabase();
+    expect((await migrateUp({ url: u, dir: thru14() })).applied).toEqual(ALL14);
+    const ids = [randomUUID(), randomUUID(), randomUUID()].sort();
+    await withClient(u, async (c) => {
+      for (const t of ids) {
+        await c.query("BEGIN");
+        await c.query("SELECT set_config('app.current_tenant_id', $1, true)", [t]);
+        await c.query("INSERT INTO public.tenants (id, slug, name) VALUES ($1, $2, 'NS Probe')", [t, `ns-${randomBytes(4).toString("hex")}`]);
+        await c.query("COMMIT");
+      }
+    });
+    const zero = "00000000-0000-0000-0000-000000000000";
+    await withClient(superUrlFor(u), async (c) => {
+      await c.query("SET ROLE wms_worker");
+      const all = await c.query<{ id: string }>(`SELECT * FROM wms_probe.active_tenant_ids($1, 10) AS id`, [zero]);
+      expect(all.rows.map((r) => Object.values(r)[0])).toEqual(ids);
+      const page = await c.query(`SELECT * FROM wms_probe.active_tenant_ids($1, 1)`, [ids[0]]);
+      expect(page.rows.map((r) => Object.values(r)[0])).toEqual([ids[1]]);
+      // wms_worker tenants'a doğrudan erişemez.
+      await expect(c.query("SELECT count(*) FROM public.tenants")).rejects.toMatchObject({ code: "42501" });
+      await c.query("RESET ROLE");
+      // Başka roller işlevi çağıramaz.
+      for (const role of ["wms_app", "wms_auth", "wms_ops"]) {
+        await c.query(`SET ROLE ${role}`);
+        await expect(c.query(`SELECT * FROM wms_probe.active_tenant_ids($1, 1)`, [zero]), role).rejects.toMatchObject({ code: "42501" });
+        await c.query("RESET ROLE");
+      }
+    });
+  });
+
+  // Her bekçi testi: tenant bağlamında tek kalıcı satır; staging down RAISE eder, satır yerinde kalır; ci down geçer.
+  async function guardCase(opts: { target: string; fail: string; down: RegExp; table: string; insert: (c: pg.Client, tenantId: string) => Promise<void>; keep: string }): Promise<void> {
+    await setProbeMemberships(STANDARD_GRANT);
+    const u = await freshDatabase();
+    expect((await migrateUp({ url: u, dir: thru14() })).applied).toEqual(ALL14);
+    const tenantId = randomUUID();
+    await withClient(u, async (c) => {
+      await c.query("BEGIN");
+      await c.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+      await c.query("INSERT INTO public.tenants (id, slug, name) VALUES ($1, $2, 'NS Guard')", [tenantId, `ns-${randomBytes(4).toString("hex")}`]);
+      await opts.insert(c, tenantId);
+      await c.query("COMMIT");
+      const blind = await c.query<{ n: string }>(`SELECT count(*)::text AS n FROM public.${opts.table}`);
+      expect(blind.rows[0]?.n, "bağlamsız FORCE RLS sahibi satır görmemeli").toBe("0");
+    });
+    const before = await schemaDigest(u);
+
+    await expect(migrateDown({ url: u, dir: thru14(), to: opts.target, wmsEnv: "staging" })).rejects.toThrow(opts.down);
+
+    await withClient(u, async (c) => {
+      const ledger = await c.query<{ version: string }>("SELECT version FROM wms_meta.schema_migrations ORDER BY version");
+      expect(ledger.rows.map((r) => r.version).filter((v) => v <= opts.fail)).toEqual(ALL14.filter((v) => v <= opts.fail));
+      const force = await c.query<{ relforcerowsecurity: boolean; relrowsecurity: boolean }>(
+        `SELECT relforcerowsecurity, relrowsecurity FROM pg_class WHERE oid = 'public.${opts.table}'::regclass`,
+      );
+      expect(force.rows).toEqual([{ relforcerowsecurity: true, relrowsecurity: true }]);
+      await c.query("BEGIN");
+      await c.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+      const kept = await c.query<{ n: string }>(`SELECT count(*)::text AS n FROM public.${opts.table} WHERE ${opts.keep}`);
+      await c.query("ROLLBACK");
+      expect(kept.rows[0]?.n).toBe("1");
+    });
+
+    const down = await migrateDown({ url: u, dir: thru14(), to: opts.target, wmsEnv: "ci" });
+    expect(down.reverted.length).toBeGreaterThan(0);
+    expect((await migrateUp({ url: u, dir: thru14() })).applied).toEqual(ALL14.filter((v) => v > opts.target));
+    expect(await schemaDigest(u)).toEqual(before);
+    expectProbeFunction(await probeFunction(u));
+  }
+
+  it("0013: dolu stock_dimensions ile staging geri alma RAISE eder, veri yerinde; ci bayrağıyla geçer", async () => {
+    await guardCase({
+      target: "0012",
+      fail: "0013",
+      down: /0013_stock_ledger down:.*stock_dimensions.*satır var/,
+      table: "stock_dimensions",
+      insert: async (c, t) => {
+        await c.query("INSERT INTO public.units (tenant_id, code, name) VALUES ($1, 'NS-U', 'NS Birim')", [t]);
+        await c.query("INSERT INTO public.warehouses (tenant_id, code, name) VALUES ($1, 'NS-W', 'NS Depo')", [t]);
+        await c.query(
+          `INSERT INTO public.items (tenant_id, code, name, base_unit_id)
+           SELECT $1, 'NS-I', 'NS Kalem', id FROM public.units WHERE code = 'NS-U'`,
+          [t],
+        );
+        await c.query(
+          `INSERT INTO public.locations (tenant_id, warehouse_id, code, name, depth, kind)
+           SELECT $1, id, 'NS-L', 'NS Konum', 0, 'STORAGE' FROM public.warehouses WHERE code = 'NS-W'`,
+          [t],
+        );
+        await c.query(
+          `INSERT INTO public.stock_dimensions (tenant_id, item_id, location_id)
+           SELECT $1, i.id, l.id FROM public.items i, public.locations l WHERE i.code = 'NS-I' AND l.code = 'NS-L'`,
+          [t],
+        );
+      },
+      keep: "stock_status = 'AVAILABLE'",
+    });
+  });
+
+  it("0014: dolu processed_events ile staging geri alma RAISE eder, veri yerinde; ci bayrağıyla geçer", async () => {
+    await guardCase({
+      target: "0013",
+      fail: "0014",
+      down: /0014_reliability down:.*processed_events.*satır var/,
+      table: "processed_events",
+      insert: async (c, t) => {
+        await c.query("INSERT INTO public.processed_events (tenant_id, consumer, event_id) VALUES ($1, 'ns.consumer', $2)", [t, randomUUID()]);
+      },
+      keep: "consumer = 'ns.consumer'",
+    });
+  });
+
+  it("0014: dolu stock_consistency_runs ile staging geri alma RAISE eder, veri yerinde; ci bayrağıyla geçer", async () => {
+    await guardCase({
+      target: "0013",
+      fail: "0014",
+      down: /0014_reliability down:.*stock_consistency_runs.*satır var/,
+      table: "stock_consistency_runs",
+      insert: async (c, t) => {
+        await c.query("SELECT set_config('app.system_reason', 'queue.stock.consistency.check', true)");
+        await c.query(
+          `INSERT INTO public.stock_consistency_runs (tenant_id, job_id, started_at, finished_at, status, checked_dimensions, mismatch_count)
+           VALUES ($1, $2, now(), now(), 'OK', 0, 0)`,
+          [t, randomUUID()],
+        );
+      },
+      keep: "status = 'OK'",
     });
   });
 });
