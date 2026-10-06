@@ -104,6 +104,26 @@ export function handleDialogCancel(
   onCancel();
 }
 
+/**
+ * `close` olayı: HTML close-watcher kuralında history-action activation yokken ardışık ikinci
+ * kapatma isteğinde `cancel` iptal edilemez ve dialog kendiliğinden kapanır (WHATWG HTML, "request
+ * to close a close watcher": canPreventClose=false). Bileşen hâlâ `open` ise durum eşitlenir:
+ * yükleniyorsa `onCancel` çağrılmaz ve dialog yeniden açılır (sunucu çağrısı sürerken modal kaybolmaz);
+ * değilse kapanış isteği `onCancel` ile üst bileşene bildirilir (Esc ile aynı sözleşme).
+ */
+export function handleDialogClose(
+  el: { open: boolean; isConnected?: boolean; showModal: () => void },
+  loading: boolean,
+  onCancel: () => void,
+): void {
+  if (el.open || el.isConnected === false) return;
+  if (loading) {
+    el.showModal();
+    return;
+  }
+  onCancel();
+}
+
 /** Yerel `<dialog>` (showModal): odak tuzağı ve Esc tarayıcıdan. Kapalıyken içerik render edilmez. */
 export function ConfirmDialog({
   open,
@@ -134,6 +154,7 @@ export function ConfirmDialog({
       aria-labelledby={titleId}
       aria-describedby={descId}
       onCancel={(e) => handleDialogCancel(e, loading, onCancel)}
+      onClose={(e) => handleDialogClose(e.currentTarget, loading, onCancel)}
       className="m-auto w-[min(28rem,calc(100vw-2rem))] rounded-card border-0 bg-surface p-6 text-ink shadow-card backdrop:bg-ink/50"
     >
       <h2 id={titleId} className="mb-2 break-words text-xl font-bold">
