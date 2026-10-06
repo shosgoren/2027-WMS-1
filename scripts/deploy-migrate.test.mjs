@@ -10,6 +10,7 @@ import {
   assertFallbackAllowed,
   buildChildEnv,
   main,
+  normalizeDirectUri,
   parseArgs,
   readUriFile,
   resolveDirectUri,
@@ -25,6 +26,8 @@ const API_KEY = rnd("key");
 const HOST = `ep-${rnd("h")}.eu-central-1.aws.neon.tech`;
 const USER = rnd("owner");
 const URI = `postgresql://${USER}:${PW}@${HOST}/neondb?sslmode=require`;
+const NEON_URI = `postgresql://${USER}:${PW}@${HOST}/neondb?sslmode=require&channel_binding=require`;
+const VF_URI = `postgresql://${USER}:${PW}@${HOST}/neondb?sslmode=verify-full`;
 const AUG = new Date("2026-10-06T12:00:00Z");
 
 describe("assertFallbackAllowed (A-54 tarih denetimi)", () => {
@@ -34,6 +37,76 @@ describe("assertFallbackAllowed (A-54 tarih denetimi)", () => {
   it("2026-11-16 → hata", () => {
     expect(() => assertFallbackAllowed(new Date("2026-11-16T00:00:00Z"))).toThrow(DeployMigrateError);
     expect(() => assertFallbackAllowed(new Date("2026-11-16T12:00:00Z"))).toThrow(/A-54/);
+  });
+});
+
+describe("normalizeDirectUri (T-106b)", () => {
+  it("Neon biçimi (channel_binding + sslmode=require) → channel_binding yok, verify-full", () => {
+    const r = normalizeDirectUri(NEON_URI);
+    expect(r.uri).toBe(VF_URI);
+    expect(r.uri).not.toContain("channel_binding");
+    expect(r.notes).toEqual(["channel_binding kaldırıldı", "sslmode=verify-full"]);
+  });
+  it("sslmode yok / prefer / allow / disable → verify-full", () => {
+    for (const q of ["", "?sslmode=prefer", "?sslmode=allow", "?sslmode=disable"]) {
+      expect(new URL(normalizeDirectUri(`postgresql://${USER}:${PW}@${HOST}/neondb${q}`).uri).searchParams.get("sslmode")).toBe("verify-full");
+    }
+  });
+  it("zaten uygun URI değişmez (verify-full / verify-ca, application_name, sslrootcert)", () => {
+    for (const q of ["sslmode=verify-full", "sslmode=verify-ca", "sslmode=verify-full&application_name=x", "sslmode=verify-full&sslrootcert=system"]) {
+      const uri = `postgresql://${USER}:${PW}@${HOST}/neondb?${q}`;
+      expect(normalizeDirectUri(uri)).toEqual({ uri, notes: [] });
+    }
+  });
+  it("options= veya başka izin dışı parametre → hata; ileti değeri içermez", () => {
+    const secretOpt = rnd("opt");
+    for (const q of [`options=-c%20role%3D${secretOpt}`, `sslmode=require&host=x`, `sslmode=require&unknown=1`]) {
+      try {
+        normalizeDirectUri(`postgresql://${USER}:${PW}@${HOST}/neondb?${q}`);
+        expect.unreachable();
+      } catch (e) {
+        expect(e).toBeInstanceOf(DeployMigrateError);
+        expect(String(e)).not.toContain(secretOpt);
+        expect(String(e)).not.toContain(PW);
+      }
+    }
+  });
+  it("tanınmayan veya yinelenen sslmode → hata", () => {
+    expect(() => normalizeDirectUri(`postgresql://${USER}:${PW}@${HOST}/d?sslmode=bogus`)).toThrow(DeployMigrateError);
+    expect(() => normalizeDirectUri(`postgresql://${USER}:${PW}@${HOST}/d?sslmode=require&sslmode=disable`)).toThrow(DeployMigrateError);
+  });
+  it("her iki yolda uygulanır: sır yolu NEON_URI'yi normalize eder, normalize URI maskelenir", () => {
+    const writes = /** @type {string[]} */ ([]);
+    const r = resolveDirectUri({
+      env: { STAGING_DATABASE_URL_DIRECT: NEON_URI, GITHUB_ACTIONS: "true" },
+      now: AUG,
+      redactor: createRedactor(),
+      write: (x) => void writes.push(x),
+    });
+    expect(r.uri).toBe(VF_URI);
+    expect(writes.join("")).toContain(`::add-mask::${VF_URI}`);
+    const f = tmpFile();
+    writeFileSync(f, `${NEON_URI}\n`, { mode: 0o600 });
+    expect(resolveDirectUri({ env: {}, now: AUG, redactor: createRedactor(), uriFile: f }).uri).toBe(VF_URI);
+  });
+  it("main: özet değer içermeyen normalize satırı yazar", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "t106b-"));
+    const summaryFile = path.join(dir, "s.md");
+    const out = /** @type {string[]} */ ([]);
+    let childUri = "";
+    const code = await main({
+      env: { STAGING_DATABASE_URL_DIRECT: NEON_URI },
+      now: AUG,
+      write: (x) => void out.push(x),
+      summaryFile,
+      argv: [],
+      runner: async (x) => ((childUri = x.env["DATABASE_URL_DIRECT"] ?? ""), { code: 0, stdout: "migrate: 0 bekleyen migration (uygulanmış toplam: 3)\n", leaked: false }),
+    });
+    expect(code).toBe(0);
+    expect(childUri).toBe(VF_URI);
+    const md = readFileSync(summaryFile, "utf8");
+    expect(md).toContain("uri normalize: channel_binding kaldırıldı, sslmode=verify-full");
+    expect(md + out.join("")).not.toContain(PW);
   });
 });
 
@@ -92,7 +165,8 @@ describe("resolveDirectUri (Migrate adımı; NEON_API_KEY görmez)", () => {
       redactor,
       write: (s) => void writes.push(s),
     });
-    expect(r).toEqual({ path: "direct-secret", uri: URI });
+    expect(r.path).toBe("direct-secret");
+    expect(r.uri).toBe(VF_URI);
     expect(writes.join("")).toContain("::add-mask::");
     expect(redactor.redact(`x ${PW} y`)).not.toContain(PW);
   });
@@ -101,7 +175,8 @@ describe("resolveDirectUri (Migrate adımı; NEON_API_KEY görmez)", () => {
     const f = tmpFile();
     writeFileSync(f, `${URI}\n`, { mode: 0o600 });
     const r = resolveDirectUri({ env: {}, now: AUG, redactor: createRedactor(), write: () => {}, uriFile: f });
-    expect(r).toEqual({ path: "neon-api", uri: URI });
+    expect(r.path).toBe("neon-api");
+    expect(r.uri).toBe(VF_URI);
     expect(existsSync(f)).toBe(false);
   });
 
