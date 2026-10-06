@@ -267,6 +267,7 @@ describe("runMigrateProcess + main", () => {
     });
     expect(code).toBe(0);
     expect(readFileSync(summaryFile, "utf8")).toContain("fallback: neon-api");
+    expect(received).not.toBeNull();
     expect(Object.keys(received ?? {})).not.toContain("NEON_API_KEY");
     expect(existsSync(uriFile)).toBe(false);
 

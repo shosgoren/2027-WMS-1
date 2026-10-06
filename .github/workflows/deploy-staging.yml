@@ -161,12 +161,17 @@ jobs:
       - name: Migrate
         env:
           STAGING_DATABASE_URL_DIRECT: ${{ secrets.STAGING_DATABASE_URL_DIRECT }}
+          URI_SOURCE_DIRECT: ${{ steps.src.outputs.direct }}
         run: |
-          if [ "${{ steps.src.outputs.direct }}" = "no" ]; then
+          if [ "$URI_SOURCE_DIRECT" = "no" ]; then
             node scripts/deploy-migrate.mjs --uri-file "$RUNNER_TEMP/migrate-uri"
           else
             node scripts/deploy-migrate.mjs
           fi
+      # Yedek yol URI dosyası her durumda silinir (tarih/mod denetimi ya da pnpm install hatasında da).
+      - name: Remove URI file
+        if: always()
+        run: rm -f "$RUNNER_TEMP/migrate-uri"
 
   deploy:
     name: deploy
