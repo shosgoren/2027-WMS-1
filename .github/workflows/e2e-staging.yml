@@ -1,0 +1,52 @@
+# Etkin WMS — staging'e karşı uçtan uca duman testi (T-131). KORUNAN DOSYA (PROTOCOL §3b).
+# Elle tetiklenir (`deploy-staging` sonrası Supervisor): Playwright testi `E2E_BASE_URL` ile staging adresine koşar; yerel yığın kurulmaz.
+# Demo verisini değiştiren adımlar staging'de serbesttir (A-43: günlük yeniden tohumlama). Sır YOK: hedef herkese açık adrestir;
+# demo girişi sunucuda yapılır, test parolayı bilmez. `permissions: contents: read`; checkout kimlik bilgisi saklamaz.
+name: e2e-staging
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: e2e-staging
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  npm_config_ignore_pnpmfile: "true"
+
+jobs:
+  e2e-staging:
+    name: e2e-staging
+    # Yalnızca main'deki iş akışı tanımı staging'e karşı koşar (deploy-staging.yml ile aynı desen).
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      E2E_BASE_URL: https://etkin-wms-staging.fly.dev
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: package.json
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm exec playwright install --with-deps chromium
+      - name: pnpm test:e2e (staging)
+        run: |
+          mkdir -p .artifacts/e2e
+          set -o pipefail
+          pnpm test:e2e 2>&1 | tee .artifacts/e2e/run.log
+      - name: Upload .artifacts/e2e
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-staging-artifacts
+          path: .artifacts/e2e/
+          if-no-files-found: warn
+          retention-days: 14
