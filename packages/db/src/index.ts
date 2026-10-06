@@ -2,7 +2,7 @@
 // sürücü ayarları yalnızca `@wms/db/internal` alt yolundadır (lint ile korunur).
 import { DB_CLIENT_SETTINGS, createDbClient, type DbClient } from "./client.ts";
 export { createDbClient } from "./client.ts";
-export type { TenantContext } from "./client.ts";
+export type { DbClient, TenantContext } from "./client.ts";
 
 const APP_DB_KEY = Symbol.for("@wms/db/app-db");
 
@@ -72,4 +72,6 @@ export { AUDIT_ACTIONS, AuditError, CHANGE_SUMMARY_MAX_BYTES, REDACTED, appendAu
 export type { AppendedAudit, AuditAction, AuditEntry, JsonValue, SecurityEventInput } from "./audit.ts";
 export type { AuditLog, NewAuditLog, NewRequestRateLimit, RequestRateLimit } from "./schema/audit.ts";
 // Bağlantı hedefi karşılaştırması (connection-target.ts, yan etkisiz): kuyruk kurulum CLI'ı uygulama bağlantısını reddetmek için kullanır.
+export { consumeRateLimit } from "./rate-limit.ts";
+export type { ConsumeRateLimitParams, ConsumeRateLimitResult } from "./rate-limit.ts";
 export { sameConnectionTarget } from "./connection-target.ts";

@@ -17,15 +17,16 @@ function deps(over: Partial<GuardDeps> = {}): GuardDeps {
     ...over,
   };
 }
-function memStore(): RateLimitStore & { counts: Map<string, number> } {
+function memStore(): RateLimitStore {
   const counts = new Map<string, number>();
   return {
-    counts,
-    hit(scope, key, w) {
-      const k = `${scope}|${key}|${w.toISOString()}`;
+    hit(scope, key, o) {
+      const ms = o.windowSeconds * 1000;
+      const start = Math.floor(o.now.getTime() / ms) * ms;
+      const k = `${scope}|${key}|${start}`;
       const n = (counts.get(k) ?? 0) + 1;
       counts.set(k, n);
-      return Promise.resolve(n);
+      return Promise.resolve({ allowed: n <= o.limit, count: n, retryAfterSeconds: Math.max(1, Math.ceil((start + ms - o.now.getTime()) / 1000)) });
     },
   };
 }
@@ -69,7 +70,7 @@ describe("action guard", () => {
     const g = act(deps({ limiter }));
     expect(await g({})).toMatchObject({ ok: true });
     expect(await g({})).toMatchObject({ ok: true });
-    expect(await g({})).toMatchObject({ ok: false, error: { code: "RATE_LIMITED", retryable: true } });
+    expect(await g({})).toMatchObject({ ok: false, error: { code: "RATE_LIMITED", retryable: true, retryAfterSeconds: expect.any(Number) as unknown } });
   });
   it("tenantKey ile tenant sayacı ayrı işler", async () => {
     const limiter = createRateLimiter({ store: memStore(), secret: "s", limits: { tenant: 1 } });

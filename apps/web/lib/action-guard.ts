@@ -8,7 +8,7 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { AppError, type AppErrorBody } from "@wms/shared/errors";
-import { RateLimitedError, clientIp, type RateLimiter } from "./rate-limit.ts";
+import { RateLimitedError, clientIp, createProductionLimiter, type RateLimiter } from "./rate-limit.ts";
 
 /** Sarmalayıcının ihtiyaç duyduğu principal şekli (`@wms/auth` `Principal` atanabilir). */
 export interface GuardPrincipal {
@@ -23,7 +23,7 @@ export interface ActionContext {
   readonly origin: string;
 }
 
-export type SafeError = AppErrorBody["error"] & { readonly requestId: string };
+export type SafeError = AppErrorBody["error"] & { readonly requestId: string; readonly retryAfterSeconds?: number };
 export type ActionResult<T> = { readonly ok: true; readonly data: T } | { readonly ok: false; readonly error: SafeError };
 
 export interface GuardDeps {
@@ -75,7 +75,7 @@ function describe(e: unknown): { error: string; sqlstate?: string; cause?: strin
 }
 
 function safeBody(err: AppError, requestId: string): SafeError {
-  return { ...err.toBody().error, requestId };
+  return { ...err.toBody().error, requestId, ...(err instanceof RateLimitedError ? { retryAfterSeconds: err.retryAfterSeconds } : {}) };
 }
 
 /** Köken denetimi: `Origin` yoksa veya uygulama kökeniyle eşleşmezse FORBIDDEN (fail-closed). Doğrulanmış kökeni döndürür. */
@@ -174,10 +174,10 @@ export function createRouteGuard(deps: GuardDeps) {
 // Bu modül Next'e bağımlı değildir: kök typecheck/entegrasyon testleri `createActionGuard`'ı doğrudan kullanır.
 // ---------------------------------------------------------------------------------------------
 
-export function createProductionGuard(getHeaders: GuardDeps["getHeaders"], limiter?: RateLimiter) {
+export function createProductionGuard(getHeaders: GuardDeps["getHeaders"], limiter: RateLimiter = createProductionLimiter()) {
   return createActionGuard({
     getHeaders,
-    ...(limiter === undefined ? {} : { limiter }),
+    limiter,
     resolvePrincipal: async (headers) => {
       const { getAuthService } = await import("@wms/auth");
       const p = await getAuthService().getPrincipal(headers);

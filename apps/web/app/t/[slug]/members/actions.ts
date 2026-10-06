@@ -26,7 +26,7 @@ const logInvitation: NonNullable<InvitationDeps["log"]> = (entry) => {
 const guardedAction = createProductionGuard(() => headers());
 
 export async function inviteMemberAction(raw: unknown) {
-  return guardedAction({ schema: inviteSchema }, async (input, ctx) => {
+  return guardedAction({ schema: inviteSchema, tenantKey: (i) => i.slug }, async (input, ctx) => {
     const principal = ctx.principal;
     if (principal === null) throw new Error("unreachable: principal required");
     const senderQueue = await getSenderQueue(); // transaction dışında başlatılır
@@ -53,7 +53,7 @@ export async function inviteMemberAction(raw: unknown) {
 }
 
 export async function revokeInvitationAction(raw: unknown) {
-  return guardedAction({ schema: revokeSchema }, async (input, ctx) => {
+  return guardedAction({ schema: revokeSchema, tenantKey: (i) => i.slug }, async (input, ctx) => {
     const principal = ctx.principal;
     if (principal === null) throw new Error("unreachable: principal required");
     await revokeInvitation({

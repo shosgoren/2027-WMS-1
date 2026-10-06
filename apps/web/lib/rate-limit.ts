@@ -5,6 +5,7 @@
 // İstemci IP'si YALNIZCA `Fly-Client-IP`'den (M6); `X-Forwarded-For` istemci tarafından sahtelenebilir, yok sayılır.
 // Better Auth'un kendi uç nokta sınırları ayrıdır ve burada değiştirilmez.
 import { createHmac } from "node:crypto";
+import { consumeRateLimit, getAppDb, type DbClient } from "@wms/db";
 import { AppError } from "@wms/shared/errors";
 
 export const WINDOW_SECONDS = 60;
@@ -26,28 +27,22 @@ export class RateLimitedError extends AppError {
   }
 }
 
+export interface RateLimitHit {
+  readonly allowed: boolean;
+  readonly count: number;
+  readonly retryAfterSeconds: number;
+}
+
 export interface RateLimitStore {
-  /** Pencere sayacını bir artırır ve yeni değeri döndürür. */
-  hit(scope: string, keyHash: string, windowStart: Date): Promise<number>;
+  /** Pencere sayacını bir artırır (atomik) ve sonucu döndürür. */
+  hit(scope: string, keyHash: string, opts: { limit: number; windowSeconds: number; now: Date }): Promise<RateLimitHit>;
 }
 
-export interface SqlExecutor {
-  (text: string, params: readonly unknown[]): Promise<{ readonly rows: readonly { readonly count: number | string }[] }>;
-}
-
-const HIT_SQL =
-  "INSERT INTO public.request_rate_limits (scope, key_hash, window_start, count) VALUES ($1, $2, $3, 1) " +
-  "ON CONFLICT (scope, key_hash, window_start) DO UPDATE SET count = public.request_rate_limits.count + 1 RETURNING count";
-
-/** PostgreSQL deposu: `exec` uygulama rolü (`wms_app`) bağlantısı üzerinden tek ifade çalıştırır. */
-export function createPgRateLimitStore(exec: SqlExecutor): RateLimitStore {
+/** Üretim deposu: `@wms/db` `consumeRateLimit` (uygulama rolü, tek ifadeli UPSERT; DB yalnızca HMAC özetini görür). */
+export function createDbRateLimitStore(client: DbClient): RateLimitStore {
   return {
-    async hit(scope, keyHash, windowStart) {
-      const res = await exec(HIT_SQL, [scope, keyHash, windowStart]);
-      const row = res.rows[0];
-      if (row === undefined) throw new Error("rate limit: RETURNING satırı yok");
-      return Number(row.count);
-    },
+    hit: (scope, keyHash, o) =>
+      consumeRateLimit(client, { scope, keyHash, limit: o.limit, windowSeconds: o.windowSeconds, now: o.now }),
   };
 }
 
@@ -81,11 +76,19 @@ export function createRateLimiter(deps: RateLimiterDeps): RateLimiter {
     async check(kind, subject) {
       const { scope, limit: dflt } = RATE_LIMITS[kind];
       const limit = deps.limits?.[kind] ?? dflt;
-      const t = now().getTime();
-      const windowMs = WINDOW_SECONDS * 1000;
-      const start = new Date(Math.floor(t / windowMs) * windowMs);
-      const count = await deps.store.hit(scope, hashKey(deps.secret, scope, subject), start);
-      if (count > limit) throw new RateLimitedError(Math.max(1, Math.ceil((start.getTime() + windowMs - t) / 1000)));
+      const r = await deps.store.hit(scope, hashKey(deps.secret, scope, subject), { limit, windowSeconds: WINDOW_SECONDS, now: now() });
+      if (!r.allowed) throw new RateLimitedError(r.retryAfterSeconds);
     },
+  };
+}
+
+/**
+ * Üretim sınırlayıcısı: DB havuzu ve HMAC sırrı (`BETTER_AUTH_SECRET`) her çağrıda tembel okunur (derleme anında değil).
+ * Sır/DB yoksa hata fırlar → eylem `INTERNAL` ile reddedilir (fail-closed; sınır sessizce atlanmaz).
+ */
+export function createProductionLimiter(): RateLimiter {
+  return {
+    check: (kind, subject) =>
+      createRateLimiter({ store: createDbRateLimitStore(getAppDb()), secret: process.env.BETTER_AUTH_SECRET ?? "" }).check(kind, subject),
   };
 }
