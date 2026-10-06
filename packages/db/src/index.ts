@@ -27,6 +27,21 @@ export function getAppDb(): DbClient {
   return appDb;
 }
 export { currentTenantId, currentUserId, withTenant } from "./with-tenant.ts";
+// Stok kilit sözleşmesi (T-210, I-15): tek giriş `acquireStockLocks`; alt adımlar dışa açılmaz.
+export { acquireStockLocks } from "./locking.ts";
+export type {
+  LockedBalance,
+  LockedDimension,
+  LockedDocument,
+  LockedLocation,
+  LockedReservation,
+  LockedSerial,
+  LockedState,
+  StockDimensionKey,
+  StockLockError,
+  StockLockErrorCode,
+  StockLockPlan,
+} from "./locking.ts";
 export { MembershipError, lockOwners, withMembership, withInvitationTenant, withNewTenant, withSystemTenant, withUser } from "./with-membership.ts";
 export type {
   Membership,
