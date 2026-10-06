@@ -255,3 +255,15 @@ Sonraki: Faz 2 — int/faz2-sema ve int/faz2-stok-sema PR'ları, ardından T-205
 - 15:35Z stok-sema son inceleme @93e1dde 0·0·2 (yalnız docs: LOCK SHARE runbook, HU lokasyonu) → A-87/A-89/T-211 notları (int/faz2-sema 872e52e, stok-sema'ya docs birleşmesi). İki Faz 2 şema dalı inceleme açısından kapandı; PR'lar Faz 1 kapısından sonra.
 - 15:10Z T-132 kapı koşusu (main 36087a2): verify 2163 OK, test:int 753 PASS, test:ac --phase 1 AC-04 80 + AC-18 9 PASS, AC-05 4 PASS, --ci PASS7 FAIL0, e2e 4/4 (temiz compose -p t132; eski etkin-wms volume checksum uyuşmazlığı — dokunulmadı). GitHub: ci main yeşil, deploy-staging #29 + main 36087a2 yeşil, restore-drill #2 success (RPO 413/RTO 11.4 Supervisor logdan teyit), e2e-staging #1, provision #3 yeşil. check:all scope/protected yerelde int/faz1-kapi olmadığı için koşamadı (PR CI'da yeşil). Uptime schedule hiç koşmamış (0 run) → elle tetiklendi. Öneri: GEÇER (koşullu).
 - int/faz2-stok-sema @93e1dde test:int 52/1010 yeşil (son).
+
+### 2026-10-06 15:45Z Supervisor turu
+- 15:30Z Faz 1 KAPISI GEÇTİ (JOURNAL). int/faz2-sema son onay 0·0·0 @872e52e → PR #58 (abone).
+- 15:35Z Faz 2 W3: int/faz2-depo, -katalog, -defter, -kuyruk dalları @87dff20 açıldı. T-205 (depo komutları), T-208 (katalog komutları + GS1), T-210 (kilit sözleşmesi), T-211 (0014 güvenilirlik şeması) ajanlarda (4 paralel).
+- 15:40Z #58 int/faz2-sema MERGED → main 3aeb54e (CI yeşil, mergeable clean). deploy-staging otomatik (0010–0012) → 15:48Z kontrol. int/faz2-stok-sema main ile birleşti → 70616fb (diff yalnız T-232/T-233, 14 dosya); son onay isteniyor → PR.
+- 15:45Z stok-sema son onay 0·0·2 @70616fb (paket kodu 93e1dde ile aynı) → PR #59 (abone).
+- 15:50Z #59 int/faz2-stok-sema MERGED → main 1608bd7 (CI yeşil). main'de 0010–0013. deploy-staging otomatik (0013 dahil).
+- 15:55Z deploy-staging #32 (main 3aeb54e, 0010–0012) YEŞİL. #33 (0013) sürüyor.
+- 16:00Z T-205 0785e11 (depo/lokasyon komutları + kapsam denetimi kapalı bayrak; test:int 1025/1025) → int/faz2-depo d0de9a3 (+A-98…A-103; A-103 boş kapsam = tüm depolar fail-open, bayrak açılmadan Q-23 + security onayı). Paket incelemesi sürüyor.
+- 16:10Z T-205 inceleme @d0de9a3 0·1·7: MAJOR arşiv/oluşturma yarışı (FOR SHARE/FOR UPDATE + count_locks + eşzamanlılık testi); MINOR açık kapsam API'si {all|ids} (boş liste hata), demo reddi/no-op, imleç sınırları (500→VALIDATION), NFC/Mn, kapsam dışı NOT_FOUND, test eksikleri → ajan. MINOR-5 negatif bakiye arşivi → Q-53. T-207'ye API değişikliği bildirildi.
+- 16:15Z deploy-staging #33 (main 1608bd7, 0013) YEŞİL — staging'de 0010–0013 uygulandı, web+worker smoke yeşil.
+- 16:20Z T-211 306a0dd (0014 processed_events, consistency runs/signals, wms_probe.active_tenant_ids; 22 test; AC-04 110): ops-role tam liste kırmızı (kart madde 3 wms_ops signals SELECT) → Supervisor onayı: listeye ekle (kart eki); ops RESTRICTIVE denetim kontrolü istendi. Kart eki: drift, ac-04 (cleanup + stock_consistency_runs system_reason bağlamı — inceleme değerlendirecek), with-membership wms_probe listesi, ops-role. A önerileri A-104…A-106 olacak.
