@@ -62,6 +62,19 @@ Q-57 | Terminoloji okuyucusu (`settings.manage` istemeyen), lokasyon sayım ve t
 Q-58 | Taşıma birimi iç içe koyma kuralları: KOLI içine KOLI/PALET, kapalı/boşaltılmış ebeveyne alt bağlama serbest mi? Şimdilik yalnız varlık ve konum denetleniyor | T-212 | açık — T-217 nest kuralıyla
 Q-59 | `SERIAL_SCOPE_TENANT_ENABLED` bayrağı hangi mekanizmayla okunur (ortam değişkeni / tenant_settings)? Şimdilik yalnız sunucu ortamı `SERIAL_SCOPE_TENANT_ENABLED="true"` (çağrı anında okunur; çağıran açamaz), varsayılan kapalı. Açmadan önce DB'de tenant geneli kısmi tekil indeks şart (yalnız komut düzeyi koruma, komutu dolanan yazmaları kapsamaz) — T-212 inceleme | T-212, Q-39 | açık
 Q-60 | `@wms/db` genel yüzeyinde tenant bağlamı boş "platform transaction" ilkeli (`withPlatformTx`) eklensin mi? T-214 şimdilik `withUser(db, sıfır-UUID)` kullanıyor | T-214 | açık — ayrı kart
+Q-61 | Depolar arası transfer belgesi (iki depoya yazan stok belgesi) hangi belge türü ve izinle yapılır? T-213 tek depolu belgeyi zorunlu kıldı (A-145) | T-213 inceleme MAJOR-1 | açık — 3B/sonraki faz
+Q-70 | Pilot rapor listesi ve CSV indirme kapsamı (3A'da ekran, CSV 4P) | Faz 3A planı | açık — A-130
+Q-71 | Min-maks kıyas tabanı (kullanılabilir mi fiziksel mi), kapsam (depo × ürün), açık uyarı sayısı | Faz 3A planı | açık — A-131
+Q-72 | 3A izinleri: kalite onayı, görev atama/üstlenme, sayım başlatma/iptal hangi rollerde | Faz 3A planı | açık — A-132
+Q-73 | Fazla kabul ve beklenen teslimsiz kabul kuralı | Faz 3A planı | açık — A-133
+Q-74 | Sevk yalnız rezervasyondan mı, paketleme adımı var mı | Faz 3A planı | açık — A-134
+Q-75 | İade: sevke bağlama zorunluluğu, üst sınır, hedef lokasyon | Faz 3A planı | açık — A-135
+Q-76 | Sayım: kör sayım, ikinci sayım, tolerans, terk süresi | Faz 3A planı | açık — A-136
+Q-77 | Etiket ölçüsü ve içerik alanları | Faz 3A planı | açık — A-137
+Q-78 | Rezervasyon tahsis önerisi politikası | Faz 3A planı | açık — A-138
+Q-79 | Saha belgeleri ve COUNT_ADJUSTMENT numara önekleri | Faz 3A planı | açık — A-139
+Q-80 | Sipariş durumları ve toplama görevlendirmesinin kapsamı | Faz 3A planı | açık — A-140
+Q-81 | 'Ürün bulunamadı' sonrası sayım görevi ve otomatik yeniden tahsis | Faz 3A planı | açık — A-141
 
 ## Varsayımlar
 A-01 | Neon pooler'ı transaction-mode PgBouncer'dır (kullanıcı kararı kaydı, 2026-10-05) — **teyit edildi 2026-10-05, sürüm hariç** (belge + T-005d koşu 3 çoklama gözlemi, https://github.com/shosgoren/2027-WMS-1/actions/runs/37388724069); PgBouncer sürümü gözlenemedi | Neon pooler türünü/kipini değiştirdiğini duyurana veya yeniden spike aksini gösterene kadar | Q-02
@@ -186,3 +199,28 @@ A-119 | A-53 kapanışı: e-posta ve davet işleri `processed_events` ile etkide
 A-120 | Resend tekilleştirme penceresi doğrulanamadı (SDK'da bilgi yok, resend.com ajan ortamından kapalı); AC-22 haricî kolu yalnız "aynı anahtar gider" düzeyinde kanıtlı | Resend belgeleri | T-214
 A-121 | `STOCK_SERIAL_LOCK_ENABLED` yalnız tam `"true"` iken açık (varsayılan kapalı, sunucu ortamı); kapalıyken `serialIds` içeren plan hiçbir sorgu çalışmadan VALIDATION_FAILED. Açmak Q-56/T-237 (0015) birleşip Supervisor kararıyla; T-213 kapalı özellik reddini ayrı mesajla eşler | Q-56 | T-210
 A-122 | `serials` (0015): wms_app'e yalnız satır kilidi için `UPDATE (created_at)` yetkisi; `serials_reject_update` (ENABLE ALWAYS, INVOKER) `lot_id` dışında satırı (`to_jsonb(NEW)-'lot_id'`, sonradan eklenen sütunlar dahil) değiştiren her UPDATE'i her rol için 23514 SERIAL_IMMUTABLE ile reddeder; aynı değeri yazan (no-op) UPDATE geçer — veri değişmez, kilidi `SELECT … FOR NO KEY UPDATE` ile eşdeğer; AC-04 "kendi satırına UPDATE ≥1" koşulu korunur (rol adına bağlı koşulsuz red G-11 riski) | Q-56 | T-237
+A-123 | Seri kapsam bayrağı (`SERIAL_SCOPE_TENANT_ENABLED`) domain'e sunucu yapılandırmasından enjekte edilir (istemci girdisinden geçemez); açıkken yalnız tenant geneli TAM kısmi tekil indeks varsa çalışır, yoksa VALIDATION_FAILED (fail-closed) | Q-59 | T-239
+A-130 | Pilot raporları 3A'da yalnız ekran; CSV indirme 4P | Q-70 | T-311
+A-131 | Min-maks kullanılabilir miktara göre, depo × ürün kapsamında, ürün başına tek açık uyarı | Q-71 | T-310
+A-132 | 3A izinleri ADR-021/T-304 tablosundaki varsayılanlar | Q-72 | T-304
+A-133 | Fazla kabul reddedilir; beklenen teslimsiz kabul yok | Q-73 | T-305
+A-134 | Sevk yalnız SEVK lokasyonundaki rezervasyondan; paketleme adımı yok | Q-74 | T-308
+A-135 | İade sevke bağlanır, sevk edilen miktarı aşamaz, hedef KABUL/KAR | Q-75 | T-308
+A-136 | Kör sayım varsayılan; ikinci sayım ve tolerans yok; terk süresi 8 saat | Q-76 | T-309
+A-137 | Etiket 100×50 mm; ürün kodu, ad, Code 128 barkod | Q-77 | T-312
+A-138 | Tahsis önerisi FIFO (alım sırası), lokasyon kodu sırası | Q-78 | T-306
+A-139 | Saha belgesi numara önekleri T-301/T-302 kartlarındaki varsayılanlar | Q-79 | T-301
+A-140 | Sipariş durumları ve toplama görevlendirme kapsamı T-306/T-307 kartlarındaki varsayılanlar | Q-80 | T-306
+A-141 | 'Ürün bulunamadı' lokasyon için sayım görevi açar; otomatik yeniden tahsis yok | Q-81 | T-307
+A-142 | Saha komutu ≤200 satır (A-07 senkron sınırı) | A-07 | T-305
+A-143 | DataWedge önek/sonek/eşik ve GS1 yer tutucu varsayılanları T-303'te | Q-12 | T-303
+A-144 | Müşteri/tedarikçi kartı yok; serbest referans metni | Q-24 | T-301
+A-145 | Stok belgesinin tüm satır lokasyonları belgenin deposuna ait (LOCATION_WAREHOUSE_MISMATCH); satır lokasyonlarının depoları da kapsam denetimine girer | Q-61 | T-213
+A-146 | DRAFT→CANCELLED `document.create`, APPROVED→CANCELLED ayrıca `document.approve` ister | T-213 inceleme MAJOR-2 | T-213
+A-147 | (kodda A-217-1) T-217'de hedef stok durumu = kaynak durum; ayrı hedef durum `document_lines.target_stock_status` (0016) ve yükleyicisi T-248 | T-217 | T-217
+A-148 | (kodda A-217-2) Yeterlilik aynı belgedeki girişleri saymaz: her çıkış boyutunda quantity − reserved ≥ toplam çıkış | 05 §Yeterlilik | T-217
+A-149 | (kodda A-217-3) Defter nedeni belge türünden: STOCK_IN→RECEIPT, STOCK_OUT→SHIPMENT, STOCK_MOVE→MOVE | 16-stock-effects | T-217
+A-150 | İade satırında `returned` için üst sınır CHECK'i yok (sınır komut kuralı, A-135) | Q-75 | T-301
+A-151 | Sipariş ve iade miktarları ürünün temel biriminde; kabul satırı birim + katsayı taşır | I-09 | T-301
+A-152 | Belge kaynak bağlantısı polimorfik (FK yok); DB tür beyaz listesi ve 'ikisi birlikte dolu/boş' kuralını zorlar, kaynağın varlığı komutun işi | ADR-021 | T-301
+A-153 | İade durum kümesi kabul belgesiyle aynı (DRAFT, OPEN, CLOSED, CANCELLED) | Q-75 | T-301
