@@ -13,9 +13,9 @@
 #   rotate             — uygulama rollerinin parolalarını döndür ve Fly URL sırlarını yeniden yaz
 #   rotate_auth_secret — BETTER_AUTH_SECRET'ı yenile (TÜM OTURUMLAR düşer)
 #   rotate_seal_key    — QUEUE_SEAL_KEY'i yenile (bekleyen email.send işleri çözülemez; yalnızca kuyruk boşken)
-#   role_path          — `api` (varsayılan; Neon API, parola sağlayıcıda üretilir) | `sql` (düz parola, A-56 riski:
-#                        yalnızca docs/OPEN_QUESTIONS.md'de Supervisor karar satırı varsa; kayıt yoksa BLOCKED)
-#   sql_decision       — `sql` yolunda karar kaydının kimliği (A-xx / Q-xx)
+#   role_path          — `sql` (varsayılan; SQL CREATE ROLE, düz parola, A-56/A-66 riski: docs/OPEN_QUESTIONS.md'de
+#                        Supervisor karar satırı yoksa BLOCKED) | `api` (Neon API; roller neon_superuser üyesi → BLOCKED)
+#   sql_decision       — `sql` yolunda karar kaydının kimliği (varsayılan A-66)
 # Girdiler `run:` içine ENJEKTE EDİLMEZ; ortam değişkeniyle geçer ve kabuk içinde doğrulanır.
 #
 # Sır kapsamı (G-09): NEON_API_KEY, FLY_API_TOKEN, RESEND_API_KEY, STAGING_DEMO_PASSWORD (isteğe bağlı) ve
@@ -42,16 +42,16 @@ on:
         type: boolean
         default: false
       role_path:
-        description: "Rol oluşturma yolu (sql yalnızca Supervisor karar kaydıyla)"
+        description: "Rol oluşturma yolu (sql: A-66 Supervisor kararı; api: neon_superuser sapmasında BLOCKED)"
         type: choice
         options:
-          - api
           - sql
-        default: api
+          - api
+        default: sql
       sql_decision:
-        description: "role_path=sql için karar kaydı kimliği (örn. A-57)"
+        description: "role_path=sql için karar kaydı kimliği (docs/OPEN_QUESTIONS.md)"
         type: string
-        default: ""
+        default: "A-66"
 
 # Aynı anda tek koşu; koşan iptal edilmez (yarım rol/sır durumu bırakılmaz).
 concurrency:

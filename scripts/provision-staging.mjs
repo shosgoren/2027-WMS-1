@@ -41,6 +41,8 @@ export const APP_ROLES = Object.freeze([
 /** Fly'da bulunmaması gereken sır (sahip/migration URI'si uygulama süreçlerine verilmez; Supervisor eki (e)). */
 export const FORBIDDEN_FLY_SECRETS = Object.freeze(["DATABASE_URL_DIRECT", "STAGING_DATABASE_URL_DIRECT"]);
 export const MIN_DEMO_PASSWORD_LENGTH = 16;
+/** Varsayılan SQL rol yolu karar kaydı (docs/OPEN_QUESTIONS.md A-66). */
+export const DEFAULT_SQL_DECISION = "A-66";
 
 /** Neon/Postgres tanımlayıcısı olarak güvenle tırnaklanabilen ad. */
 const IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]{0,62}$/;
@@ -68,7 +70,7 @@ export function quoteIdent(name) {
  */
 export function parseArgs(argv) {
   /** @type {Flags} */
-  const f = { rotate: false, rotateAuthSecret: false, rotateSealKey: false, rolePath: "api", sqlDecision: null };
+  const f = { rotate: false, rotateAuthSecret: false, rotateSealKey: false, rolePath: "sql", sqlDecision: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--rotate") f.rotate = true;
@@ -84,9 +86,8 @@ export function parseArgs(argv) {
       f.sqlDecision = v;
     } else throw new Error(`bilinmeyen argüman: ${String(a)}`);
   }
-  if (f.rolePath === "sql" && f.sqlDecision === null) {
-    throw new Error("--role-path sql yalnızca --sql-decision <A-xx|Q-xx> (Supervisor karar kaydı) ile kullanılabilir");
-  }
+  // Varsayılan rol yolu `sql` + A-66 (Supervisor kararı: Neon API rolleri neon_superuser üyesi). `--role-path api` açıkça seçilir.
+  if (f.rolePath === "sql" && f.sqlDecision === null) f.sqlDecision = DEFAULT_SQL_DECISION;
   return f;
 }
 
@@ -144,7 +145,7 @@ FROM pg_auth_members m JOIN pg_roles pr ON pr.oid = m.roleid JOIN pg_roles mr ON
 JOIN pg_roles g ON g.oid = m.grantor WHERE pr.rolname = 'wms_identity_probe' ORDER BY 2, 6;
 SELECT 'm1', CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'wms_identity_probe')
   THEN pg_has_role(current_user, 'wms_identity_probe', 'MEMBER WITH ADMIN OPTION') ELSE false END;
-SELECT 'owner', current_user, r.rolsuper, r.rolbypassrls FROM pg_roles r WHERE r.rolname = current_user;`;
+SELECT 'owner', current_user, r.rolsuper, r.rolbypassrls, r.rolcreaterole FROM pg_roles r WHERE r.rolname = current_user;`;
 }
 
 /** @param {string} stdout @returns {string[][]} */
@@ -210,7 +211,7 @@ export function appRoleDeviations(r) {
 export function parseProbeCheck(stdout) {
   const all = rows(stdout);
   const attr = all.find((c) => c[0] === "attr" && c.length >= 8);
-  const owner = all.find((c) => c[0] === "owner" && c.length >= 4);
+  const owner = all.find((c) => c[0] === "owner" && c.length >= 5);
   const m1 = all.find((c) => c[0] === "m1" && c.length >= 2);
   return {
     exists: attr !== undefined,
@@ -221,7 +222,7 @@ export function parseProbeCheck(stdout) {
       .filter((c) => c[0] === "member" && c.length >= 6)
       .map((c) => ({ member: String(c[1]), admin: tf(String(c[2])), inherit: tf(String(c[3])), set: tf(String(c[4])), grantor: String(c[5]) })),
     indirectAdmin: m1 ? tf(String(m1[1])) : null,
-    owner: owner ? { name: String(owner[1]), super: tf(String(owner[2])), bypassrls: tf(String(owner[3])) } : null,
+    owner: owner ? { name: String(owner[1]), super: tf(String(owner[2])), bypassrls: tf(String(owner[3])), createrole: tf(String(owner[4])) } : null,
   };
 }
 
@@ -229,14 +230,20 @@ export function parseProbeCheck(stdout) {
  * ADR-015 5. tur eki MINOR-6 kural 1 (tüm `pg_auth_members` satırları) + 3. tur m1 (dolaylı ADMIN yok).
  * @param {ReturnType<typeof parseProbeCheck>} p
  * @param {string} migrationRole
- * @returns {{ ok: boolean, problems: string[], adminOnly: string[] }}
+ * @param {{ waiveOwnerAdmin?: boolean }} [opts] A-67: yalnızca sahip rolün kendi ADMIN'i (doğrudan satır / dolaylı m1) WARN sayılır;
+ *   çağıran bunu yalnızca sahip rolün rolbypassrls=true VE rolcreaterole=true olduğunda açar.
+ * @returns {{ ok: boolean, problems: string[], warnings: string[], adminOnly: string[] }}
  */
-export function evaluateProbe(p, migrationRole) {
+export function evaluateProbe(p, migrationRole, opts = {}) {
   /** @type {string[]} */
   const problems = [];
   /** @type {string[]} */
   const adminOnly = [];
-  if (!p.exists || !p.attrs) return { ok: false, problems: ["probe-missing"], adminOnly };
+  /** @type {string[]} */
+  const warnings = [];
+  /** @param {string} id */
+  const ownerAdmin = (id) => (opts.waiveOwnerAdmin ? warnings.push(id) : problems.push(id));
+  if (!p.exists || !p.attrs) return { ok: false, problems: ["probe-missing"], warnings, adminOnly };
   const a = p.attrs;
   if (a.login) problems.push("probe-login");
   if (a.super) problems.push("probe-superuser");
@@ -248,15 +255,16 @@ export function evaluateProbe(p, migrationRole) {
   const others = p.members.filter((m) => m.member !== migrationRole);
   if (mine.length === 0) problems.push("migration-role-not-member");
   if (mine.some((m) => m.inherit)) problems.push("migration-role-inherit");
-  if (mine.some((m) => m.admin)) problems.push("migration-role-admin-option");
+  if (mine.some((m) => m.admin)) ownerAdmin("migration-role-admin-option");
   if (mine.length > 0 && !mine.some((m) => m.set)) problems.push("migration-role-no-set");
   for (const m of others) {
     if (m.set || m.inherit) problems.push(`other-member-set-or-inherit:${m.member}`);
     else if (APP_ROLES.some((r) => r.role === m.member)) problems.push(`app-role-member:${m.member}`);
     else if (m.admin) adminOnly.push(m.member);
   }
-  if (p.indirectAdmin !== false) problems.push(p.indirectAdmin === true ? "migration-role-indirect-admin" : "indirect-admin-unknown");
-  return { ok: problems.length === 0, problems, adminOnly };
+  if (p.indirectAdmin === true) ownerAdmin("migration-role-indirect-admin");
+  else if (p.indirectAdmin !== false) problems.push("indirect-admin-unknown");
+  return { ok: problems.length === 0, problems, warnings, adminOnly };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -274,7 +282,7 @@ export function evaluateProbe(p, migrationRole) {
  * yaratıldıysa rol silinir (artık bırakılmaz) ve BLOCKED döner; ADR-015 yeniden açılır (yol B: migration rolü dışında
  * bir altyapı rolü — ayrı Supervisor kararı).
  * @param {{ psql: PsqlFn, migrationRole: string, say: (s: string) => void }} o
- * @returns {{ status: "OK" | "BLOCKED" | "RED", line: string, problems: string[], adminOnly: string[], created: boolean,
+ * @returns {{ status: "OK" | "BLOCKED" | "RED", warn: boolean, warnings: string[], line: string, problems: string[], adminOnly: string[], created: boolean,
  *   ownerSuper: boolean | null, ownerBypassrls: boolean | null, attempts: string[] }}
  */
 export function ensureProbe(o) {
@@ -289,6 +297,8 @@ export function ensureProbe(o) {
   /** @param {string} line @param {string[]} problems */
   const red = (line, problems, extra = {}) => ({
     status: /** @type {const} */ ("RED"),
+    warn: false,
+    warnings: [],
     line,
     problems,
     adminOnly: [],
@@ -318,6 +328,7 @@ COMMIT;`);
     if (first.p === null) return red(`${PROBE_ROLE}: FAIL (katalog sorgusu başarısız)`, ["inspect-failed"], { created, ownerSuper, ownerBypassrls });
   }
   let ev = evaluateProbe(first.p, o.migrationRole);
+  let finalProbe = first.p;
   if (!ev.ok && ev.problems.some((p) => p === "migration-role-admin-option" || p === "migration-role-indirect-admin")) {
     // Örtük ADMIN satırlarını her yetki veren için geri almayı dene (başarısızlık beklenen/olası; sonuç katalogdan okunur).
     const grantors = [...new Set(first.p.members.filter((m) => m.member === o.migrationRole && m.admin).map((m) => m.grantor))];
@@ -336,10 +347,30 @@ COMMIT;`);
     const again = inspect();
     if (again.p === null) return red(`${PROBE_ROLE}: FAIL (katalog sorgusu başarısız)`, ["inspect-failed"], { created, ownerSuper, ownerBypassrls });
     ev = evaluateProbe(again.p, o.migrationRole);
+    finalProbe = again.p;
+  }
+  // A-67: örtük ADMIN kaldırılamıyorsa yalnızca sahip rol bypassrls VE createrole ise WARN (gerekçeli); aksi halde FAIL.
+  const waive = finalProbe.owner?.bypassrls === true && finalProbe.owner?.createrole === true;
+  if (!ev.ok || ev.warnings.length > 0) ev = evaluateProbe(finalProbe, o.migrationRole, { waiveOwnerAdmin: waive });
+  if (ev.ok && ev.warnings.length > 0) {
+    return {
+      status: "OK",
+      warn: true,
+      line: `${PROBE_ROLE}: WARN (set, noinherit; sahip rolün örtük ADMIN'i kaldırılamadı — A-67: sahip rol zaten BYPASSRLS + CREATEROLE)`,
+      problems: [],
+      warnings: ev.warnings,
+      adminOnly: ev.adminOnly,
+      created,
+      ownerSuper,
+      ownerBypassrls,
+      attempts,
+    };
   }
   if (ev.ok) {
     return {
       status: "OK",
+      warn: false,
+      warnings: [],
       line: `${PROBE_ROLE}: OK (set, noinherit, noadmin)`,
       problems: [],
       adminOnly: ev.adminOnly,
@@ -355,6 +386,8 @@ COMMIT;`);
   }
   return {
     status: "BLOCKED",
+    warn: false,
+    warnings: [],
     line: `${PROBE_ROLE}: BLOCKED (${ev.problems.join(", ")}) — ADR-015 5. tur eki MINOR-6 yeniden açılır`,
     problems: ev.problems,
     adminOnly: ev.adminOnly,
@@ -588,7 +621,7 @@ export function createFlyctl(o) {
 export function renderSummaryMd(s) {
   const L = [`# T-105 staging hazırlığı — ${s.status}`, "", `Rol yolu: \`${s.rolePath}\``, ""];
   for (const l of s.lines) L.push(`- ${l}`);
-  L.push("", `owner_bypassrls: ${s.ownerBypassrls}`, `owner_superuser: ${s.ownerSuperuser}`, "");
+  L.push("", `demo parolası: ${s.demoPassword}`, `owner_bypassrls: ${s.ownerBypassrls}`, `owner_superuser: ${s.ownerSuperuser}`, "");
   if (s.notes.length > 0) {
     L.push("## Notlar");
     for (const n of s.notes) L.push(`- ${n}`);
@@ -634,6 +667,7 @@ export async function main(o = {}) {
   let status = "RED";
   let ownerBypassrls = "unknown";
   let ownerSuper = "unknown";
+  let demoSource = "yazılmadı";
   /** @type {Flags | null} */
   let flags = null;
 
@@ -649,6 +683,7 @@ export async function main(o = {}) {
       ownerSuperuser: ownerSuper,
       flySecrets: flyActions,
       forbiddenPresent,
+      demoPassword: demoSource,
     };
     writeFileSync(path.join(outDir, "summary.json"), `${JSON.stringify(summary, null, 2)}\n`);
     writeFileSync(path.join(outDir, "summary.md"), renderSummaryMd(summary));
@@ -707,6 +742,7 @@ export async function main(o = {}) {
     const probe = ensureProbe({ psql, migrationRole: conn.ownerRole, say });
     lines.push(probe.line);
     if (probe.adminOnly.length > 0) notes.push(`wms_identity_probe yalnızca-ADMIN üyeler (ADR-015 1(b)): ${probe.adminOnly.join(", ")}`);
+    if (probe.warn) notes.push(`m1 WARN (A-67): sahip rolün probe üzerindeki örtük ADMIN'i kaldırılamadı (${probe.warnings.join(", ")}); gerekçe: sahip rol rolbypassrls=true VE rolcreaterole=true, ADMIN yeni yetenek kazandırmaz. Uygulama rollerinin probe üyeliği denetimi değişmedi (FAIL)`);
     if (probe.attempts.length > 0) notes.push(`probe girişimleri: ${probe.attempts.join(", ")}`);
     ownerBypassrls = probe.ownerBypassrls === null ? "unknown" : String(probe.ownerBypassrls);
     ownerSuper = probe.ownerSuper === null ? "unknown" : String(probe.ownerSuper);
@@ -745,6 +781,7 @@ export async function main(o = {}) {
     flyActions = plan.actions;
     if (flags.rotateAuthSecret) notes.push("BETTER_AUTH_SECRET yenilendi: tüm oturumlar sonraki dağıtımda düşer");
     if (flags.rotateSealKey) notes.push("QUEUE_SEAL_KEY yenilendi: kuyrukta bekleyen email.send işleri çözülemez (yalnızca kuyruk boşken döndürün)");
+    demoSource = demoIn !== null ? "repo sırrından (STAGING_DEMO_PASSWORD)" : plan.actions.DEMO_PASSWORD === "generated" ? "üretildi (okunamaz)" : "mevcut Fly sırrı (dokunulmadı; kaynağı bilinmiyor)";
     if (plan.actions.DEMO_PASSWORD === "generated") notes.push("DEMO_PASSWORD rastgele üretildi ve okunamaz; bilinen bir değer için STAGING_DEMO_PASSWORD repo sırrını ekleyip yeniden koşun");
     if (plan.actions.RESEND_API_KEY === "absent") notes.push("RESEND_API_KEY repo sırrı yok: e-posta gönderimi MAIL_DELIVERY_DISABLED ile reddedilir (U-03)");
     try {

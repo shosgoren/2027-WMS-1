@@ -42,21 +42,21 @@ const makeRand = () => {
 /** psql çıktı satırları */
 const roleRow = (/** @type {string} */ n, /** @type {Partial<Record<string, string>>} */ o = {}) =>
   ["role", n, o.login ?? "t", o.super ?? "f", o.bypass ?? "f", o.createdb ?? "f", o.createrole ?? "f", o.repl ?? "f", o.members ?? "0", o.owned ?? "0"].join("|");
-const probeOut = (/** @type {string[]} */ members, m1 = "f", exists = true) =>
+const probeOut = (/** @type {string[]} */ members, m1 = "f", exists = true, createrole = "f") =>
   [
     ...(exists ? ["attr|wms_identity_probe|f|f|f|f|f|f"] : []),
     ...members.map((m) => `member|${m}`),
     `m1|${m1}`,
-    `owner|${OWNER}|f|t`,
+    `owner|${OWNER}|f|t|${createrole}`,
   ].join("\n");
 const OK_MEMBER = `${OWNER}|f|f|t|infra`;
 
 describe("argümanlar / karar kaydı", () => {
   it("bayraklar", () => {
-    expect(parseArgs([])).toMatchObject({ rotate: false, rotateAuthSecret: false, rotateSealKey: false, rolePath: "api" });
+    expect(parseArgs([])).toMatchObject({ rotate: false, rotateAuthSecret: false, rotateSealKey: false, rolePath: "sql", sqlDecision: "A-66" });
+    expect(parseArgs(["--role-path", "api"])).toMatchObject({ rolePath: "api", sqlDecision: null });
     expect(parseArgs(["--rotate", "--rotate-auth-secret", "--rotate-seal-key"])).toMatchObject({ rotate: true, rotateAuthSecret: true, rotateSealKey: true });
     expect(() => parseArgs(["--bilinmeyen"])).toThrow(/bilinmeyen/);
-    expect(() => parseArgs(["--role-path", "sql"])).toThrow(/--sql-decision/);
     expect(parseArgs(["--role-path", "sql", "--sql-decision", "A-57"]).sqlDecision).toBe("A-57");
   });
   it("SQL yolu: yalnızca kimlikli + T-105 + SQL CREATE ROLE içeren karar satırı", () => {
@@ -112,6 +112,51 @@ describe("probe üyelik denetimi (ADR-015 5. tur eki MINOR-6)", () => {
     expect(evaluateProbe(parseProbeCheck(probeOut([], "f", false)), OWNER).problems).toEqual(["probe-missing"]);
     const p = parseProbeCheck(probeOut([OK_MEMBER]));
     expect(evaluateProbe(/** @type {any} */ ({ ...p, attrs: { ...p.attrs, login: true, bypassrls: true } }), OWNER).problems).toEqual(["probe-login", "probe-bypassrls"]);
+  });
+});
+
+describe("A-67: m1 / örtük ADMIN", () => {
+  const implicit = `${OWNER}|t|f|f|cloud_admin`;
+  const ev = (/** @type {string[]} */ m, /** @type {string} */ m1, /** @type {string} */ createrole, /** @type {boolean} */ waive) =>
+    evaluateProbe(parseProbeCheck(probeOut(m, m1, true, createrole)), OWNER, { waiveOwnerAdmin: waive });
+  it("waiveOwnerAdmin yalnızca sahip rolün ADMIN'ini WARN yapar; diğer sapmalar FAIL kalır", () => {
+    const r = ev([OK_MEMBER, implicit], "t", "t", true);
+    expect(r).toMatchObject({ ok: true, problems: [], warnings: ["migration-role-admin-option", "migration-role-indirect-admin"] });
+    expect(ev([OK_MEMBER, implicit], "t", "t", false).ok).toBe(false);
+    expect(ev([OK_MEMBER, implicit, "wms_app|t|f|f|x"], "t", "t", true).problems).toEqual(["app-role-member:wms_app"]);
+    expect(ev([OK_MEMBER, implicit, "wms_worker|f|f|t|x"], "t", "t", true).problems).toEqual(["other-member-set-or-inherit:wms_worker"]);
+    expect(ev([`${OWNER}|t|t|t|x`], "t", "t", true).problems).toEqual(["migration-role-inherit"]);
+    expect(evaluateProbe({ ...parseProbeCheck(probeOut([OK_MEMBER, implicit])), indirectAdmin: null }, OWNER, { waiveOwnerAdmin: true }).problems).toEqual(["indirect-admin-unknown"]);
+  });
+  const run = (/** @type {string} */ createrole, /** @type {string[]} */ extra = []) => {
+    /** @type {string[]} */
+    const seen = [];
+    const withAdmin = probeOut([OK_MEMBER, implicit, ...extra], "t", true, createrole);
+    let n = 0;
+    const script = [probeOut([], "f", false, createrole), "", withAdmin, "", "x", withAdmin, "", ""];
+    const psql = (/** @type {string} */ sql) => {
+      seen.push(sql);
+      const out = script[n++] ?? "";
+      return n === 5 ? { ok: false, stdout: "", sqlstate: "42501", error: "x" } : { ok: true, stdout: out, sqlstate: null, error: null };
+    };
+    return { r: ensureProbe({ psql, migrationRole: OWNER, say: () => undefined }), seen };
+  };
+  it("sahip rol bypassrls + createrole → WARN ve devam (probe silinmez, gerekçe satırı)", () => {
+    const { r, seen } = run("t");
+    expect(r.status).toBe("OK");
+    expect(r.warn).toBe(true);
+    expect(r.line).toMatch(/^wms_identity_probe: WARN .*A-67/);
+    expect(seen.some((q) => q.startsWith("DROP ROLE"))).toBe(false);
+  });
+  it("sahip rol createrole değil → FAIL (BLOCKED), probe silinir", () => {
+    const { r, seen } = run("f");
+    expect(r.status).toBe("BLOCKED");
+    expect(seen.some((q) => q.startsWith("DROP ROLE"))).toBe(true);
+  });
+  it("koşul sağlansa da uygulama rolünde probe üyeliği/ADMIN → FAIL", () => {
+    const { r } = run("t", ["wms_auth|t|f|f|x"]);
+    expect(r.status).toBe("BLOCKED");
+    expect(r.problems).toContain("app-role-member:wms_auth");
   });
 });
 
@@ -338,7 +383,7 @@ describe("main (sahte Neon/psql/flyctl)", () => {
     for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
   });
 
-  /** @param {{ rolesExist?: boolean, existingFly?: string[], rolesBlocked?: boolean, probeBlocked?: boolean, importFails?: boolean, flyAfterMissing?: boolean }} [o] */
+  /** @param {{ rolesExist?: boolean, ownerCreaterole?: string, existingFly?: string[], rolesBlocked?: boolean, probeBlocked?: boolean, importFails?: boolean, flyAfterMissing?: boolean }} [o] */
   function harness(o = {}) {
     const outDir = mkdtempSync(path.join(tmpdir(), "t105-"));
     dirs.push(outDir);
@@ -353,7 +398,7 @@ describe("main (sahte Neon/psql/flyctl)", () => {
     let roleReads = 0;
     const psql = (/** @type {any} */ _t, /** @type {string} */ sql) => {
       const ok = (/** @type {string} */ stdout) => ({ ok: true, stdout, sqlstate: null, error: null });
-      if (sql.includes("'attr'")) return ok(o.probeBlocked ? probeOut([OK_MEMBER, implicit], "t") : probeOut([OK_MEMBER]));
+      if (sql.includes("'attr'")) return ok(o.probeBlocked ? probeOut([OK_MEMBER, implicit], "t", true, o.ownerCreaterole ?? "f") : probeOut([OK_MEMBER]));
       if (sql.includes("'role'")) {
         roleReads++;
         if (roleReads === 1 && !o.rolesExist) return ok("");
@@ -399,7 +444,7 @@ describe("main (sahte Neon/psql/flyctl)", () => {
       deleteRole: async (/** @type {string} */ _b, /** @type {string} */ name) => void roleCalls.push(`delete:${name}`),
     };
     const env = { NEON_API_KEY: NEON_KEY, NEON_PROJECT_ID: "dry-heart-13671059", FLY_API_TOKEN: FLY_TOKEN, RESEND_API_KEY: RESEND };
-    const run = (/** @type {string[]} */ argv = [], /** @type {Record<string, string>} */ extraEnv = {}) =>
+    const run = (/** @type {string[]} */ argv = ["--role-path", "api"], /** @type {Record<string, string>} */ extraEnv = {}) =>
       main({ env: { ...env, ...extraEnv }, argv, say: (s) => void said.push(s), rand: makeRand(), redactor, api, fly, psql, outDir });
     return { run, said, imports, roleCalls, outDir, redactor };
   }
@@ -450,7 +495,7 @@ describe("main (sahte Neon/psql/flyctl)", () => {
 
   it("--rotate: var olan roller için parola sıfırlanır ve URL'ler yeniden yazılır", async () => {
     const h = harness({ rolesExist: true, existingFly: ["DATABASE_URL", "AUTH_DATABASE_URL", "DATABASE_URL_WORKER"] });
-    expect(await h.run(["--rotate"])).toBe(0);
+    expect(await h.run(["--role-path", "api", "--rotate"])).toBe(0);
     expect(h.roleCalls).toEqual(["reset:wms_app", "reset:wms_auth", "reset:wms_worker"]);
     expect(h.imports.join("")).toContain(`DATABASE_URL=postgresql://wms_app:${PW.wms_app}@`);
   });
@@ -468,6 +513,28 @@ describe("main (sahte Neon/psql/flyctl)", () => {
     expect(h.imports).toEqual([]);
     expect(h.roleCalls).toEqual(["create:wms_app", "create:wms_auth", "create:wms_worker", "delete:wms_app", "delete:wms_auth", "delete:wms_worker"]);
     expect(allText(h)).toContain("Fly'a hiçbir sır yazılmadı");
+  });
+
+  it("varsayılan yol sql + A-66: Neon API rol uçları çağrılmaz; CREATE ROLE ile kurulur; Fly'a yazılır; demo bilgisi özette", async () => {
+    const h = harness();
+    expect(await h.run([])).toBe(0);
+    expect(h.roleCalls).toEqual([]);
+    expect(allText(h)).toContain("demo parolası: üretildi (okunamaz)");
+    expect(h.imports.join("")).toContain("DATABASE_URL=postgresql://wms_app:");
+    const h2 = harness();
+    expect(await h2.run([], { STAGING_DEMO_PASSWORD: DEMO_IN })).toBe(0);
+    expect(allText(h2)).toContain("demo parolası: repo sırrından");
+    expect(allText(h2)).not.toContain(DEMO_IN);
+  });
+
+  it("m1 WARN (A-67): sahip rol bypassrls+createrole → koşu yeşil, özette gerekçe; createrole yoksa FAIL ve Fly'a yazım yok", async () => {
+    const h = harness({ probeBlocked: true, ownerCreaterole: "t" });
+    expect(await h.run()).toBe(0);
+    expect(allText(h)).toContain("wms_identity_probe: WARN");
+    expect(allText(h)).toContain("m1 WARN (A-67)");
+    const h2 = harness({ probeBlocked: true });
+    expect(await h2.run()).toBe(2);
+    expect(h2.imports).toEqual([]);
   });
 
   it("probe BLOCKED → çıkış 2, Fly'a yazım yok (roller yine de değerlendirilir: tek koşuda tüm engeller görünür)", async () => {
@@ -502,6 +569,6 @@ describe("main (sahte Neon/psql/flyctl)", () => {
     const h = harness();
     expect(await main({ env: {}, argv: [], say: (s) => void h.said.push(s), outDir: h.outDir })).toBe(1);
     expect(h.said.join("\n")).toContain("NEON_API_KEY, NEON_PROJECT_ID");
-    expect(await harness().run([], { STAGING_DEMO_PASSWORD: "kisa" })).toBe(1);
+    expect(await harness().run(undefined, { STAGING_DEMO_PASSWORD: "kisa" })).toBe(1);
   });
 });
