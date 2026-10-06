@@ -8,6 +8,10 @@
 //    var ve hepsi `started`. Süreç grubu `config.metadata.fly_process_group` alanındadır
 //    (eski ad `process_group`; fly-go v0.11.2 `MachineConfig.ProcessGroup`).
 // Bu betik FLY_API_TOKEN görmez: status dosyasını dağıtım adımı yazar.
+// Teşhis (T-106c): worker FAIL olursa iş akışı AYRI adımda (FLY_API_TOKEN'lı) makine loglarını bu betiğe borulayarak
+// izin listesiyle (ham log yok) yazar: `node scripts/deploy-smoke.mjs worker-ids --status-file F` (başlamamış worker
+// makine kimlikleri + olay özeti) ve `... mask-logs [--max-lines 200]` (stdin → izin listeli stdout). Bu alt komutlar
+// FLY_API_TOKEN GÖRMEZ (yalnız flyctl çağrısının ortamında); ham log yazılmaz, izin listesi uygulanır.
 // Çıktı: başarısız kontrolün nedeni + tek özet satırı. Herhangi bir FAIL → çıkış kodu 1.
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -151,6 +155,187 @@ export function checkProcessGroup(statusJson, group = DEFAULTS.group) {
   return { ok: true, reason: `"${group}" ${states.length} makine started` };
 }
 
+
+// ---- T-106c: worker makine teşhisi (maskeli) -------------------------------------------------------------------
+export const DIAG_MAX_LINES = 200;
+const HIDDEN_MSG = "[msg gizlendi]";
+// İZİN LİSTESİ (allowlist) — kalıp tabanlı maskeleme tamamlanamaz (kaçışlı JSON, boşluklu/kısa/URL-kodlu değerler,
+// runner'da bulunmayan Fly uygulama sırları). Bu yüzden ham log ASLA yazılmaz; yalnızca aşağıdaki alanlar/sabit
+// ifadeler yeniden üretilir, kalan her satır sayılır ve yazılmaz.
+// Gerçek ISO-8601 (tarih T saat[.kesir] Z|±hh:mm); serbest rakam dizisi (telefon vb.) geçmez.
+const RE_TS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+const RE_LEVEL = /^[a-z]{3,10}$/;
+/** Makine durumu/olay sözcükleri (worker-ids özeti). */
+const RE_STATE_WORD = /^[a-z_-]{1,20}$/;
+// Hata kodu: ≤32 karakter ve YALNIZCA (a) SQLSTATE (5 karakter [0-9A-Z]) ya da (b) harfle başlayan, rakamsız büyük harf
+// adı: ya tek sözcük ≤12 karakter (ECONNREFUSED) ya da alt çizgiyle ayrılmış sözcükler (QUEUE_SCHEMA_MISSING). Rakam
+// içeren uzun büyük harf/rakam dizileri (base32 TOTP sırrı, kart no) ve uzun tek sözcükler reddedilir.
+const RE_CODE = /^(?=.{1,32}$)(?:[A-Z][A-Z_]{2,11}|[A-Z]+(?:_[A-Z]+)+|[0-9A-Z]{5})$/;
+// msg: serbest metin YOK; yalnızca worker/kuyruk kodunun yazdığı sabit iletiler (tam eşleşme).
+export const ALLOWED_MSGS = new Set([
+  "started", "queue started", "queue start failed", "queue error", "invalid configuration", "mail configured",
+  "job types without handler", "demo disabled", "demo.reseed done", "demo.reseed failed", "demo.reseed enqueued",
+  "demo.reseed enqueue failed", "email sent", "email.send failed", "invitation email sent", "invitation.deliver failed",
+  "invitation.deliver skipped", "job handler failed (permanent)", "job handler failed (transient; will retry)", "shutdown started", "shutdown complete",
+  "shutdown completed with errors", "shutdown hook failed", "shutdown timed out", "forced exit", "uncaught exception", "unhandled rejection",
+  // Sabit iletiler (parantez/büyük harf içerir; tam eşleşme):
+  "BETTER_AUTH_URL not set (warning); invitation.deliver jobs will fail until configured",
+  "demo disabled: account adapter configuration missing (AUTH_DATABASE_URL); demo.reseed not registered",
+  "demo disabled: account adapter configuration missing (DEMO_EMAIL_DOMAIN); demo.reseed not registered",
+]);
+const RE_ERRCLASS = /^[A-Za-z]{1,40}(?:Error|Exception)$/;
+// Worker açılış hatası: yalnızca ortam DEĞİŞKENİ ADI + sabit ifade (değer içermez; main.ts requireEnv).
+const RE_MISSING_ENV = /^[A-Z][A-Z0-9_]{2,60} tanımlı değil$/;
+const RE_ERR_LINE = /^([A-Za-z]{1,40}(?:Error|Exception))(?:\s\[([^\]\s]{1,40})\])?/;
+/** Fly/sistem satırları: [desen, yazılacak sabit metin (grup 1 = sayısal kod ise eklenir)]. */
+const SYSTEM_PATTERNS = /** @type {const} */ ([
+  [/Main child exited normally with code: (\d{1,3})\b/, "Main child exited normally with code: "],
+  [/Main child exited with signal \(with signal '(SIG[A-Z0-9]{2,10})'/, "Main child exited with signal "],
+  [/\bexited with code (\d{1,3})\b/, "exited with code "],
+  [/Process appears to have been OOM killed/, "Process appears to have been OOM killed"],
+  [/Out of memory/, "Out of memory"],
+  [/\boom\b/i, "oom"],
+  [/Starting init/, "Starting init"],
+  [/Preparing to run/, "Preparing to run"],
+  [/Virtual machine exited abruptly/, "Virtual machine exited abruptly"],
+]);
+
+// flyctl 0.4.111 `logs` (internal/render/logs.go, HideAllocID+HideRegion): başta boşluk, sonra
+// `<RFC3339 zaman> <sağlayıcı>[<makine>] <bölge> [<düzey>] <alanlar><mesaj>`. ANSI renkleri önce silinir.
+const RE_FLY_PREFIX =
+  /^\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})) ([a-z]{2,12})\[([a-z0-9]{8,20})\] ([a-z]{3}) \[(debug|info|warn|warning|error)\] ?(.*)$/;
+
+/**
+ * Tek log satırını izin listesiyle işler. Dönüş: yazılacak güvenli metin ya da `null` (gizlenecek).
+ * Fly öneki sıkı regex'le ayrılır (zaman, makine kimliği, düzey sabit alan olarak yazılır); gövdeye izin listesi
+ * uygulanır. Önek eşleşmezse gövde = satırın tamamı.
+ * @param {string} rawLine
+ * @returns {string | null}
+ */
+export function allowLine(rawLine) {
+  const line = rawLine.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "");
+  const pm = RE_FLY_PREFIX.exec(line);
+  if (pm === null) return allowBody(line.trim());
+  const body = allowBody((pm[6] ?? "").trim());
+  return body === null ? null : `${pm[1]} ${pm[3]} [${pm[5]}] ${body}`;
+}
+
+/**
+ * @param {string} line
+ * @returns {string | null}
+ */
+function allowBody(line) {
+  if (line === "") return null;
+  if (line.startsWith("{")) {
+    /** @type {unknown} */
+    let o;
+    try {
+      o = JSON.parse(line);
+    } catch {
+      return null;
+    }
+    if (typeof o !== "object" || o === null || Array.isArray(o)) return null;
+    const r = /** @type {Record<string, unknown>} */ (o);
+    /** @type {Record<string, string>} */
+    const out = {};
+    const str = (/** @type {unknown} */ v, /** @type {RegExp} */ re) => (typeof v === "string" && re.test(v) ? v : undefined);
+    const ts = str(r["time"], RE_TS) ?? str(r["ts"], RE_TS);
+    if (ts !== undefined) out["time"] = ts;
+    const level = str(r["level"], RE_LEVEL);
+    if (level !== undefined) out["level"] = level;
+    out["msg"] = typeof r["msg"] === "string" && ALLOWED_MSGS.has(r["msg"]) ? r["msg"] : HIDDEN_MSG;
+    const err = typeof r["err"] === "object" && r["err"] !== null ? /** @type {Record<string, unknown>} */ (r["err"]) : {};
+    const code = str(r["code"], RE_CODE) ?? str(r["errorCode"], RE_CODE) ?? str(err["code"], RE_CODE);
+    if (code !== undefined) out["code"] = code;
+    // `error`: düz sınıf adı (dize) ya da lifecycle `describeError` nesnesi {name,message,stack} → yalnızca `.name`.
+    const errObj = typeof r["error"] === "object" && r["error"] !== null ? /** @type {Record<string, unknown>} */ (r["error"]) : {};
+    const errName = str(err["name"], RE_ERRCLASS) ?? str(r["error"], RE_ERRCLASS) ?? str(errObj["name"], RE_ERRCLASS);
+    if (errName !== undefined) out["error"] = errName;
+    else {
+      const missing = str(r["error"], RE_MISSING_ENV);
+      if (missing !== undefined) out["error"] = missing;
+    }
+    return JSON.stringify(out);
+  }
+  const m = RE_ERR_LINE.exec(line);
+  if (m !== null) return m[2] !== undefined && RE_CODE.test(m[2]) ? `${m[1]} [${m[2]}]` : `${m[1]}`;
+  for (const [re, fixed] of SYSTEM_PATTERNS) {
+    const x = re.exec(line);
+    if (x !== null) return x[1] !== undefined ? `${fixed}${x[1]}` : fixed;
+  }
+  return null;
+}
+
+/**
+ * Log metnini son `maxLines` satırla sınırlar; izinli satırlar `worker| ` önekiyle döner, kalanlar yalnızca sayılır.
+ * Çıktı `worker| ` ile başlar → `::`/`##[`/`#` ile başlayan satır oluşamaz.
+ * @param {string} text
+ * @param {{ maxLines?: number }} [opts]
+ * @returns {{ lines: string[], total: number, hidden: number }}
+ */
+export function maskLogs(text, opts = {}) {
+  const max = opts.maxLines ?? DIAG_MAX_LINES;
+  const all = text.split(/\r?\n/).filter((l) => l.trim() !== "");
+  const tail = all.slice(-max);
+  /** @type {string[]} */
+  const lines = [];
+  let hidden = 0;
+  for (const l of tail) {
+    const a = allowLine(l);
+    if (a === null) hidden++;
+    else lines.push(`worker| ${a}`);
+  }
+  return { lines, total: all.length, hidden };
+}
+
+/**
+ * Başlamamış süreç grubu makineleri: kimlik + durum + son olaylar (yalnızca beyaz listeli alanlar; yapılandırma/env
+ * ASLA yazılmaz). Olay alanları (`events[].request.exit_event`) Fly Machines API şemasındandır; yoksa atlanır.
+ * @param {string} statusJson
+ * @param {string} [group]
+ * @returns {{ id: string, summary: string[] }[]}
+ */
+export function describeStoppedMachines(statusJson, group = DEFAULTS.group) {
+  /** @type {unknown} */
+  let parsed;
+  try {
+    parsed = JSON.parse(statusJson);
+  } catch {
+    return [];
+  }
+  const machines = /** @type {{ Machines?: unknown } | null} */ (parsed)?.Machines;
+  if (!Array.isArray(machines)) return [];
+  /** @type {{ id: string, summary: string[] }[]} */
+  const out = [];
+  for (const m of machines) {
+    if (processGroupOf(m) !== group) continue;
+    const mm = /** @type {Record<string, any>} */ (m);
+    if (mm["state"] === "started") continue;
+    const id = typeof mm["id"] === "string" ? mm["id"] : "";
+    if (!/^[a-z0-9]{8,20}$/.test(id)) continue;
+    const word = (/** @type {unknown} */ v) => (typeof v === "string" && RE_STATE_WORD.test(v) ? v : "?");
+    const summary = [`state=${word(mm["state"])}`];
+    const restart = mm["config"]?.restart?.policy;
+    if (typeof restart === "string") summary.push(`restart_policy=${word(restart)}`);
+    const guest = mm["config"]?.guest;
+    if (guest && typeof guest.memory_mb === "number") summary.push(`memory_mb=${guest.memory_mb}`);
+    const events = Array.isArray(mm["events"]) ? /** @type {any[]} */ (mm["events"]).slice(0, 8) : [];
+    for (const e of events) {
+      const x = e?.request?.exit_event;
+      const parts = [`event=${word(e?.type)}`, `status=${word(e?.status)}`];
+      if (x && typeof x === "object") {
+        if (typeof x.exit_code === "number") parts.push(`exit_code=${x.exit_code}`);
+        if (typeof x.oom_killed === "boolean") parts.push(`oom_killed=${x.oom_killed}`);
+        if (typeof x.signal === "number") parts.push(`signal=${x.signal}`);
+        if (typeof x.requested_stop === "boolean") parts.push(`requested_stop=${x.requested_stop}`);
+      }
+      summary.push(parts.join(" ").replace(/[^\x20-\x7e]/g, "?").slice(0, 160));
+    }
+    out.push({ id, summary });
+  }
+  return out;
+}
+
 /**
  * @param {string[]} argv
  * @returns {{ url: string, statusFile: string, group: string }}
@@ -185,7 +370,43 @@ export function summaryLine(web, worker) {
   return `deploy-smoke: web ${web.ok ? "OK" : "FAIL"} · worker ${worker.ok ? "OK" : "FAIL"}`;
 }
 
+/** T-106c alt komutları (teşhis; sağlık/durum denetimini DEĞİŞTİRMEZ). */
+async function diagCommand(/** @type {string[]} */ argv) {
+  const [cmd, ...rest] = argv;
+  if (cmd === "worker-ids") {
+    const i = rest.indexOf("--status-file");
+    const file = i >= 0 ? rest[i + 1] : undefined;
+    if (file === undefined) {
+      console.error("kullanım: deploy-smoke.mjs worker-ids --status-file <json>");
+      return 2;
+    }
+    for (const m of describeStoppedMachines(readFileSync(file, "utf8"))) {
+      for (const l of m.summary) console.error(`worker| ${m.id} ${l}`);
+      console.log(m.id);
+    }
+    return 0;
+  }
+  if (cmd === "mask-logs") {
+    const i = rest.indexOf("--max-lines");
+    const max = i >= 0 ? Number(rest[i + 1]) : DIAG_MAX_LINES;
+    if (!Number.isInteger(max) || max < 1) {
+      console.error("--max-lines pozitif tam sayı olmalı");
+      return 2;
+    }
+    const chunks = [];
+    for await (const c of process.stdin) chunks.push(c);
+    const { lines, total, hidden } = maskLogs(Buffer.concat(chunks).toString("utf8"), { maxLines: max });
+    for (const l of lines) console.log(l);
+    console.log(`worker-diag: ${lines.length} satır yazıldı (toplam ${total}; gizlenen satır: ${hidden}; izin listesi)`);
+    return 0;
+  }
+  console.error(`deploy-smoke: bilinmeyen alt komut "${cmd}"`);
+  return 2;
+}
+
 async function main() {
+  const first = process.argv[2];
+  if (first === "worker-ids" || first === "mask-logs") return diagCommand(process.argv.slice(2));
   let args;
   try {
     args = parseArgs(process.argv.slice(2));
