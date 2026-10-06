@@ -34,8 +34,8 @@ export interface PermanentFailure {
   readonly permanent: true;
 }
 
-/** 4xx olduğu halde geçici sayılan durumlar: istek zaman aşımı, erken istek, hız sınırı. */
-const TRANSIENT_4XX: readonly number[] = [408, 425, 429];
+/** 4xx olduğu halde geçici sayılan durumlar: istek zaman aşımı, eşzamanlı idempotency çakışması (409, Resend), erken istek, hız sınırı. */
+const TRANSIENT_4XX: readonly number[] = [408, 409, 425, 429];
 
 /** 15 §Hata kodlarına eklenmesi gereken kod için bkz. rapor bulgusu; T-112 aynı adı kullanır. */
 export class MailError extends Error {
@@ -44,8 +44,8 @@ export class MailError extends Error {
   /** Sağlayıcı HTTP durumu: yalnızca `options.status` ile verilir (mesaj metni ayrıştırılmaz); ağ hatasında tanımsız. */
   readonly status: number | undefined;
   /**
-   * Yeniden denemenin sonucu değiştirmeyeceği hata: kip kapalı, alıcı geçersiz, sağlayıcı 4xx (429 hariç).
-   * Ağ hatası, 5xx ve 429 geçicidir.
+   * Yeniden denemenin sonucu değiştirmeyeceği hata: kip kapalı, alıcı geçersiz, sağlayıcı 4xx (408, 409, 425, 429 hariç).
+   * Ağ hatası, 5xx, 408, 409, 425 ve 429 geçicidir.
    */
   readonly permanent: boolean;
   constructor(code: MailError["code"], message: string, options?: { readonly status?: number }) {
@@ -90,6 +90,12 @@ export function loadMailConfig(env: Readonly<Record<string, string | undefined>>
   };
 }
 
+/** Kip/ortam uyumsuzluğu: genel hata yerine ayırt edilebilir ad ve kod taşır (log ve alarm için; mesaj değer içermez). */
+export class MailConfigError extends Error {
+  override name = "MailConfigError";
+  readonly code = "MAIL_MODE_NOT_ALLOWED" as const;
+}
+
 /** `mailpit` kipine izin verilen ortamlar (A-50 ile aynı küme). */
 const MAILPIT_ENVS: readonly string[] = ["local", "ci"];
 
@@ -100,7 +106,7 @@ const MAILPIT_ENVS: readonly string[] = ["local", "ci"];
  */
 export function assertMailModeAllowed(config: Pick<MailConfig, "mode">, wmsEnv: string | undefined): void {
   if (config.mode === "mailpit" && !MAILPIT_ENVS.includes(wmsEnv ?? "")) {
-    throw new Error("MAIL_MODE=mailpit is only allowed when WMS_ENV is local or ci");
+    throw new MailConfigError("MAIL_MODE=mailpit is only allowed when WMS_ENV is local or ci");
   }
 }
 

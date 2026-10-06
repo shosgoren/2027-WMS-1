@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import {
   EMAIL_SEND_JOB_TYPE,
+  MailConfigError,
   MailError,
   MailPayloadError,
   assertMailModeAllowed,
@@ -224,9 +225,9 @@ describe("hata sınıflaması (kalıcı / geçici)", () => {
         () => Promise.reject(new Error("hata bekleniyordu")),
         (e: unknown) => e as MailError,
       );
-  it("Resend 4xx (408, 425, 429 hariç) kalıcı; 408, 425, 429 ve 5xx geçici", async () => {
+  it("Resend 4xx (408, 409, 425, 429 hariç) kalıcı; 408, 409, 425, 429 ve 5xx geçici", async () => {
     for (const status of [400, 401, 403, 404, 410, 422]) expect((await resend(status)).permanent, String(status)).toBe(true);
-    for (const status of [408, 425, 429, 500, 502, 503]) expect((await resend(status)).permanent, String(status)).toBe(false);
+    for (const status of [408, 409, 425, 429, 500, 502, 503]) expect((await resend(status)).permanent, String(status)).toBe(false);
   });
   it("ağ hatası geçici", async () => {
     const f = vi.fn<typeof fetch>().mockRejectedValue(new TypeError("fetch failed"));
@@ -275,6 +276,10 @@ describe("mailpit kipi ortam kısıtı", () => {
     const mailpit = config({ MAIL_MODE: "mailpit", MAILPIT_URL: "http://localhost:8025", MAIL_FROM: "a@b.c" });
     for (const ok of ["local", "ci"]) expect(() => assertMailModeAllowed(mailpit, ok)).not.toThrow();
     for (const bad of [undefined, "", "staging", "production", "prod", "LOCAL"]) expect(() => assertMailModeAllowed(mailpit, bad)).toThrow(/WMS_ENV/);
+    const err = (() => { try { assertMailModeAllowed(mailpit, "production"); } catch (e) { return e; } return undefined; })();
+    expect(err).toBeInstanceOf(MailConfigError);
+    expect((err as MailConfigError).name).toBe("MailConfigError");
+    expect((err as MailConfigError).code).toBe("MAIL_MODE_NOT_ALLOWED");
   });
   it("diğer kiplere kısıt uygulanmaz", () => {
     for (const mode of ["disabled", "resend"]) expect(() => assertMailModeAllowed({ mode } as MailConfig, "production")).not.toThrow();
