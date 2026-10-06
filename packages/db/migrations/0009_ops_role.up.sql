@@ -35,6 +35,7 @@
 DO $pre$
 DECLARE
   r pg_catalog.pg_roles%ROWTYPE;
+  bad text;
 BEGIN
   SELECT * INTO r FROM pg_catalog.pg_roles WHERE rolname = 'wms_ops';
   IF NOT FOUND THEN
@@ -50,6 +51,17 @@ BEGIN
   -- örtük ADMIN'i (A-67 gerekçesi; yeni yetenek kazandırmaz) provizyon betiği tarafından ayrıca raporlanır.
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members WHERE roleid = r.oid AND (set_option OR inherit_option)) THEN
     RAISE EXCEPTION '0009_ops_role: wms_ops üzerinde SET/INHERIT seçenekli üyelik var (yalnızca-ADMIN satırı kabul edilir)';
+  END IF;
+  -- MINOR-1: yalnızca-ADMIN satırını yalnızca migration rolü ya da (A-67 koşulu) rolbypassrls AND rolcreaterole taşıyan,
+  -- süper kullanıcı olmayan sahip rol taşıyabilir; wms_app/wms_auth/wms_worker/diğerleri kendine SET verip SET ROLE yapabilir.
+  SELECT string_agg(m.rolname, ', ') INTO bad
+    FROM pg_catalog.pg_auth_members am
+    JOIN pg_catalog.pg_roles m ON m.oid = am.member
+   WHERE am.roleid = r.oid
+     AND m.rolname <> current_user
+     AND NOT (m.rolbypassrls AND m.rolcreaterole AND NOT m.rolsuper);
+  IF bad IS NOT NULL THEN
+    RAISE EXCEPTION '0009_ops_role: wms_ops üzerinde yetkisiz üye (ADMIN dahil): % (yalnızca migration rolü veya BYPASSRLS+CREATEROLE sahip rol)', bad;
   END IF;
   IF pg_catalog.to_regclass('public.audit_logs') IS NULL OR pg_catalog.to_regclass('public.tenant_settings') IS NULL THEN
     RAISE EXCEPTION '0009_ops_role: 0003_tenancy/0004_audit önkoşulu yok';
