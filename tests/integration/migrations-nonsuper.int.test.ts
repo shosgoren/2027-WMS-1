@@ -559,6 +559,41 @@ describe("0007–0012 — süper kullanıcı olmayan migrator", () => {
     expect(await schemaDigest(u)).toEqual(base);
   });
 
+  it("0010 (T-235): FORCE RLS altındaki sahip A bağlamında B anahtarlı locations INSERT eder: row_security_active true, 42501 'row-level security policy'", async () => {
+    await setProbeMemberships(STANDARD_GRANT);
+    const u = await freshDatabase();
+    expect((await migrateUp({ url: u, dir: thru12() })).applied).toEqual(ALL);
+    const tenantA = randomUUID();
+    const tenantB = randomUUID();
+    await withClient(u, async (c) => {
+      for (const t of [tenantA, tenantB]) {
+        await c.query("BEGIN");
+        await c.query("SELECT set_config('app.current_tenant_id', $1, true)", [t]);
+        await c.query("INSERT INTO public.tenants (id, slug, name) VALUES ($1, $2, 'NS Loc')", [t, `ns-${randomBytes(4).toString("hex")}`]);
+        await c.query("INSERT INTO public.warehouses (tenant_id, code, name) VALUES ($1, 'NS-W', 'NS Depo')", [t]);
+        await c.query("COMMIT");
+      }
+      await c.query("BEGIN");
+      await c.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantA]);
+      const active = await c.query<{ a: boolean }>("SELECT row_security_active('public.locations') AS a");
+      expect(active.rows).toEqual([{ a: true }]);
+      const wh = await c.query<{ id: string }>("SELECT id FROM public.warehouses");
+      expect(wh.rows).toHaveLength(1);
+      let err: (Error & { code?: string }) | undefined;
+      try {
+        await c.query(
+          "INSERT INTO public.locations (tenant_id, warehouse_id, code, name, depth, kind) VALUES ($1, $2, 'NS-L', 'NS Konum', 0, 'STORAGE')",
+          [tenantB, (wh.rows[0] as { id: string }).id],
+        );
+      } catch (e) {
+        err = e as Error & { code?: string };
+      }
+      await c.query("ROLLBACK");
+      expect(err?.code).toBe("42501");
+      expect(err?.message).toContain("row-level security policy");
+    });
+  });
+
   // Her bekçi testi: tenant bağlamında tek kalıcı satır; staging down RAISE eder, satır yerinde kalır; ci down geçer.
   async function guardCase(opts: { target: string; fail: string; down: RegExp; table: string; insert: string; keep: string }): Promise<void> {
     await setProbeMemberships(STANDARD_GRANT);

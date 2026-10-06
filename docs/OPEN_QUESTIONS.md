@@ -53,6 +53,7 @@ Q-48 | Belge satırında `reversed_quantity <= quantity` üst sınırı hangi bi
 Q-49 | Durum değiştiren taşımada (ör. AVAILABLE → QUARANTINE) belge satırı hedef stok durumunu nerede taşır? Satırda tek `stock_status` var | T-206, ADR-017 | açık — T-217/T-232 öncesi netleşmeli
 Q-50 | Stok defteri `reason` için izinli değer kümesi nedir (sabit kod listesi mi, serbest metin mi)? Şimdilik yalnızca boş olmama CHECK'i | T-232 | açık — T-213/T-217 komut katmanı kodları belirleyince CHECK daraltılır
 Q-51 | Stok defteri `actor_user_id` zorunlu mu (sistem/worker hareketleri)? Şimdilik nullable, FK yok | T-232 | açık — 0012 geçmiş yazıcısıyla tutarlı karar T-213'te
+Q-52 | Stok defteri satırı hangi belge durumunda yazılabilir (senkron yol ≤200 satır `posting_job_id`'siz; asenkron yol APPROVED+posting_job_id; ters kayıt belgesi)? DB şimdilik belge durumuna bakmıyor | T-232 inceleme MINOR-5, ADR-018 §2 | açık — T-213/T-217 posting akışıyla DB kuralı (tetikleyici, FOR SHARE) eklenir
 
 ## Varsayımlar
 A-01 | Neon pooler'ı transaction-mode PgBouncer'dır (kullanıcı kararı kaydı, 2026-10-05) — **teyit edildi 2026-10-05, sürüm hariç** (belge + T-005d koşu 3 çoklama gözlemi, https://github.com/shosgoren/2027-WMS-1/actions/runs/37388724069); PgBouncer sürümü gözlenemedi | Neon pooler türünü/kipini değiştirdiğini duyurana veya yeniden spike aksini gösterene kadar | Q-02
