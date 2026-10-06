@@ -18,6 +18,10 @@ Kaynak sözdizimi: `<dosya>#<json.yolu>` (package.json alanı) veya `docker-comp
 | React DOM | react-dom | 19.3.0 | apps/web/package.json#dependencies.react-dom | ADR-001 |
 | React tipleri | @types/react | 19.3.0 | apps/web/package.json#devDependencies.@types/react | ADR-001 |
 | React DOM tipleri | @types/react-dom | 19.3.0 | apps/web/package.json#devDependencies.@types/react-dom | ADR-001 |
+| React (packages/ui) | react | 19.3.0 | packages/ui/package.json#dependencies.react | ADR-001, T-110 |
+| React DOM (packages/ui) | react-dom | 19.3.0 | packages/ui/package.json#dependencies.react-dom | ADR-001, T-110 |
+| React tipleri (packages/ui) | @types/react | 19.3.0 | packages/ui/package.json#devDependencies.@types/react | ADR-001, T-110 |
+| React DOM tipleri (packages/ui) | @types/react-dom | 19.3.0 | packages/ui/package.json#devDependencies.@types/react-dom | ADR-001, T-110 |
 | PostgreSQL (yerel/CI) | postgres | 18.6-trixie | docker-compose.yml#postgres | ADR-004; digest sha256:5a5a84b19854a9ffaa54082c166ff4ec27473a361e496e5ea167f298f2da9722 |
 | PgBouncer (yerel/CI, transaction mode) | edoburu/pgbouncer | v1.26.0-p0 | docker-compose.yml#pgbouncer | ADR-004 |
 | MinIO (yerel/CI) | alpine/minio | RELEASE.2025-10-15T17-29-55Z | docker-compose.yml#minio | ADR-006 |
@@ -31,10 +35,12 @@ Kaynak sözdizimi: `<dosya>#<json.yolu>` (package.json alanı) veya `docker-comp
 | Neon pooler | — | — PgBouncer transaction (belge); sürüm gözlenemedi (Q-02 açık) | | ADR-004 |
 | Prepared statement ayarı | — | — `prepare=false` (üretim, T-005d kapı koşusu; Q-04 kapandı); kod kaynağı `packages/db` `DB_CLIENT_SETTINGS` | | ADR-004 |
 | Kuyruk kütüphanesi | — | — pg-boss seçildi (ADR-005 eki 2026-10-05); sürüm ilk kuyruk kartında kilitlenir (aday 12.36.0) | | ADR-005 |
-| Tailwind CSS | tailwindcss | — ilk kullanan kart | | |
-| Shadcn/Radix, Lucide | — | — ilk kullanan kart | | |
+| Tailwind CSS | tailwindcss | 4.3.3 | apps/web/package.json#dependencies.tailwindcss | T-109 |
+| Tailwind PostCSS eklentisi | @tailwindcss/postcss | 4.3.3 | apps/web/package.json#dependencies.@tailwindcss/postcss | T-109 |
+| Shadcn/Radix | — | — ilk kullanan kart | | |
+| Lucide | lucide-react | 1.52.0 | packages/ui/package.json#dependencies.lucide-react | T-110 |
 | TanStack Query / Virtual | @tanstack/* | — ilk kullanan kart | | |
-| next-intl | next-intl | — ilk kullanan kart | | |
+| next-intl | next-intl | 4.14.9 | apps/web/package.json#dependencies.next-intl | T-109, ADR-002 |
 | Zod | zod | — ilk kullanan kart | | |
 
 Sürüm notları (kaynak: kurulu `package.json`/`pnpm-lock.yaml`, 2026-10-05):
@@ -54,7 +60,7 @@ Sürüm notları (kaynak: kurulu `package.json`/`pnpm-lock.yaml`, 2026-10-05):
 | DB | Neon PostgreSQL 18 (`aws-eu-central-1`) + transaction-mode PgBouncer pooler; teknik alanlar T-005d ile dolduruldu, pooler sürümü gözlenemedi (Q-02) | ADR-004 (kabul) |
 | Kuyruk | Postgres kuyruğu (Faz 0–4); kütüphane pg-boss (ADR-005 eki) | ADR-005 (kabul) |
 | Dosya | S3 uyumlu özel bucket; yerelde MinIO; prod sağlayıcısı ADR-007 | ADR-006 (kabul) |
-| Web arayüzü | TypeScript strict, Tailwind, Shadcn/Radix, Lucide | — (ilk kullanan kart) |
+| Web arayüzü | TypeScript strict, Tailwind, Shadcn/Radix, Lucide (lucide-react 1.52.0, T-110) | — (Shadcn/Radix: ilk kullanan kart) |
 | Durum/veri | TanStack Query, TanStack Virtual, Zustand (gerektiğinde) | — |
 | Validasyon / i18n | Zod / next-intl | — |
 | Test | Vitest, Testcontainers, Playwright, k6, fast-check | — |

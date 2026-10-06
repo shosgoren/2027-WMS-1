@@ -1,0 +1,21 @@
+{
+  "shell": {
+    "productName": "Etkin WMS",
+    "easyMode": "Easy mode",
+    "skipToContent": "Skip to content",
+    "viewSwitch": {
+      "label": "View",
+      "flow": "Flow",
+      "cockpit": "Cockpit"
+    },
+    "userChip": {
+      "label": "User",
+      "placeholderName": "Not signed in",
+      "placeholderInitials": "?"
+    },
+    "help": {
+      "full": "Call for help",
+      "short": "Help"
+    }
+  }
+}

@@ -1,4 +1,8 @@
 import type { NextConfig } from "next";
+import createNextIntlPlugin from "next-intl/plugin";
+
+// Yönlendirmesiz next-intl: istek yapılandırması i18n/request.ts (T-109).
+const withNextIntl = createNextIntlPlugin("./i18n/request.ts");
 
 // Tüm yanıtlara güvenlik başlıkları (T-010 security-reviewer MINOR). HSTS yalnızca HTTPS üzerinden
 // tarayıcıda etkilidir (Fly `force_https`); çerçeveleme hem X-Frame-Options hem CSP ile kapalı.
@@ -20,4 +24,4 @@ const nextConfig: NextConfig = {
   },
 };
 
-export default nextConfig;
+export default withNextIntl(nextConfig);
