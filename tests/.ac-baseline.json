@@ -1,6 +1,6 @@
 {
   "acTests": {
-    "AC-04": 40,
+    "AC-04": 58,
     "AC-05": 2,
     "AC-18": 9,
     "AC-28": 59,
@@ -13,7 +13,10 @@
     "tests/guards/ac-43.test.mjs": 37,
     "tests/guards/ac-44.test.mjs": 42,
     "tests/integration/ac/ac-04-api-slug.int.test.ts": 46,
+    "tests/integration/ac/ac-04-coverage.int.test.ts": 12,
     "tests/integration/ac/ac-04-db-isolation.int.test.ts": 81,
+    "tests/integration/ac/ac-04-export-route.int.test.ts": 50,
+    "tests/integration/ac/ac-04-file-cache.int.test.ts": 58,
     "tests/integration/ac/ac-05-pooler-isolation.int.test.ts": 15,
     "tests/integration/ac/ac-18-membership-db.int.test.ts": 21,
     "tests/integration/ac/ac-28-runtime.int.test.ts": 16,
