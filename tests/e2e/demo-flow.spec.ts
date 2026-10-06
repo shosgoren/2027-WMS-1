@@ -38,9 +38,21 @@ async function expectNoCspViolations(page: Page, where: string): Promise<void> {
   expect(v, `${where}: CSP ihlali`).toEqual([]);
 }
 
-/** Sorgu/parça atılır (G-09: URL'de belirteç olsa bile loga girmez). */
+/** Belirteç taşıyan yol parçaları (davet, parola sıfırlama vb.) ve uzun belirteç benzeri dizgiler maskelenir (G-09). */
+const TOKEN_PATH = /\/(invite|reset-password|verify-email|magic-link)\/[^/?#\s"')]+/g;
+const TOKEN_LIKE = /[A-Za-z0-9_-]{24,}/g;
+function maskTokens(raw: string): string {
+  return raw.replace(TOKEN_PATH, "/$1/[token]").replace(TOKEN_LIKE, "[redacted]");
+}
+
+/** Sorgu/parça atılır, yol belirteçleri maskelenir (G-09: URL'de belirteç olsa bile loga girmez). */
 function stripUrl(raw: string): string {
-  return raw.split("#")[0]?.split("?")[0] ?? raw;
+  return maskTokens(raw.split("#")[0]?.split("?")[0] ?? raw);
+}
+
+/** Serbest metindeki (konsol, pageerror, CSP blockedURI) URL'ler `stripUrl`'den geçer; kalan metinde belirteçler maskelenir. */
+function scrubText(raw: string): string {
+  return maskTokens(raw.replace(/https?:\/\/[^\s"'<>)]+/g, (u) => stripUrl(u)));
 }
 
 /**
@@ -52,10 +64,10 @@ function collectDiagnostics(page: Page): () => Promise<unknown> {
   const pageErrors: string[] = [];
   const failed: string[] = [];
   page.on("console", (m) => {
-    if (m.type() === "error" || m.type() === "warning") consoleErrors.push(`${m.type()}: ${m.text().slice(0, 500)} @ ${stripUrl(m.location().url)}`);
+    if (m.type() === "error" || m.type() === "warning") consoleErrors.push(`${m.type()}: ${scrubText(m.text()).slice(0, 500)} @ ${stripUrl(m.location().url)}`);
   });
-  page.on("pageerror", (e) => pageErrors.push(String(e.message).slice(0, 500)));
-  page.on("requestfailed", (r) => failed.push(`FAILED ${r.method()} ${stripUrl(r.url())} ${r.failure()?.errorText ?? ""}`));
+  page.on("pageerror", (e) => pageErrors.push(scrubText(String(e.message)).slice(0, 500)));
+  page.on("requestfailed", (r) => failed.push(`FAILED ${r.method()} ${stripUrl(r.url())} ${scrubText(r.failure()?.errorText ?? "")}`));
   page.on("response", (r) => {
     if (r.status() >= 400) failed.push(`${r.status()} ${r.request().method()} ${stripUrl(r.url())}`);
   });
@@ -85,7 +97,8 @@ function collectDiagnostics(page: Page): () => Promise<unknown> {
 
 async function reportDiagnostics(testInfo: TestInfo, flush: () => Promise<unknown>): Promise<void> {
   if (testInfo.status === testInfo.expectedStatus) return;
-  const payload = await flush();
+  // Son savunma: tüm çıktı (sayfa durumu, CSP blockedURI dahil) maskelenir.
+  const payload: unknown = JSON.parse(scrubText(JSON.stringify(await flush())));
   const body = JSON.stringify(payload, null, 2);
   await testInfo.attach("t247-diagnostics.json", { body, contentType: "application/json" });
   console.log(`T247-DIAG ${testInfo.project.name} ${JSON.stringify(payload)}`);
