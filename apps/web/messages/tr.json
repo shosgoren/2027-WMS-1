@@ -552,6 +552,9 @@
       "created": "Stok rezerve ettin.",
       "released": "Bir rezervasyonu serbest bıraktın."
     },
+    "external_ref": {
+      "linked": "Bir dış sistem referansı bağladın veya güncelledin."
+    },
     "other": "Bir işlem yaptın."
   },
   "auditLog": {

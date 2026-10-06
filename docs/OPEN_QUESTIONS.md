@@ -224,3 +224,10 @@ A-150 | İade satırında `returned` için üst sınır CHECK'i yok (sınır kom
 A-151 | Sipariş ve iade miktarları ürünün temel biriminde; kabul satırı birim + katsayı taşır | I-09 | T-301
 A-152 | Belge kaynak bağlantısı polimorfik (FK yok); DB tür beyaz listesi ve 'ikisi birlikte dolu/boş' kuralını zorlar, kaynağın varlığı komutun işi | ADR-021 | T-301
 A-153 | İade durum kümesi kabul belgesiyle aynı (DRAFT, OPEN, CLOSED, CANCELLED) | Q-75 | T-301
+A-252-1 | `external_refs` polimorfiktir (entity_type + entity_id): bileşik FK yok (0018 code_history deseni); tenant sınırı RLS USING+WITH CHECK, varlığın aynı tenant'ta varlığı komutta RLS altında doğrulanır (DB tetikleyicisi AC-04 RLS-hata sözleşmesini bozardı) | ADR-021 / T-251 deseni | T-252
+A-252-2 | Dış referans/imleç komutları ve okumaları `settings.manage` ister (yalnız TENANT_ADMIN, A-68); ayrı `integration.manage` izni Faz 6'da eklenir | A-45 | T-252
+A-252-3 | `EXTERNAL_REF_CONFLICT` `packages/shared` hata kodu DEĞİL: domain'de `ExternalRefConflictError` (AppError alt sınıfı, code VALIDATION_FAILED, `reason`); HTTP/i18n eşlemesi Faz 6 | 15-engineering §API sözleşmesi | T-252
+A-252-4 | PARTY için tablo yok: varlık-var denetimi kapalı (dış kimlik doğrulanmadan bağlanır); cari tablosu gelince açılır | Faz 6 cari otoritesi | T-252
+A-252-5 | Defterde `ledger_seq` yok: dışa aktarım imleci (created_xid, id) sırasıdır (`cursor_xid` bigint + `cursor_id` uuid); tek akış `LEDGER`; outbox akışı adaptörle (Faz 6) eklenir | ADR-019 | T-252
+A-252-6 | `listUnsynced` yalnız `created_xid < pg_snapshot_xmin(pg_current_snapshot())` satırlarını verir: düşük xid'li geç commit'li işlem imleci aşıp atlanmaz; yan etki: uzun açık işlem listeyi geciktirir | I-04 | T-252
+A-252-7 | Bir varlık başka dış kimliğe bağlıyken yeniden bağlama (ve dış kimliğin başka varlığa taşınması) EXTERNAL_REF_CONFLICT'tir; bağlantı kaldırma/devretme komutu bu kartta yok (DELETE yetkisi yok) | 09-integrations mutabakat | T-252

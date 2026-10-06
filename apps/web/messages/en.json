@@ -552,6 +552,9 @@
       "created": "You reserved stock.",
       "released": "You released a reservation."
     },
+    "external_ref": {
+      "linked": "You linked or updated an external system reference."
+    },
     "other": "You did something."
   },
   "auditLog": {
