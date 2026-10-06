@@ -14,7 +14,7 @@
     "tests/guards/ac-43.test.mjs": 37,
     "tests/guards/ac-44.test.mjs": 42,
     "tests/integration/ac/ac-04-api-slug.int.test.ts": 46,
-    "tests/integration/ac/ac-04-db-isolation.int.test.ts": 93,
+    "tests/integration/ac/ac-04-db-isolation.int.test.ts": 94,
     "tests/integration/ac/ac-04-export-route.int.test.ts": 50,
     "tests/integration/ac/ac-04-file-cache.int.test.ts": 59,
     "tests/integration/ac/ac-05-pooler-isolation.int.test.ts": 15,
