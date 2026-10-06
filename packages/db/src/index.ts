@@ -75,3 +75,6 @@ export type { AuditLog, NewAuditLog, NewRequestRateLimit, RequestRateLimit } fro
 export { consumeRateLimit } from "./rate-limit.ts";
 export type { ConsumeRateLimitParams, ConsumeRateLimitResult } from "./rate-limit.ts";
 export { sameConnectionTarget } from "./connection-target.ts";
+// Sağlık yoklamaları (T-129): `/api/health` DB ve kuyruk şeması erişimi (satır okumaz).
+export { pingDatabase, pingQueueSchema } from "./health.ts";
+export type { ProbeResult } from "./health.ts";

@@ -1,0 +1,46 @@
+# Etkin WMS — zamanlanmış uptime denetimi (T-129, A-44). KORUNAN DOSYA (PROTOCOL §3b).
+# Staging'i 15 dakikada bir yoklar: `/api/health` (HTTP 200, status/db/queue ok) ve `/login` (HTTP 200 + demo bandı metni);
+# her istek için yanıt süresi eşiği ve soğuk başlatma için 1 yeniden deneme `scripts/uptime-check.mjs` içindedir.
+# Alarm kanalı (A-44): başarısız iş = kırmızı koşu = GitHub bildirimi (Faz 4P'ye kadar başka kanal yok).
+#
+# Sır YOK: hedef herkese açık adrestir; iş akışı hiçbir sır/değişken okumaz, checkout kimlik bilgisi saklamaz,
+# `permissions: contents: read`. Üçüncü taraf kodu: action'lar tam commit SHA ile sabit (ci.yml ile aynı sürümler).
+# Not: GitHub `schedule` yalnızca VARSAYILAN daldaki tanımla koşar (main'e birleşene kadar yalnızca workflow_dispatch);
+# zamanlanmış koşular yoğun saatlerde gecikebilir/atlanabilir (GitHub belgesi) — kesin 15 dk aralığı garanti değildir.
+name: uptime
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+# Aynı anda tek denetim; gecikmiş koşular üst üste binmez.
+concurrency:
+  group: uptime
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+# .pnpmfile kodu hiçbir adımda yüklenmez (ci.yml ile aynı savunma; bu iş bağımlılık kurmaz).
+env:
+  npm_config_ignore_pnpmfile: "true"
+
+jobs:
+  uptime:
+    name: uptime
+    runs-on: ubuntu-24.04
+    # En kötü durum: 2 deneme x 20 sn zaman aşımı x 2 denetim + bekleme; geri kalanı kuyruk/kurulum payı.
+    timeout-minutes: 5
+    env:
+      BASE_URL: https://etkin-wms-staging.fly.dev
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Node sürümü package.json "engines.node" alanından (betik yalnızca yerleşik fetch kullanır).
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: package.json
+      - name: Uptime denetimi
+        run: node scripts/uptime-check.mjs --base-url "$BASE_URL" --expect-text "Demo ortamı" --max-ms 3000

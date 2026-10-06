@@ -9,6 +9,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { runTenantQuery, type TenantAccessParams } from "@wms/domain/identity/access";
 import { AppError, type AppErrorBody } from "@wms/shared/errors";
+import { requestIdFrom } from "@wms/shared/log";
 import { RateLimitedError, clientIp, createProductionLimiter, type RateLimiter } from "./rate-limit.ts";
 
 /** Sarmalayıcının ihtiyaç duyduğu principal şekli (`@wms/auth` `Principal` atanabilir). */
@@ -119,9 +120,11 @@ export function createActionGuard(deps: GuardDeps) {
     handler: (input: z.infer<S>, ctx: ActionContext) => Promise<R>,
   ): (raw: unknown) => Promise<ActionResult<R>> {
     return async (raw) => {
-      const requestId = deps.newRequestId();
+      let requestId = deps.newRequestId();
       try {
         const headers = await deps.getHeaders();
+        // T-129: `proxy.ts` yalnızca UUID biçimli kimliği iletir; yanıttaki istek kimliği günlük/yanıt başlığıyla aynıdır.
+        requestId = requestIdFrom(headers) ?? requestId;
         const origin = assertOrigin(deps, headers);
         await limit(deps, "ip", ipOf(deps, headers));
         const principal = await deps.resolvePrincipal(headers);
@@ -176,7 +179,7 @@ export function createRouteGuard(deps: GuardDeps) {
     handler: (request: Request, ctx: RouteContext) => Promise<Response>,
   ): (request: Request) => Promise<Response> {
     return async (request) => {
-      const requestId = deps.newRequestId();
+      const requestId = requestIdFrom(request.headers) ?? deps.newRequestId();
       try {
         const headers = request.headers;
         if (!["GET", "HEAD", "OPTIONS"].includes(request.method.toUpperCase())) assertOrigin(deps, headers);
