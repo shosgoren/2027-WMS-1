@@ -12,6 +12,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { APIError, createAuthMiddleware, getIP, getSessionFromCtx, isAPIError } from "better-auth/api";
 import { betterAuth } from "better-auth";
+import type { BetterAuthOptions } from "better-auth";
 import { nextCookies } from "better-auth/next-js";
 import { twoFactor } from "better-auth/plugins/two-factor";
 import { sql } from "drizzle-orm";
@@ -243,7 +244,7 @@ const SECURITY_EVENT = Object.freeze({
 export interface Principal {
   readonly userId: string;
   readonly sessionId: string;
-  /** Oturum oluşturma zamanı (son kimlik doğrulama; yeniden doğrulama kaydı T-112b). */
+  /** Oturum oluşturma zamanı (son kimlik doğrulama; yeniden doğrulama kaydı T-112c). */
   readonly authenticatedAt: Date;
   /** Oturum düzeyi MFA: `sessions.mfa_verified_at IS NOT NULL` (ADR-014 §12). */
   readonly mfaVerified: boolean;
@@ -370,30 +371,35 @@ function createRateLimitStorage(client: DbClient) {
       const last = Number(current[0]?.last_request ?? now);
       return { allowed: false, retryAfter: Math.max(1, Math.ceil((last + windowMs - now) / 1000)) };
     },
-    /** Sayacı ARTIRMADAN kilit durumunu okur (e-posta başına başarısız giriş kilidi: yalnızca başarısızlık sayılır). */
-    async peek(key: string, rule: { window: number; max: number }): Promise<{ locked: boolean; retryAfter: number | null }> {
-      const now = Date.now();
-      const windowMs = rule.window * 1000;
-      const rows = await db.execute<{ count: number; last_request: string | number }>(
-        sql`SELECT count, last_request FROM public.auth_rate_limits WHERE key_hash = ${sha256Hex(key)}`,
+    /**
+     * Rezervasyonu geri alır (başarılı giriş): sayaç 1 azalır (0'ın altına inmez). SIFIRLAMAZ: önceki başarısızlıklar
+     * (rezerve edilmiş, geri alınmamış) pencerede kalır → A-41 "5 BAŞARISIZ deneme" anlamı korunur.
+     */
+    async refund(key: string): Promise<void> {
+      await db.execute(
+        sql`UPDATE public.auth_rate_limits SET count = GREATEST(count - 1, 0) WHERE key_hash = ${sha256Hex(key)}`,
       );
-      const row = rows[0];
-      if (row === undefined) return { locked: false, retryAfter: null };
-      const last = Number(row.last_request);
-      if (Number(row.count) >= rule.max && now - last < windowMs) {
-        return { locked: true, retryAfter: Math.max(1, Math.ceil((last + windowMs - now) / 1000)) };
-      }
-      return { locked: false, retryAfter: null };
     },
   };
 }
 
 /** A-37: bayrak kapalıyken `undefined` — `socialProviders` anahtarı yapılandırmaya hiç eklenmez. */
-export function socialProvidersFor(
-  env: AuthEnv,
-): { google: { clientId: string; clientSecret: string }; microsoft: { clientId: string; clientSecret: string } } | undefined {
+export function socialProvidersFor(env: AuthEnv):
+  | { google: SocialProviderConfig; microsoft: SocialProviderConfig }
+  | undefined {
   if (!env.socialEnabled || env.google === null || env.microsoft === null) return undefined;
-  return { google: { ...env.google }, microsoft: { ...env.microsoft } };
+  // MAJOR-2: örtük kayıt kapalı. `disableImplicitSignUp` tek başına YETMEZ: istemci `requestSignUp: true` göndererek
+  // aşar (api/routes/sign-in.mjs:197, callback.mjs:181: `disableImplicitSignUp && !requestSignUp`). `disableSignUp`
+  // (oauth-provider.d.mts:232/333; link-account.mjs:256) istemciden aşılamaz → kayıt kapısı (SIGNUP_ENABLED) ile aynı.
+  const gate = { disableImplicitSignUp: true, disableSignUp: !env.signupEnabled } as const;
+  return { google: { ...env.google, ...gate }, microsoft: { ...env.microsoft, ...gate } };
+}
+
+interface SocialProviderConfig {
+  readonly clientId: string;
+  readonly clientSecret: string;
+  readonly disableImplicitSignUp: true;
+  readonly disableSignUp: boolean;
 }
 
 // Sızıntıyı KAYNAĞINDA kesme: drizzle-orm 0.45.3 her sorgu hatasını `DrizzleQueryError` (mesaj: "Failed query:
@@ -519,6 +525,18 @@ async function masked<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
+const authOptionsByService = new WeakMap<AuthService, BetterAuthOptions>();
+
+/**
+ * YALNIZCA test/inceleme: `createAuth` ile kurulan örneğin etkin Better Auth seçenekleri (`auth.options`). Üretim kodu
+ * bunu kullanmaz; Better Auth nesnesi dar yüzeyin dışına çıkmaz.
+ */
+export function inspectAuthOptions(service: AuthService): BetterAuthOptions {
+  const options = authOptionsByService.get(service);
+  if (options === undefined) throw new AuthConfigError("inspectAuthOptions: service was not created by createAuth");
+  return options;
+}
+
 /** Better Auth yapılandırmasını kurar ve dar yüzeyi döndürür. */
 export function createAuth(params: CreateAuthParams): AuthService {
   const { client, eventClient, env } = params;
@@ -583,6 +601,54 @@ export function createAuth(params: CreateAuthParams): AuthService {
         ? sql`DELETE FROM public.sessions WHERE user_id = ${userId}::uuid`
         : sql`DELETE FROM public.sessions WHERE user_id = ${userId}::uuid AND token <> ${keepToken}`,
     );
+  }
+
+  /**
+   * Fail-closed iptal (MINOR-1/2): `keepToken` dışındaki oturumlar silinemezse sırayla (2) kullanıcının TÜM oturumları
+   * (mevcut dahil; yeniden giriş gerekir), (3) mevcut/yeni oturum belirteçleri silinir ve istek HATA ile biter.
+   * Eski `mfa_verified_at`'lı oturum sağ kalmasın diye başarı yanıtı asla dönmez.
+   */
+  async function revokeFailClosed(userId: string, keepToken: string | null, selfTokens: readonly (string | undefined)[]): Promise<void> {
+    try {
+      await revokeOtherSessions(userId, keepToken);
+      return;
+    } catch (error) {
+      logMasked("error", "revoke other sessions failed; failing closed", error);
+    }
+    if (keepToken !== null) {
+      try {
+        await revokeOtherSessions(userId, null);
+      } catch (error) {
+        logMasked("error", "revoke all sessions failed; deleting current session only", error);
+        for (const token of selfTokens) {
+          if (token === undefined) continue;
+          try {
+            await authDb.execute(sql`DELETE FROM public.sessions WHERE token = ${token}`);
+          } catch (inner) {
+            logMasked("error", "current session delete failed", inner);
+          }
+        }
+      }
+    } else {
+      for (const token of selfTokens) {
+        if (token === undefined) continue;
+        try {
+          await authDb.execute(sql`DELETE FROM public.sessions WHERE token = ${token}`);
+        } catch (inner) {
+          logMasked("error", "current session delete failed", inner);
+        }
+      }
+    }
+    throw new APIError("INTERNAL_SERVER_ERROR", { message: "SESSION_POLICY_FAILED", code: "SESSION_POLICY_FAILED" });
+  }
+
+  /** İsteği yapan oturumun belirteci (kancalarda `ctx.context.session` yoksa çerezden). */
+  async function currentTokenOf(ctx: Parameters<typeof getSessionFromCtx>[0]): Promise<string | undefined> {
+    try {
+      return (ctx.context.session ?? (await getSessionFromCtx(ctx)))?.session.token;
+    } catch {
+      return undefined;
+    }
   }
 
   const auth = betterAuth({
@@ -701,10 +767,15 @@ export function createAuth(params: CreateAuthParams): AuthService {
             throw new APIError("FORBIDDEN", { message: "DEMO_FORBIDDEN", code: "DEMO_FORBIDDEN" });
           }
         }
-        // A-41: e-posta başına başarısız giriş kilidi (IP'den bağımsız); yalnızca başarısızlıklar sayılır (after).
+        // A-41 / MAJOR-1: e-posta başına başarısız giriş kilidi, IP'den bağımsız. Denetim ve ayırma TEK atomik adım
+        // (kütüphanenin kendi sınırlayıcısı gibi: rate-limiter/index.mjs:281-297 tek ifade): her deneme Argon2'den ÖNCE
+        // rezerve edilir (sayaç artar; eşik aşıldıysa 429). Böylece paralel istekler denetim–artırma arasındaki
+        // boşluktan geçemez (eşik+1'den fazlası parola doğrulamasına ulaşamaz). Başarılı girişte rezerv geri alınır
+        // (after: sayaç -1, sıfırlama değil) → yalnızca BAŞARISIZ denemeler pencerede kalır. Bayrak gerekmez: after
+        // yalnızca before geçildiyse çalışır.
         if (ctx.path === "/sign-in/email" && typeof ctx.body?.email === "string") {
-          const lock = await rateStore.peek(emailRateKey("signin-fail", ctx.body.email), EMAIL_RATE_RULES.failedSignIn);
-          if (lock.locked) throw new APIError("TOO_MANY_REQUESTS", { message: "RATE_LIMITED", code: "RATE_LIMITED" });
+          const verdict = await rateStore.consume(emailRateKey("signin-fail", ctx.body.email), EMAIL_RATE_RULES.failedSignIn);
+          if (!verdict.allowed) throw new APIError("TOO_MANY_REQUESTS", { message: "RATE_LIMITED", code: "RATE_LIMITED" });
         }
         if (ctx.path === "/request-password-reset") {
           // A-41: e-posta başına sıfırlama talebi sınırı (kullanıcı var/yok ayrımı yok: her e-posta aynı kurala tabi).
@@ -734,13 +805,14 @@ export function createAuth(params: CreateAuthParams): AuthService {
           case "/sign-in/email": {
             if (failed) {
               const email = typeof ctx.body?.email === "string" ? ctx.body.email : undefined;
-              if (email !== undefined) await rateStore.consume(emailRateKey("signin-fail", email), EMAIL_RATE_RULES.failedSignIn);
               const known = email === undefined ? null : await ctx.context.internalAdapter.findUserByEmail(email.toLowerCase());
               await emit(SECURITY_EVENT.loginFailed, known?.user.id ?? null, source, options, {
                 reason: (ctx.context.returned as APIError).body?.code ?? "UNKNOWN",
               });
               return;
             }
+            // Başarılı giriş: rezervasyon geri alınır (başarısız denemeler sayılmaya devam eder).
+            if (typeof ctx.body?.email === "string") await rateStore.refund(emailRateKey("signin-fail", ctx.body.email));
             const created = ctx.context.newSession;
             if (!created) return;
             // 2FA'lı kullanıcıda oturum, eklentinin kancasında (bu kancadan sonra) silinir; giriş tamamlanmadı.
@@ -787,7 +859,9 @@ export function createAuth(params: CreateAuthParams): AuthService {
             // M5: parola değişiminde diğer tüm oturumlar iptal (istemci `revokeOtherSessions` göndermese de).
             const fresh = ctx.context.newSession;
             const current = fresh ?? (await getSessionFromCtx(ctx));
-            if (current !== null && current !== undefined) await revokeOtherSessions(current.user.id, current.session.token);
+            if (current !== null && current !== undefined) {
+              await revokeFailClosed(current.user.id, current.session.token, [current.session.token, fresh?.session.token]);
+            }
             await emit(SECURITY_EVENT.passwordChanged, current?.user.id ?? null, source, options);
             return;
           }
@@ -806,11 +880,11 @@ export function createAuth(params: CreateAuthParams): AuthService {
             const enabling = ctx.path === "/two-factor/verify-totp" || ctx.path === "/two-factor/enable";
             if (enabling && user.twoFactorEnabled === true) {
               // M5: 2FA etkinleştirmede tüm eski oturumlar iptal; eklenti hemen ardından yeni oturum açar.
-              await revokeOtherSessions(user.id, null);
+              await revokeFailClosed(user.id, null, [await currentTokenOf(ctx)]);
               await emit(SECURITY_EVENT.twoFactorEnabled, user.id, ctx.request ?? ctx.headers, ctx.context.options);
             } else if (ctx.path === "/two-factor/disable" && user.twoFactorEnabled === false) {
               // M5: devre dışı bırakmada tüm eski oturumlar iptal; yeni oturum eklentinin ardından açılır.
-              await revokeOtherSessions(user.id, null);
+              await revokeFailClosed(user.id, null, [await currentTokenOf(ctx)]);
               await emit(SECURITY_EVENT.twoFactorDisabled, user.id, ctx.request ?? ctx.headers, ctx.context.options);
             }
           },
@@ -829,7 +903,7 @@ export function createAuth(params: CreateAuthParams): AuthService {
     ],
   });
 
-  return {
+  const service: AuthService = {
     async handler(request) {
       try {
         return await auth.handler(request);
@@ -856,9 +930,9 @@ export function createAuth(params: CreateAuthParams): AuthService {
       };
     },
 
-    // M5 / T-112b kapısı: bu kontrol `security_events` olaylarına (`reauth.succeeded`) DAYANMAZ; yalnızca
+    // M5 / T-112c kapısı: bu kontrol `security_events` olaylarına (`reauth.succeeded`) DAYANMAZ; yalnızca
     // oturum `createdAt` ve DB `now()` kullanır. `reauth.*` yazımının `wms_auth`'a kısıtlanması migration
-    // ister (tetikleyici) ve bu kartta yoktur → olay tabanlı yeniden doğrulama T-112b'ye kadar KAPALI;
+    // ister (tetikleyici) ve bu kartta yoktur → olay tabanlı yeniden doğrulama T-112c'ye kadar KAPALI;
     // `wms_app` ile `reauth.*` sahteciliği DB'de engellenmemiştir (T-112c).
     async requireRecentAuth(principal, maxAgeSec) {
       if (!Number.isFinite(maxAgeSec) || maxAgeSec < 0) {
@@ -915,6 +989,8 @@ export function createAuth(params: CreateAuthParams): AuthService {
       });
     },
   };
+  authOptionsByService.set(service, auth.options);
+  return service;
 }
 
 // ---------------------------------------------------------------------------------------------
