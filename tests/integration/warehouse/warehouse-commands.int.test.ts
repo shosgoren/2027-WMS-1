@@ -280,7 +280,7 @@ describe("review fixes (T-205 inceleme)", () => {
 
   /**
    * Deterministik yarış: `adm` bağlantısında kapı transaction'ı hedef satırı `FOR NO KEY UPDATE` kilitler; komutlar başlatılır;
-   * `pg_stat_activity` (wait_event_type = 'Lock'; ikinci bekleyen tuple kilidinde ilk bekleyenin ardına dizilir, doğrudan kapıya değil) ile `waiters` bekleyen oturum görülene kadar beklenir; kapı COMMIT edilir (isteğe bağlı `inGate` SQL'i
+   * `pg_blocking_pids` zinciri (özyinelemeli: ikinci bekleyen tuple kilidinde doğrudan kapıya değil ilk bekleyenin ardına dizilir; ilgisiz oturumlar sayılmaz) ile `waiters` bekleyen oturum görülene kadar beklenir; kapı COMMIT edilir (isteğe bağlı `inGate` SQL'i
    * önce çalışır). Kilit kaldırılırsa komut kapıya takılmaz → bekleme zaman aşımıyla test kırmızı olur (mutasyon kanıtı).
    */
   async function gated<T>(lockSql: string, lockParams: unknown[], waiters: number, start: () => Promise<T>, inGate?: string): Promise<T> {
@@ -294,7 +294,12 @@ describe("review fixes (T-205 inceleme)", () => {
       running.catch(() => undefined);
       const deadline = Date.now() + 10_000;
       for (;;) {
-        const n = Number((await adm.query<{ n: string }>("SELECT count(*) AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database() AND pid <> $1", [pid])).rows[0]!.n);
+        const n = Number((await adm.query<{ n: string }>(`WITH RECURSIVE chain(pid) AS (
+               SELECT a.pid FROM pg_stat_activity a WHERE $1 = ANY(pg_blocking_pids(a.pid))
+               UNION
+               SELECT a.pid FROM pg_stat_activity a JOIN chain c ON c.pid = ANY(pg_blocking_pids(a.pid))
+             ) SELECT count(*) AS n FROM chain`,
+          [pid])).rows[0]!.n);
         if (n >= waiters) break;
         if (Date.now() > deadline) throw new Error(`gate: expected ${waiters} blocked sessions, saw ${n}`);
         await sleep(20);
