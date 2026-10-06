@@ -58,8 +58,10 @@ beforeAll(async () => {
   B = await seedWorld(adm, reg, "B205");
 }, 120_000);
 
-afterEach(() => {
+afterEach(async () => {
   delete process.env.WAREHOUSE_SCOPE_ENABLED;
+  // Kapsam satırları testten bağımsız temizlenir (başarısız test sonraki testi etkilemesin).
+  await adm.query("DELETE FROM public.membership_warehouse_scopes WHERE tenant_id = ANY($1::uuid[])", [[A.tenantId, B.tenantId]]);
 });
 
 afterAll(async () => {
@@ -110,7 +112,7 @@ describe("warehouse commands", () => {
     expect((await failure(createWarehouse(picker(A), { code: uniq("p-"), name: "n" }))).code).toBe("FORBIDDEN");
     expect((await failure(createLocation(picker(A), { warehouseId: A.warehouseId, code: uniq("p-"), name: "n", kind: "STORAGE" }))).code).toBe("FORBIDDEN");
     expect((await failure(archiveLocation(picker(A), { locationId: A.childLocationId }))).code).toBe("FORBIDDEN");
-    expect((await failure(setMembershipWarehouseScopes(picker(A), { membershipId: A.memberMembershipId, warehouseIds: [] }))).code).toBe("FORBIDDEN");
+    expect((await failure(setMembershipWarehouseScopes(picker(A), { membershipId: A.memberMembershipId, all: true }))).code).toBe("FORBIDDEN");
     expect((await listWarehouses(picker(A))).items.length).toBeGreaterThan(0);
     expect((await getLocationTree(picker(A), { warehouseId: A.warehouseId })).items.length).toBe(2);
   });
@@ -213,12 +215,99 @@ describe("location commands", () => {
     const wh = await createWarehouse(admin(A), { code, name: "Gizli" });
     const loc = await createLocation(admin(A), { warehouseId: wh.warehouseId, code: "s1", name: "S", kind: "STORAGE" });
     expect((await listWarehouses(admin(B))).items.some((w) => w.id === wh.warehouseId)).toBe(false);
-    expect((await getLocationTree(admin(B), { warehouseId: wh.warehouseId })).items).toEqual([]);
-    expect(await findLocationByCode(admin(B), { warehouseId: wh.warehouseId, code: "s1" })).toBeNull();
+    expect((await failure(getLocationTree(admin(B), { warehouseId: wh.warehouseId }))).code).toBe("NOT_FOUND");
+    expect((await failure(findLocationByCode(admin(B), { warehouseId: wh.warehouseId, code: "s1" }))).code).toBe("NOT_FOUND");
     expect((await failure(archiveLocation(admin(B), { locationId: loc.locationId }))).code).toBe("NOT_FOUND");
     expect((await failure(renameWarehouse(admin(B), { warehouseId: wh.warehouseId, name: "x" }))).code).toBe("NOT_FOUND");
     expect((await failure(createLocation(admin(B), { warehouseId: wh.warehouseId, code: "s2", name: "x", kind: "STORAGE" }))).code).toBe("NOT_FOUND");
     expect((await failure(listWarehouses({ db: app, principal: { userId: A.ownerUserId, mfaVerified: true }, tenantSlug: B.slug }))).code).toBe("NOT_FOUND");
+  });
+});
+
+describe("review fixes (T-205 inceleme)", () => {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  it("A-100: archiveLocation is IN_USE while a count is running (COUNTING)", async () => {
+    const { warehouseId } = await createWarehouse(admin(A), { code: uniq("cn-"), name: "C" });
+    const loc = await createLocation(admin(A), { warehouseId, code: "c1", name: "C", kind: "STORAGE" });
+    await adm.query(
+      "UPDATE public.location_count_locks SET status = 'COUNTING', count_session_id = $2, locked_at = now(), locked_by = $3 WHERE location_id = $1",
+      [loc.locationId, randomUUID(), A.ownerMembershipId],
+    );
+    expect((await failure(archiveLocation(admin(A), { locationId: loc.locationId }))).detail).toBe("IN_USE");
+    await adm.query("UPDATE public.location_count_locks SET status = 'IDLE', count_session_id = NULL, locked_at = NULL, locked_by = NULL WHERE location_id = $1", [loc.locationId]);
+    expect(await archiveLocation(admin(A), { locationId: loc.locationId })).toEqual({ archived: true });
+  });
+
+  it("audit change_summary never carries a code key", async () => {
+    const wh = await createWarehouse(admin(A), { code: uniq("au-"), name: "Au" });
+    const loc = await createLocation(admin(A), { warehouseId: wh.warehouseId, code: "au1", name: "Au1", kind: "STORAGE" });
+    const r = await adm.query<{ change_summary: Record<string, unknown> }>(
+      "SELECT change_summary FROM public.audit_logs WHERE tenant_id = $1 AND entity_id = ANY($2::text[])",
+      [A.tenantId, [wh.warehouseId, loc.locationId]],
+    );
+    expect(r.rows.length).toBe(2);
+    for (const row of r.rows) expect(Object.keys(row.change_summary).some((k) => k.toLowerCase().includes("code"))).toBe(false);
+  });
+
+  it("cursor values beyond depth/code limits are VALIDATION_FAILED (not 500)", async () => {
+    const id = randomUUID();
+    expect((await failure(getLocationTree(admin(A), { warehouseId: A.warehouseId, after: { depth: 40000, code: "A", id } }))).code).toBe("VALIDATION_FAILED");
+    expect((await failure(getLocationTree(admin(A), { warehouseId: A.warehouseId, after: { depth: 0, code: "A".repeat(65), id } }))).code).toBe("VALIDATION_FAILED");
+  });
+
+  it("scope command is closed in a demo tenant (M9)", async () => {
+    const userId = (await adm.query<{ id: string }>("INSERT INTO public.users (name, email) VALUES ('T205 demo', $1) RETURNING id", [`t205-${randomUUID().slice(0, 8)}@example.test`])).rows[0]!.id;
+    const tenantId = randomUUID();
+    const slug = `t205-demo-${randomUUID().slice(0, 8)}`;
+    await adm.query("INSERT INTO public.tenants (id, slug, name, status, is_demo) VALUES ($1, $2, 'T205 demo', 'ACTIVE', true)", [tenantId, slug]);
+    const m = (await adm.query<{ id: string }>("INSERT INTO public.tenant_memberships (tenant_id, user_id, status, is_owner) VALUES ($1, $2, 'ACTIVE', true) RETURNING id", [tenantId, userId])).rows[0]!.id;
+    await adm.query("INSERT INTO public.membership_roles (tenant_id, membership_id, role_key) VALUES ($1, $2, 'TENANT_ADMIN')", [tenantId, m]);
+    const e = await failure(setMembershipWarehouseScopes({ db: app, principal: { userId, mfaVerified: false }, tenantSlug: slug }, { membershipId: m, all: true }));
+    expect(e.code).toBe("FORBIDDEN");
+  });
+
+  async function activeUnderArchived(warehouseId: string): Promise<number> {
+    const r = await adm.query<{ n: string }>(
+      `SELECT count(*) AS n FROM public.locations c
+         LEFT JOIN public.locations p ON p.id = c.parent_id
+         JOIN public.warehouses w ON w.id = c.warehouse_id
+        WHERE c.warehouse_id = $1 AND c.status = 'ACTIVE' AND (p.status = 'ARCHIVED' OR w.status = 'ARCHIVED')`,
+      [warehouseId],
+    );
+    return Number(r.rows[0]?.n);
+  }
+
+  it("race archiveLocation(parent) vs createLocation(child): exactly one wins, no active child under an archived parent", async () => {
+    const { warehouseId } = await createWarehouse(admin(A), { code: uniq("r1-"), name: "R" });
+    for (let i = 0; i < 12; i++) {
+      const parent = await createLocation(admin(A), { warehouseId, code: `p${i}`, name: "P", kind: "STORAGE" });
+      const calls = [
+        () => archiveLocation(admin(A), { locationId: parent.locationId }),
+        () => createLocation(admin(A), { warehouseId, parentId: parent.locationId, code: `c${i}`, name: "C", kind: "STORAGE" }),
+      ];
+      if (i % 2 === 1) calls.reverse();
+      if (i % 3 === 0) await sleep(0);
+      const res = await Promise.allSettled(calls.map((f) => f()));
+      expect(res.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+      const rej = res.find((r) => r.status === "rejected") as PromiseRejectedResult;
+      expect((rej.reason as AppError).detail === "IN_USE" || (rej.reason as AppError).detail === "PARENT_INVALID").toBe(true);
+      expect(await activeUnderArchived(warehouseId)).toBe(0);
+    }
+  });
+
+  it("race archiveWarehouse vs createLocation: exactly one wins, no active location in an archived warehouse", async () => {
+    for (let i = 0; i < 12; i++) {
+      const { warehouseId } = await createWarehouse(admin(A), { code: uniq("r2-"), name: "R" });
+      const calls = [
+        () => archiveWarehouse(admin(A), { warehouseId }),
+        () => createLocation(admin(A), { warehouseId, code: "n1", name: "N", kind: "STORAGE" }),
+      ];
+      if (i % 2 === 1) calls.reverse();
+      const res = await Promise.allSettled(calls.map((f) => f()));
+      expect(res.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+      expect(await activeUnderArchived(warehouseId)).toBe(0);
+    }
   });
 });
 
@@ -236,36 +325,52 @@ describe("warehouse scope (A-77, flag WAREHOUSE_SCOPE_ENABLED)", () => {
     await setMembershipWarehouseScopes(admin(A), { membershipId: A.memberMembershipId, warehouseIds: [A.warehouseId] });
     await expect(check(A, "member", [other])).resolves.toBeUndefined();
     expect((await getLocationTree(picker(A), { warehouseId: other })).items).toEqual([]);
+    expect(await findLocationByCode(picker(A), { warehouseId: other, code: "yok" })).toBeNull();
     expect((await listWarehouses(picker(A))).items.some((w) => w.id === other)).toBe(true);
   });
 
   it("flag on: admin always passes; no scope rows = all; rows restrict to the listed warehouses", async () => {
     process.env.WAREHOUSE_SCOPE_ENABLED = "true";
     const other = await newWarehouse();
-    await setMembershipWarehouseScopes(admin(A), { membershipId: A.memberMembershipId, warehouseIds: [] });
+    await setMembershipWarehouseScopes(admin(A), { membershipId: A.memberMembershipId, all: true });
     await expect(check(A, "member", [other, A.warehouseId])).resolves.toBeUndefined();
     await setMembershipWarehouseScopes(admin(A), { membershipId: A.memberMembershipId, warehouseIds: [A.warehouseId] });
     await expect(check(A, "member", [A.warehouseId])).resolves.toBeUndefined();
     const e = await failure(check(A, "member", [A.warehouseId, other]));
     expect(e.code).toBe("FORBIDDEN");
     expect(e.detail).toBe("WAREHOUSE_OUT_OF_SCOPE");
-    expect((await failure(getLocationTree(picker(A), { warehouseId: other }))).detail).toBe("WAREHOUSE_OUT_OF_SCOPE");
+    // kapsam dışı kart/okuma: varlık sızmaz → NOT_FOUND (var olmayan depoyla aynı yanıt)
+    expect((await failure(getLocationTree(picker(A), { warehouseId: other }))).code).toBe("NOT_FOUND");
+    expect((await failure(findLocationByCode(picker(A), { warehouseId: other, code: "x" }))).code).toBe("NOT_FOUND");
+    expect((await failure(getLocationTree(picker(A), { warehouseId: randomUUID() }))).code).toBe("NOT_FOUND");
     expect((await listWarehouses(picker(A))).items.map((w) => w.id)).toEqual([A.warehouseId]);
     // TENANT_ADMIN kapsam satırı olsa da geçer
     await setMembershipWarehouseScopes(admin(A), { membershipId: A.ownerMembershipId, warehouseIds: [A.warehouseId] });
     await expect(check(A, "owner", [other])).resolves.toBeUndefined();
-    await setMembershipWarehouseScopes(admin(A), { membershipId: A.ownerMembershipId, warehouseIds: [] });
-    await setMembershipWarehouseScopes(admin(A), { membershipId: A.memberMembershipId, warehouseIds: [] });
+    await setMembershipWarehouseScopes(admin(A), { membershipId: A.ownerMembershipId, all: true });
+    await setMembershipWarehouseScopes(admin(A), { membershipId: A.memberMembershipId, all: true });
   });
 
   it("setMembershipWarehouseScopes validates targets, replaces rows and audits; cross-tenant ids are rejected", async () => {
     const w = await newWarehouse();
-    expect(await setMembershipWarehouseScopes(admin(A), { membershipId: A.memberMembershipId, warehouseIds: [w, w, A.warehouseId] })).toEqual({ warehouseIds: [A.warehouseId, w].sort() });
+    expect(await setMembershipWarehouseScopes(admin(A), { membershipId: A.memberMembershipId, warehouseIds: [w, w, A.warehouseId] })).toEqual({
+      changed: true,
+      all: false,
+      warehouseIds: [A.warehouseId, w].sort(),
+    });
+    // aynı liste → changed:false, yeni audit yok
+    const n1 = await auditCount(A.tenantId, "warehouse_scope.changed", A.memberMembershipId);
+    expect((await setMembershipWarehouseScopes(admin(A), { membershipId: A.memberMembershipId, warehouseIds: [A.warehouseId, w] })).changed).toBe(false);
+    expect(await auditCount(A.tenantId, "warehouse_scope.changed", A.memberMembershipId)).toBe(n1);
+    // belirsiz girdiler: boş liste, ikisi birden, hiçbiri
+    for (const bad of [{ warehouseIds: [] }, { all: true, warehouseIds: [w] }, {}]) {
+      expect((await failure(setMembershipWarehouseScopes(admin(A), { membershipId: A.memberMembershipId, ...bad } as never))).code).toBe("VALIDATION_FAILED");
+    }
     expect(await auditCount(A.tenantId, "warehouse_scope.changed", A.memberMembershipId)).toBeGreaterThan(0);
     expect((await failure(setMembershipWarehouseScopes(admin(A), { membershipId: A.memberMembershipId, warehouseIds: [B.warehouseId] }))).code).toBe("NOT_FOUND");
-    expect((await failure(setMembershipWarehouseScopes(admin(A), { membershipId: B.memberMembershipId, warehouseIds: [] }))).code).toBe("NOT_FOUND");
-    expect((await failure(setMembershipWarehouseScopes(admin(A), { membershipId: "x", warehouseIds: [] }))).code).toBe("VALIDATION_FAILED");
-    await setMembershipWarehouseScopes(admin(A), { membershipId: A.memberMembershipId, warehouseIds: [] });
+    expect((await failure(setMembershipWarehouseScopes(admin(A), { membershipId: B.memberMembershipId, all: true }))).code).toBe("NOT_FOUND");
+    expect((await failure(setMembershipWarehouseScopes(admin(A), { membershipId: "x", all: true }))).code).toBe("VALIDATION_FAILED");
+    await setMembershipWarehouseScopes(admin(A), { membershipId: A.memberMembershipId, all: true });
     const rows = await adm.query("SELECT 1 FROM public.membership_warehouse_scopes WHERE membership_id = $1", [A.memberMembershipId]);
     expect(rows.rowCount).toBe(0);
   });

@@ -1,5 +1,9 @@
 // Lokasyon komutları ve okuyucuları (T-205; A-68, A-83, A-86, A-89; 0010 tetikleyicileri).
 //
+// - Eşzamanlılık (READ COMMITTED): `createLocation` depo ve ebeveyn satırını `FOR SHARE` okur; `archiveLocation`/`archiveWarehouse`
+//   hedef satırı `FOR UPDATE` okur (+ `archiveLocation` sayım kilidi satırı `FOR UPDATE`) ve kontrolleri kilitten SONRA yapar →
+//   arşivli ebeveyn/depo altında aktif lokasyon oluşamaz (FK KEY SHARE tek başına NO KEY UPDATE ile çakışmaz).
+// - Kapsam dışı depo/lokasyon `NOT_FOUND` (varlık sızmaz); stok komutları `assertWarehouseInScope` ile `FORBIDDEN` verir.
 // - Yazma `settings.manage`, okuma `stock.view`; her yazma aynı transaction'da `appendAudit`. Ham INSERT açık sütunlarla
 //   (sütun düzeyi yetki, bkz. warehouses.ts). `code`/`depth`/`parent_id`/`warehouse_id` değişmez (A-83; tetikleyici zorlar).
 // - `depth` = ebeveyn + 1 (tetikleyici de doğrular, fail-closed). `TRANSIT` yalnızca kök düzeyde. Sayım kilidi satırı 0010
@@ -11,6 +15,7 @@ import { appendAudit } from "@wms/db";
 import { AppError } from "@wms/shared/errors";
 import { runTenantCommand, runTenantQuery, type AccessTx, type Membership } from "../identity/access.ts";
 import {
+  CODE_MAX,
   codeTaken,
   hasPositiveBalance,
   inUse,
@@ -20,7 +25,7 @@ import {
   parseUuid,
   type WarehouseCallParams,
 } from "./warehouses.ts";
-import { assertWarehouseInScope } from "./scope.ts";
+import { assertWarehouseVisible } from "./scope.ts";
 
 export const LOCATION_KIND_LIST = ["RECEIVING", "STORAGE", "STAGING", "TRANSIT"] as const;
 export type LocationKindValue = (typeof LOCATION_KIND_LIST)[number];
@@ -94,9 +99,9 @@ export async function createLocation(params: WarehouseCallParams, input: CreateL
   const kind = parseKind(input.kind);
   if (kind === "TRANSIT" && parentId !== null) throw new AppError("VALIDATION_FAILED", { detail: "PARENT_INVALID" });
   return runTenantCommand({ ...params, permission: "settings.manage" }, async (tx, m) => {
-    await assertWarehouseInScope(tx, m, [warehouseId]);
+    await assertWarehouseVisible(tx, m, [warehouseId]);
     const wh = await tx.execute<{ status: string }>(
-      sql`SELECT status FROM public.warehouses WHERE tenant_id = ${m.tenantId}::uuid AND id = ${warehouseId}::uuid`,
+      sql`SELECT status FROM public.warehouses WHERE tenant_id = ${m.tenantId}::uuid AND id = ${warehouseId}::uuid FOR SHARE`,
     );
     if (wh[0] === undefined) throw new AppError("NOT_FOUND");
     if (wh[0].status !== "ACTIVE") throw new AppError("VALIDATION_FAILED");
@@ -104,7 +109,8 @@ export async function createLocation(params: WarehouseCallParams, input: CreateL
     if (parentId !== null) {
       const p = await tx.execute<{ depth: number | string; status: string }>(
         sql`SELECT depth, status FROM public.locations
-             WHERE tenant_id = ${m.tenantId}::uuid AND warehouse_id = ${warehouseId}::uuid AND id = ${parentId}::uuid`,
+             WHERE tenant_id = ${m.tenantId}::uuid AND warehouse_id = ${warehouseId}::uuid AND id = ${parentId}::uuid
+             FOR SHARE`,
       );
       const parent = p[0];
       if (parent === undefined || parent.status !== "ACTIVE") throw new AppError("VALIDATION_FAILED", { detail: "PARENT_INVALID" });
@@ -142,7 +148,7 @@ async function loadActive(tx: AccessTx, m: Membership, locationId: string): Prom
   );
   if (rows[0] === undefined) throw new AppError("NOT_FOUND");
   const row = toRow(rows[0]);
-  await assertWarehouseInScope(tx, m, [row.warehouseId]);
+  await assertWarehouseVisible(tx, m, [row.warehouseId]);
   if (row.status !== "ACTIVE") throw new AppError("VALIDATION_FAILED");
   return row;
 }
@@ -210,12 +216,16 @@ export async function archiveLocation(params: WarehouseCallParams, input: Archiv
   const locationId = parseUuid(input.locationId);
   return runTenantCommand({ ...params, permission: "settings.manage" }, async (tx, m) => {
     const rows = await tx.execute<LocationDbRow>(
-      sql`SELECT ${COLS} FROM public.locations WHERE tenant_id = ${m.tenantId}::uuid AND id = ${locationId}::uuid`,
+      sql`SELECT ${COLS} FROM public.locations WHERE tenant_id = ${m.tenantId}::uuid AND id = ${locationId}::uuid FOR UPDATE`,
     );
     if (rows[0] === undefined) throw new AppError("NOT_FOUND");
     const cur = toRow(rows[0]);
-    await assertWarehouseInScope(tx, m, [cur.warehouseId]);
+    await assertWarehouseVisible(tx, m, [cur.warehouseId]);
     if (cur.status === "ARCHIVED") return { archived: false };
+    // Sayım kilidi satırı da kilitlenir (sayım başlatma ile arşiv yarışı); kontroller kilitlerden SONRA.
+    await tx.execute(
+      sql`SELECT location_id FROM public.location_count_locks WHERE tenant_id = ${m.tenantId}::uuid AND location_id = ${locationId}::uuid FOR UPDATE`,
+    );
     const child = await tx.execute<{ used: boolean }>(
       sql`SELECT EXISTS (SELECT 1 FROM public.locations
                           WHERE tenant_id = ${m.tenantId}::uuid AND parent_id = ${locationId}::uuid AND status = 'ACTIVE') AS used`,
@@ -243,6 +253,12 @@ export async function archiveLocation(params: WarehouseCallParams, input: Archiv
   });
 }
 
+/** Depo yoksa (veya başka tenant'ta) `NOT_FOUND`; kapsam dışı depoyla aynı yanıt. */
+async function assertWarehouseExists(tx: AccessTx, tenantId: string, warehouseId: string): Promise<void> {
+  const r = await tx.execute<{ id: string }>(sql`SELECT id FROM public.warehouses WHERE tenant_id = ${tenantId}::uuid AND id = ${warehouseId}::uuid`);
+  if (r[0] === undefined) throw new AppError("NOT_FOUND");
+}
+
 export interface LocationTreeCursor {
   readonly depth: number;
   readonly code: string;
@@ -267,13 +283,17 @@ export async function getLocationTree(params: WarehouseCallParams, input: GetLoc
   const warehouseId = parseUuid(input.warehouseId);
   const limit = parseLimit(input.limit);
   const after = input.after;
-  if (after !== undefined && (!Number.isInteger(after.depth) || after.depth < 0 || typeof after.code !== "string")) {
+  if (
+    after !== undefined &&
+    (!Number.isInteger(after.depth) || after.depth < 0 || after.depth > MAX_LOCATION_DEPTH || typeof after.code !== "string" || Array.from(after.code).length > CODE_MAX)
+  ) {
     throw new AppError("VALIDATION_FAILED");
   }
   const afterId = after === undefined ? null : parseUuid(after.id);
   const includeArchived = input.includeArchived === true;
   return runTenantQuery({ ...params, permission: "stock.view" }, async (tx, m) => {
-    await assertWarehouseInScope(tx, m, [warehouseId]);
+    await assertWarehouseExists(tx, m.tenantId, warehouseId);
+    await assertWarehouseVisible(tx, m, [warehouseId]);
     const rows = await tx.execute<LocationDbRow>(
       sql`SELECT ${COLS} FROM public.locations
            WHERE tenant_id = ${m.tenantId}::uuid AND warehouse_id = ${warehouseId}::uuid
@@ -297,7 +317,8 @@ export async function findLocationByCode(params: WarehouseCallParams, input: { r
   const warehouseId = parseUuid(input.warehouseId);
   const code = normalizeCode(input.code);
   return runTenantQuery({ ...params, permission: "stock.view" }, async (tx, m) => {
-    await assertWarehouseInScope(tx, m, [warehouseId]);
+    await assertWarehouseExists(tx, m.tenantId, warehouseId);
+    await assertWarehouseVisible(tx, m, [warehouseId]);
     const rows = await tx.execute<LocationDbRow>(
       sql`SELECT ${COLS} FROM public.locations
            WHERE tenant_id = ${m.tenantId}::uuid AND warehouse_id = ${warehouseId}::uuid AND code = ${code}`,

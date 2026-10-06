@@ -59,24 +59,57 @@ export async function assertWarehouseInScope(
   }
 }
 
-export type ScopeCallParams = Omit<TenantAccessParams, "permission" | "recentAuth">;
-
-export interface SetScopesInput {
-  readonly membershipId: string;
-  /** Boş liste = tüm kapsam satırları silinir (A-77: kapsam satırı yoksa tüm depolar). */
-  readonly warehouseIds: readonly string[];
-  readonly requestId?: string | null;
+/**
+ * Kart/okuma komutları için: kapsam dışı depo VARLIK SIZDIRMAZ → `NOT_FOUND` (stok komutlarındaki `assertWarehouseInScope`
+ * `FORBIDDEN`/`WAREHOUSE_OUT_OF_SCOPE` verir). Bayrak kapalıyken no-op.
+ */
+export async function assertWarehouseVisible(
+  tx: AccessTx,
+  membership: Membership,
+  warehouseIds: readonly string[],
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): Promise<void> {
+  const allowed = await resolveWarehouseScope(tx, membership, env);
+  if (allowed === null) return;
+  const set = new Set(allowed);
+  for (const id of warehouseIds) if (!set.has(id.toLowerCase())) throw new AppError("NOT_FOUND");
 }
 
-/** Üyeliğin depo kapsamını değiştirir (`users.manage`); hedef üyelik satırı serileştirme için `FOR UPDATE` kilitlenir. */
-export async function setMembershipWarehouseScopes(
-  params: ScopeCallParams,
-  input: SetScopesInput,
-): Promise<{ readonly warehouseIds: readonly string[] }> {
+export type ScopeCallParams = Omit<TenantAccessParams, "permission" | "recentAuth">;
+
+export type SetScopesInput =
+  | { readonly membershipId: string; readonly all: true; readonly requestId?: string | null }
+  | { readonly membershipId: string; readonly warehouseIds: readonly string[]; readonly requestId?: string | null };
+
+export interface SetScopesResult {
+  readonly changed: boolean;
+  /** `true` = kapsam satırı yok (A-77: tüm depolar). */
+  readonly all: boolean;
+  readonly warehouseIds: readonly string[];
+}
+
+/**
+ * Üyeliğin depo kapsamını değiştirir (`users.manage`). Giriş açıktır: `{ all: true }` (kapsam satırı yok = tüm depolar) ya da
+ * boş OLMAYAN `{ warehouseIds }`; boş liste ve belirsiz girdi `VALIDATION_FAILED`. Demo tenant'ta kapalı (M9). Liste
+ * değişmediyse `changed: false`, audit yok. Hedef üyelik satırı serileştirme için `FOR UPDATE` kilitlenir.
+ */
+export async function setMembershipWarehouseScopes(params: ScopeCallParams, input: SetScopesInput): Promise<SetScopesResult> {
   const membershipId = uuid(input.membershipId);
-  if (!Array.isArray(input.warehouseIds) || input.warehouseIds.length > 1000) throw new AppError("VALIDATION_FAILED");
-  const ids = [...new Set(input.warehouseIds.map(uuid))].sort();
+  const raw = input as { all?: unknown; warehouseIds?: unknown };
+  let all: boolean;
+  let ids: string[];
+  if (raw.all === true && raw.warehouseIds === undefined) {
+    all = true;
+    ids = [];
+  } else if (raw.all === undefined && Array.isArray(raw.warehouseIds) && raw.warehouseIds.length >= 1 && raw.warehouseIds.length <= 1000) {
+    all = false;
+    ids = [...new Set((raw.warehouseIds as unknown[]).map(uuid))].sort();
+  } else {
+    throw new AppError("VALIDATION_FAILED");
+  }
   return runTenantCommand({ ...params, permission: "users.manage" }, async (tx, m) => {
+    const demo = await tx.execute<{ is_demo: boolean }>(sql`SELECT is_demo FROM public.tenants WHERE id = ${m.tenantId}::uuid`);
+    if (demo[0]?.is_demo !== false) throw new AppError("FORBIDDEN"); // M9: demo tenant'ta kapalı
     const target = await tx.execute<{ id: string }>(
       sql`SELECT id FROM public.tenant_memberships
            WHERE tenant_id = ${m.tenantId}::uuid AND id = ${membershipId}::uuid AND status = 'ACTIVE'
@@ -89,10 +122,12 @@ export async function setMembershipWarehouseScopes(
       );
       if (found.length !== ids.length) throw new AppError("NOT_FOUND");
     }
-    const before = await tx.execute<{ warehouse_id: string }>(
+    const beforeRows = await tx.execute<{ warehouse_id: string }>(
       sql`SELECT warehouse_id FROM public.membership_warehouse_scopes
            WHERE tenant_id = ${m.tenantId}::uuid AND membership_id = ${membershipId}::uuid ORDER BY warehouse_id`,
     );
+    const before = beforeRows.map((r) => r.warehouse_id);
+    if (before.length === ids.length && before.every((v, i) => v === ids[i])) return { changed: false, all, warehouseIds: ids };
     await tx.execute(
       sql`DELETE FROM public.membership_warehouse_scopes WHERE tenant_id = ${m.tenantId}::uuid AND membership_id = ${membershipId}::uuid`,
     );
@@ -108,9 +143,9 @@ export async function setMembershipWarehouseScopes(
       entityType: "membership",
       entityId: membershipId,
       requestId: input.requestId ?? null,
-      changeSummary: { from_warehouse_ids: before.map((r) => r.warehouse_id), to_warehouse_ids: ids },
+      changeSummary: { from_warehouse_ids: before, to_warehouse_ids: ids, all },
     });
-    return { warehouseIds: ids };
+    return { changed: true, all, warehouseIds: ids };
   });
 }
 

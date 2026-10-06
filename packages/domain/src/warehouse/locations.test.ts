@@ -31,6 +31,12 @@ describe("normalizeCode", () => {
   it("makes exact-match comparison: dotted/dotless variants stay distinct", () => {
     expect(normalizeCode("ı1")).not.toBe(normalizeCode("i1"));
   });
+  it("maps canonical-equivalent spellings to one code and rejects uncomposable combining marks", () => {
+    expect(normalizeCode("I\u0307z")).toBe(normalizeCode("\u0130z"));
+    expect(normalizeCode("e\u0301")).toBe("\u00e9");
+    fails(() => normalizeCode("x\u0301"));
+    fails(() => normalizeCode("A\u200b"));
+  });
   it("rejects empty, control characters, non-strings and over-long codes", () => {
     fails(() => normalizeCode("   "));
     fails(() => normalizeCode("A\u0000B"));
