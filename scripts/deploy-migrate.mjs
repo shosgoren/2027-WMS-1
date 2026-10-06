@@ -67,6 +67,49 @@ export function assertDirectUri(uri) {
   parsePgUri(uri); // host/kullanıcı/parola/veritabanı boş olamaz
 }
 
+/** `migrate.ts` izin listesi: `sslmode`, `ssl*`, `application_name` (anahtarlar büyük/küçük harf duyarlı). */
+const isAllowedQueryKey = (/** @type {string} */ k) => /^(?:ssl[a-z_]*|application_name)$/.test(k); // connection-target.ts ile aynı desen
+/** sslmode değerleri: bunlar TLS doğrulamasını düşürür/yoktur → verify-full'a yükseltilir. */
+const UPGRADE_SSLMODES = new Set(["require", "prefer", "allow", "disable"]);
+
+/**
+ * Neon URI normalizasyonu (T-106b): `channel_binding` kaldırılır (postgres.js desteklemez); `sslmode` yok ya da
+ * require/prefer/allow/disable ise `verify-full` (Neon sertifikası genel CA'lıdır; doğrulama güçlenir, düşmez).
+ * İzin listesi dışı başka parametre (ör. `options`) → HATA (sessizce silinmez); iletide yalnızca anahtar adı, değer yok.
+ * @param {string} uri
+ * @returns {{ uri: string, notes: string[] }}
+ */
+export function normalizeDirectUri(uri) {
+  let u;
+  try {
+    u = new URL(uri);
+  } catch {
+    throw new DeployMigrateError("doğrudan bağlantı URI'si ayrıştırılamadı");
+  }
+  /** @type {string[]} */
+  const notes = [];
+  if (u.searchParams.has("channel_binding")) {
+    u.searchParams.delete("channel_binding");
+    notes.push("channel_binding kaldırıldı");
+  }
+  const bad = [...new Set([...u.searchParams.keys()].filter((k) => !isAllowedQueryKey(k)))];
+  if (bad.length > 0) {
+    // Anahtar adı yalnızca güvenli biçimdeyse yazılır (bozuk URI'de parola parçası anahtar adına düşebilir; redactor tanımaz).
+    const shown = bad.map((k) => (/^[a-z_]{1,32}$/.test(k) ? k : "<adsız>"));
+    throw new DeployMigrateError(`URI izin listesi dışı sorgu parametresi içeriyor (${bad.length}): ${shown.join(", ")} (sessizce silinmez; yalnızca sslmode/ssl*/application_name)`);
+  }
+  const modes = u.searchParams.getAll("sslmode");
+  if (modes.length > 1) throw new DeployMigrateError("URI birden çok sslmode içeriyor");
+  const mode = modes[0];
+  if (mode === undefined || UPGRADE_SSLMODES.has(mode)) {
+    u.searchParams.set("sslmode", "verify-full");
+    notes.push("sslmode=verify-full");
+  } else if (mode !== "verify-full" && mode !== "verify-ca") {
+    throw new DeployMigrateError("URI sslmode değeri tanınmıyor");
+  }
+  return { uri: u.toString(), notes };
+}
+
 /**
  * Alt süreç ortamı (daraltılmış). `uri` yalnızca `DATABASE_URL_DIRECT` olarak girer.
  * @param {Record<string, string | undefined>} base
@@ -140,16 +183,18 @@ export function readUriFile(file) {
  *   env: Record<string, string | undefined>, now: Date, redactor: ReturnType<typeof createRedactor>,
  *   write?: (s: string) => void, uriFile?: string,
  * }} o
- * @returns {{ path: "direct-secret" | "neon-api", uri: string }}
+ * @returns {{ path: "direct-secret" | "neon-api", uri: string, notes: string[] }}
  */
 export function resolveDirectUri(o) {
   const mask = (/** @type {string} */ v) => maskSecret(o.redactor, v, { env: o.env, ...(o.write ? { write: o.write } : {}) });
   const direct = (o.env["STAGING_DATABASE_URL_DIRECT"] ?? "").trim();
   if (direct !== "") {
     mask(direct);
-    assertDirectUri(direct);
     mask(parsePgUri(direct).password);
-    return { path: "direct-secret", uri: direct };
+    const n = normalizeDirectUri(direct);
+    mask(n.uri);
+    assertDirectUri(n.uri);
+    return { path: "direct-secret", uri: n.uri, notes: n.notes };
   }
   if (o.uriFile === undefined) {
     throw new DeployMigrateError("URI kaynağı yok: STAGING_DATABASE_URL_DIRECT boş ve --uri-file verilmedi");
@@ -157,9 +202,11 @@ export function resolveDirectUri(o) {
   assertFallbackAllowed(o.now);
   const uri = readUriFile(o.uriFile);
   mask(uri);
-  assertDirectUri(uri);
   mask(parsePgUri(uri).password);
-  return { path: "neon-api", uri };
+  const n = normalizeDirectUri(uri);
+  mask(n.uri);
+  assertDirectUri(n.uri);
+  return { path: "neon-api", uri: n.uri, notes: n.notes };
 }
 
 /**
@@ -203,7 +250,7 @@ export function summarizeMigrateOutput(stdout) {
 }
 
 /**
- * @param {{ path: string, applied: string[], nothingPending: boolean, ok: boolean, lines: string[] }} s
+ * @param {{ path: string, applied: string[], nothingPending: boolean, ok: boolean, lines: string[], notes?: string[] }} s
  */
 export function renderSummaryMd(s) {
   const out = [
@@ -212,6 +259,7 @@ export function renderSummaryMd(s) {
     `- sonuç: ${s.ok ? "OK" : "FAIL"}`,
     `- yol: \`${s.path}\``,
     ...(s.path === "neon-api" ? ["- fallback: neon-api (A-54: 2026-11-15 sonrası kırmızı; STAGING_DATABASE_URL_DIRECT ekleyin)"] : []),
+    ...((s.notes ?? []).length > 0 ? [`- uri normalize: ${(s.notes ?? []).join(", ")}`] : []),
     `- uygulanan: ${s.nothingPending ? "0 bekleyen" : s.applied.length > 0 ? s.applied.join(", ") : "bilinmiyor"}`,
     ...s.lines.map((l) => `- \`${l}\``),
     "",
@@ -308,12 +356,13 @@ export async function main(o = {}) {
     summarize({ path: "bilinmiyor", applied: [], nothingPending: false, ok: false, lines: [] });
     return 1;
   }
+  if (resolved.notes.length > 0) write(`deploy-migrate: uri normalize: ${resolved.notes.join(", ")}\n`);
   write(`deploy-migrate: yol=${resolved.path}${resolved.path === "neon-api" ? " (fallback: neon-api; A-54)" : ""}\n`);
   const run = o.runner ?? runMigrateProcess;
   const r = await run({ env: buildChildEnv(env, resolved.uri), redactor, write: rawWrite });
   const sum = summarizeMigrateOutput(r.stdout);
   const ok = r.code === 0 && !r.leaked;
-  summarize({ path: resolved.path, applied: sum.applied, nothingPending: sum.nothingPending, ok, lines: sum.lines });
+  summarize({ path: resolved.path, applied: sum.applied, nothingPending: sum.nothingPending, ok, lines: sum.lines, notes: resolved.notes });
   if (r.leaked) write("::error::deploy-migrate: çıktıda sızıntı belirtisi (maskelenmiş); iş başarısız sayıldı\n");
   if (r.code !== 0) write(`::error::deploy-migrate: pnpm db:migrate çıkış kodu ${r.code}; dağıtım durduruldu\n`);
   else if (ok) write(`deploy-migrate: OK — ${sum.nothingPending ? "0 bekleyen" : sum.applied.length > 0 ? `${sum.applied.join(", ")} applied` : "tamamlandı"}\n`);
