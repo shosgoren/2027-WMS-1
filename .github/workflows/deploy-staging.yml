@@ -15,6 +15,26 @@
 # uygulama düzeyinde deploy token'ı (`fly tokens create deploy -a etkin-wms-staging`) yeterlidir.
 # Org token'ı yalnızca ilk oluşturma içindir: ilk yeşil koşudan sonra kullanıcı FLY_API_TOKEN'ı
 # uygulama kapsamlı deploy token'la değiştirir (U-06).
+# Migration (T-106, ADR-015 §7): AYRI `migrate` işi (ayrı runner) Deploy'dan ÖNCE koşar; `deploy` işi `needs: migrate`
+# olduğundan migration başarısızsa Deploy/Smoke hiç başlamaz (fail-closed). Sıra: migration önce, uygulama sonra
+# (genişlet–taşı–daralt). Yeni şema eski uygulama sürümüyle çalışabilmelidir; eski sürümü bozacak bir migration
+# (daraltma: sütun/tablo silme) bu iş akışının kapsamı DIŞINDADIR — ayrı, sonraki bir dağıtımda yapılır.
+# Sır ayrımı (MAJOR-A): bağımlılık kurulumu (node_modules kodu) YALNIZCA `migrate` işindedir ve orada FLY_API_TOKEN
+# yoktur; `deploy` işinde pnpm/node_modules kurulumu YOKTUR ve migration sırlarını görmez.
+# Migration sırları:
+#   1) STAGING_DATABASE_URL_DIRECT repo sırrı (kapsamı yalnızca staging veritabanı; tercih edilen, `direct-secret`);
+#      yalnızca "Migrate" adımının env'indedir (ve yedek yol karar adımında, kabuk betiği).
+#   2) yoksa (koşullu adım "Resolve URI (fallback)") NEON_API_KEY + NEON_PROJECT_ID ile Neon API'sinden sahip rolün
+#      doğrudan URI'si alınır, maskelenir ve 0600 dosyaya yazılır; bu adım bağımlılık kurulmadan ÖNCE koşar.
+#      "Migrate" adımı NEON_API_KEY'i GÖRMEZ. Adım özetinde `fallback: neon-api`. A-54: bu yol 2026-11-15'ten sonra
+#      kırmızıdır (betik UTC saatini denetler); o tarihten sonra NEON_API_KEY bu iş akışından KALDIRILACAKTIR.
+# Sahip URI'si (`DATABASE_URL_DIRECT`) Fly'a ASLA yazılmaz (I-03); yalnızca alt sürecin ortamında yaşar ve
+# `::add-mask::` ile maskelenir. Alt süreç ortamı daraltılır (RUNNER_TEMP/NODE_OPTIONS dahil değil).
+# Bilinen risk: GitHub environment + dal kuralı ile sır kapsamını daraltma özel repoda ücretsiz planda yok; sır,
+# repoya yazma yetkisi olanlara (güvenilen taraf) açıktır.
+# Manifest koruması (MINOR-c): ci.yml `deps` işindeki "Audit config guard (manifests)" adımı burada AYNEN
+# tekrarlanır (pnpm'den önce); ci.yml'deki değişiklik buraya elle taşınmalıdır (kabul edilen kopya).
+# `WMS_ENV=staging DEMO_MODE=1`: migration rolü demo tenant adımı (T-123) aynı koşuda çalışır.
 # Üçüncü taraf kodu: action'lar tam commit SHA ile sabit; flyctl resmî sürüm ikilisi SHA-256 ile
 # doğrulanır (superfly/flyctl-actions/setup-flyctl yerine — o action sağlama doğrulaması yapmaz).
 name: deploy-staging
@@ -33,13 +53,129 @@ concurrency:
 permissions:
   contents: read
 
-# .pnpmfile kodu hiçbir adımda yüklenmez (ci.yml ile aynı savunma; bu iş pnpm kullanmaz).
+# .pnpmfile kodu hiçbir adımda yüklenmez (ci.yml ile aynı savunma).
 env:
   npm_config_ignore_pnpmfile: "true"
 
 jobs:
+  migrate:
+    name: migrate
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # pnpm/action-setup manifest korumasından SONRA gelir (configDependencies her pnpm komutunda indirilir; ci.yml deps).
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: package.json
+          package-manager-cache: false
+      - name: Audit config guard (manifests)
+        run: |
+          python3 - "$RUNNER_TEMP/overrides.json" <<'EOF'
+          import json, os, re, subprocess, sys
+          try:
+              import yaml
+          except ImportError:
+              print("::error::PyYAML bulunamadı — manifest koruması koşamıyor (kapalı başarısızlık)")
+              sys.exit(1)
+          out_path = sys.argv[1]
+          files = [f for f in subprocess.run(["git", "ls-files", "-z"], check=True, capture_output=True).stdout.decode().split("\0") if f]
+          hits, overrides = [], []
+          def bad_key(k):
+              k = str(k).lower().replace("-", "").replace("_", "")
+              return k.startswith("audit") or "pnpmfile" in k or k == "configdependencies" or "registry" in k
+          for f in files:
+              name = os.path.basename(f)
+              if name in (".pnpmfile.cjs", ".pnpmfile.mjs"):
+                  hits.append(f"{f}: pnpmfile kabul edilmez")
+              elif name in ("package.yaml", "package.json5"):
+                  hits.append(f"{f}: yalnızca package.json manifesti kabul edilir")
+              elif name in ("pnpm-workspace.yaml", "pnpm-workspace.yml"):
+                  try:
+                      data = yaml.safe_load(open(f, encoding="utf-8")) or {}
+                  except Exception as e:
+                      hits.append(f"{f}: YAML ayrıştırılamadı ({e.__class__.__name__})"); continue
+                  if not isinstance(data, dict):
+                      hits.append(f"{f}: kök bir eşleme değil"); continue
+                  for k, v in data.items():
+                      if bad_key(k): hits.append(f"{f}: {k}")
+                      if str(k) == "overrides" and isinstance(v, dict):
+                          overrides += [{"source": f, "key": str(ok), "value": str(ov)} for ok, ov in v.items()]
+              elif name == "package.json":
+                  try:
+                      pkg = json.load(open(f, encoding="utf-8"))
+                  except Exception as e:
+                      hits.append(f"{f}: JSON ayrıştırılamadı ({e.__class__.__name__})"); continue
+                  if not isinstance(pkg, dict):
+                      hits.append(f"{f}: kök bir nesne değil"); continue
+                  if "configDependencies" in pkg: hits.append(f"{f}: configDependencies")
+                  pnpm = pkg.get("pnpm") or {}
+                  if isinstance(pnpm, dict):
+                      for k, v in pnpm.items():
+                          if bad_key(k): hits.append(f"{f}: pnpm.{k}")
+                          if k == "overrides" and isinstance(v, dict):
+                              overrides += [{"source": f"{f} pnpm.overrides", "key": str(ok), "value": str(ov)} for ok, ov in v.items()]
+                  for field in ("resolutions",):
+                      if isinstance(pkg.get(field), dict):
+                          overrides += [{"source": f"{f} {field}", "key": str(ok), "value": str(ov)} for ok, ov in pkg[field].items()]
+              elif name == ".npmrc":
+                  for line in open(f, encoding="utf-8"):
+                      m = re.match(r"\s*([^#;=\s][^=]*?)\s*=", line)
+                      if m and bad_key(m.group(1).strip().strip("'\"").split(":")[-1]):
+                          hits.append(f"{f}: {m.group(1).strip()}")
+          json.dump(overrides, open(out_path, "w"))
+          if hits:
+              print("::error::audit config not allowed; exceptions live only in ci.yml A-36")
+              for h in hits: print(f"  {h}")
+              sys.exit(1)
+          print(f"audit config guard: OK ({len(files)} izlenen dosya; overrides: {len(overrides)})")
+          EOF
+      # Yedek yol kararı: yalnızca kabuk; bağımlılık yok. Bu adımın env'inde yalnızca STAGING_DATABASE_URL_DIRECT var.
+      - name: Select URI source
+        id: src
+        env:
+          STAGING_DATABASE_URL_DIRECT: ${{ secrets.STAGING_DATABASE_URL_DIRECT }}
+        run: |
+          if [ -n "$STAGING_DATABASE_URL_DIRECT" ]; then
+            echo "direct=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "direct=no" >> "$GITHUB_OUTPUT"
+          fi
+      # YEDEK YOL (A-54, 2026-11-15'e kadar): bağımlılık kurulmadan ÖNCE; yalnızca repodaki (güvenilen) betik koşar.
+      # URI maskelenir ve yalnızca sonraki adımın okuyacağı 0600 dosyaya yazılır.
+      - name: Resolve URI (fallback)
+        if: steps.src.outputs.direct == 'no'
+        env:
+          NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
+          NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
+        run: |
+          umask 077
+          node scripts/deploy-migrate.mjs --resolve-only --out "$RUNNER_TEMP/migrate-uri"
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      # Yalnızca migration için; yaşam döngüsü betikleri çalışmaz. Bu işte FLY_API_TOKEN yok.
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      # NEON_API_KEY bu adımın ortamında YOKTUR.
+      - name: Migrate
+        env:
+          STAGING_DATABASE_URL_DIRECT: ${{ secrets.STAGING_DATABASE_URL_DIRECT }}
+          URI_SOURCE_DIRECT: ${{ steps.src.outputs.direct }}
+        run: |
+          if [ "$URI_SOURCE_DIRECT" = "no" ]; then
+            node scripts/deploy-migrate.mjs --uri-file "$RUNNER_TEMP/migrate-uri"
+          else
+            node scripts/deploy-migrate.mjs
+          fi
+      # Yedek yol URI dosyası her durumda silinir (tarih/mod denetimi ya da pnpm install hatasında da).
+      - name: Remove URI file
+        if: always()
+        run: rm -f "$RUNNER_TEMP/migrate-uri"
+
   deploy:
     name: deploy
+    needs: migrate
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -54,7 +190,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Node sürümü package.json "engines.node" alanından (smoke betiği için; bağımlılık kurulmaz).
+      # Node yalnızca smoke betiği için; bağımlılık KURULMAZ (pnpm/node_modules yok).
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: package.json
