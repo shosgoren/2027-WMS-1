@@ -21,7 +21,7 @@ import { sql } from "../../../packages/db/node_modules/drizzle-orm/index.js";
 import { createDbClient, type DbClient } from "../../../packages/db/src/client.ts";
 import { withUser } from "../../../packages/db/src/index.ts";
 import { APP_ROLE, AUTH_ROLE, PROBE_ROLE, readIntEnv, redactErrorChain } from "../harness/env.ts";
-import { cleanupDocuments, mkMembership, mkUser, newRegistry, seedWorld, type TenantWorld } from "../fixtures/tenants.ts";
+import { cleanupDocuments, cleanupStock, mkMembership, mkUser, newRegistry, seedWorld, type TenantWorld } from "../fixtures/tenants.ts";
 
 const env = readIntEnv(process.env);
 const urls = [env.databaseUrl, env.databaseUrlDirect];
@@ -185,6 +185,7 @@ async function cleanupExceptTenants(c: pg.Client, r: typeof reg): Promise<void> 
   const tenantIds = r.worlds.map((w) => w.tenantId);
   const userIds = [...r.worlds.flatMap((w) => [w.ownerUserId, w.memberUserId]), ...r.extraUsers];
   if (tenantIds.length > 0) {
+    await cleanupStock(c, tenantIds); // T-232 stok tabloları (defter append-only tetikleyicisi fikstürde geçici kapatılır)
     await cleanupDocuments(c, tenantIds); // T-206 tabloları (append-only tetikleyici replica ile atlanır)
     // T-204 + T-202 tabloları FK sırasıyla önce (taşıma birimi → seri → lot → barkod/dönüşüm → sahip → ürün → birim; kapsam → kilit → lokasyon → depo).
     for (const t of [

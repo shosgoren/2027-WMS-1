@@ -16,6 +16,7 @@ import * as audit from "../../../packages/db/src/schema/audit.ts";
 import * as catalog from "../../../packages/db/src/schema/catalog.ts";
 import * as documents from "../../../packages/db/src/schema/documents.ts";
 import * as identity from "../../../packages/db/src/schema/identity.ts";
+import * as stock from "../../../packages/db/src/schema/stock.ts";
 import * as tenancy from "../../../packages/db/src/schema/tenancy.ts";
 import * as warehouse from "../../../packages/db/src/schema/warehouse.ts";
 import { readIntEnv, redactErrorChain, secretUrls } from "../harness/env.ts";
@@ -27,7 +28,7 @@ const dbRequire = createRequire(path.resolve(import.meta.dirname, "../../../pack
 const pgCore = (await import(pathToFileURL(dbRequire.resolve("drizzle-orm/pg-core")).href)) as typeof import("../../../packages/db/node_modules/drizzle-orm/pg-core/index.js");
 
 type PgTableAny = Parameters<typeof pgCore.getTableConfig>[0];
-const SCHEMA_MODULES: Record<string, unknown>[] = [identity, tenancy, audit, warehouse, catalog, documents];
+const SCHEMA_MODULES: Record<string, unknown>[] = [identity, tenancy, audit, warehouse, catalog, documents, stock];
 
 function allTables(): PgTableAny[] {
   const out: PgTableAny[] = [];
@@ -138,7 +139,7 @@ describe(`identity schema drift (target=${env.target})`, () => {
       // `id` sütunu olan her Drizzle tablosu (tenant_settings'in PK'si tenant_id'dir, request_rate_limits'in bilesik PK'si vardir; `id` yoktur).
       const withId = allTables().filter((t) => pgCore.getTableConfig(t).columns.some((c) => c.name === "id"));
       expect(ids.rows.length).toBe(withId.length);
-      expect(withId.length).toBe(28); // T-202: + warehouses, locations; T-204: + units, items, unit_conversions, item_barcodes, inventory_owners, lots, serials, handling_units; T-206: + document_type_versions, documents, document_lines, document_status_history, idempotency_records
+      expect(withId.length).toBe(31); // T-202: + warehouses, locations; T-204: + units, items, unit_conversions, item_barcodes, inventory_owners, lots, serials, handling_units; T-206: + document_type_versions, documents, document_lines, document_status_history, idempotency_records; T-232: + stock_dimensions, stock_ledger, reservations (stock_balances'ta id yok)
       for (const r of ids.rows) {
         expect(r.data_type, r.table_name).toBe("uuid");
         expect(r.column_default, r.table_name).toBe("gen_random_uuid()");
