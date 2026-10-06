@@ -29,6 +29,8 @@ const HOST_POOLED = "ep-cool-dark-123456-pooler.c-2.eu-central-1.aws.neon.tech";
 const rnd = (/** @type {string} */ prefix) => `${prefix}${randomBytes(9).toString("hex")}`;
 const OWNER_PW = rnd("o");
 const PW = { wms_app: rnd("a"), wms_auth: rnd("u"), wms_worker: rnd("w") };
+/** Depo belgesinden bağımsız: A-66 karar satırı biçimi. */
+const DECISION_FIXTURE = "A-66 | T-105 SQL CREATE ROLE kararı";
 const NEON_KEY = rnd("n");
 const FLY_TOKEN = rnd("f");
 const RESEND = rnd("r");
@@ -203,6 +205,13 @@ describe("ensureProbe", () => {
     expect(p.seen[4]).toContain('GRANTED BY "cloud_admin"');
     expect(p.seen[6]).toBe("DROP ROLE wms_identity_probe;");
   });
+  it("probe yaratıldı ama sonraki katalog sorgusu düştü → bu koşuda yaratılan probe silinir", () => {
+    const p = psqlOf([out(probeOut([], "f", false)), out(""), fail("08006"), out("")]);
+    const r = ensureProbe({ psql: p.fn, migrationRole: OWNER, say: () => undefined });
+    expect(r.status).toBe("RED");
+    expect(p.seen[3]).toBe("DROP ROLE wms_identity_probe;");
+    expect(r.attempts).toContain("cleanup-drop-probe:ok");
+  });
   it("var olan, bozuk probe silinmez", () => {
     const p = psqlOf([out(probeOut([`${OWNER}|f|t|t|infra`])), out(probeOut([`${OWNER}|f|t|t|infra`]))]);
     const r = ensureProbe({ psql: p.fn, migrationRole: OWNER, say: () => undefined });
@@ -356,7 +365,7 @@ describe("ensureAppRoles", () => {
     let n = 0;
     const psql = (/** @type {string} */ sql) => {
       sqls.push(sql);
-      const stdout = n++ === 0 ? "" : n === 5 ? cleanRows : "";
+      const stdout = n++ === 2 ? cleanRows : "";
       return { ok: true, stdout, sqlstate: null, error: null };
     };
     const r = await ensureAppRoles({
@@ -370,9 +379,41 @@ describe("ensureAppRoles", () => {
       say: () => undefined,
     });
     expect(r.status).toBe("OK");
-    expect(sqls[1]).toMatch(/^CREATE ROLE "wms_app" LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD '[A-Za-z0-9_-]+';$/);
+    // Tek transaction: katalog okuma, tek BEGIN…COMMIT yazımı, katalog okuma.
+    expect(sqls).toHaveLength(3);
+    expect(sqls[1]).toMatch(/^BEGIN;\nCREATE ROLE "wms_app" LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD '[A-Za-z0-9_-]+';\n/);
+    expect(sqls[1]).toMatch(/COMMIT;$/);
+    expect(sqls[1]?.match(/CREATE ROLE/g)).toHaveLength(3);
     expect(masked).toHaveLength(3);
     expect(sqls[1]).toContain(masked[0]);
+  });
+  it("SQL yolu kısmi başarısızlık: wms_auth ifadesi düşerse tek transaction geri alınır; başka yazım/sonuç parolası yok", async () => {
+    /** @type {string[]} */
+    const sqls = [];
+    const psql = (/** @type {string} */ sql) => {
+      sqls.push(sql);
+      return sql.startsWith("BEGIN;") ? { ok: false, stdout: "", sqlstate: "42710", error: "x" } : { ok: true, stdout: "", sqlstate: null, error: null };
+    };
+    const r = await ensureAppRoles({ psql, api: /** @type {any} */ (null), branchId: "br", flags: { ...flags, rolePath: "sql" }, flySecrets: new Set(), rand: makeRand(), mask: () => undefined, say: () => undefined });
+    expect(r.status).toBe("RED");
+    expect(r.passwords.size).toBe(0);
+    expect(r.created).toEqual([]);
+    expect(sqls.filter((q) => /CREATE ROLE|ALTER ROLE/.test(q))).toHaveLength(1);
+    expect(sqls.some((q) => q.startsWith("DROP ROLE"))).toBe(false);
+  });
+  it("salt-okur kip (probe OK değil): CREATE/ALTER/API çağrısı 0, sapmalar yine raporlanır", async () => {
+    /** @type {string[]} */
+    const sqls = [];
+    /** @type {string[]} */
+    const calls = [];
+    const api = { createRole: async () => (calls.push("c"), "x"), resetRolePassword: async () => (calls.push("r"), "x"), deleteRole: async () => void calls.push("d") };
+    const clean = await ensureAppRoles({ psql: (q) => (sqls.push(q), { ok: true, stdout: "", sqlstate: null, error: null }), api, branchId: "br", flags: { ...flags, rotate: true }, flySecrets: new Set(), rand: makeRand(), mask: () => undefined, say: () => undefined, readOnly: true });
+    expect(clean.status).toBe("BLOCKED");
+    expect(clean.lines[0]).toMatch(/salt-okur/);
+    const dev = await ensureAppRoles({ psql: (q) => (sqls.push(q), { ok: true, stdout: superRows, sqlstate: null, error: null }), api, branchId: "br", flags, flySecrets: new Set(), rand: makeRand(), mask: () => undefined, say: () => undefined, readOnly: true });
+    expect(dev.lines[0]).toMatch(/BLOCKED \(mevcut rol sapması/);
+    expect(calls).toEqual([]);
+    expect(sqls.some((q) => /CREATE ROLE|ALTER ROLE|DROP ROLE/.test(q))).toBe(false);
   });
 });
 
@@ -445,7 +486,7 @@ describe("main (sahte Neon/psql/flyctl)", () => {
     };
     const env = { NEON_API_KEY: NEON_KEY, NEON_PROJECT_ID: "dry-heart-13671059", FLY_API_TOKEN: FLY_TOKEN, RESEND_API_KEY: RESEND };
     const run = (/** @type {string[]} */ argv = ["--role-path", "api"], /** @type {Record<string, string>} */ extraEnv = {}) =>
-      main({ env: { ...env, ...extraEnv }, argv, say: (s) => void said.push(s), rand: makeRand(), redactor, api, fly, psql, outDir });
+      main({ env: { ...env, ...extraEnv }, argv, say: (s) => void said.push(s), rand: makeRand(), redactor, api, fly, psql, outDir , readFile: () => DECISION_FIXTURE });
     return { run, said, imports, roleCalls, outDir, redactor };
   }
   const allText = (/** @type {ReturnType<typeof harness>} */ h) =>
@@ -537,10 +578,13 @@ describe("main (sahte Neon/psql/flyctl)", () => {
     expect(h2.imports).toEqual([]);
   });
 
-  it("probe BLOCKED → çıkış 2, Fly'a yazım yok (roller yine de değerlendirilir: tek koşuda tüm engeller görünür)", async () => {
+  // Sıkılaştırma (Supervisor onaylı, paket incelemesi MAJOR-1): probe OK değilken roller yalnızca salt-okur denetlenir;
+  // aksi halde ALTER/API parola değişimi Fly'a yazılamaz ve çalışan staging bağlantıları bayatlardı. Engeller yine raporda.
+  it("probe BLOCKED → çıkış 2, Fly'a yazım yok; rol yazımı (create/alter/API) 0, salt-okur rapor var", async () => {
     const h = harness({ probeBlocked: true });
     expect(await h.run()).toBe(2);
-    expect(h.roleCalls).toEqual(["create:wms_app", "create:wms_auth", "create:wms_worker"]);
+    expect(h.roleCalls).toEqual([]);
+    expect(allText(h)).toContain("salt-okur");
     expect(h.imports).toEqual([]);
     expect(allText(h)).toContain("wms_identity_probe: BLOCKED");
   });
@@ -567,7 +611,7 @@ describe("main (sahte Neon/psql/flyctl)", () => {
 
   it("eksik girdi: yalnızca ADLAR; STAGING_DEMO_PASSWORD çok kısa → kırmızı", async () => {
     const h = harness();
-    expect(await main({ env: {}, argv: [], say: (s) => void h.said.push(s), outDir: h.outDir })).toBe(1);
+    expect(await main({ env: {}, argv: [], say: (s) => void h.said.push(s), outDir: h.outDir, readFile: () => DECISION_FIXTURE })).toBe(1);
     expect(h.said.join("\n")).toContain("NEON_API_KEY, NEON_PROJECT_ID");
     expect(await harness().run(undefined, { STAGING_DEMO_PASSWORD: "kisa" })).toBe(1);
   });

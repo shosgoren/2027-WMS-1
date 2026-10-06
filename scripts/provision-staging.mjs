@@ -4,15 +4,18 @@
 //
 // Akış: (1) Neon ana dalı + sahip rol bağlantıları (scripts/neon-api.mjs; hepsi maskelenir) → (2) Fly sır ADLARI
 // (`flyctl secrets list --json`; değer okunamaz) → (3) `wms_identity_probe` (NOLOGIN) + migration rolü üyeliği
-// (ADR-015 §4, 3./5. tur ekleri) → (4) uygulama rolleri `wms_app`, `wms_auth`, `wms_worker` (Neon API ile; ADR-004
-// (d), Q-32 (d): parola sağlayıcıda üretilir, SQL metnine düşmez) ve katalogdan nitelik denetimi → (5) YALNIZCA
-// hepsi yeşilse Fly sırları tek `flyctl secrets import --stage` çağrısıyla (stdin; argv/log'da değer yok).
+// (ADR-015 §4, 3./5. tur ekleri; örtük ADMIN için A-67) → (4) uygulama rolleri `wms_app`, `wms_auth`, `wms_worker` ve
+// katalogdan nitelik denetimi → (5) YALNIZCA hepsi yeşilse Fly sırları tek `flyctl secrets import --stage` çağrısıyla
+// (stdin; argv/log'da değer yok). Probe OK değilse 4. adım SALT-OKURDUR (CREATE/ALTER/API yazımı yok): çalışan staging
+// bağlantıları, Fly'a yazılamayacak parola değişimiyle bayatlamasın.
 //
-// Rol yolu: varsayılan `api`. Neon belgesine göre API ile yaratılan roller `neon_superuser` üyesidir (BYPASSRLS,
-// CREATEROLE …); nitelik denetimi bunu yakalar → BLOCKED (çıkış 2), bu koşuda yaratılan rol API ile silinir, Fly'a
-// HİÇBİR sır yazılmaz. `--role-path sql` (SQL `CREATE ROLE … PASSWORD`, düz parola, A-56 riski) yalnızca
-// `--sql-decision <id>` ile ve docs/OPEN_QUESTIONS.md'de o kimlikli, "T-105" ve "SQL CREATE ROLE" geçen Supervisor
-// karar satırı varsa çalışır (Supervisor eki (d): ödünleşimi uygulayıcı seçmez).
+// Rol yolu: varsayılan `sql` (A-66, Supervisor kararı): roller dal sahibi rolle `CREATE ROLE … PASSWORD` ile yaratılır;
+// parola koşu başına rastgele (256 bit), yalnızca bu süreçte üretilir, maskelenir ve düz metin olarak CREATE/ALTER ROLE
+// içinde sunucuya gider (Neon SQL'de SCRAM verifier kabul etmez, A-56; kalan risk: Neon log_statement/pg_stat_statements).
+// Tüm CREATE/ALTER ifadeleri TEK transaction'dadır (kısmi başarısızlıkta hiçbiri uygulanmaz). `--role-path api`: Neon API
+// ile yaratılan roller `neon_superuser` üyesidir (BYPASSRLS, CREATEROLE …); nitelik denetimi bunu yakalar → BLOCKED
+// (çıkış 2), bu koşuda yaratılan rol silinir, Fly'a HİÇBİR sır yazılmaz. `--role-path sql` için `--sql-decision <id>`
+// (varsayılan A-66) ve docs/OPEN_QUESTIONS.md'de o kimlikli, "T-105" ve "SQL CREATE ROLE" geçen karar satırı gerekir.
 //
 // Sır kapsamı (G-09): tüm gizli değerler `::add-mask::` + kendi maskeleyicimiz; alt süreç ortamları daraltılır
 // (flyctl yalnızca FLY_API_TOKEN, psql yalnızca bağlantı bilgisi). Özet yalnızca `.artifacts/t-105/summary.{json,md}`
@@ -314,6 +317,12 @@ export function ensureProbe(o) {
   const ownerSuper = first.p.owner?.super ?? null;
   const ownerBypassrls = first.p.owner?.bypassrls ?? null;
   let created = false;
+  /** Bu koşuda yaratılan probe, sonraki bir adım başarısızsa artık bırakılmaz. */
+  const dropIfCreated = () => {
+    if (!created) return;
+    const d = o.psql(`DROP ROLE ${PROBE_ROLE};`);
+    attempts.push(`cleanup-drop-probe:${d.ok ? "ok" : (d.sqlstate ?? "error")}`);
+  };
   if (!first.p.exists) {
     // Transaction-yerel `createrole_self_grant` boş: örtük üyelik yalnızca ADMIN olur (ADR-015 5. tur eki MINOR-6).
     const c = o.psql(`BEGIN;
@@ -325,7 +334,10 @@ COMMIT;`);
     if (!c.ok) return red(`${PROBE_ROLE}: FAIL (oluşturma/üyelik SQLSTATE ${c.sqlstate ?? "?"})`, ["create-failed"], { ownerSuper, ownerBypassrls });
     created = true;
     first = inspect();
-    if (first.p === null) return red(`${PROBE_ROLE}: FAIL (katalog sorgusu başarısız)`, ["inspect-failed"], { created, ownerSuper, ownerBypassrls });
+    if (first.p === null) {
+      dropIfCreated();
+      return red(`${PROBE_ROLE}: FAIL (katalog sorgusu başarısız)`, ["inspect-failed"], { created, ownerSuper, ownerBypassrls });
+    }
   }
   let ev = evaluateProbe(first.p, o.migrationRole);
   let finalProbe = first.p;
@@ -345,7 +357,10 @@ COMMIT;`);
       attempts.push(`revoke-admin:${r.ok ? "ok" : (r.sqlstate ?? "error")}`);
     }
     const again = inspect();
-    if (again.p === null) return red(`${PROBE_ROLE}: FAIL (katalog sorgusu başarısız)`, ["inspect-failed"], { created, ownerSuper, ownerBypassrls });
+    if (again.p === null) {
+      dropIfCreated();
+      return red(`${PROBE_ROLE}: FAIL (katalog sorgusu başarısız)`, ["inspect-failed"], { created, ownerSuper, ownerBypassrls });
+    }
     ev = evaluateProbe(again.p, o.migrationRole);
     finalProbe = again.p;
   }
@@ -380,10 +395,7 @@ COMMIT;`);
       attempts,
     };
   }
-  if (created) {
-    const d = o.psql(`DROP ROLE ${PROBE_ROLE};`);
-    attempts.push(`cleanup-drop-probe:${d.ok ? "ok" : (d.sqlstate ?? "error")}`);
-  }
+  dropIfCreated();
   return {
     status: "BLOCKED",
     warn: false,
@@ -426,7 +438,7 @@ export function planRoles(o) {
 /**
  * @param {{
  *   psql: PsqlFn, api: RoleApi, branchId: string, flags: Flags, flySecrets: Set<string>, rand: RandFn,
- *   mask: (v: string) => void, say: (s: string) => void,
+ *   mask: (v: string) => void, say: (s: string) => void, readOnly?: boolean,
  * }} o
  * @returns {Promise<{ status: "OK" | "BLOCKED" | "RED", lines: string[], passwords: Map<string, string>,
  *   deviations: Record<string, string[]>, created: string[], rotated: string[], note: string | null }>}
@@ -462,20 +474,32 @@ export async function ensureAppRoles(o) {
   }
 
   const plan = planRoles({ exists, flySecrets: o.flySecrets, rotate: o.flags.rotate });
+  if (o.readOnly) {
+    // Probe OK değil: yalnızca katalog raporu; hiçbir CREATE/ALTER/API yazımı yok (parola değişip Fly'a yazılamaz).
+    for (const p of plan) lines.push(`${p.role}: salt-okur (${p.create ? "yok, yaratılmadı" : "mevcut, sapma yok"}; probe OK değil → yazım yapılmadı)`);
+    return stop("BLOCKED", "probe OK değil: uygulama rolleri salt-okur denetlendi (CREATE/ALTER/API yazımı yok)");
+  }
   if (o.flags.rolePath === "sql") {
+    // Tüm CREATE/ALTER ROLE ifadeleri tek transaction'da: kısmi başarısızlıkta hiçbiri uygulanmaz.
+    /** @type {string[]} */
+    const stmts = [];
     for (const p of plan.filter((x) => x.needPassword)) {
       const pw = genRolePassword(o.rand);
       o.mask(pw);
-      const stmt = p.create
-        ? `CREATE ROLE ${quoteIdent(p.role)} LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD '${pw}';`
-        : `ALTER ROLE ${quoteIdent(p.role)} WITH PASSWORD '${pw}';`;
-      const r = o.psql(stmt);
-      if (!r.ok) {
-        lines.push(`${p.role}: FAIL (SQL SQLSTATE ${r.sqlstate ?? "?"})`);
-        return stop("RED", "SQL rol işlemi başarısız");
-      }
+      stmts.push(
+        p.create
+          ? `CREATE ROLE ${quoteIdent(p.role)} LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD '${pw}';`
+          : `ALTER ROLE ${quoteIdent(p.role)} WITH PASSWORD '${pw}';`,
+      );
       passwords.set(p.role, pw);
-      (p.create ? created : rotated).push(p.role);
+    }
+    if (stmts.length > 0) {
+      const r = o.psql(`BEGIN;\n${stmts.join("\n")}\nCOMMIT;`);
+      if (!r.ok) {
+        lines.push(`rol işlemleri: FAIL (tek transaction geri alındı; SQLSTATE ${r.sqlstate ?? "?"})`);
+        return stop("RED", "SQL rol işlemi başarısız (hiçbir rol değişmedi)");
+      }
+      for (const p of plan.filter((x) => x.needPassword)) (p.create ? created : rotated).push(p.role);
     }
   } else {
     for (const p of plan.filter((x) => x.needPassword)) {
@@ -494,6 +518,12 @@ export async function ensureAppRoles(o) {
   if (Object.keys(deviations).length > 0) {
     for (const [role, d] of Object.entries(deviations)) lines.push(`${role}: BLOCKED (${d.join(", ")})`);
     // Bu koşuda yaratılan, niteliği sapan roller bırakılmaz (API yolunda neon_superuser üyeliği → BYPASSRLS).
+    if (o.flags.rolePath === "sql") {
+      for (const role of created) {
+        const d = o.psql(`DROP ROLE ${quoteIdent(role)};`);
+        lines.push(d.ok ? `${role}: bu koşuda yaratılan rol silindi` : `${role}: FAIL (yaratılan rol silinemedi — elle silinmeli, SQLSTATE ${d.sqlstate ?? "?"})`);
+      }
+    }
     if (o.flags.rolePath === "api") {
       for (const role of created) {
         try {
@@ -752,9 +782,11 @@ export async function main(o = {}) {
       return finish();
     }
 
-    const roles = await ensureAppRoles({ psql, api, branchId: conn.branchId, flags, flySecrets: existing, rand, mask, say });
+    const roles = await ensureAppRoles({ psql, api, branchId: conn.branchId, flags, flySecrets: existing, rand, mask, say, readOnly: probe.status !== "OK" });
     lines.push(...roles.lines);
     if (roles.note) notes.push(roles.note);
+    if (roles.created.length > 0) notes.push(`bu koşuda yaratılan roller: ${roles.created.join(", ")}`);
+    if (roles.rotated.length > 0) notes.push(`bu koşuda parolası döndürülen roller: ${roles.rotated.join(", ")}`);
     if (probe.status === "BLOCKED" || roles.status === "BLOCKED") {
       status = "BLOCKED";
       notes.push("Fly'a hiçbir sır yazılmadı");
