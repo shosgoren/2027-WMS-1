@@ -51,6 +51,8 @@ Q-46 | INVARIANTS I-05 negatif stok için "tenant politikası + özel yetki + ge
 Q-47 | Lot `expiry_date` / `production_date` düzeltmesi hangi rolle ve hangi denetim iziyle yapılır (yanlış SKT girişi)? | T-204, 04 §Lot | açık — şimdilik wms_app UPDATE (audit eylemi T-212/T-216'da)
 Q-48 | Belge satırında `reversed_quantity <= quantity` üst sınırı hangi birimde karşılaştırılır (satır birimi mi, temel birim mi)? DB yalnızca ≥0 ve artışı zorluyor | T-206 | açık — komut katmanı (T-213/T-217) karar verene kadar üst sınır komutta
 Q-49 | Durum değiştiren taşımada (ör. AVAILABLE → QUARANTINE) belge satırı hedef stok durumunu nerede taşır? Satırda tek `stock_status` var | T-206, ADR-017 | açık — T-217/T-232 öncesi netleşmeli
+Q-50 | Stok defteri `reason` için izinli değer kümesi nedir (sabit kod listesi mi, serbest metin mi)? Şimdilik yalnızca boş olmama CHECK'i | T-232 | açık — T-213/T-217 komut katmanı kodları belirleyince CHECK daraltılır
+Q-51 | Stok defteri `actor_user_id` zorunlu mu (sistem/worker hareketleri)? Şimdilik nullable, FK yok | T-232 | açık — 0012 geçmiş yazıcısıyla tutarlı karar T-213'te
 
 ## Varsayımlar
 A-01 | Neon pooler'ı transaction-mode PgBouncer'dır (kullanıcı kararı kaydı, 2026-10-05) — **teyit edildi 2026-10-05, sürüm hariç** (belge + T-005d koşu 3 çoklama gözlemi, https://github.com/shosgoren/2027-WMS-1/actions/runs/37388724069); PgBouncer sürümü gözlenemedi | Neon pooler türünü/kipini değiştirdiğini duyurana veya yeniden spike aksini gösterene kadar | Q-02
@@ -147,3 +149,6 @@ A-91 | Belge durum makinesi DB'de yalnızca "POSTED değişmez", "POSTED ⇒ num
 A-92 | Sonlanmış (IN_PROGRESS dışı) idempotency kaydı tamamen değişmezdir (I-06) | — | T-206
 A-93 | Belge satırı lokasyonunun belge deposuna ait olduğunu DB denetlemez (FK yalnızca `(tenant_id, location_id)`); depo uyumu komut katmanında | Komut testi T-213/T-217 kabulünde | T-206
 A-94 | `wms_ops` belge tablolarında yetki almaz (0010/0011 deseni; kartın "yalnızca SELECT" ifadesinden sapma). Gerekirse ayrı kart + migration ile ops RESTRICTIVE politikasıyla eklenir | — | T-206
+A-95 | Belge `reason` (ve kopyalandığı silinemeyen `document_status_history.reason`) serbest metnine kişisel veri girilmez: UI alanında uyarı (T-216/T-226), ≤500 karakter CHECK; KVKK silme yükümlülüğü append-only geçmişle çakışacağından 4P saklama/silme kartı bu sütunu kapsar (anonimleştirme yolu) | 4P saklama kartında karar | T-206 inceleme
+A-96 | CONSUMED/RELEASED rezervasyon sonlanmıştır, değiştirilemez; INSERT yalnızca ACTIVE açar | — | T-232
+A-97 | Seri boyutu yoksa `stock_balances.serial_key` sıfır UUID sentinelidir (tekillik ve CHECK bunun üzerine); gerçek serial_id ile çakışma pratikte imkânsız | — | T-232
