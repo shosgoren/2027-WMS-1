@@ -19,14 +19,12 @@ const KNOWN_ERRORS = ["forbidden", "unauthenticated", "validation_failed", "rate
 export function Wizard({
   name,
   slug,
-  requestId,
   templates,
   defaultTemplateKey,
   backHref,
 }: {
   name: string;
   slug: string;
-  requestId: string;
   templates: readonly TemplatePreview[];
   defaultTemplateKey: string;
   backHref: string;
@@ -41,8 +39,6 @@ export function Wizard({
 
   return (
     <form action={formAction} className="flex min-w-0 flex-col gap-4">
-      <input type="hidden" name="name" value={name} />
-      <input type="hidden" name="requestId" value={requestId} />
       <section className="flex min-w-0 flex-col gap-1 rounded-card bg-surface p-4 shadow-card">
         <p className="break-words text-xl font-bold text-ink">{name}</p>
         <p className="break-all text-base text-ink-muted">{t("step1.slugPreview", { slug })}</p>

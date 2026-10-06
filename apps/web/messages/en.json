@@ -284,7 +284,9 @@
       "enter": "Enter as {role}",
       "entering": "Entering…",
       "failed": "Demo sign-in failed.",
-      "failedAction": "Demo accounts may not be ready yet. Try again shortly; if it continues, tell your administrator."
+      "failedAction": "Demo accounts may not be ready yet. Try again shortly; if it continues, tell your administrator.",
+      "unavailable": "Demo sign-in is not configured in this environment.",
+      "unavailableAction": "The demo account settings are missing or invalid; tell your administrator."
     }
   },
   "help": {

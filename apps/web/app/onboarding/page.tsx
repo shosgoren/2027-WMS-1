@@ -1,5 +1,4 @@
 import type { Metadata } from "next";
-import { randomUUID } from "node:crypto";
 import { headers } from "next/headers";
 import Link from "next/link";
 import { redirect } from "next/navigation";
@@ -7,12 +6,13 @@ import { getTranslations } from "next-intl/server";
 import { Banner, Button, TextField } from "@wms/ui";
 import { TEMPLATE_KEYS, getTemplate } from "@wms/domain/onboarding/templates";
 import { slugCandidates, workspaceCreationAllowed } from "@wms/domain/onboarding/workspace";
+import { readWizardDraft, saveWorkspaceNameAction } from "./actions.ts";
 import { Wizard } from "./wizard.tsx";
 import type { TemplatePreview } from "./wizard.tsx";
 
-// Çalışma alanı sihirbazı (T-122). Adım URL'dedir: adım 1 `GET` formu, adım 2 `?name=` ile gelir; böylece yenileme/geri
-// "kaldığı adımdan devam" eder ve slug önizlemesi domain'in kendi üretiminden (`slugCandidates`) sunucuda hesaplanır
-// (kural istemcide yinelenmez; istemci paketi sunucu paketlerini içe aktarmaz — T-127a/b).
+// Çalışma alanı sihirbazı (T-122). Adım sunucu durumundadır: adım 1 POST eder, ad + `requestId` kısa ömürlü httpOnly çerezde
+// (URL'de ad yok); çerez varsa adım 2, yoksa (ya da `?edit=1`) adım 1 çizilir: yenileme/geri kaldığı adımdan devam eder ve
+// aynı `requestId`'yi taşır. Slug önizlemesi domain'in `slugCandidates` çıktısından sunucuda hesaplanır (istemcide kural yok).
 export const dynamic = "force-dynamic";
 
 export async function generateMetadata(): Promise<Metadata> {
@@ -55,28 +55,29 @@ export default async function OnboardingPage({ searchParams }: { searchParams: P
     );
   }
 
-  const rawName = first((await searchParams).name);
-  const name = rawName?.trim() ?? "";
-  const nameValid = name !== "" && name.length <= NAME_MAX && !/[\u0000-\u001f\u007f]/.test(name);
+  const query = await searchParams;
+  const draft = await readWizardDraft();
+  const edit = first(query.edit) === "1";
+  const invalid = first(query.invalid) === "1";
   const ts = await getTranslations("serverErrors");
 
-  if (!nameValid) {
+  if (draft === null || edit) {
     return (
       <main className={SHELL}>
         <h1 className="break-words text-3xl font-extrabold text-ink">{t("title")}</h1>
         <p className="text-lg text-ink-muted">{t("intro")}</p>
         <p className="text-base font-semibold text-accent-ink">{t("stepOf", { current: 1, total: 2 })}</p>
-        <form method="get" action="/onboarding" className="flex flex-col gap-4 rounded-card bg-surface p-4 shadow-card">
+        <form action={saveWorkspaceNameAction} className="flex flex-col gap-4 rounded-card bg-surface p-4 shadow-card">
           <h2 className="text-xl font-bold text-ink">{t("step1.title")}</h2>
           <TextField
             label={t("step1.label")}
             hint={t("step1.hint")}
             name="name"
-            defaultValue={rawName ?? ""}
+            defaultValue={draft?.name ?? ""}
             maxLength={NAME_MAX}
             required
             autoComplete="organization"
-            error={rawName === undefined ? undefined : { reason: ts("validation_failed"), action: ts("validation_failedAction") }}
+            error={invalid ? { reason: ts("validation_failed"), action: ts("validation_failedAction") } : undefined}
           />
           <Button type="submit">{t("step1.next")}</Button>
         </form>
@@ -84,9 +85,7 @@ export default async function OnboardingPage({ searchParams }: { searchParams: P
     );
   }
 
-  // `requestId` bu çizimde üretilir ve forma gömülür: aynı forma çift tıklama aynı isteği taşır (ikinci tenant oluşmaz).
-  const requestId = randomUUID();
-  const slug = slugCandidates(name, requestId)[0] ?? "";
+  const slug = slugCandidates(draft.name, draft.requestId)[0] ?? "";
   const templates: TemplatePreview[] = [];
   for (const key of TEMPLATE_KEYS) {
     const tpl = getTemplate(key);
@@ -97,7 +96,7 @@ export default async function OnboardingPage({ searchParams }: { searchParams: P
     <main className={SHELL}>
       <h1 className="break-words text-3xl font-extrabold text-ink">{t("title")}</h1>
       <p className="text-base font-semibold text-accent-ink">{t("stepOf", { current: 2, total: 2 })}</p>
-      <Wizard name={name} slug={slug} requestId={requestId} templates={templates} defaultTemplateKey="PACKAGING_SUPPLIES" backHref={`/onboarding?name=${encodeURIComponent(name)}`} />
+      <Wizard name={draft.name} slug={slug} templates={templates} defaultTemplateKey="PACKAGING_SUPPLIES" backHref="/onboarding?edit=1" />
     </main>
   );
 }

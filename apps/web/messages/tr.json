@@ -284,7 +284,9 @@
       "enter": "{role} olarak gir",
       "entering": "Giriliyor…",
       "failed": "Demo girişi yapılamadı.",
-      "failedAction": "Demo hesapları henüz hazır olmayabilir. Biraz sonra yeniden dene; sürerse yöneticine haber ver."
+      "failedAction": "Demo hesapları henüz hazır olmayabilir. Biraz sonra yeniden dene; sürerse yöneticine haber ver.",
+      "unavailable": "Demo girişi bu ortamda yapılandırılmamış.",
+      "unavailableAction": "Demo hesabı ayarları eksik ya da hatalı; yöneticine haber ver."
     }
   },
   "help": {

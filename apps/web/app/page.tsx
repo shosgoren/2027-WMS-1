@@ -8,7 +8,7 @@ import { getAppDb } from "@wms/db";
 import { getMembershipSummary } from "@wms/domain/identity/member-queries";
 import { ROLE_KEYS } from "@wms/domain/identity/permissions";
 import { workspaceCreationAllowed } from "@wms/domain/onboarding/workspace";
-import { demoSignInAction } from "./demo-actions.ts";
+import { demoLoginStatus, demoSignInAction } from "./demo-actions.ts";
 
 // Landing (T-122). Oturumlu kullanıcı çalışma alanına ya da `/onboarding`'e gider. Ortam bayrakları istek anında okunur.
 export const dynamic = "force-dynamic";
@@ -52,7 +52,8 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
 
   const t = await getTranslations();
   // A-43: demo yalnızca sunucuda karar verilir; bayraklar yokken bant ve düğmeler HİÇ render edilmez (login ile aynı koşul).
-  const demo = process.env.DEMO_MODE === "1" && process.env.WMS_ENV === "staging";
+  const demoState = await demoLoginStatus();
+  const demo = demoState !== "disabled";
   // A-50 / m11: `SIGNUP_ENABLED` yalnızca local|ci'da etkindir; staging/prod'da düğme çıkmaz.
   const signup = workspaceCreationAllowed(process.env);
   const rawError = first((await searchParams).demoError);
@@ -81,6 +82,12 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
             {t("landing.demo.heading")}
           </h2>
           <p className="text-base text-ink-muted">{t("landing.demo.intro")}</p>
+          {demoState === "misconfigured" ? (
+            <Banner kind="warning">
+              <p>{t("landing.demo.unavailable")}</p>
+              <p className="mt-1">{t("landing.demo.unavailableAction")}</p>
+            </Banner>
+          ) : null}
           {demoError === undefined ? null : (
             <Banner kind="error">
               <p>{demoError === "RATE_LIMITED" ? `${t("serverErrors.rate_limited")} ${t("serverErrors.rate_limitedAction")}` : `${t("landing.demo.failed")} ${t("landing.demo.failedAction")}`}</p>
@@ -94,7 +101,8 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
                 type="submit"
                 name="role"
                 value={role}
-                className={`${BUTTON} cursor-pointer border-2 border-border bg-surface text-ink`}
+                disabled={demoState !== "ready"}
+                className={`${BUTTON} cursor-pointer border-2 border-border bg-surface text-ink disabled:cursor-not-allowed disabled:opacity-60`}
               >
                 {t("landing.demo.enter", { role: t(`roles.${role}`) })}
               </button>

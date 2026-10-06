@@ -7,7 +7,7 @@
 import { cookies, headers } from "next/headers";
 import { z } from "zod";
 import { getAuthService } from "@wms/auth";
-import { DEMO_ROLES, loadDemoSeedConfig } from "@wms/domain/demo/seed";
+import { DEMO_EMAIL_DOMAIN, DEMO_ROLES, loadDemoSeedConfig } from "@wms/domain/demo/seed";
 import { ROLE_KEYS } from "@wms/domain/identity/permissions";
 import { AppError } from "@wms/shared/errors";
 import { createProductionGuard } from "../lib/action-guard.ts";
@@ -16,11 +16,25 @@ const schema = z.object({ role: z.enum(ROLE_KEYS) }).strict();
 
 const guardedAction = createProductionGuard(() => headers());
 
-/** Landing ve eylem aynı koşulu kullanır (login sayfasındaki "Demo ortamı" bandıyla aynı: A-43). */
-function demoLoginAllowed(env: NodeJS.ProcessEnv): string | undefined {
-  if (env.WMS_ENV?.trim() !== "staging" || env.DEMO_MODE?.trim() !== "1") return undefined;
+type DemoLoginConfig =
+  | { readonly state: "disabled" | "misconfigured" }
+  | { readonly state: "ready"; readonly password: string };
+
+/**
+ * TEK yapılandırma kararı (landing ve eylem aynısını kullanır): `disabled` = bayraklar kapalı (landing hiçbir şey çizmez);
+ * `misconfigured` = bayraklar açık ama `DEMO_EMAIL_DOMAIN` ≠ T-123a sabiti (`example.invalid`) ya da `DEMO_PASSWORD` yok/geçersiz
+ * (landing düğmeleri açıklamalı devre dışı gösterir, eylem FORBIDDEN döner); `ready` yalnızca hepsi doğruyken.
+ */
+function loadDemoLoginConfig(env: NodeJS.ProcessEnv): DemoLoginConfig {
+  if (env.WMS_ENV?.trim() !== "staging" || env.DEMO_MODE?.trim() !== "1") return { state: "disabled" };
+  if (env.DEMO_EMAIL_DOMAIN?.trim().toLowerCase() !== DEMO_EMAIL_DOMAIN) return { state: "misconfigured" };
   const config = loadDemoSeedConfig(env);
-  return config.enabled ? config.password : undefined;
+  return config.enabled ? { state: "ready", password: config.password } : { state: "misconfigured" };
+}
+
+/** Landing için yalnızca durum döner (parola asla). */
+export async function demoLoginStatus(): Promise<"disabled" | "misconfigured" | "ready"> {
+  return loadDemoLoginConfig(process.env).state;
 }
 
 interface ParsedCookie {
@@ -67,8 +81,11 @@ function parseSetCookie(raw: string): ParsedCookie | undefined {
 
 export async function demoSignInAction(raw: unknown) {
   return guardedAction({ schema, requireAuth: false }, async (input, ctx) => {
-    const password = demoLoginAllowed(process.env);
-    if (password === undefined) throw new AppError("FORBIDDEN");
+    const config = loadDemoLoginConfig(process.env);
+    if (config.state !== "ready") throw new AppError("FORBIDDEN");
+    // Oturumu açık kullanıcı demo girişi yapamaz (önce çıkış): çerez üzerine yazılıp sahipsiz oturum kalmaz.
+    if (ctx.principal !== null) throw new AppError("FORBIDDEN");
+    const password = config.password;
     const incoming = await headers();
     const forward = new Headers({ "content-type": "application/json", origin: ctx.origin });
     // Better Auth hız sınırı `fly-client-ip`ten anahtarlanır (auth `ipAddressHeaders`): gerçek istemci adresi iletilir.
