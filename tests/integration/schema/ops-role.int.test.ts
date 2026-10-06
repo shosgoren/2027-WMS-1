@@ -409,6 +409,8 @@ describe(`0009 ileri/geri/ileri (target=${env.target})`, () => {
       const up = await migrateUp({ url: scratchUrl });
       expect(up.applied).toEqual(["0009"]);
     } finally {
+      // Assertion düşse de wms_app'te wms_ops ADMIN'i kalmasın (küme geneli rol; sonraki dosyaları kirletmez).
+      await a.query(`REVOKE ${OPS} FROM wms_app`).catch(() => undefined);
       await a.query(`DROP ROLE IF EXISTS ${tmp}`).catch(() => undefined);
     }
     admin = await connect(scratchUrl);
