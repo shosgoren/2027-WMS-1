@@ -4,12 +4,12 @@ import type { S3Client } from "@aws-sdk/client-s3";
 import { describe, expect, it } from "vitest";
 import { AppError } from "../../shared/src/errors.ts";
 import { tenantCacheKey } from "../../shared/src/cache-key.ts";
-import { assertOwnedKey, normalizeRelativeKey, storageContextFromMembership, type StorageContext } from "../../shared/src/storage.ts";
-import { StorageConfigError, StorageDisabledError, createObjectStorage, createObjectStorageFromEnv } from "./index.ts";
+import { assertOwnedKey, issueStorageContextFromVerifiedTenant, normalizeRelativeKey, type StorageContext } from "../../shared/src/storage.ts";
+import { StorageConfigError, createStorageContext, type StorageTx, StorageDisabledError, createObjectStorage, createObjectStorageFromEnv } from "./index.ts";
 
 const A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-const ctxOf = (tenantId: string): StorageContext => storageContextFromMembership({ membershipId: "m-1", tenantId });
+const ctxOf = (tenantId: string): StorageContext => issueStorageContextFromVerifiedTenant(tenantId);
 
 function codeOf(fn: () => unknown): string | undefined {
   try {
@@ -52,6 +52,13 @@ describe("normalizeRelativeKey", () => {
     ["bidi geçersiz kılma", "a‮b"],
     ["eşleşmemiş vekil", "a\ud800b"],
     ["çok uzun", "a".repeat(1000)],
+    ["NFKC≠NFC tam genişlikli eğik çizgi", "a\uff0fb"],
+    ["ligatür", "\ufb01le"],
+    ["yumuşak tire", "a\u00adb"],
+    ["Arapça harf işareti", "a\u061cb"],
+    ["satır ayırıcı", "a\u2028b"],
+    ["paragraf ayırıcı", "a\u2029b"],
+    ["etiket karakteri", "a\u{e0041}b"],
   ])("reddeder: %s", (_n, key) => {
     expect(codeOf(() => normalizeRelativeKey(key))).toBe("VALIDATION_FAILED");
   });
@@ -92,13 +99,19 @@ describe("StorageContext markası", () => {
     const storage = createObjectStorage({ ...cfg(), client: fakeClient(() => sent++) });
     const forged = { tenantId: A } as unknown as StorageContext;
     expect(await asyncCodeOf(() => storage.get(forged, `tenants/${A}/x`))).toBe("FORBIDDEN");
-    expect(await asyncCodeOf(() => storage.put(A as unknown as StorageContext, "x", new Uint8Array(), { contentType: "text/plain" }))).toBe("FORBIDDEN");
+    expect(await asyncCodeOf(() => storage.put(A as unknown as StorageContext, "x", new Uint8Array(), { contentType: "application/octet-stream" }))).toBe("FORBIDDEN");
     expect(sent).toBe(0);
   });
-  it("geçersiz üyelik FORBIDDEN", () => {
-    expect(codeOf(() => storageContextFromMembership({ membershipId: "m", tenantId: "not-a-uuid" }))).toBe("FORBIDDEN");
-    expect(codeOf(() => storageContextFromMembership({ membershipId: "", tenantId: A }))).toBe("FORBIDDEN");
-    expect(codeOf(() => storageContextFromMembership(A as never))).toBe("FORBIDDEN");
+  it("geçersiz tenant kimliği FORBIDDEN", () => {
+    expect(codeOf(() => issueStorageContextFromVerifiedTenant("not-a-uuid"))).toBe("FORBIDDEN");
+    expect(codeOf(() => issueStorageContextFromVerifiedTenant(undefined))).toBe("FORBIDDEN");
+    expect(codeOf(() => issueStorageContextFromVerifiedTenant({ tenantId: A }))).toBe("FORBIDDEN");
+  });
+  it("createStorageContext tenant'ı tx oturum ayarından okur; ayar yoksa FORBIDDEN", async () => {
+    const txWith = (tenant: string | null): StorageTx => ({ execute: () => Promise.resolve([{ tenant_id: tenant }]) }) as unknown as StorageTx;
+    expect((await createStorageContext(txWith(B))).tenantId).toBe(B);
+    expect(await asyncCodeOf(() => createStorageContext(txWith(null)))).toBe("FORBIDDEN");
+    expect(await asyncCodeOf(() => createStorageContext(txWith("not-a-uuid")))).toBe("FORBIDDEN");
   });
 });
 
@@ -118,13 +131,29 @@ describe("adaptör: ağsız ret", () => {
     expect(await asyncCodeOf(() => storage.delete(ctx, `tenants/${B}/x`))).toBe("FORBIDDEN");
     expect(await asyncCodeOf(() => storage.signedGetUrl(ctx, `tenants/${B}/x`, 60))).toBe("FORBIDDEN");
     expect(await asyncCodeOf(() => storage.get(ctx, `tenants/${A}/../${B}/x`))).toBe("VALIDATION_FAILED");
-    expect(await asyncCodeOf(() => storage.put(ctx, "../x", new Uint8Array(), { contentType: "text/plain" }))).toBe("VALIDATION_FAILED");
-    expect(await asyncCodeOf(() => storage.put(ctx, "/x", new Uint8Array(), { contentType: "text/plain" }))).toBe("VALIDATION_FAILED");
+    expect(await asyncCodeOf(() => storage.put(ctx, "../x", new Uint8Array(), { contentType: "application/octet-stream" }))).toBe("VALIDATION_FAILED");
+    expect(await asyncCodeOf(() => storage.put(ctx, "/x", new Uint8Array(), { contentType: "application/octet-stream" }))).toBe("VALIDATION_FAILED");
     expect(sent).toBe(0);
   });
   it.each([0, -1, 1.5, 3601, Number.NaN, Number.POSITIVE_INFINITY])("geçersiz imzalı URL süresi %s reddedilir", async (ttl) => {
     const storage = createObjectStorage({ ...cfg(), client: fakeClient(() => undefined) });
     expect(await asyncCodeOf(() => storage.signedGetUrl(ctxOf(A), `tenants/${A}/x`, ttl))).toBe("VALIDATION_FAILED");
+  });
+});
+
+describe("içerik türü ve boyut (ağsız)", () => {
+  it("izin listesi dışı, CRLF'li ve büyük harfli türler reddedilir; sınır aşan gövde reddedilir", async () => {
+    let sent = 0;
+    const storage = createObjectStorage({ ...cfg(), client: fakeClient(() => sent++) });
+    for (const ct of ["text/html", "application/pdf\r\nX: y", "Text/CSV", "text/csv; charset=utf-8"]) {
+      expect(await asyncCodeOf(() => storage.put(ctxOf(A), "x", new Uint8Array(1), { contentType: ct }))).toBe("VALIDATION_FAILED");
+    }
+    expect(await asyncCodeOf(() => storage.put(ctxOf(A), "x", new Uint8Array(50 * 1024 * 1024 + 1), { contentType: "application/pdf" }))).toBe("VALIDATION_FAILED");
+    expect(sent).toBe(0);
+  });
+  it("bilinmeyen ifNoneMatch değeri reddedilir", async () => {
+    const storage = createObjectStorage({ ...cfg(), client: fakeClient(() => undefined) });
+    expect(await asyncCodeOf(() => storage.put(ctxOf(A), "x", new Uint8Array(1), { contentType: "application/pdf", ifNoneMatch: "abc" as never }))).toBe("VALIDATION_FAILED");
   });
 });
 

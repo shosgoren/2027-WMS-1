@@ -4,10 +4,13 @@
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import path from "node:path";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { AppError } from "../../../packages/shared/src/errors.ts";
-import { storageContextFromMembership, type ObjectStorage, type StorageContext } from "../../../packages/shared/src/storage.ts";
-import { createObjectStorage, readStorageConfig, type ObjectStorageConfig } from "../../../packages/storage/src/index.ts";
+import { createDbClient, withTenant } from "../../../packages/db/src/index.ts";
+import { DB_CLIENT_SETTINGS, createTenantContext, type DbClient } from "../../../packages/db/src/client.ts";
+import { readIntEnv } from "../harness/env.ts";
+import { type ObjectStorage, type StorageContext } from "../../../packages/shared/src/storage.ts";
+import { createObjectStorage, createStorageContext, readStorageConfig, type ObjectStorageConfig } from "../../../packages/storage/src/index.ts";
 
 // Yalnızca kullanılan SDK yüzeyi bildirilir (SDK tiplerine kökten bakmak çözülemeyen @smithy/* tiplerini getirir).
 interface TestS3Client {
@@ -30,13 +33,14 @@ const dec = new TextDecoder();
 
 let requests = 0;
 let storage: ObjectStorage;
+let dbClient: DbClient;
 let ctxA: StorageContext;
 let ctxB: StorageContext;
 let tenantA: string;
 let tenantB: string;
 let bucketEndpointKeyless: { endpoint: string; bucket: string };
 
-beforeAll(() => {
+beforeAll(async () => {
   const missing = ["STORAGE_ENABLED", "STORAGE_ENDPOINT", "STORAGE_BUCKET", "STORAGE_ACCESS_KEY_ID", "STORAGE_SECRET_ACCESS_KEY"].filter((n) => !process.env[n]);
   if (missing.length > 0) {
     throw new Error(`object-storage int test needs a MinIO target; missing env: ${missing.join(", ")} (compose target sets them in global-setup; neon target must supply them)`);
@@ -63,8 +67,11 @@ beforeAll(() => {
   storage = createObjectStorage({ ...config, client: client as unknown as NonNullable<ObjectStorageConfig["client"]> });
   tenantA = randomUUID();
   tenantB = randomUUID();
-  ctxA = storageContextFromMembership({ membershipId: randomUUID(), tenantId: tenantA });
-  ctxB = storageContextFromMembership({ membershipId: randomUUID(), tenantId: tenantB });
+  // Bağlam, tenant kimliğini çağırandan değil tx'in app.current_tenant_id ayarından alır (security MAJOR).
+  dbClient = createDbClient({ url: readIntEnv(process.env).databaseUrl, ...DB_CLIENT_SETTINGS });
+  const ctxFor = (tenantId: string): Promise<StorageContext> => withTenant(createTenantContext(dbClient, tenantId), (tx) => createStorageContext(tx));
+  ctxA = await ctxFor(tenantA);
+  ctxB = await ctxFor(tenantB);
   bucketEndpointKeyless = { endpoint: config.endpoint, bucket: config.bucket };
 });
 
@@ -78,19 +85,50 @@ async function codeOf(fn: () => Promise<unknown>): Promise<string> {
   return "NO_ERROR";
 }
 
+afterAll(async () => {
+  await dbClient.close();
+});
+
 describe("ObjectStorage (MinIO)", () => {
+  it("bağlam tenant'ı DB oturum ayarından türetir; sahte nesne/dizgi kabul edilmez", async () => {
+    expect(ctxA.tenantId).toBe(tenantA);
+    const forged = { tenantId: tenantB, membershipId: randomUUID() } as unknown as StorageContext;
+    const before = requests;
+    expect(await codeOf(() => storage.put(forged, "x", enc.encode("x"), { contentType: "application/octet-stream" }))).toBe("FORBIDDEN");
+    expect(await codeOf(() => storage.get(forged, `tenants/${tenantB}/x`))).toBe("FORBIDDEN");
+    expect(requests).toBe(before);
+  });
+
+  it("üzerine yazma varsayılan olarak yok (VERSION_CONFLICT); ifNoneMatch:null izin verir", async () => {
+    const rel = `ow/${randomUUID()}.bin`;
+    const key = await storage.put(ctxA, rel, enc.encode("bir"), { contentType: "application/octet-stream" });
+    expect(await codeOf(() => storage.put(ctxA, rel, enc.encode("iki"), { contentType: "application/octet-stream" }))).toBe("VERSION_CONFLICT");
+    expect(dec.decode((await storage.get(ctxA, key)).body)).toBe("bir");
+    await storage.put(ctxA, rel, enc.encode("iki"), { contentType: "application/octet-stream", ifNoneMatch: null });
+    expect(dec.decode((await storage.get(ctxA, key)).body)).toBe("iki");
+    await storage.delete(ctxA, key);
+  });
+
+  it("izin listesi dışı / CRLF'li içerik türü ağ çağrısı yapmadan reddedilir", async () => {
+    const before = requests;
+    for (const ct of ["text/html", "image/svg+xml", "application/pdf\r\nX: y", "TEXT/CSV", ""]) {
+      expect(await codeOf(() => storage.put(ctxA, "ct.bin", enc.encode("x"), { contentType: ct }))).toBe("VALIDATION_FAILED");
+    }
+    expect(requests).toBe(before);
+  });
+
   it("A put/get/delete çalışır; anahtar tenants/<A>/ önekli", async () => {
-    const key = await storage.put(ctxA, `docs/${randomUUID()}.txt`, enc.encode("merhaba"), { contentType: "text/plain" });
+    const key = await storage.put(ctxA, `docs/${randomUUID()}.txt`, enc.encode("merhaba"), { contentType: "application/octet-stream" });
     expect(key.startsWith(`tenants/${tenantA}/docs/`)).toBe(true);
     const got = await storage.get(ctxA, key);
     expect(dec.decode(got.body)).toBe("merhaba");
-    expect(got.contentType).toBe("text/plain");
+    expect(got.contentType).toBe("application/octet-stream");
     await storage.delete(ctxA, key);
     expect(await codeOf(() => storage.get(ctxA, key))).toBe("NOT_FOUND");
   });
 
   it("A bağlamıyla B önekli anahtar: FORBIDDEN ve MinIO'ya istek gitmez", async () => {
-    const keyB = await storage.put(ctxB, "secret.txt", enc.encode("b-verisi"), { contentType: "text/plain" });
+    const keyB = await storage.put(ctxB, "secret.txt", enc.encode("b-verisi"), { contentType: "application/octet-stream" });
     const before = requests;
     expect(await codeOf(() => storage.get(ctxA, keyB))).toBe("FORBIDDEN");
     expect(await codeOf(() => storage.delete(ctxA, keyB))).toBe("FORBIDDEN");
@@ -106,13 +144,13 @@ describe("ObjectStorage (MinIO)", () => {
   it("yol geçişi / mutlak / ters eğik çizgi / unicode benzeri put anahtarları ağ çağrısı yapmaz", async () => {
     const before = requests;
     for (const bad of ["../x", "a/../../x", "/abs", "a\\b", "a//b", "．．/x", `../${tenantB}/x`]) {
-      expect(await codeOf(() => storage.put(ctxA, bad, enc.encode("x"), { contentType: "text/plain" }))).toBe("VALIDATION_FAILED");
+      expect(await codeOf(() => storage.put(ctxA, bad, enc.encode("x"), { contentType: "application/octet-stream" }))).toBe("VALIDATION_FAILED");
     }
     expect(requests).toBe(before);
   });
 
   it("NFC olmayan ve NFC yazım aynı nesneye çözülür (put normalleştirir)", async () => {
-    const key = await storage.put(ctxA, "café.txt", enc.encode("n"), { contentType: "text/plain" });
+    const key = await storage.put(ctxA, "café.txt", enc.encode("n"), { contentType: "application/octet-stream" });
     expect(key).toBe(`tenants/${tenantA}/café.txt`);
     expect(dec.decode((await storage.get(ctxA, key)).body)).toBe("n");
     await storage.delete(ctxA, key);
@@ -120,17 +158,18 @@ describe("ObjectStorage (MinIO)", () => {
 
   describe("imzalı URL", () => {
     it("süre içinde yalnızca o anahtarı GET ile verir; X-Amz-Expires = ttl", async () => {
-      const key = await storage.put(ctxA, `signed/${randomUUID()}.txt`, enc.encode("imzali"), { contentType: "text/plain" });
+      const key = await storage.put(ctxA, `signed/${randomUUID()}.txt`, enc.encode("imzali"), { contentType: "application/octet-stream" });
       const url = await storage.signedGetUrl(ctxA, key, 30);
       expect(new URL(url).searchParams.get("X-Amz-Expires")).toBe("30");
       const ok = await fetch(url);
       expect(ok.status).toBe(200);
+      expect(ok.headers.get("content-disposition")).toBe("attachment");
       expect(await ok.text()).toBe("imzali");
       await storage.delete(ctxA, key);
     });
 
     it("süre dolunca reddedilir", async () => {
-      const key = await storage.put(ctxA, `signed/${randomUUID()}.txt`, enc.encode("kisa"), { contentType: "text/plain" });
+      const key = await storage.put(ctxA, `signed/${randomUUID()}.txt`, enc.encode("kisa"), { contentType: "application/octet-stream" });
       const url = await storage.signedGetUrl(ctxA, key, 1);
       expect((await fetch(url)).status).toBe(200);
       await new Promise((r) => setTimeout(r, 2500));
@@ -139,8 +178,8 @@ describe("ObjectStorage (MinIO)", () => {
     });
 
     it("kapsam: başka anahtara, PUT/DELETE yöntemine ve imzasız erişime geçerli değildir", async () => {
-      const key = await storage.put(ctxA, `signed/${randomUUID()}.txt`, enc.encode("kapsam"), { contentType: "text/plain" });
-      const other = await storage.put(ctxB, "other.txt", enc.encode("baska"), { contentType: "text/plain" });
+      const key = await storage.put(ctxA, `signed/${randomUUID()}.txt`, enc.encode("kapsam"), { contentType: "application/octet-stream" });
+      const other = await storage.put(ctxB, "other.txt", enc.encode("baska"), { contentType: "application/octet-stream" });
       const url = new URL(await storage.signedGetUrl(ctxA, key, 60));
       // Aynı imza başka tenant anahtarına uygulanamaz (imza yolu kapsar).
       const swapped = new URL(url);
@@ -174,8 +213,9 @@ describe("ObjectStorage (MinIO)", () => {
       forcePathStyle: true,
       credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey, ...(config.sessionToken === undefined ? {} : { sessionToken: config.sessionToken }) },
     });
-    await expect(client.send(new s3.CreateBucketCommand({ Bucket: `x${randomUUID()}` }))).rejects.toThrow();
-    await expect(client.send(new s3.ListBucketsCommand({}))).rejects.toThrow();
+    const denied = { name: "AccessDenied", $metadata: { httpStatusCode: 403 } };
+    await expect(client.send(new s3.CreateBucketCommand({ Bucket: `x${randomUUID()}` }))).rejects.toMatchObject(denied);
+    await expect(client.send(new s3.ListBucketsCommand({}))).rejects.toMatchObject(denied);
     client.destroy();
   });
 });

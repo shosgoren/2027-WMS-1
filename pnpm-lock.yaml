@@ -166,6 +166,9 @@ importers:
       '@aws-sdk/s3-request-presigner':
         specifier: 3.1146.0
         version: 3.1146.0
+      '@wms/db':
+        specifier: workspace:*
+        version: link:../db
       '@wms/shared':
         specifier: workspace:*
         version: link:../shared

@@ -6,17 +6,22 @@
 // ve loga/hataya yazılmaz (G-09). `STORAGE_ENABLED` kapalıyken (A-52: staging'de Tigris yok) bağdaştırıcı oluşturulmaz.
 import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client, S3ServiceException } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import { AppError } from "../../shared/src/errors.ts";
+import { currentTenantId, type withTenant } from "@wms/db";
+import { AppError } from "@wms/shared/errors";
 import {
+  MAX_OBJECT_BYTES,
+  assertBodySize,
+  assertContentType,
   assertOwnedKey,
   assertSignedUrlTtl,
   buildTenantKey,
   isIssuedStorageContext,
+  issueStorageContextFromVerifiedTenant,
   type ObjectStorage,
   type PutMeta,
   type StorageContext,
   type StoredObject,
-} from "../../shared/src/storage.ts";
+} from "@wms/shared/storage";
 
 export interface ObjectStorageConfig {
   readonly endpoint: string;
@@ -70,14 +75,32 @@ export function createObjectStorageFromEnv(env: Env): ObjectStorage {
   return createObjectStorage(readStorageConfig(env));
 }
 
+/** Tenant transaction'ı (`withTenant`/`withMembership` callback'inin `tx` tipi). */
+export type StorageTx = Parameters<Parameters<typeof withTenant>[1]>[0];
+
+/**
+ * Depolama bağlamı: tenant kimliği ÇAĞIRANIN verdiği değerden değil, `tx`'in `app.current_tenant_id` oturum
+ * ayarından okunur (`withMembership`/`withTenant` kurar). Bağlam yoksa `FORBIDDEN`.
+ */
+export async function createStorageContext(tx: StorageTx): Promise<StorageContext> {
+  const tenantId = await currentTenantId(tx);
+  if (tenantId === undefined) throw new AppError("FORBIDDEN");
+  return issueStorageContextFromVerifiedTenant(tenantId);
+}
+
+/** Kök neden yalnızca hata adı/HTTP durumu taşır: anahtar, bucket, uç nokta ve istek ayrıntısı loga/zincire girmez. */
 function internal(cause: unknown): AppError {
   const e = new AppError("INTERNAL");
-  e.cause = cause;
+  if (cause instanceof S3ServiceException) {
+    e.cause = new Error(`s3:${cause.name}:${cause.$metadata.httpStatusCode ?? "-"}`);
+  } else {
+    e.cause = new Error(cause instanceof Error ? `storage:${cause.name}` : "storage:unknown");
+  }
   return e;
 }
 
-function isNotFound(e: unknown): boolean {
-  return e instanceof S3ServiceException && (e.name === "NoSuchKey" || e.name === "NotFound" || e.$metadata.httpStatusCode === 404);
+function errName(e: unknown): string | undefined {
+  return e instanceof S3ServiceException ? e.name : undefined;
 }
 
 export function createObjectStorage(config: ObjectStorageConfig): ObjectStorage {
@@ -104,10 +127,16 @@ export function createObjectStorage(config: ObjectStorageConfig): ObjectStorage 
       guard(ctx);
       const key = buildTenantKey(ctx, relativeKey);
       if (!(body instanceof Uint8Array)) throw new AppError("VALIDATION_FAILED");
-      if (typeof meta?.contentType !== "string" || meta.contentType === "") throw new AppError("VALIDATION_FAILED");
+      assertBodySize(body.byteLength);
+      const contentType = assertContentType(meta?.contentType);
+      const ifNoneMatch = meta.ifNoneMatch === undefined ? "*" : meta.ifNoneMatch;
+      if (ifNoneMatch !== "*" && ifNoneMatch !== null) throw new AppError("VALIDATION_FAILED");
       try {
-        await client.send(new PutObjectCommand({ Bucket, Key: key, Body: body, ContentType: meta.contentType }));
+        await client.send(
+          new PutObjectCommand({ Bucket, Key: key, Body: body, ContentType: contentType, ...(ifNoneMatch === null ? {} : { IfNoneMatch: ifNoneMatch }) }),
+        );
       } catch (e) {
+        if (errName(e) === "PreconditionFailed") throw new AppError("VERSION_CONFLICT");
         throw internal(e);
       }
       return key;
@@ -119,9 +148,16 @@ export function createObjectStorage(config: ObjectStorageConfig): ObjectStorage 
       try {
         const out = await client.send(new GetObjectCommand({ Bucket, Key: owned }));
         if (out.Body === undefined) throw new Error("empty body");
+        if (out.ContentLength !== undefined && out.ContentLength > MAX_OBJECT_BYTES) {
+          // Gövde okunmadan bırakılır (bağlantı serbest kalsın).
+          const stream = out.Body as { destroy?: () => void };
+          stream.destroy?.();
+          throw new AppError("VALIDATION_FAILED");
+        }
         return { body: await out.Body.transformToByteArray(), contentType: out.ContentType };
       } catch (e) {
-        if (isNotFound(e)) throw new AppError("NOT_FOUND");
+        if (e instanceof AppError) throw e;
+        if (errName(e) === "NoSuchKey") throw new AppError("NOT_FOUND");
         throw internal(e);
       }
     },
@@ -141,7 +177,7 @@ export function createObjectStorage(config: ObjectStorageConfig): ObjectStorage 
       const owned = assertOwnedKey(ctx, key);
       const expiresIn = assertSignedUrlTtl(ttlSec);
       try {
-        return await getSignedUrl(client, new GetObjectCommand({ Bucket, Key: owned }), { expiresIn });
+        return await getSignedUrl(client, new GetObjectCommand({ Bucket, Key: owned, ResponseContentDisposition: "attachment" }), { expiresIn });
       } catch (e) {
         throw internal(e);
       }
