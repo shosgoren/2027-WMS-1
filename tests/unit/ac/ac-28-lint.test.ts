@@ -827,7 +827,7 @@ describe("AC-28 lint (T-127a): normalize edilmemiş yol atlatmaları", () => {
   );
 
   it(
-    "@AC-28 packages/shared/src içinde ./cache-key import'u serbest ama `export … from` yeniden dışa aktarımı yasak",
+    "@AC-28 packages/shared/src içinde de göreli cache-key import'u, `import * as`, import() ve `export … from` yasak (muafiyet yok)",
     async () => {
       const file = probe("packages/shared/src/__ac28_probe__.ts");
       for (const spec of ["./cache-key.ts", "./cache-key", "./x/../cache-key.ts", "../src/./cache-key.ts", "./%63ache-key.ts"]) {
@@ -837,9 +837,17 @@ describe("AC-28 lint (T-127a): normalize edilmemiş yol atlatmaları", () => {
           expect(hits, code).toHaveLength(1);
           expect(hits[0]?.severity, code).toBe(2);
         }
-        const imp = await lint(`import { x } from ${JSON.stringify(spec)};\n\nexport const c = x;\n`, file);
-        expect(rawHits(imp), spec).toHaveLength(0);
-        expect(imp.errorCount, spec).toBe(0);
+        const others = [
+          `import { x } from ${JSON.stringify(spec)};\n\nexport const c = x;\n`,
+          `import * as ns from ${JSON.stringify(spec)};\n\nexport const c = ns;\n`,
+          `export const c = (): Promise<unknown> => import(${JSON.stringify(spec)});\n`,
+          `import { x } from ${JSON.stringify(spec)};\nexport { x };\n`,
+        ];
+        for (const code of others) {
+          const hits = rawHits(await lint(code, file));
+          expect(hits, code).toHaveLength(1);
+          expect(hits[0]?.severity, code).toBe(2);
+        }
       }
     },
     60_000,
@@ -851,7 +859,6 @@ describe("AC-28 lint (T-127a): normalize edilmemiş yol atlatmaları", () => {
       const ok: Array<[string, string]> = [
         [STORAGE_INDEX_PATH, 'import { a } from "./././context.ts";\n\nexport const c = a;\n'],
         [STORAGE_SRC_PATH, 'import { a } from "../src/./context.ts";\n\nexport const c = a;\n'],
-        [probe("packages/shared/src/__ac28_probe__.ts"), 'import { a } from "./cache-key.ts";\n\nexport const c = a;\n'],
         [STORAGE_INDEX_PATH, 'import { a } from "../../shared/src/./cache-key.ts";\n\nexport const c = a;\n'],
       ];
       for (const [file, code] of ok) {

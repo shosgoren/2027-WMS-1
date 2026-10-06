@@ -648,8 +648,6 @@ const PROFILES = [
     files: ["packages/storage/src/index.ts"],
     allow: [AWS_SDK_ENTRY, STORAGE_CONTEXT_PATH_ENTRY, CACHE_KEY_ENTRY, CACHE_KEY_PATH_ENTRY],
   }),
-  // `@wms/shared` kendi iç göreli `./cache-key` içe aktarımı (çözülmüş yol denetimi) serbesttir; `export … from` yeniden dışa aktarımı ve paket adı girdisi yasak kalır.
-  strictProfile({ files: ["packages/shared/src/**"], allow: [CACHE_KEY_PATH_ENTRY], reexportForbid: [CACHE_KEY_PATH_ENTRY] }),
   // `packages/db` ve `tests/integration` ana bloktan muaftır (mevcut); yeni kütüphane yasakları orada da
   // geçerlidir, statik olmayan import/require muafiyeti değişmez. T-127a: depolama sınırları da burada geçerlidir;
   // `@aws-sdk` yalnızca depolama fikstürleri (MinIO/STS kurulumu ve nesne deposu entegrasyon testi) için serbesttir.
