@@ -128,9 +128,13 @@ BEGIN
   -- ebeveyn/depo aramasına GİRİLMEZ ve ret üretilmez; reddi FORCE RLS WITH CHECK (42501, polroles={0}) verir. Böylece
   -- uyuşmazlık ebeveyn hatasına (23503/23514) dönüşemez ve ret kaynağı tek (politika) olur. Erken dönüş yeni yol açmaz:
   -- WITH CHECK her NOBYPASSRLS rol için (wms_app, wms_auth, wms_ops; sahip dahil, FORCE) satırı mutlaka reddeder.
+  -- row_security_active('public.locations') (PG: boolean, STABLE; geçerli rol için RLS fiilen uygulanıyor mu — FORCE altında
+  -- sahip için true, süper kullanıcı/BYPASSRLS için false): RLS'i aşan rolde politika koruma sağlamayacağından erken dönüş
+  -- yapılmaz, derinlik/döngü/ebeveyn denetimleri tam çalışır (T-202 MAJOR-1 yolları açılmaz).
   -- Bağlam yoksa (boş/ayarsız) bu dal atlanır ve aşağıdaki denetimler aynen çalışır.
   IF NULLIF(pg_catalog.current_setting('app.current_tenant_id', true), '') IS NOT NULL
-     AND NEW.tenant_id IS DISTINCT FROM NULLIF(pg_catalog.current_setting('app.current_tenant_id', true), '')::uuid THEN
+     AND NEW.tenant_id IS DISTINCT FROM NULLIF(pg_catalog.current_setting('app.current_tenant_id', true), '')::uuid
+     AND pg_catalog.row_security_active('public.locations') THEN
     RETURN NEW;
   END IF;
   IF NEW.parent_id IS NULL THEN
