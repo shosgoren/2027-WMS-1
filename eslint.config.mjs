@@ -652,62 +652,128 @@ const STOCK_WRITE_SQL_RE = new RegExp(
  * Değer parametresi (`VALUES (${a})`, `WHERE id = ${y}`) tablo konumunu dinamik yapmaz; önceki (iv) bu yüzden stok tablosu okuyan her dosyada
  * başka tabloya yazmayı yanlış pozitif sayıyordu (katalog/depo dalları).
  */
-/** Tablo adı belirteci: isteğe bağlı `ONLY`, noktalı önekler (nokta etrafında boşluk olabilir: `public . ${t}`), ad; içinde ifade (`\u0000`) varsa konum dinamiktir. */
-const DYN_TABLE_TOKEN = `(?:ONLY\\s+)?(?:[\\w"]+\\s*\\.\\s*)*[\\w"]*\u0000`;
-const STOCK_WRITE_DYN_RE = new RegExp(`(?<![\\w])(?:INSERT\\s+INTO|UPDATE|DELETE\\s+FROM|MERGE\\s+INTO)\\s+${DYN_TABLE_TOKEN}`, "i");
 const STOCK_WRITE_VERB_RE = /(?<![\w])(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM|MERGE\s+INTO|TRUNCATE)\s/i;
-const STOCK_LIST_START_RE = /(?<![\w])(?:FROM|JOIN|USING)\s+/gi;
-const STOCK_TRUNCATE_START_RE = /(?<![\w])TRUNCATE(?:\s+TABLE)?\s+/gi;
-const STOCK_TRUNCATE_END_RE = /(?<![\w])(?:RESTART|CONTINUE|CASCADE|RESTRICT)(?![\w])/i;
-/** En dış düzeyde tablo listesini bitiren anahtar sözcükler (değer parametreleri bunlardan sonra gelir; tablo konumu sayılmaz). */
-const STOCK_LIST_END_RE = /^(?:WHERE|ON|USING|SET|VALUES|RETURNING|GROUP|ORDER|HAVING|LIMIT|OFFSET|FOR|WINDOW|UNION|INTERSECT|EXCEPT)(?![\w])/i;
-const DYN_FIRST_RE = new RegExp(`^${DYN_TABLE_TOKEN}`, "i");
-const DYN_COMMA_RE = new RegExp(`,\\s*${DYN_TABLE_TOKEN}`, "i");
-/** Liste parçasında (virgüllü) bir öğenin tablo konumu dinamik mi. @param {string} seg */
-const listSegmentDynamic = (seg) => DYN_FIRST_RE.test(seg) || DYN_COMMA_RE.test(seg);
 /**
- * `FROM`/`JOIN`/`USING` listesinde tablo konumu dinamik mi (`FROM a, ${t} b`, `JOIN public . ${t}`, `FROM d, (SELECT 1) s, ${t}`).
- * Parantez dengesiyle taranır: alt sorgu içeriği atlanır (kendi FROM'u ayrıca taranır), en dış düzeyde anahtar sözcük gelince liste biter.
- * @param {string} t
+ * T-238 (iv), kesin tasarım: yeni (iv) = main'in (iv) koşulu DARALTILMIŞI. Önce main'in koşulu (`\u0000` + yazma fiili / kilit sözcüğü) hesaplanır;
+ * main ihlal demiyorsa temiz. Main ihlal diyorsa YALNIZCA `provablyValueOnly` metindeki HER `\u0000`'ın değer konumunda olduğunu KESİN gösterirse temiz sayılır.
+ * Kanıtlanamayan her durumda (kapanmamış tırnak/yorum/`$tag$`, `--` yorumu, dengesiz parantez, string/`$$` içinde ifade, tanınmayan konum) main'in sonucu (ihlal)
+ * korunur; böylece "main ihlal ⇒ yeni ihlal" yapı gereğidir. `\u0000` = `${…}`, `+` işleneni, `join` parçası.
  */
-const fromListDynamic = (t) => {
-  for (const m of t.matchAll(STOCK_LIST_START_RE)) {
-    const rest = t.slice((m.index ?? 0) + m[0].length);
-    let depth = 0;
-    let seg = "";
-    for (let i = 0; i < rest.length; i++) {
-      const ch = rest[i];
-      if (ch === "(") {
-        if (depth === 0) seg += "(";
-        depth++;
-      } else if (ch === ")") {
-        if (depth === 0) break;
-        depth--;
-        if (depth === 0) seg += ")";
-      } else if (depth === 0) {
-        if (/[A-Za-z]/.test(ch ?? "") && !/[\w"]/.test(rest[i - 1] ?? " ") && STOCK_LIST_END_RE.test(rest.slice(i))) break;
-        seg += ch;
+/** Önce yorum/string/`E'…'`/`$tag$…$tag$` nötrlenir; kanıtlanamıyorsa `null`. @param {string} t @returns {string | null} */
+const neutralizeSql = (t) => {
+  let out = "";
+  for (let i = 0; i < t.length; ) {
+    const ch = t[i];
+    if (ch === "-" && t[i + 1] === "-") return null;
+    if (ch === "/" && t[i + 1] === "*") {
+      let depth = 1;
+      i += 2;
+      while (i < t.length && depth > 0) {
+        if (t[i] === "/" && t[i + 1] === "*") {
+          depth++;
+          i += 2;
+        } else if (t[i] === "*" && t[i + 1] === "/") {
+          depth--;
+          i += 2;
+        } else i++;
+      }
+      if (depth > 0) return null;
+      out += " ";
+      continue;
+    }
+    if (ch === "'") {
+      const escapes = /[eE]$/.test(out) && !/[\w$"]/.test(out.at(-2) ?? " ");
+      let j = i + 1;
+      for (;;) {
+        if (j >= t.length) return null;
+        const c = t[j];
+        if (c === "\u0000") return null;
+        if (escapes && c === "\\") j += 2;
+        else if (c === "'" && t[j + 1] === "'") j += 2;
+        else if (c === "'") break;
+        else j++;
+      }
+      if (escapes) out = out.slice(0, -1);
+      out += " ";
+      i = j + 1;
+      continue;
+    }
+    if (ch === '"') {
+      let j = i + 1;
+      while (j < t.length && t[j] !== '"') j++;
+      if (j >= t.length) return null;
+      out += `"${t.slice(i + 1, j).replace(/[^\u0000]/g, "x")}"`;
+      i = j + 1;
+      continue;
+    }
+    if (ch === "$" && !/[\w$]/.test(t[i - 1] ?? " ")) {
+      const m = /^\$(?:[A-Za-z_][\w]*)?\$/.exec(t.slice(i));
+      if (m) {
+        const close = t.indexOf(m[0], i + m[0].length);
+        if (close === -1 || t.slice(i + m[0].length, close).includes("\u0000")) return null;
+        out += " ";
+        i = close + m[0].length;
+        continue;
       }
     }
-    if (listSegmentDynamic(seg)) return true;
+    out += ch;
+    i++;
   }
-  return false;
+  return out;
 };
-/** `TRUNCATE a, ${t}`: virgüllü listenin her öğesi. @param {string} t */
-const truncateDynamic = (t) => {
-  for (const m of t.matchAll(STOCK_TRUNCATE_START_RE)) {
-    const rest = t.slice((m.index ?? 0) + m[0].length);
-    const end = rest.search(STOCK_TRUNCATE_END_RE);
-    if (listSegmentDynamic(end === -1 ? rest : rest.slice(0, end))) return true;
+const LIST_START = new Set(["FROM", "JOIN", "USING", "INTO", "UPDATE", "TRUNCATE", "OF"]);
+const LIST_END = new Set(["WHERE", "ON", "SET", "VALUES", "RETURNING", "GROUP", "ORDER", "HAVING", "LIMIT", "OFFSET", "FOR", "WINDOW", "UNION", "INTERSECT", "EXCEPT", "SELECT", "WITH"]);
+/** `FOR UPDATE`, `DO UPDATE`, `NO KEY UPDATE` içindeki UPDATE tablo listesi başlatmaz. */
+const NOT_LIST_UPDATE_PREV = new Set(["FOR", "KEY", "DO"]);
+/**
+ * Tablo-listesi durum makinesi: FROM/JOIN/USING/INTO/UPDATE/TRUNCATE/OF sonrası LİSTE durumu, en dış düzeyde yan tümce sözcüğüne kadar sürer; parantez yeni düzey (OTHER).
+ * LİSTE durumundaki, ya da ada yapışık/noktalı `\u0000` tablo konumudur. Yalnızca OTHER durumunda ve yapışık olmayan `\u0000` değer sayılır.
+ * @param {string} t @returns {boolean} true = her `\u0000` KESİN değer konumunda
+ */
+const provablyValueOnly = (t) => {
+  const n = neutralizeSql(t);
+  if (n === null) return false;
+  /** @type {boolean[]} true = LİSTE */
+  const stack = [false];
+  let prevWord = "";
+  let prevNonSpace = "";
+  for (let i = 0; i < n.length; ) {
+    const ch = /** @type {string} */ (n[i]);
+    if (ch === "(") {
+      stack.push(false);
+      prevNonSpace = ch;
+      i++;
+    } else if (ch === ")") {
+      stack.pop();
+      if (stack.length === 0) return false;
+      prevNonSpace = ch;
+      i++;
+    } else if (ch === "\u0000") {
+      const glued = /[\w"$.]/.test(n[i - 1] ?? " ") || prevNonSpace === ".";
+      if (stack[stack.length - 1] === true || glued) return false;
+      // Sonraki karakter adın devamıysa (`${a}_x`, `${a}.${b}`) ad parçasıdır.
+      if (/[\w"$.]/.test(n[i + 1] ?? " ")) return false;
+      prevNonSpace = ch;
+      i++;
+    } else if (/[A-Za-z_]/.test(ch)) {
+      const m = /^[A-Za-z_][\w$]*/.exec(n.slice(i));
+      const w = (m?.[0] ?? ch).toUpperCase();
+      if (LIST_END.has(w)) stack[stack.length - 1] = false;
+      else if (LIST_START.has(w) && !(w === "UPDATE" && NOT_LIST_UPDATE_PREV.has(prevWord))) stack[stack.length - 1] = true;
+      prevWord = w;
+      prevNonSpace = "a";
+      i += m?.[0].length ?? 1;
+    } else {
+      if (!/\s/.test(ch)) prevNonSpace = ch;
+      i++;
+    }
   }
-  return false;
+  return stack.length === 1;
 };
-/** @param {string} t */
-const dynamicWrite = (t) => STOCK_WRITE_DYN_RE.test(t) || truncateDynamic(t) || (STOCK_WRITE_VERB_RE.test(t) && fromListDynamic(t));
-/** @param {string} t */
-const dynamicWriteSql = (t) => dynamicWrite(t) || dynamicWrite(stripSqlComments(t));
-/** @param {string} t */
-const fromListDynamicSql = (t) => fromListDynamic(t) || fromListDynamic(stripSqlComments(t));
+/** @param {string} t main'in (iv) yazma koşulu (+ yorumsuz biçim). */
+const mainDynWrite = (t) => t.includes("\u0000") && testSql(STOCK_WRITE_VERB_RE, t);
+/** @param {string} t main'in (iv) kilit koşulu. */
+const mainDynLock = (t) => t.includes("\u0000") && testSql(STOCK_LOCK_SQL_RE, t);
 const STOCK_WRITE_TABLE_ANY_RE = new RegExp(`(?<![\\w])${tableRe(STOCK_WRITE_TABLES)}`, "i");
 const STOCK_WRITE_TABLE_EXACT_RE = new RegExp(`^\\s*${tableRe(STOCK_WRITE_TABLES)}\\s*$`, "i");
 const STOCK_FOR_MODE_RE = /^\s*(?:no\s+key\s+update|update|share|key\s+share)\s*$/i;
@@ -832,9 +898,9 @@ const stockSqlGuard = {
     const checkString = (node, text) => {
       if (testSql(STOCK_WRITE_TABLE_ANY_RE, text)) seen.writeTable = true;
       if (testSql(STOCK_LOCK_TABLE_RE, text)) seen.lockTable = true;
-      if (text.includes("\u0000")) {
-        if (!writeAllowed && dynamicWriteSql(text)) dynamicVerbs.push({ node, kind: "write" });
-        if (!isLockFile && testSql(STOCK_LOCK_SQL_RE, text) && fromListDynamicSql(text)) dynamicVerbs.push({ node, kind: "lock" });
+      if (text.includes("\u0000") && !provablyValueOnly(text)) {
+        if (!writeAllowed && mainDynWrite(text)) dynamicVerbs.push({ node, kind: "write" });
+        if (!isLockFile && mainDynLock(text)) dynamicVerbs.push({ node, kind: "lock" });
       }
       if (!isLockFile && testSql(STOCK_LOCK_SQL_RE, text) && testSql(STOCK_LOCK_TABLE_RE, text)) report(node, "lock");
       if (!writeAllowed && testSql(STOCK_WRITE_SQL_RE, text)) report(node, "write");

@@ -18,9 +18,7 @@ const AUTH_INDEX = "packages/auth/src/index.ts";
 
 let eslint: ESLint;
 beforeAll(async () => {
-  // T238_ESLINT_CONFIG: MAIN_VIOLATIONS kümesinin `origin/main` kuralında da ihlal verdiğini kanıtlamak için (bkz. küme yorumu); varsayılan repo yapılandırması.
-  const override = process.env.T238_ESLINT_CONFIG;
-  eslint = new ESLint({ cwd: REPO_ROOT, ...(override === undefined || override === "" ? {} : { overrideConfigFile: path.resolve(override) }) });
+  eslint = new ESLint({ cwd: REPO_ROOT });
   // İlk lintText yapılandırmayı yükler (yük altında saniyeler sürer); ısınma beforeAll zaman aşımında (60 sn) yapılır, vaka sınırında değil.
   await eslint.lintText("export {};\n", { filePath: at("packages/domain/src/__stock_sql_warmup__.ts"), warnIgnored: true });
 }, 60_000);
@@ -443,9 +441,8 @@ describe("T-238: (iv) main'deki dinamik biçimler korunur (inceleme BLOCKER; tab
 // KALICI REGRESYON GÜVENCESİ (T-238 kart madde 9, G-11). MAIN_VIOLATIONS: `origin/main` (274db5f) kuralında İHLAL veren dinamik/atlatma biçimleri;
 // bu dalda da ihlal vermek ZORUNDADIR. MUST_BE_CLEAN: meşru SQL (katalog/depo/değer parametreleri), temiz kalmak ZORUNDADIR.
 // KÜMELERİ GENİŞLETMEK SERBESTTİR, ELEMAN ÇIKARMAK YASAKTIR (kural gevşemesi sayılır; korunan inceleme gerekir).
-// Her MAIN_VIOLATIONS elemanının main'de de ihlal verdiği şöyle doğrulanır:
-//   git show origin/main:eslint.config.mjs > eslint.main.config.mjs   (geçici, commit'e girmez)
-//   T238_ESLINT_CONFIG=eslint.main.config.mjs pnpm exec vitest run tests/unit/lint/stock-sql-lint.test.ts -t "MAIN_VIOLATIONS"
+// Her MAIN_VIOLATIONS elemanının main'de de ihlal verdiği, depoya EKLENMEYEN tek seferlik bir betikle (.artifacts/ altına sonuç yazar) doğrulanır:
+// main yapılandırması (`git show origin/main:eslint.config.mjs`) ile bu dosyadaki örnekler `lintText` ile koşulur.
 // =================================================================================================================================
 const RD = 'export const r = (a: string) => `SELECT quantity FROM public.stock_balances WHERE tenant_id = ${a}`;\n';
 const fn = (sqlText: string): string => `${RD}export const q = (t: string, v: string) => \`${sqlText}\`;\n`;
@@ -480,6 +477,19 @@ const MAIN_VIOLATIONS: [string, string][] = [
   ["DELETE FROM a USING ${t}", fn("DELETE FROM a USING ${t} WHERE a.id = 1")],
   ["UPDATE items SET … FROM ${t}", fn("UPDATE public.items SET a = 1 FROM ${t} WHERE true")],
   ["MERGE INTO a USING ${t}", fn("MERGE INTO a USING ${t} ON true WHEN MATCHED THEN DELETE")],
+  // inceleme turu 4 (@d56ed9d): string/`$$` içindeki parantez, tırnaklı kaçış
+  ["FROM d, (SELECT ')') s, ${t} b FOR UPDATE", fn("SELECT 1 FROM d, (SELECT ')') s, ${t} b FOR UPDATE")],
+  ["FROM d, (SELECT '(') s, ${t} b FOR UPDATE", fn("SELECT 1 FROM d, (SELECT '(') s, ${t} b FOR UPDATE")],
+  ["FROM d, (SELECT $$)$$) s, ${t} b FOR UPDATE", fn("SELECT 1 FROM d, (SELECT $$)$$) s, ${t} b FOR UPDATE")],
+  ["UPDATE a SET x = 1 FROM b, (SELECT ')') s, ${t} WHERE true", fn("UPDATE a SET x = 1 FROM b, (SELECT ')') s, ${t} WHERE true")],
+  ["DELETE FROM a USING (SELECT '(') s, ${t} WHERE true", fn("DELETE FROM a USING (SELECT '(') s, ${t} WHERE true")],
+  ["UPDATE public.${T}", fn("UPDATE public.${t} SET a = 1")],
+  ["UPDATE ${s}.stock_balances", fn("UPDATE ${t}.stock_balances SET a = 1")],
+  ["WITH x AS (…) UPDATE ${T}", fn("WITH x AS (SELECT 1) UPDATE ${t} SET a = 1")],
+  ["UPDATE\\n\\t${T}", fn("UPDATE\n\t${t} SET a = 1")],
+  ['UPDATE ${"stock_balances"}', fn('UPDATE ${"stock_balances"} SET a = 1')],
+  ['UPDATE ${sql.raw("stock_balances")}', `${RD}import { sql } from "drizzle-orm";\nexport const q = (v: string) => sql\`UPDATE \${sql.raw("stock_balances")} SET a = \${v}\`;\n`],
+  ['UPDATE /**/"${t}"', fn('UPDATE /**/"${t}" SET a = 1')],
   // main'in statik kuralları (a)/(b) ve (c)
   ["UPDATE stock_balances (statik)", 'export const q = "UPDATE stock_balances SET quantity = 0";\n'],
   ["FOR UPDATE stock_balances (statik)", 'export const q = "SELECT 1 FROM stock_balances FOR UPDATE";\n'],
@@ -500,11 +510,14 @@ const MUST_BE_CLEAN: [string, string][] = [
   ["depo: DELETE FROM public.locations", fn("DELETE FROM public.locations WHERE id = ${t}")],
   ["alt sorgu içinde değer parametresi", fn("SELECT 1 FROM a WHERE x IN (SELECT y FROM b WHERE z = ${v}) FOR UPDATE")],
   ["TRUNCATE statik stok dışı", fn("TRUNCATE documents RESTART IDENTITY")],
+  ["INSERT INTO items SELECT … FROM documents WHERE id = ${v}", fn("INSERT INTO public.items (a) SELECT a FROM public.documents WHERE id = ${v}")],
+  ["WHERE note = ' FROM ' || ${v} … FOR UPDATE", fn("SELECT 1 FROM public.documents WHERE note = ' FROM ' || ${v} FOR UPDATE")],
+  ["string içinde parantez + parametre WHERE'de", fn("SELECT 1 FROM d, (SELECT ')') s WHERE x = ${v} FOR UPDATE")],
   ["JOIN ... USING (col) + parametre", fn("SELECT 1 FROM a JOIN b USING (id) WHERE a.x = ${v} FOR UPDATE")],
 ];
 describe("MAIN_VIOLATIONS: main'de ihlal veren biçimler bu dalda da ihlaldir (eleman çıkarmak yasak)", () => {
   it("küme boş değildir", () => {
-    expect(MAIN_VIOLATIONS.length).toBeGreaterThanOrEqual(31);
+    expect(MAIN_VIOLATIONS.length).toBeGreaterThanOrEqual(43);
   });
   it.each(MAIN_VIOLATIONS)("MAIN_VIOLATIONS: %s", async (_n, code) => {
     expect((await hits(code, CONSISTENCY)).length).toBeGreaterThanOrEqual(1);
@@ -512,7 +525,7 @@ describe("MAIN_VIOLATIONS: main'de ihlal veren biçimler bu dalda da ihlaldir (e
 });
 describe("MUST_BE_CLEAN: meşru SQL temiz kalır (eleman çıkarmak yasak)", () => {
   it("küme boş değildir", () => {
-    expect(MUST_BE_CLEAN.length).toBeGreaterThanOrEqual(14);
+    expect(MUST_BE_CLEAN.length).toBeGreaterThanOrEqual(17);
   });
   it.each(MUST_BE_CLEAN)("MUST_BE_CLEAN: %s", async (_n, code) => {
     expect(await hits(code, CONSISTENCY)).toEqual([]);
