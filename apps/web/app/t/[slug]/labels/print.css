@@ -14,8 +14,8 @@
   width: 100mm;
   height: 50mm;
   max-width: 100%;
-  background: #fff;
-  border: 1px solid #c8c8c8;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
   overflow: hidden;
 }
 
@@ -30,7 +30,7 @@
   body {
     margin: 0;
     padding: 0;
-    background: #fff;
+    background: var(--color-surface);
   }
 
   /* Etiket dışındaki her şey gizlenir; yalnızca etiket sayfaları basılır. */
