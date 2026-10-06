@@ -1,6 +1,6 @@
 // JobQueue + pg-boss bağdaştırıcısı entegrasyon testi (T-115; ADR-005 eki, ADR-016 §12).
 //
-// Uygulama tarafı YALNIZCA DATABASE_URL (wms_app, PgBouncer transaction mode) ile bağlanır. Migration rolü
+// Üretici YALNIZCA DATABASE_URL (wms_app), tüketici DATABASE_URL_WORKER (wms_worker) ile bağlanır (PgBouncer transaction mode). Migration rolü
 // (DATABASE_URL_DIRECT) yalnızca doğrulama okumaları ve temizlik içindir. Veriler sentetik UUID'lerdir (G-09).
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
@@ -15,14 +15,15 @@ import { DB_CLIENT_SETTINGS, createTenantContext, rawDb, type DbClient } from ".
 import type { TenantTx } from "../../../packages/queue-adapter/src/index.ts";
 import { QUEUE_SCHEMA, assertBamCommandsExpected, createJobQueue, installQueueSchema, isExpectedBamCommand, pgBossAsyncCommandsForVerification, type PgBossJobQueue } from "../../../packages/queue-adapter/src/index.ts";
 import { JOB_PAYLOAD_SCHEMAS, JOB_TYPES, QueueError, type Job, type JobContext } from "../../../packages/shared/src/queue.ts";
-import { readIntEnv, redactErrorChain } from "../harness/env.ts";
+import { readIntEnv, readWorkerDatabaseUrl, redactErrorChain } from "../harness/env.ts";
 
 // `drizzle-orm` yalnızca paketlerin bağımlılığıdır; kökten çözülemez → packages/db çözümleyicisi.
 const dbRequire = createRequire(path.resolve(import.meta.dirname, "../../../packages/db/package.json"));
 const { sql } = (await import(pathToFileURL(dbRequire.resolve("drizzle-orm")).href)) as typeof import("../../../packages/db/node_modules/drizzle-orm/index.js");
 
 const env = readIntEnv(process.env);
-const urls = [env.databaseUrl, env.databaseUrlDirect];
+const workerUrl = readWorkerDatabaseUrl(process.env);
+const urls = [env.databaseUrl, env.databaseUrlDirect, workerUrl];
 
 let client: DbClient;
 let admin: pg.Client;
@@ -31,6 +32,19 @@ const queues: PgBossJobQueue[] = [];
 function newQueue(): PgBossJobQueue {
   const q = createJobQueue({
     connectionString: env.databaseUrl,
+    max: 3,
+    pollingIntervalSeconds: 0.5,
+    stopTimeoutMs: 5000,
+    runInTenant: (tenantId, _reason, fn) => withTenant(createTenantContext(client, tenantId), fn),
+  });
+  queues.push(q);
+  return q;
+}
+
+/** Tüketici: `DATABASE_URL_WORKER` (wms_worker) ile bağlanır; handler'daki tenant verisi yine wms_app havuzundan (`client`). */
+function newWorker(): PgBossJobQueue {
+  const q = createJobQueue({
+    connectionString: workerUrl,
     max: 3,
     pollingIntervalSeconds: 0.5,
     stopTimeoutMs: 5000,
@@ -229,19 +243,56 @@ describe("wms_app en dar yetki (BLOCKER: bam/version/queue)", () => {
   it("install-cli: DATABASE_URL ile aynı hedef reddedilir", async () => {
     const cli = path.resolve(import.meta.dirname, "../../../packages/queue-adapter/src/install-cli.ts");
     const run = promisify(execFile);
-    await expect(
-      run(process.execPath, [cli], { env: { ...process.env, DATABASE_URL: env.databaseUrlDirect, DATABASE_URL_DIRECT: env.databaseUrlDirect } }),
-    ).rejects.toMatchObject({ code: 1 });
+    const err = await run(process.execPath, [cli], {
+      env: { ...process.env, DATABASE_URL: env.databaseUrlDirect, DATABASE_URL_DIRECT: env.databaseUrlDirect },
+    }).then(
+      () => undefined,
+      (e: unknown) => e as { code?: number; stderr?: string },
+    );
+    expect(err?.code).toBe(1);
+    expect(err?.stderr).toContain("DATABASE_URL_DIRECT uygulama bağlantısıyla (DATABASE_URL) aynı hedefe işaret edemez");
+    expect(err?.stderr).not.toMatch(/postgres(ql)?:\/\//);
   });
 
   it("kurulum uygulama rolüyle çalıştırılamaz", async () => {
     await expect(installQueueSchema({ url: env.databaseUrl })).rejects.toMatchObject({ name: "QueueInstallError" });
   });
 
-  it("üretici ve tüketici yolları dar yetkiyle çalışır (job tablosu DML)", async () => {
+  it("kurulum wms_worker ile çalıştırılamaz ve pgboss şemasını sahiplenemez (migration rolü denetimi)", async () => {
+    const ownerBefore = (await admin.query(`SELECT pg_get_userbyid(nspowner) AS o FROM pg_namespace WHERE nspname = $1`, [QUEUE_SCHEMA])).rows[0].o;
+    await expect(installQueueSchema({ url: workerUrl })).rejects.toMatchObject({
+      name: "QueueInstallError",
+      message: expect.stringContaining("must run with the migration role"),
+    });
+    const ownerAfter = (await admin.query(`SELECT pg_get_userbyid(nspowner) AS o FROM pg_namespace WHERE nspname = $1`, [QUEUE_SCHEMA])).rows[0].o;
+    expect(ownerAfter).toBe(ownerBefore);
+  });
+
+  it("CREATE yetkili ama migration rolü olmayan operasyon rolü kurulumu yapamaz (sahiplik denetimi migration rolüne bağlı)", async () => {
+    const role = `t115c_ops_${randomUUID().slice(0, 8)}`;
+    const pw = randomUUID().replaceAll("-", "");
+    await admin.query(`CREATE ROLE ${role} LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD '${pw}'`);
+    try {
+      await admin.query(`GRANT CREATE ON DATABASE ${(await admin.query("SELECT current_database() AS d")).rows[0].d} TO ${role}`);
+      const u = new URL(env.databaseUrlDirect);
+      u.username = role;
+      u.password = pw;
+      await expect(installQueueSchema({ url: u.toString() })).rejects.toMatchObject({
+        name: "QueueInstallError",
+        message: expect.stringContaining("must be the migration role"),
+      });
+    } finally {
+      await admin.query(`REVOKE ALL ON DATABASE ${(await admin.query("SELECT current_database() AS d")).rows[0].d} FROM ${role}`);
+      await admin.query(`DROP ROLE ${role}`);
+    }
+  });
+
+  it("gönderen yolu dar yetkiyle çalışır: job SELECT, queue SELECT; UPDATE/DELETE yok", async () => {
     await asApp(async (c) => {
       await expect(c.query(`SELECT count(*) FROM ${QUEUE_SCHEMA}.job`)).resolves.toBeDefined();
       await expect(c.query(`SELECT name FROM ${QUEUE_SCHEMA}.queue LIMIT 1`)).resolves.toBeDefined();
+      await expect(c.query(`UPDATE ${QUEUE_SCHEMA}.job SET priority = 1`)).rejects.toMatchObject(denied);
+      await expect(c.query(`DELETE FROM ${QUEUE_SCHEMA}.job`)).rejects.toMatchObject(denied);
     });
   });
 });
@@ -250,7 +301,7 @@ describe("enqueue + worker tüketimi", () => {
   it("commit edilen transaction'daki iş tüketilir; tenant kimliği transaction'dan türetilir", async () => {
     const tenantId = randomUUID();
     const seen: JobContext[] = [];
-    const worker = newQueue();
+    const worker = newWorker();
     await worker.work("demo.reseed", async (ctx) => {
       if ((await tenantOfCtx(ctx)) === tenantId) seen.push(ctx);
     });
@@ -268,7 +319,7 @@ describe("enqueue + worker tüketimi", () => {
   it("geri alınan transaction'daki iş hiç oluşmaz ve tüketilmez", async () => {
     const tenantId = randomUUID();
     const seen: string[] = [];
-    const worker = newQueue();
+    const worker = newWorker();
     await worker.work("demo.reseed", async (ctx) => {
       if ((await tenantOfCtx(ctx)) === tenantId) seen.push(ctx.jobId);
     });
@@ -320,14 +371,14 @@ describe("enqueue + worker tüketimi", () => {
     expect((await jobRows(tenantId))[0]?.state).toBe("created");
 
     const count: string[] = [];
-    const first = newQueue();
+    const first = newWorker();
     await first.work("demo.reseed", async (ctx) => {
       if ((await tenantOfCtx(ctx)) === tenantId) count.push(ctx.jobId);
     });
     await first.stop();
     const afterStop = count.length;
 
-    const second = newQueue();
+    const second = newWorker();
     await second.work("demo.reseed", async (ctx) => {
       if ((await tenantOfCtx(ctx)) === tenantId) count.push(ctx.jobId);
     });
@@ -340,7 +391,7 @@ describe("enqueue + worker tüketimi", () => {
 
   it("platform işi tenant'sız yazılır; handler tenantId=null görür", async () => {
     const seen: JobContext[] = [];
-    const worker = newQueue();
+    const worker = newWorker();
     const marker = randomUUID();
     await worker.work("demo.reseed", async (ctx) => {
       if (ctx.actorUserId === marker) seen.push(ctx);
@@ -353,21 +404,9 @@ describe("enqueue + worker tüketimi", () => {
   });
 });
 
-describe("kalıcı / geçici hata (T-116b)", () => {
-  // `fail` yolu pg-boss'ta DELETE + INSERT ile çalışır; `wms_app`'te job DELETE yetkisi yoktur (T-115 en dar yetki).
-  // Tüketici yetkileri `wms_worker` ile T-115c'de tanımlanır; o zamana dek bu testler tüketiciyi migration rolüyle
-  // bağlar (sınıflama ve durum geçişleri doğrulanır, yetki modeli değil). Bkz. T-116b raporu bulgusu.
-  const failPathWorker = (): PgBossJobQueue => {
-    const q = createJobQueue({
-      connectionString: env.databaseUrlDirect,
-      max: 3,
-      pollingIntervalSeconds: 0.5,
-      stopTimeoutMs: 5000,
-      runInTenant: (tenantId, _reason, fn) => withTenant(createTenantContext(client, tenantId), fn),
-    });
-    queues.push(q);
-    return q;
-  };
+describe("kalıcı / geçici hata (T-116b; tüketici wms_worker)", () => {
+  // `fail` yolu pg-boss'ta DELETE + INSERT ile çalışır: tüketici `wms_worker` ile bağlanır (job DELETE yetkisi yalnızca onda).
+  const failPathWorker = newWorker;
   const stateOf = async (tenantId: string) => {
     const r = await admin.query(`SELECT state, retry_count, retry_limit, output FROM ${QUEUE_SCHEMA}.job WHERE data->>'tenantId' = $1`, [tenantId]);
     return r.rows as { state: string; retry_count: number; retry_limit: number; output: Record<string, unknown> | null }[];
@@ -431,7 +470,7 @@ describe("kalıcı / geçici hata (T-116b)", () => {
 
   it("başarılı iş completed olur (perJobResults yolu)", async () => {
     const tenantId = randomUUID();
-    const worker = newQueue();
+    const worker = newWorker();
     await worker.work("demo.reseed", async () => undefined);
     const producer = await startedQueue();
     await withTenant(tenantCtx(tenantId), (tx) => producer.enqueue(tx, reseed()));

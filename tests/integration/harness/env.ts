@@ -19,6 +19,9 @@ export type IntTarget = (typeof INT_TARGETS)[number];
 /** Uygulama rolü adı (I-03; .env.example ve infra/postgres/init/01-roles.sh ile aynı). */
 export const APP_ROLE = "wms_app";
 
+/** Kuyruk tüketicisi rolü adı (T-115c; .env.example ve 01-roles.sh ile aynı). */
+export const WORKER_ROLE = "wms_worker";
+
 /** Kimlik rolü adı (ADR-014 §10; .env.example ve infra/postgres/init/01-roles.sh ile aynı). */
 export const AUTH_ROLE = "wms_auth";
 
@@ -139,6 +142,20 @@ export function readAuthDatabaseUrl(env: Env): string {
     throw new IntEnvError(`missing AUTH_DATABASE_URL (${hint})`);
   }
   assertPostgresUrl("AUTH_DATABASE_URL", url);
+  return url;
+}
+
+/** Worker rolü (wms_worker, pooler) URL'si: DATABASE_URL_WORKER (T-115c). Her iki hedefte zorunlu; değer hata metnine yazılmaz. */
+export function readWorkerDatabaseUrl(env: Env): string {
+  const url = nonEmpty(env, "DATABASE_URL_WORKER");
+  if (url === undefined) {
+    const hint =
+      parseTarget(env) === "neon"
+        ? "WMS_INT_TARGET=neon requires DATABASE_URL_WORKER (worker role wms_worker, pooler)"
+        : "compose target: written by tests/integration/harness/global-setup.ts — run via `pnpm test:int`";
+    throw new IntEnvError(`missing DATABASE_URL_WORKER (${hint})`);
+  }
+  assertPostgresUrl("DATABASE_URL_WORKER", url);
   return url;
 }
 

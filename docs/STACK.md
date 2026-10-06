@@ -53,6 +53,7 @@ Kaynak sözdizimi: `<dosya>#<json.yolu>` (package.json alanı) veya `docker-comp
 
 Sürüm notları (kaynak: kurulu `package.json`/`pnpm-lock.yaml`, 2026-10-05):
 - **Kapsam kuralı (T-004b):** Workspace'lerin (`pnpm-lock.yaml#importers`) `package.json` dosyalarındaki her doğrudan bağımlılık (`dependencies`, `devDependencies`, `optionalDependencies`; `workspace:` hariç) bu tabloda kaynağıyla kilitli bir satıra sahip olmalıdır; eksikse `node scripts/check-docs.mjs` FAIL verir.
+- **pg-boss rolleri (T-115c):** gönderen (web) `DATABASE_URL` = `wms_app` (yalnızca `pgboss.job` INSERT/SELECT; RLS ile kendi tenant'ı); tüketici (worker) `DATABASE_URL_WORKER` = `wms_worker` (`pgboss.job` SELECT/INSERT/UPDATE/DELETE; fetch/complete/fail/retry). Yetkiler ve RLS `installQueueSchema` ile (migration rolü) verilir; roller 01-roles.sh (Neon: T-105, düz parola, Q-06). Yeni rol için yerel volume'u bir kez `docker compose down -v` ile sıfırlayın.
 - **pg 8.23.1:** yalnızca testlerde kullanılır (entegrasyon düzeneği: rol/RLS probu, PgBouncer yönetimi); uygulama sürücüsü postgres.js'tir.
 - **TypeScript 6.0.3'te kalınır:** typescript-eslint 8.71.0'ın desteklediği TypeScript aralığı `<6.1.0`; TS yükseltmesi typescript-eslint desteğini bekler.
 - **Node.js:** 24 Active LTS (`engines` `>=24 <25`). Node 26 LTS'e 2026-10-28'de geçer; geçiş ayrı kartla yapılır (`engines`, `@types/node`, CI Node sürümü birlikte).
