@@ -21,7 +21,7 @@ import { sql } from "../../../packages/db/node_modules/drizzle-orm/index.js";
 import { createDbClient, type DbClient } from "../../../packages/db/src/client.ts";
 import { withUser } from "../../../packages/db/src/index.ts";
 import { APP_ROLE, AUTH_ROLE, PROBE_ROLE, WORKER_ROLE, readIntEnv, redactErrorChain } from "../harness/env.ts";
-import { PLATFORM_FIXTURE_CONSUMER, cleanupDocuments, cleanupReliability, cleanupStock, mkMembership, mkUser, newRegistry, seedWorld, type TenantWorld } from "../fixtures/tenants.ts";
+import { cleanupDocuments, cleanupReliability, cleanupStock, mkMembership, mkUser, newRegistry, seedWorld, type TenantWorld } from "../fixtures/tenants.ts";
 
 const env = readIntEnv(process.env);
 const urls = [env.databaseUrl, env.databaseUrlDirect];
@@ -197,7 +197,7 @@ async function cleanupExceptTenants(c: pg.Client, r: typeof reg): Promise<void> 
   const tenantIds = r.worlds.map((w) => w.tenantId);
   const userIds = [...r.worlds.flatMap((w) => [w.ownerUserId, w.memberUserId]), ...r.extraUsers];
   if (tenantIds.length > 0) {
-    await cleanupReliability(c, tenantIds); // T-211 tenant satırları
+    await cleanupReliability(c, tenantIds, r.worlds.map((w) => w.platformEventId)); // T-211 tenant satırları
     await cleanupStock(c, tenantIds); // T-232 stok tabloları (defter append-only tetikleyicisi fikstürde geçici kapatılır)
     await cleanupDocuments(c, tenantIds); // T-206 tabloları (append-only tetikleyici replica ile atlanır)
     // T-204 + T-202 tabloları FK sırasıyla önce (taşıma birimi → seri → lot → barkod/dönüşüm → sahip → ürün → birim; kapsam → kilit → lokasyon → depo).
@@ -458,10 +458,17 @@ describe("AC-04 DB — platform satırı (tenant_id NULL) ve sistem gerekçeli y
 
   it("@AC-04 platform satırı: bağlamsızken yalnızca NULL tenant satırı görünür; tenant bağlamında görünmez ve yazılamaz", async () => {
     for (const name of NULL_TENANT_TABLES) {
-      const total = Number(((await admin.query<{ n: string }>(`SELECT count(*)::text AS n FROM public.${q(name)} WHERE tenant_id IS NULL AND consumer = $1`, [PLATFORM_FIXTURE_CONSUMER])).rows[0] as { n: string }).n);
-      expect(total, `${name}: fikstür A ve B için platform satırı tohumlar`).toBe(2);
-      const blind = await attempt(appClient, [], `SELECT count(*)::int AS n FROM public.${q(name)} WHERE consumer = $1`, [PLATFORM_FIXTURE_CONSUMER]);
-      expect(blind.ok && (blind.rows[0] as { n: number }).n, `${name}: bağlamsız NULL satırları görür`).toBe(2);
+      const ids = [A.platformEventId, B.platformEventId];
+      const total = Number(((await admin.query<{ n: string }>(`SELECT count(*)::text AS n FROM public.${q(name)} WHERE tenant_id IS NULL AND event_id = ANY($1::uuid[])`, [ids])).rows[0] as { n: string }).n);
+      expect(total, `${name}: fikstür A ve B için kayıttaki platform satırlarını tohumlar`).toBe(2);
+      const blind = await attempt(
+        appClient,
+        [],
+        `SELECT count(*) FILTER (WHERE event_id = ANY($1::uuid[]) AND tenant_id IS NULL)::int AS registered, count(*) FILTER (WHERE tenant_id IS NOT NULL)::int AS tenanted FROM public.${q(name)}`,
+        [ids],
+      );
+      expect(blind.ok && (blind.rows[0] as { registered: number }).registered, `${name}: bağlamsız kayıttaki platform satırları görünür`).toBe(2);
+      expect(blind.ok && (blind.rows[0] as { tenanted: number }).tenanted, `${name}: bağlamsız hiçbir tenant'lı satır görünmez`).toBe(0);
       for (const w of [A, B]) {
         const ctx = await attempt(appClient, [setTenant(w.tenantId)], `SELECT count(*)::int AS n FROM public.${q(name)} WHERE tenant_id IS NULL`);
         expect(ctx.ok && (ctx.rows[0] as { n: number }).n, `${name}: tenant bağlamında NULL satır görünmez`).toBe(0);
