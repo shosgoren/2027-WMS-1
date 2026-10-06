@@ -33,9 +33,17 @@ async function computed(page: Page, selector: string, prop: string): Promise<str
 }
 
 async function selectView(page: Page, label: string): Promise<void> {
+  // T-254: telefon genişliğinde görünüm anahtarı menüdedir; önce menü açılır, aynı düğme kullanılır (beklenen davranış aynı).
+  const menuButton = page.getByTestId("app-bar-menu");
+  const inMenu = await menuButton.isVisible();
+  if (inMenu) await menuButton.click();
   const button = page.getByRole("button", { name: label, exact: true });
   await button.click();
   await expect(button).toHaveAttribute("aria-pressed", "true");
+  if (inMenu) {
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toBeHidden();
+  }
 }
 
 async function expectFocusRing(page: Page, locator: ReturnType<Page["locator"]>, where: string): Promise<void> {

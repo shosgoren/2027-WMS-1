@@ -1,4 +1,4 @@
-import { headers } from "next/headers";
+import { cookies, headers } from "next/headers";
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { getTranslations } from "next-intl/server";
@@ -8,10 +8,21 @@ import { getAppDb } from "@wms/db";
 import { runTenantQuery } from "@wms/domain/identity/access";
 import { getMembershipSummary } from "@wms/domain/identity/member-queries";
 import { AppError } from "@wms/shared/errors";
+import { AppBar } from "./app-bar.tsx";
+import { BottomNav } from "./bottom-nav.tsx";
 
 export const dynamic = "force-dynamic";
 
 const TOUCH = "min-h-12 min-w-12";
+
+// Görünüm çerezi kök düzendeki `setView` ile aynı sözleşmeyi kullanır (`view`: flow | cockpit, 1 yıl); telefon menüsündeki anahtar
+// bu eylemi çağırır. Kök düzenin eylemi dışa aktarılamaz (layout dosyası yalnızca varsayılan dışa aktarım taşır).
+async function setView(formData: FormData): Promise<void> {
+  "use server";
+  const raw = String(formData.get("view") ?? "");
+  const next = raw === "cockpit" ? "cockpit" : "flow";
+  (await cookies()).set("view", next, { path: "/", maxAge: 60 * 60 * 24 * 365, sameSite: "lax", secure: process.env.NODE_ENV === "production" });
+}
 
 // Tenant kabuğu (T-119): üyelik SUNUCUDA doğrulanır (üye değil → 404; varlık sızdırılmaz). Yetki kararı domain'dedir
 // (`runTenantQuery`); burada yalnızca kullanıcı adı, aktif rol çipi ve tenant değiştirici gösterilir.
@@ -58,10 +69,19 @@ export default async function TenantLayout({ children, params }: { children: Rea
   if (current === undefined) notFound();
   const t = await getTranslations();
   const roleName = current.roles.map((r) => t(`roles.${r}`)).join(", ");
+  const view = (await cookies()).get("view")?.value === "cockpit" ? "cockpit" : "flow";
 
   return (
-    <div className="flex min-w-0 flex-col">
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border bg-surface px-4 py-2" data-testid="tenant-bar">
+    <div className="tenant-shell flex min-w-0 flex-col">
+      <AppBar
+        slug={slug}
+        tenantName={current.tenantName}
+        userName={summary.userName}
+        view={view}
+        setViewAction={setView}
+        memberships={summary.memberships.map((m) => ({ slug: m.slug, tenantName: m.tenantName, rolesLabel: m.roles.map((r) => t(`roles.${r}`)).join(", ") }))}
+      />
+      <div className="desk-only flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border bg-surface px-4 py-2" data-testid="tenant-bar">
         <details className="relative min-w-0">
           <summary
             className={`${TOUCH} flex cursor-pointer list-none items-center gap-2 rounded-full bg-accent-soft px-4 text-sm font-bold text-accent-ink focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus`}
@@ -91,7 +111,8 @@ export default async function TenantLayout({ children, params }: { children: Rea
         </details>
         <span className="min-w-0 truncate text-sm font-semibold text-ink-muted">{t("tenantBar.user", { name: summary.userName })}</span>
       </div>
-      {children}
+      <div className="tenant-body flex min-w-0 flex-col">{children}</div>
+      <BottomNav slug={slug} />
     </div>
   );
 }

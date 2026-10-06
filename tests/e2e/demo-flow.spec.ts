@@ -23,6 +23,14 @@ async function expectTouchTarget(page: Page, locator: ReturnType<Page["locator"]
   expect(box?.width ?? 0, `${name}: genişlik`).toBeGreaterThanOrEqual(47.5);
 }
 
+/** T-254: telefon genişliğinde "Çıkış yap" menüdedir; menü düğmesi görünürse önce menü açılır. Açıldıysa true döner. */
+async function openMenuIfPhone(page: Page): Promise<boolean> {
+  const menuButton = page.getByTestId("app-bar-menu");
+  if (!(await menuButton.isVisible())) return false;
+  await menuButton.click();
+  return true;
+}
+
 /** CSP ihlali olaylarını sayfa ömrü boyunca toplar (konsol regex'i değil; securitypolicyviolation). */
 async function collectCspViolations(page: Page): Promise<void> {
   await page.addInitScript(`
@@ -142,7 +150,12 @@ test.describe("demo akışı", () => {
     await expect(tasks.locator('a[data-state="soon"]')).toHaveCount(0);
     await expectNoHorizontalOverflow(page, "ana ekran");
     await expectNoCspViolations(page, "ana ekran");
+    const menuOpened = await openMenuIfPhone(page);
     await expectTouchTarget(page, page.getByRole("button", { name: "Çıkış yap" }), "başlık: Çıkış yap");
+    if (menuOpened) {
+      await page.keyboard.press("Escape");
+      await expect(page.getByRole("dialog")).toBeHidden();
+    }
 
     // Üyeler.
     await tasks.getByRole("link", { name: /Ekibimi yönet/ }).click();
@@ -187,6 +200,7 @@ test.describe("demo akışı", () => {
     await expectNoHorizontalOverflow(page, "denetim kaydı");
 
     // Çıkış → /login; korumalı sayfa /login'e döner.
+    await openMenuIfPhone(page);
     await page.getByRole("button", { name: "Çıkış yap" }).click();
     await expect(page).toHaveURL(/\/login$/);
     await expect(page.getByRole("heading", { name: "Giriş yap" })).toBeVisible();
@@ -226,6 +240,7 @@ test.describe("demo akışı", () => {
     await page.goto("/t/demo/audit");
     await expect(page.getByText("Denetim kaydını görmek için yetkin yok.")).toBeVisible();
 
+    await openMenuIfPhone(page);
     await page.getByRole("button", { name: "Çıkış yap" }).click();
     await expect(page).toHaveURL(/\/login$/);
   });

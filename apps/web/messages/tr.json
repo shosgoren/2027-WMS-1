@@ -16,6 +16,19 @@
     "help": {
       "full": "Yardım çağır",
       "short": "Yardım"
+    },
+    "menu": {
+      "open": "Menüyü aç",
+      "title": "Menü",
+      "close": "Kapat"
+    },
+    "nav": {
+      "label": "Ana gezinme",
+      "home": "Ana sayfa",
+      "scan": "Tara",
+      "tasks": "Görevlerim",
+      "menu": "Menü",
+      "soon": "Yakında"
     }
   },
   "auth": {
