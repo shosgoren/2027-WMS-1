@@ -6,6 +6,8 @@
 // çağrı `--no-replace-objects` ile koşar: `refs/replace/*` bir commit'i/blob'u başka içerikle
 // gösteremez.
 import { execFileSync } from "node:child_process";
+import { lstatSync, readFileSync, readlinkSync } from "node:fs";
+import path from "node:path";
 
 /** Varsayılan hedef dal (kartın Dal satırında `int/…` hedefi yoksa). */
 export const DEFAULT_TARGET = "origin/main";
@@ -274,4 +276,120 @@ const BLOB_CACHE = new Map();
 export function mergeSubjects(cwd, base) {
   const out = git(cwd, ["log", "--first-parent", "--merges", "--format=%s", `${base}..HEAD`]);
   return out.split("\n").filter((l) => l !== "");
+}
+
+/**
+ * Süren birleştirmenin (çakışmalı `git merge`) MERGE_HEAD commit'leri (T-242). Dosya elle
+ * yazılabildiği için içerik doğrulanır: yalnızca 40 haneli SHA satırları ve var olan commit'ler;
+ * geçersiz satır = yok sayılır (gevşeme yok). Dosya yoksa `[]`.
+ * @param {string} cwd
+ * @returns {string[]}
+ */
+export function mergeHeads(cwd) {
+  const p = path.resolve(cwd, git(cwd, ["rev-parse", "--git-path", "MERGE_HEAD"]).trim());
+  let text;
+  try {
+    text = readFileSync(p, "utf8");
+  } catch {
+    return [];
+  }
+  /** @type {string[]} */
+  const out = [];
+  for (const line of text.split("\n")) {
+    const sha = line.trim();
+    if (/^[0-9a-f]{40}$/.test(sha) && refExists(cwd, sha) && !out.includes(sha)) out.push(sha);
+  }
+  return out;
+}
+
+/**
+ * `ancestor`, `descendant`'in atası mı (ya da aynı commit mi)?
+ * @param {string} cwd
+ * @param {string} ancestor
+ * @param {string} descendant
+ * @returns {boolean}
+ */
+export function isAncestor(cwd, ancestor, descendant) {
+  try {
+    git(cwd, ["merge-base", "--is-ancestor", ancestor, descendant]);
+    return true;
+  } catch (e) {
+    if (e instanceof GitError && e.status === 1) return false;
+    throw e;
+  }
+}
+
+/**
+ * Süren birleştirmenin MERGE_MSG ilk satırı (konu); yoksa `""`.
+ * @param {string} cwd
+ * @returns {string}
+ */
+export function mergeMsgSubject(cwd) {
+  try {
+    const p = path.resolve(cwd, git(cwd, ["rev-parse", "--git-path", "MERGE_MSG"]).trim());
+    return readFileSync(p, "utf8").split("\n")[0] ?? "";
+  } catch (e) {
+    if (e instanceof GitError) throw e;
+    return "";
+  }
+}
+
+/**
+ * Dal adının (`refs/heads/<ad>` ya da `refs/remotes/origin/<ad>`) gösterdiği commit `sha` mı?
+ * @param {string} cwd
+ * @param {string} branch
+ * @param {string} sha
+ * @returns {boolean}
+ */
+export function branchPointsAt(cwd, branch, sha) {
+  for (const ref of [`refs/heads/${branch}`, `refs/remotes/origin/${branch}`]) {
+    try {
+      if (git(cwd, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]).trim() === sha) return true;
+    } catch {
+      // ref yok: sıradaki aday
+    }
+  }
+  return false;
+}
+
+/**
+ * Çalışma ağacındaki yolların `treeEntries` biçiminde girdisi (`"<mod> blob <id>"`; yoksa `""`).
+ * Blob kimliği `git hash-object` ile (süzgeçler dahil, yazmadan) hesaplanır; dizin/özel dosya
+ * ve okunamayanlar eşleşmeyen bir değer alır (fail-closed).
+ * @param {string} cwd depo kökü
+ * @param {string[]} files
+ * @returns {Map<string, string>}
+ */
+export function worktreeEntries(cwd, files) {
+  /** @type {Map<string, string>} */
+  const out = new Map();
+  for (const f of files) {
+    const abs = path.join(cwd, f);
+    let st;
+    try {
+      st = lstatSync(abs);
+    } catch {
+      out.set(f, "");
+      continue;
+    }
+    try {
+      if (st.isSymbolicLink()) {
+        const id = execFileSync("git", ["--no-replace-objects", "hash-object", "--stdin"], {
+          cwd,
+          env: gitEnv(),
+          input: readlinkSync(abs),
+          encoding: "utf8",
+        }).trim();
+        out.set(f, `120000 blob ${id}`);
+      } else if (st.isFile()) {
+        const id = git(cwd, ["hash-object", `--path=${f}`, "--", f]).trim();
+        out.set(f, `${st.mode & 0o111 ? "100755" : "100644"} blob ${id}`);
+      } else {
+        out.set(f, "?");
+      }
+    } catch {
+      out.set(f, "?");
+    }
+  }
+  return out;
 }
