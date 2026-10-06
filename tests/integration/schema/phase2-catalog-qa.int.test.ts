@@ -303,7 +303,7 @@ describe("Faz 2 şeması — tenant izolasyonu (wms_app, RLS)", () => {
 
   it("document_type_versions: A bağlamı sistem sürümlerini (tenant_id NULL) görür; wms_app INSERT/UPDATE/DELETE yapamaz (42501)", async () => {
     const seen = await appOne(A.tenantId, "SELECT key FROM public.document_type_versions WHERE tenant_id IS NULL ORDER BY key");
-    expect(seen.ok && seen.rows.map((r) => r.key)).toEqual(["REVERSAL", "STOCK_IN", "STOCK_MOVE", "STOCK_OUT"]);
+    expect(seen.ok && seen.rows.map((r) => r.key)).toEqual(["COUNT_ADJUSTMENT", "REVERSAL", "STOCK_IN", "STOCK_MOVE", "STOCK_OUT"]);
     expectRejected(
       await appOne(A.tenantId, "INSERT INTO public.document_type_versions (tenant_id, key, version) VALUES ($1, 'STOCK_IN', 99)", [A.tenantId]),
       [INSUFFICIENT_PRIVILEGE],
@@ -384,7 +384,7 @@ describe("Faz 2 şeması — bileşik FK'ler (0010/0011)", () => {
       await appOne(
         A.tenantId,
         "UPDATE public.location_count_locks SET status = 'COUNTING', count_session_id = $2, locked_at = now(), locked_by = $3 WHERE location_id = $1",
-        [A.rootLocationId, randomUUID(), B.ownerMembershipId],
+        [A.rootLocationId, A.countSessionId, B.ownerMembershipId],
       ),
       [FK_VIOLATION],
       "locked_by = B üyeliği",
@@ -393,7 +393,7 @@ describe("Faz 2 şeması — bileşik FK'ler (0010/0011)", () => {
     const ok = await appOne(
       A.tenantId,
       "UPDATE public.location_count_locks SET status = 'COUNTING', count_session_id = $2, locked_at = now(), locked_by = $3 WHERE location_id = $1",
-      [A.rootLocationId, randomUUID(), A.ownerMembershipId],
+      [A.rootLocationId, A.countSessionId, A.ownerMembershipId],
     );
     expect(ok.ok && ok.rowCount === 1, fmt(ok)).toBe(true);
     expectRejected(

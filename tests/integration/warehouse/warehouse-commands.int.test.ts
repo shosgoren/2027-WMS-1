@@ -232,7 +232,7 @@ describe("review fixes (T-205 inceleme)", () => {
     const loc = await createLocation(admin(A), { warehouseId, code: "c1", name: "C", kind: "STORAGE" });
     await adm.query(
       "UPDATE public.location_count_locks SET status = 'COUNTING', count_session_id = $2, locked_at = now(), locked_by = $3 WHERE location_id = $1",
-      [loc.locationId, randomUUID(), A.ownerMembershipId],
+      [loc.locationId, A.countSessionId, A.ownerMembershipId],
     );
     expect((await failure(archiveLocation(admin(A), { locationId: loc.locationId }))).detail).toBe("IN_USE");
     await adm.query("UPDATE public.location_count_locks SET status = 'IDLE', count_session_id = NULL, locked_at = NULL, locked_by = NULL WHERE location_id = $1", [loc.locationId]);
@@ -342,8 +342,8 @@ describe("review fixes (T-205 inceleme)", () => {
       const loc = await createLocation(admin(A), { warehouseId, code: `k${i}`, name: "K", kind: "STORAGE" });
       // Kapı = sayım başlatan transaction: kilit satırını COUNTING'e geçirir, henüz COMMIT etmemiştir.
       const res = await gated(
-        "UPDATE public.location_count_locks SET status = 'COUNTING', count_session_id = gen_random_uuid(), locked_at = now(), locked_by = $2 WHERE location_id = $1",
-        [loc.locationId, A.ownerMembershipId],
+        "UPDATE public.location_count_locks SET status = 'COUNTING', count_session_id = $3, locked_at = now(), locked_by = $2 WHERE location_id = $1",
+        [loc.locationId, A.ownerMembershipId, A.countSessionId],
         1,
         () => Promise.allSettled([archiveLocation(admin(A), { locationId: loc.locationId })]),
       );

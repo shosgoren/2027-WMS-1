@@ -1165,5 +1165,162 @@ describe("0013–0014 — süper kullanıcı olmayan migrator", () => {
         expect(n.rows[0]?.n).toBe("0");
       });
     });
+
+    // ---- 0017 (T-302): görev/sayım/min-maks/COUNT_ADJUSTMENT; süper kullanıcı olmayan migrator (0016 yardımcılarını kullanır) ----
+    describe("0017 tasks_counts_alerts", () => {
+      let thru17Dir: string | undefined;
+      const thru17 = (): string => (thru17Dir ??= copyMigrations("0017"));
+      const ALL17 = [...ALL16, "0017"];
+      const NEW17 = ["warehouse_tasks", "count_sessions", "count_session_lines", "item_stock_policies", "stock_alerts"];
+      const FUNCS17 = ["warehouse_tasks_guard_state", "count_sessions_guard_state", "count_session_lines_guard_state", "stock_alerts_guard_state"];
+
+      it("ileri (0001–0017) → 0017 geri (to 0016) → ileri: parmak izi birebir; tablolar/işlevler/sütun/FK/COUNT_ADJUSTMENT down'da yok; eski CHECK'ler ve FORCE RLS geri gelir", async () => {
+        await setProbeMemberships(STANDARD_GRANT);
+        const u = await freshDatabase();
+        expect((await migrateUp({ url: u, dir: thru17() })).applied).toEqual(ALL17);
+        const before = await digest16(u);
+        expectProbeFunction(await probeFunction(u));
+        await withClient(u, async (c) => {
+          const r = await c.query<{ su: boolean; byp: boolean }>("SELECT rolsuper AS su, rolbypassrls AS byp FROM pg_roles WHERE rolname = current_user");
+          expect(r.rows).toEqual([{ su: false, byp: false }]);
+          const f = await c.query<{ relname: string; relrowsecurity: boolean; relforcerowsecurity: boolean }>(
+            "SELECT relname, relrowsecurity, relforcerowsecurity FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relname = ANY($1::text[]) ORDER BY 1",
+            [NEW17],
+          );
+          expect(f.rows.map((x) => [x.relname, x.relrowsecurity, x.relforcerowsecurity])).toEqual([...NEW17].sort().map((n) => [n, true, true]));
+          const sys = await c.query<{ n: number }>("SELECT count(*)::int AS n FROM public.document_type_versions WHERE tenant_id IS NULL AND key = 'COUNT_ADJUSTMENT' AND version = 1");
+          expect(sys.rows[0]?.n).toBe(1);
+        });
+
+        expect((await migrateDown({ url: u, dir: thru17(), to: "0016", wmsEnv: "ci" })).reverted).toEqual(["0017"]);
+        expect(await digest16(u)).not.toEqual(before);
+        await withClient(u, async (c) => {
+          const gone = await c.query(
+            `SELECT 1 FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relname = ANY($1::text[])
+             UNION ALL SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'tenant_settings' AND column_name = 'count_abandon_hours'
+             UNION ALL SELECT 1 FROM pg_proc WHERE proname = ANY($2::text[])
+             UNION ALL SELECT 1 FROM pg_constraint WHERE conname = 'location_count_locks_session_fkey'
+             UNION ALL SELECT 1 FROM pg_class WHERE relname = 'location_count_locks_tenant_session_idx'
+             UNION ALL SELECT 1 FROM public.document_type_versions WHERE key = 'COUNT_ADJUSTMENT'`,
+            [NEW17, FUNCS17],
+          );
+          expect(gone.rows).toEqual([]);
+          const chk = await c.query<{ conname: string; def: string }>(
+            "SELECT conname, pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname IN ('documents_kind_chk', 'number_sequences_kind_chk') ORDER BY 1",
+          );
+          for (const x of chk.rows) {
+            expect(x.def, x.conname).not.toContain("COUNT_ADJUSTMENT");
+            expect(x.def, x.conname).toContain("REVERSAL");
+          }
+          expect(chk.rows).toHaveLength(2);
+          const trg = await c.query<{ tgenabled: string }>("SELECT tgenabled FROM pg_trigger WHERE tgname = 'document_type_versions_immutable'");
+          expect(trg.rows).toEqual([{ tgenabled: "A" }]);
+          const force = await c.query<{ relname: string; f: boolean }>(
+            "SELECT relname, relforcerowsecurity AS f FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relname IN ('documents', 'number_sequences', 'tenant_settings', 'document_type_versions', 'location_count_locks') ORDER BY 1",
+          );
+          expect(force.rows).toHaveLength(5);
+          expect(force.rows.every((x) => x.f), "down sonrası FORCE RLS geri açık olmalı").toBe(true);
+          const a85 = await c.query<{ n: number }>("SELECT count(*)::int AS n FROM pg_constraint WHERE conname = 'location_count_locks_state_chk'");
+          expect(a85.rows[0]?.n).toBe(1);
+        });
+
+        expect((await migrateUp({ url: u, dir: thru17() })).applied).toEqual(["0017"]);
+        expect(await digest16(u)).toEqual(before);
+        expectProbeFunction(await probeFunction(u));
+      });
+
+      it("dolu warehouse_tasks ile staging geri alma RAISE eder, veri yerinde; ci bayrağıyla geçer; yeniden ileri parmak izi birebir", async () => {
+        await setProbeMemberships(STANDARD_GRANT);
+        const u = await freshDatabase();
+        expect((await migrateUp({ url: u, dir: thru17() })).applied).toEqual(ALL17);
+        const tenantId = await freshTenant(u, async (c, t) => {
+          await seedBase(c, t);
+          await c.query("INSERT INTO public.warehouse_tasks (tenant_id, warehouse_id, kind) SELECT $1, id, 'PICK' FROM public.warehouses WHERE code = 'NS-W'", [t]);
+        });
+        const before = await digest16(u);
+        await expect(migrateDown({ url: u, dir: thru17(), to: "0016", wmsEnv: "staging" })).rejects.toThrow(/0017_tasks_counts_alerts down:.*warehouse_tasks.*satır var/);
+        await withClient(u, async (c) => {
+          const ledger = await c.query<{ version: string }>("SELECT version FROM wms_meta.schema_migrations ORDER BY version");
+          expect(ledger.rows.map((r) => r.version)).toEqual(ALL17);
+          await c.query("BEGIN");
+          await c.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+          const kept = await c.query<{ n: string }>("SELECT count(*)::text AS n FROM public.warehouse_tasks");
+          await c.query("ROLLBACK");
+          expect(kept.rows[0]?.n).toBe("1");
+          const force = await c.query<{ f: boolean }>("SELECT relforcerowsecurity AS f FROM pg_class WHERE oid = 'public.warehouse_tasks'::regclass");
+          expect(force.rows).toEqual([{ f: true }]);
+        });
+        expect((await migrateDown({ url: u, dir: thru17(), to: "0016", wmsEnv: "ci" })).reverted).toEqual(["0017"]);
+        expect((await migrateUp({ url: u, dir: thru17() })).applied).toEqual(["0017"]);
+        expect(await digest16(u)).toEqual(before);
+      });
+
+      it("count_abandon_hours <> 8 / COUNT_ADJUSTMENT sayacı ile staging geri alma RAISE eder; ci bayrağıyla geçer", async () => {
+        await setProbeMemberships(STANDARD_GRANT);
+        const u = await freshDatabase();
+        expect((await migrateUp({ url: u, dir: thru17() })).applied).toEqual(ALL17);
+        await freshTenant(u, async (c, t) => {
+          await seedBase(c, t);
+          await c.query(`INSERT INTO public.tenant_settings (tenant_id, locale, time_zone, onboarding_status, count_abandon_hours) VALUES ($1, 'tr-TR', 'Europe/Istanbul', 'PENDING', 12)`, [t]);
+          await c.query("INSERT INTO public.number_sequences (tenant_id, document_kind, period) VALUES ($1, 'COUNT_ADJUSTMENT', '2026')", [t]);
+        });
+        await expect(migrateDown({ url: u, dir: thru17(), to: "0016", wmsEnv: "staging" })).rejects.toThrow(/0017_tasks_counts_alerts down:.*(number_sequences.*COUNT_ADJUSTMENT|tenant_settings.*count_abandon_hours)/);
+        expect((await migrateDown({ url: u, dir: thru17(), to: "0016", wmsEnv: "ci" })).reverted).toEqual(["0017"]);
+        expect((await migrateUp({ url: u, dir: thru17() })).applied).toEqual(["0017"]);
+      });
+
+      it("COUNT_ADJUSTMENT belgesi varken geri alma ci bayrağıyla bile RAISE eder (işlenmiş belge silinemez); ledger/izler yerinde kalır", async () => {
+        await setProbeMemberships(STANDARD_GRANT);
+        const u = await freshDatabase();
+        expect((await migrateUp({ url: u, dir: thru17() })).applied).toEqual(ALL17);
+        await freshTenant(u, async (c, t) => {
+          await seedBase(c, t);
+          await c.query(
+            `INSERT INTO public.documents (tenant_id, kind, type_version_id, warehouse_id, business_date, created_by)
+             SELECT $1, 'COUNT_ADJUSTMENT', v.id, w.id, '2026-02-01', $2
+               FROM public.document_type_versions v, public.warehouses w WHERE v.tenant_id IS NULL AND v.key = 'COUNT_ADJUSTMENT' AND w.code = 'NS-W'`,
+            [t, randomUUID()],
+          );
+        });
+        await expect(migrateDown({ url: u, dir: thru17(), to: "0016", wmsEnv: "ci" })).rejects.toThrow(/0017_tasks_counts_alerts down:.*COUNT_ADJUSTMENT belgesi var/);
+        await withClient(u, async (c) => {
+          const ledger = await c.query<{ version: string }>("SELECT version FROM wms_meta.schema_migrations ORDER BY version");
+          expect(ledger.rows.map((r) => r.version)).toEqual(ALL17);
+          const force = await c.query<{ f: boolean }>("SELECT relforcerowsecurity AS f FROM pg_class WHERE oid = 'public.documents'::regclass");
+          expect(force.rows).toEqual([{ f: true }]);
+          const sys = await c.query<{ n: number }>("SELECT count(*)::int AS n FROM public.document_type_versions WHERE key = 'COUNT_ADJUSTMENT'");
+          expect(sys.rows[0]?.n).toBe(1);
+        });
+      });
+
+      it("0016 durumunda COUNTING kilit satırı (yetim count_session_id) varken 0017 ileri açık hata ile durur, hiçbir şey uygulanmaz; satır yerinde", async () => {
+        await setProbeMemberships(STANDARD_GRANT);
+        const u = await freshDatabase();
+        expect((await migrateUp({ url: u, dir: thru16() })).applied).toEqual(ALL16);
+        const tenantId = await freshTenant(u, async (c, t) => {
+          await seedBase(c, t);
+          const user = await c.query<{ id: string }>("INSERT INTO public.users (name, email) VALUES ('NS', $1) RETURNING id", [`ns-${randomBytes(4).toString("hex")}@example.test`]);
+          const m = await c.query<{ id: string }>("INSERT INTO public.tenant_memberships (tenant_id, user_id, status, is_owner) VALUES ($1, $2, 'ACTIVE', true) RETURNING id", [t, user.rows[0]?.id]);
+          await c.query(
+            "UPDATE public.location_count_locks SET status = 'COUNTING', count_session_id = $2, locked_at = now(), locked_by = $3 WHERE tenant_id = $1",
+            [t, randomUUID(), m.rows[0]?.id],
+          );
+        });
+        await expect(migrateUp({ url: u, dir: thru17() })).rejects.toThrow(/0017_tasks_counts_alerts: 1 kilit satırı count_session_id taşıyor/);
+        await withClient(u, async (c) => {
+          const ledger = await c.query<{ version: string }>("SELECT version FROM wms_meta.schema_migrations ORDER BY version");
+          expect(ledger.rows.map((r) => r.version)).toEqual(ALL16);
+          const t = await c.query("SELECT 1 FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relname = 'count_sessions'");
+          expect(t.rows).toEqual([]);
+          const force = await c.query<{ f: boolean }>("SELECT relforcerowsecurity AS f FROM pg_class WHERE oid = 'public.location_count_locks'::regclass");
+          expect(force.rows).toEqual([{ f: true }]);
+          await c.query("BEGIN");
+          await c.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+          const kept = await c.query<{ n: string }>("SELECT count(*)::text AS n FROM public.location_count_locks WHERE status = 'COUNTING'");
+          await c.query("ROLLBACK");
+          expect(kept.rows[0]?.n).toBe("1");
+        });
+      });
+    });
   });
 });

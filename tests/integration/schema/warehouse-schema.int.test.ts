@@ -123,7 +123,7 @@ describe("T-202 lokasyon + sayım kilidi satırı", () => {
   });
 
   it("kilit satırı durum güncellemesi (COUNTING/IDLE) CHECK ile tutarlı; tutarsız durum reddedilir", async () => {
-    const sess = randomUUID();
+    const sess = A.countSessionId;
     const ok = await inTenant(A.tenantId, async (q) => {
       await q(
         "UPDATE public.location_count_locks SET status = 'COUNTING', count_session_id = $2, locked_at = now(), locked_by = $3 WHERE location_id = $1",

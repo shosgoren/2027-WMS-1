@@ -22,7 +22,7 @@ const xid8 = customType<{ data: string }>({
   },
 });
 
-export const DOCUMENT_KINDS = ["STOCK_IN", "STOCK_OUT", "STOCK_MOVE", "REVERSAL"] as const;
+export const DOCUMENT_KINDS = ["STOCK_IN", "STOCK_OUT", "STOCK_MOVE", "REVERSAL", "COUNT_ADJUSTMENT"] as const;
 export type DocumentKind = (typeof DOCUMENT_KINDS)[number];
 export const DOCUMENT_STATUSES = ["DRAFT", "APPROVED", "POSTED", "CANCELLED"] as const;
 export type DocumentStatus = (typeof DOCUMENT_STATUSES)[number];
