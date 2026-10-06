@@ -15,6 +15,19 @@
 # uygulama düzeyinde deploy token'ı (`fly tokens create deploy -a etkin-wms-staging`) yeterlidir.
 # Org token'ı yalnızca ilk oluşturma içindir: ilk yeşil koşudan sonra kullanıcı FLY_API_TOKEN'ı
 # uygulama kapsamlı deploy token'la değiştirir (U-06).
+# Migration (T-106, ADR-015 §7): "Migrate" adımı Deploy'dan ÖNCE koşar ve başarısızsa iş durur (fail-closed;
+# Deploy/Smoke koşmaz). Sıra: migration önce, uygulama sonra (genişlet–taşı–daralt). Yeni şema eski uygulama
+# sürümüyle çalışabilmelidir; eski sürümü bozacak bir migration (daraltma: sütun/tablo silme) bu iş akışının
+# kapsamı DIŞINDADIR — ayrı, sonraki bir dağıtımda yapılır.
+# Migration sırları YALNIZCA "Migrate" adımının env'indedir (FLY_API_TOKEN orada yok, NEON_API_KEY Deploy'da yok):
+#   1) STAGING_DATABASE_URL_DIRECT repo sırrı (kapsamı yalnızca staging veritabanı; tercih edilen, `direct-secret`);
+#   2) yoksa NEON_API_KEY + NEON_PROJECT_ID ile Neon API'sinden sahip rolün doğrudan URI'si (`neon-api`, adım özetinde
+#      `fallback: neon-api`). A-54: bu yedek yol 2026-11-15'ten sonra kırmızıdır (betik UTC saatini denetler).
+#      API anahtarı `pnpm db:migrate` alt sürecine GEÇMEZ (alt süreç ortamı daraltılır).
+# Sahip URI'si (`DATABASE_URL_DIRECT`) Fly'a ASLA yazılmaz (I-03); yalnızca alt sürecin ortamında yaşar ve
+# `::add-mask::` ile maskelenir. Bilinen risk: GitHub environment + dal kuralı ile sır kapsamını daraltma özel repoda
+# ücretsiz planda yok; sır, repoya yazma yetkisi olanlara (güvenilen taraf) açıktır.
+# `WMS_ENV=staging DEMO_MODE=1`: migration rolü demo tenant adımı (T-123) aynı koşuda çalışır.
 # Üçüncü taraf kodu: action'lar tam commit SHA ile sabit; flyctl resmî sürüm ikilisi SHA-256 ile
 # doğrulanır (superfly/flyctl-actions/setup-flyctl yerine — o action sağlama doğrulaması yapmaz).
 name: deploy-staging
@@ -33,7 +46,7 @@ concurrency:
 permissions:
   contents: read
 
-# .pnpmfile kodu hiçbir adımda yüklenmez (ci.yml ile aynı savunma; bu iş pnpm kullanmaz).
+# .pnpmfile kodu hiçbir adımda yüklenmez (ci.yml ile aynı savunma).
 env:
   npm_config_ignore_pnpmfile: "true"
 
@@ -69,6 +82,18 @@ jobs:
           tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP/flyctl" flyctl
           echo "$RUNNER_TEMP/flyctl" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/flyctl/flyctl" version
+      # pnpm sürümü package.json "packageManager" alanından okunur.
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      # Yalnızca migration için; yaşam döngüsü betikleri çalışmaz.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      # Uygulama dağıtımından ÖNCE; başarısızsa sonraki adımlar koşmaz (varsayılan `if: success()`).
+      - name: Migrate
+        env:
+          STAGING_DATABASE_URL_DIRECT: ${{ secrets.STAGING_DATABASE_URL_DIRECT }}
+          NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
+          NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
+        run: node scripts/deploy-migrate.mjs
       # 1) Varlık denetimi `flyctl status -a` (uygulama düzeyi token yeterli). Uygulama varsa org
       #    komutlarına girilmez. Yalnızca hata "bulunamadı" ise (ilk koşu) token'ın erişebildiği TEK
       #    organizasyonda oluşturulur; birden çok org → tahmin edilmez, kırmızı. Diğer her hata

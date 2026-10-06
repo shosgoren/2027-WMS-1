@@ -2,7 +2,7 @@
 // Dağıtım sonrası duman testi (T-010 / ADR-013). `deploy-staging.yml` dağıtımdan sonra koşar:
 //   node scripts/deploy-smoke.mjs --url https://etkin-wms-staging.fly.dev/api/health \
 //     --status-file "$RUNNER_TEMP/fly-status.json"
-// 1) web: URL → HTTP 200 ve gövde `{"status":"ok"}`; yeniden deneme + istek başına zaman aşımı
+// 1) web: URL → HTTP 200 ve gövde `{"status":"ok"}` (varsa `db` alanı da `ok`, T-106); yeniden deneme + istek başına zaman aşımı
 //    (web makinesi `auto_stop_machines` ile durmuş olabilir; ilk istek onu başlatır).
 // 2) worker: `flyctl status --json` çıktısında (dosya) `worker` süreç grubunda en az bir makine
 //    var ve hepsi `started`. Süreç grubu `config.metadata.fly_process_group` alanındadır
@@ -53,6 +53,17 @@ export function evaluateHealth(status, body) {
   }
   if (typeof parsed !== "object" || parsed === null || /** @type {{ status?: unknown }} */ (parsed).status !== "ok") {
     return { ok: false, reason: `beklenmeyen gövde: ${body.slice(0, 200)}` };
+  }
+  // T-106: `db` alanı (T-129 sonrası) VARSA "ok" olmalı (metin "ok" ya da {status:"ok"}); alan yoksa
+  // mevcut davranış (geriye uyumlu). Alan uydurulmaz/beklenmez: yalnızca var olan denetlenir.
+  const rec = /** @type {Record<string, unknown>} */ (parsed);
+  if (Object.prototype.hasOwnProperty.call(rec, "db")) {
+    const db = rec["db"];
+    const dbStatus = typeof db === "object" && db !== null ? /** @type {{ status?: unknown }} */ (db).status : db;
+    if (dbStatus !== "ok") {
+      return { ok: false, reason: `db alanı ok değil: ${JSON.stringify(dbStatus ?? null).slice(0, 100)}` };
+    }
+    return { ok: true, reason: 'HTTP 200 {status:"ok", db:"ok"}' };
   }
   return { ok: true, reason: "HTTP 200 {status:\"ok\"}" };
 }
