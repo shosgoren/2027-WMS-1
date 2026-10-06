@@ -1,12 +1,11 @@
 // Worker giriş noktası: `node dist/main.js`. Web'den bağımsız, uzun ömürlü süreç (ADR-001).
 import { DEMO_TENANT_ID, createDbClient, withSystemTenant } from "@wms/db";
-import { loadDemoSeedConfig } from "@wms/domain/demo/seed";
 import { createJobQueue } from "@wms/queue-adapter";
 import { assertMailModeAllowed, loadMailConfig } from "@wms/shared/mailer";
 import { createSealer } from "@wms/shared/seal";
 import { JOB_TYPES, type JobHandler, type JobType } from "@wms/shared/queue";
 import { createDeliverInvitationHandler } from "./jobs/deliver-invitation.js";
-import { DEMO_RESEED_SINGLETON_KEY, createDemoReseedHandler, resolveDemoAccountPort, startDemoReseedSchedule } from "./jobs/demo-reseed.js";
+import { DEMO_RESEED_SINGLETON_KEY, registerDemoReseed } from "./jobs/demo-reseed.js";
 import { createMailer, createSendEmailHandler } from "./jobs/send-email.js";
 import { createJsonLogger, createLifecycle, EXIT_FAILURE, parseShutdownTimeoutMs } from "./lifecycle.js";
 
@@ -84,34 +83,22 @@ if (undecided.length > 0) {
 // denetimli, transaction-local bağlam) kurulur (ADR-016 §6). Havuz ayarları `DB_CLIENT_SETTINGS` ile aynıdır.
 const db = createDbClient({ url: databaseUrl, poolMax: 10, prepare: false });
 
-// Demo (T-123): fail-closed. Kapalıysa yalnızca neden loglanır (parola/değer asla); iş türü kaydedilmez.
-let demoEnabled = false;
-let demoAuthDb: ReturnType<typeof createDbClient> | undefined;
-{
-  const demo = loadDemoSeedConfig(process.env);
-  if (!demo.enabled) {
-    logger.info("demo disabled", { reason: demo.reason });
-  } else {
-    // `wms_auth` bağlantısı yalnızca demo açıkken ve AUTH_DATABASE_URL tanımlıysa kurulur (prod'da hiç kurulmaz).
-    const authUrl = process.env.AUTH_DATABASE_URL?.trim();
-    const authDb = authUrl === undefined || authUrl === "" ? undefined : createDbClient({ url: authUrl, poolMax: 2, prepare: false });
-    let accounts: ReturnType<typeof resolveDemoAccountPort>;
-    try {
-      accounts = resolveDemoAccountPort(process.env, authDb);
-    } catch (err) {
-      logger.error("invalid configuration", { error: err instanceof Error ? err.name : "unknown" });
-      process.exit(EXIT_FAILURE);
-    }
-    if (accounts === undefined || authDb === undefined) {
-      logger.error("demo disabled: account adapter configuration missing (AUTH_DATABASE_URL / DEMO_EMAIL_DOMAIN); demo.reseed not registered");
-      if (authDb !== undefined) await authDb.close();
-    } else {
-      demoEnabled = true;
-      demoAuthDb = authDb;
-      HANDLERS["demo.reseed"] = createDemoReseedHandler({ db, accounts, password: demo.password, logger });
-    }
-  }
+// Demo (T-123/T-123a, A-63): fail-closed; ayrıntı registerDemoReseed'de. Kapalıyken `wms_auth` havuzu açılmaz, bağdaştırıcı
+// (ve argon2 yerel ikilisi) yüklenmez. Rol/ortam hataları açılışı düşürür.
+let demo: Awaited<ReturnType<typeof registerDemoReseed>>;
+try {
+  demo = await registerDemoReseed({
+    env: process.env,
+    db,
+    logger,
+    openAuthDb: (url) => createDbClient({ url, poolMax: 2, prepare: false }),
+  });
+} catch (err) {
+  const code = (err as { code?: unknown } | null)?.code;
+  logger.error("invalid configuration", { error: err instanceof Error ? err.name : "unknown", ...(typeof code === "string" ? { code } : {}) });
+  process.exit(EXIT_FAILURE);
 }
+if (demo.handler !== undefined) HANDLERS["demo.reseed"] = demo.handler;
 
 const queue = createJobQueue({
   connectionString: workerDatabaseUrl,
@@ -137,22 +124,18 @@ logger.info("queue started", {
 });
 
 // Demo yeniden tohumlama zamanlaması: açılışta bir kez + günlük 03:00 UTC; `singletonKey` ile tek iş.
-const demoSchedule = demoEnabled
-  ? startDemoReseedSchedule({
-      logger,
-      enqueue: () =>
-        // Tenant kimliği sabittir (iş yükünde yok); bağlam withSystemTenant ile kurulur (gerekçe üyelik/rol yazmaz).
-        withSystemTenant(db, DEMO_TENANT_ID, "demo.schedule", (tx) =>
-          queue.enqueue(tx, { type: "demo.reseed", payload: {}, singletonKey: DEMO_RESEED_SINGLETON_KEY }),
-        ),
-    })
-  : undefined;
+const demoSchedule = demo.startSchedule(() =>
+  // Tenant kimliği sabittir (iş yükünde yok); bağlam withSystemTenant ile kurulur (gerekçe üyelik/rol yazmaz).
+  withSystemTenant(db, DEMO_TENANT_ID, "demo.schedule", (tx) =>
+    queue.enqueue(tx, { type: "demo.reseed", payload: {}, singletonKey: DEMO_RESEED_SINGLETON_KEY }),
+  ),
+);
 
 // Kapanış sırası: önce zamanlayıcı, sonra kuyruk (çalışan işler biter), sonra DB havuzu.
 lifecycle.register({ name: "demo-schedule", run: () => demoSchedule?.stop() });
 lifecycle.register({ name: "job-queue", run: () => queue.stop() });
 lifecycle.register({ name: "db", run: () => db.close() });
-lifecycle.register({ name: "demo-auth-db", run: () => demoAuthDb?.close() });
+lifecycle.register({ name: "demo-auth-db", run: () => demo.close() });
 
 lifecycle.installProcessHandlers(process);
 lifecycle.start();

@@ -5,8 +5,7 @@
 //   withMembership) wms_app havuzundan erişir (T-115c modeli: kuyruk wms_worker, tenant verisi wms_app).
 // - Zamanlama: pg-boss `schedule` kapalıdır (adaptör `schedule: false`); açılışta bir kez + günlük 03:00 UTC işi
 //   `singletonKey` ile kuyruğa yazan süreç içi zamanlayıcı. Eşzamanlı iki örnekte tek iş oluşur (singleton).
-import { nextDailyRunUtc, reseedDemo, type DemoAccountPort } from "@wms/domain/demo/seed";
-import { createDemoAccountPort, parseDemoDomain } from "@wms/auth/demo-accounts";
+import { loadDemoSeedConfig, nextDailyRunUtc, reseedDemo, type DemoAccountPort } from "@wms/domain/demo/seed";
 import type { createDbClient } from "@wms/db";
 import type { AccessDbClient } from "@wms/domain/identity/access";
 import type { EnqueueResult, JobHandler } from "@wms/shared/queue";
@@ -15,18 +14,74 @@ import type { Logger } from "../lifecycle.js";
 export const DEMO_RESEED_SINGLETON_KEY = "demo.reseed";
 export const DEMO_RESEED_HOUR_UTC = 3;
 
+type DbClient = ReturnType<typeof createDbClient>;
+type DemoAdapterModule = Pick<typeof import("@wms/auth/demo-accounts"), "createDemoAccountPort" | "parseDemoDomain">;
+
+export interface DemoRegistrationOptions {
+  readonly env: Readonly<Record<string, string | undefined>>;
+  readonly db: AccessDbClient;
+  readonly logger: Logger;
+  /** `wms_auth` havuzu açar; YALNIZCA demo açık ve `AUTH_DATABASE_URL` varken çağrılır (A-63). */
+  readonly openAuthDb: (url: string) => DbClient;
+  /** Varsayılan: dinamik `import("@wms/auth/demo-accounts")` (prod yolu bu modüle ve argon2'ye hiç dokunmaz). */
+  readonly loadAdapter?: () => Promise<DemoAdapterModule>;
+  readonly setTimer?: DemoReseedScheduleOptions["setTimer"];
+  readonly clearTimer?: DemoReseedScheduleOptions["clearTimer"];
+  readonly now?: () => Date;
+}
+
+export interface DemoRegistration {
+  readonly handler: JobHandler<"demo.reseed"> | undefined;
+  /** Demo kapalıysa `undefined` döner ve zamanlayıcı BAŞLATILMAZ. */
+  startSchedule(enqueue: () => Promise<EnqueueResult>): { stop(): void } | undefined;
+  close(): Promise<void>;
+}
+
 /**
- * Gerçek kimlik hesabı bağdaştırıcısı (`@wms/auth` `createDemoAccountPort`, `wms_auth` bağlantısı; T-123a). Yalnızca
- * yapılandırma eksikse (`authDb` yok: `AUTH_DATABASE_URL` tanımsız; veya `DEMO_EMAIL_DOMAIN` geçersiz) `undefined` döner;
- * çağıran demo işini KAYDETMEZ ve açıkça loglar (sahte başarı yok, G-07). Ortam kapısı (`WMS_ENV`/`DEMO_MODE`) bağdaştırıcının
- * kendisinde de zorlanır: kapalıysa kurulum fırlatır, `undefined` dönmez (prod'da sessizce geçilmez).
+ * Demo kaydı (T-123 + T-123a, A-63). Fail-closed: `WMS_ENV` ∉ local|staging, `DEMO_MODE`≠1 veya parola geçersizse hiçbir
+ * şey kurulmaz (`wms_auth` havuzu açılmaz, bağdaştırıcı yüklenmez, iş kaydedilmez, zamanlayıcı başlamaz). Açıkken
+ * yapılandırma eksikse (`AUTH_DATABASE_URL`/`DEMO_EMAIL_DOMAIN`) iş kaydedilmez ve açıkça loglanır (G-07). Rol doğrulaması
+ * (`current_user = 'wms_auth'`) ve ortam hataları FIRLATILIR (çağıran açılışı düşürür).
  */
-export function resolveDemoAccountPort(
-  env: Readonly<Record<string, string | undefined>>,
-  authDb: ReturnType<typeof createDbClient> | undefined,
-): DemoAccountPort | undefined {
-  if (authDb === undefined || parseDemoDomain(env.DEMO_EMAIL_DOMAIN) === null) return undefined;
-  return createDemoAccountPort({ authDb, env });
+export async function registerDemoReseed(options: DemoRegistrationOptions): Promise<DemoRegistration> {
+  const { env, db, logger } = options;
+  const none: DemoRegistration = { handler: undefined, startSchedule: () => undefined, close: async () => undefined };
+  const demo = loadDemoSeedConfig(env);
+  if (!demo.enabled) {
+    logger.info("demo disabled", { reason: demo.reason });
+    return none;
+  }
+  const authUrl = env.AUTH_DATABASE_URL?.trim();
+  if (authUrl === undefined || authUrl === "") {
+    logger.error("demo disabled: account adapter configuration missing (AUTH_DATABASE_URL); demo.reseed not registered");
+    return none;
+  }
+  const adapter = await (options.loadAdapter ?? (() => import("@wms/auth/demo-accounts")))();
+  if (adapter.parseDemoDomain(env.DEMO_EMAIL_DOMAIN) === null) {
+    logger.error("demo disabled: account adapter configuration missing (DEMO_EMAIL_DOMAIN); demo.reseed not registered");
+    return none;
+  }
+  const authDb = options.openAuthDb(authUrl);
+  try {
+    const accounts = adapter.createDemoAccountPort({ authDb, env });
+    await accounts.verifyRole();
+    const handler = createDemoReseedHandler({ db, accounts, password: demo.password, logger });
+    return {
+      handler,
+      startSchedule: (enqueue) =>
+        startDemoReseedSchedule({
+          logger,
+          enqueue,
+          ...(options.now === undefined ? {} : { now: options.now }),
+          ...(options.setTimer === undefined ? {} : { setTimer: options.setTimer }),
+          ...(options.clearTimer === undefined ? {} : { clearTimer: options.clearTimer }),
+        }),
+      close: () => authDb.close(),
+    };
+  } catch (error) {
+    await authDb.close().catch(() => undefined);
+    throw error;
+  }
 }
 
 export interface DemoReseedDeps {

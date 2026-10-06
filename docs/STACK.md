@@ -39,6 +39,7 @@ Kaynak sözdizimi: `<dosya>#<json.yolu>` (package.json alanı) veya `docker-comp
 | Better Auth (kimlik katmanı) | better-auth | 1.7.7 | packages/auth/package.json#dependencies.better-auth | ADR-014 |
 | Better Auth (web istemcisi, `better-auth/react`) | better-auth | 1.7.7 | apps/web/package.json#dependencies.better-auth | ADR-014, T-118 |
 | Argon2id parola özeti | @node-rs/argon2 | 2.2.1 | packages/auth/package.json#dependencies.@node-rs/argon2 | ADR-014 |
+| Argon2id (worker, demo hesap bağdaştırıcısı; pakete gömülmez, imajda yerel ikili) | @node-rs/argon2 | 2.2.1 | apps/worker/package.json#dependencies.@node-rs/argon2 | T-123a, A-63 |
 | Kuyruk kütüphanesi | pg-boss | 12.36.0 | packages/queue-adapter/package.json#dependencies.pg-boss | ADR-005 |
 | Worker paketleyici (esbuild; yalnızca derleme) | esbuild | 0.28.2 | apps/worker/package.json#devDependencies.esbuild | ADR-013 |
 | TanStack Query / Virtual | @tanstack/* | — ilk kullanan kart | | |

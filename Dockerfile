@@ -22,6 +22,9 @@ RUN pnpm install --frozen-lockfile --ignore-scripts
 # web: Next standalone (`apps/web/.next/standalone`, izleme kökü depo kökü → `apps/web/server.js`).
 # worker: tsc tür denetimi (tsconfig.build.json, noEmit) + esbuild tek dosya paketi → `apps/worker/dist/main.js`
 # (workspace .ts paketleri ve pg-boss pakete gömülür; çalışma zamanında node_modules ve kaynak .ts gerekmez).
+# `@node-rs/argon2` YEREL ikili olduğu için pakete GÖMÜLMEZ (esbuild `--external`); demo hesap bağdaştırıcısı onu yalnızca
+# demo açıkken dinamik yükler (T-123a). Aşağıda pnpm sembolik bağlarından çözülmüş kopyası (`cp -rL`; derleme aşaması
+# çalışma zamanıyla aynı taban imaj/libc, yalnızca eşleşen platform ikilileri kurulur) /argon-modules'e alınır.
 # Son adım: DB ortamı olmadan (ve migrate argümanlarıyla) çalıştırılan worker kendi yapılandırma hatasını verir;
 # çıktıda `MIGRATION_` yoksa migration CLI paketlenmemiş/koşmuyor demektir (T-115 Supervisor eki 3).
 RUN pnpm --filter @wms/web build \
@@ -32,7 +35,10 @@ RUN pnpm --filter @wms/web build \
  && ! grep -q 'workspace:' apps/worker/dist/main.js \
  && out="$(env -u DATABASE_URL -u DATABASE_URL_DIRECT node apps/worker/dist/main.js down --to 0000 2>&1 || true)" \
  && printf '%s' "$out" | grep -q 'invalid configuration' \
- && ! printf '%s' "$out" | grep -q 'MIGRATION_'
+ && ! printf '%s' "$out" | grep -q 'MIGRATION_' \
+ && ! grep -Eq '^import .*"@node-rs/argon2"' apps/worker/dist/main.js \
+ && mkdir -p /argon-modules/@node-rs \
+ && cp -rL node_modules/.pnpm/@node-rs+argon2@*/node_modules/@node-rs/. /argon-modules/@node-rs/
 
 # ---------------------------------------------------------------------------------------------
 FROM ${NODE_IMAGE} AS runtime
@@ -46,6 +52,8 @@ COPY --from=build /repo/apps/web/.next/standalone/ ./
 COPY --from=build /repo/apps/web/.next/static ./apps/web/.next/static
 COPY --from=build /repo/apps/worker/package.json ./apps/worker/package.json
 COPY --from=build /repo/apps/worker/dist/main.js ./apps/worker/dist/main.js
+# Yerel `@node-rs/argon2` (+ platform ikilileri): worker dizininden çözülür (apps/worker/node_modules).
+COPY --from=build /argon-modules/ ./apps/worker/node_modules/
 # Next çalışma zamanı önbelleği için yazılabilir tek dizin.
 RUN mkdir -p apps/web/.next/cache && chown node:node apps/web/.next/cache
 # Taban imajdaki root olmayan `node` kullanıcısı (uid 1000).

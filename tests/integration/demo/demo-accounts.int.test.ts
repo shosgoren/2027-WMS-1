@@ -8,13 +8,14 @@ import { PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH, createAuth, readAuthEnv } fro
 import { verifyPassword } from "../../../packages/auth/src/password.ts";
 import { createDbClient } from "../../../packages/db/src/index.ts";
 import { DB_CLIENT_SETTINGS, type DbClient } from "../../../packages/db/src/client.ts";
-import { DEMO_ACCOUNT_PASSWORD_MAX_LENGTH, DEMO_ACCOUNT_PASSWORD_MIN_LENGTH } from "../../../packages/auth/src/demo-accounts.ts";
-import { resolveDemoAccountPort } from "../../../apps/worker/src/jobs/demo-reseed.ts";
+import { DEMO_ACCOUNT_EMAIL_DOMAIN, DEMO_ACCOUNT_PASSWORD_MAX_LENGTH, DEMO_ACCOUNT_PASSWORD_MIN_LENGTH } from "../../../packages/auth/src/demo-accounts.ts";
+import { DEMO_EMAIL_DOMAIN } from "../../../packages/domain/src/demo/seed.ts";
+import { ARGON2_PARAMS, hashPassword } from "../../../packages/auth/src/password.ts";
 import { readAuthDatabaseUrl, readIntEnv } from "../harness/env.ts";
 
 const env = readIntEnv(process.env);
 const authUrl = readAuthDatabaseUrl(process.env);
-const DOMAIN = "demo-t123a.invalid";
+const DOMAIN = "example.invalid";
 const DEMO_ENV = { WMS_ENV: "local", DEMO_MODE: "1", DEMO_EMAIL_DOMAIN: DOMAIN } as const;
 const BASE = "http://localhost:3000";
 const rnd = (): string => `Dm-${randomBytes(9).toString("hex")}`;
@@ -121,6 +122,7 @@ describe("demo hesap bağdaştırıcısı", () => {
     ["WMS_ENV=ci", { WMS_ENV: "ci", DEMO_MODE: "1", DEMO_EMAIL_DOMAIN: DOMAIN }, "FORBIDDEN"],
     ["DEMO_MODE=0", { WMS_ENV: "local", DEMO_MODE: "0", DEMO_EMAIL_DOMAIN: DOMAIN }, "FORBIDDEN"],
     ["DEMO_MODE yok", { WMS_ENV: "staging", DEMO_EMAIL_DOMAIN: DOMAIN }, "FORBIDDEN"],
+    ["DEMO_EMAIL_DOMAIN başka geçerli alan", { WMS_ENV: "local", DEMO_MODE: "1", DEMO_EMAIL_DOMAIN: "other.invalid" }, "VALIDATION_FAILED"],
     ["DEMO_EMAIL_DOMAIN yok", { WMS_ENV: "local", DEMO_MODE: "1" }, "VALIDATION_FAILED"],
     ["DEMO_EMAIL_DOMAIN geçersiz", { WMS_ENV: "local", DEMO_MODE: "1", DEMO_EMAIL_DOMAIN: "not a domain" }, "VALIDATION_FAILED"],
   ] as const)("ortam kapısı fail-closed: %s", async (_name, e, code) => {
@@ -140,11 +142,73 @@ describe("demo hesap bağdaştırıcısı", () => {
     expect(await q("SELECT 1 FROM public.users WHERE email = $1", [email("late")])).toHaveLength(0);
   });
 
-  it("worker çözümleyici: yapılandırma eksikse undefined, prod'da fırlatır", () => {
-    expect(resolveDemoAccountPort(DEMO_ENV, undefined)).toBeUndefined();
-    expect(resolveDemoAccountPort({ WMS_ENV: "local", DEMO_MODE: "1" }, authClient)).toBeUndefined();
-    expect(resolveDemoAccountPort(DEMO_ENV, authClient)).toBeDefined();
-    expect(() => resolveDemoAccountPort({ ...DEMO_ENV, WMS_ENV: "production" }, authClient)).toThrow(DemoAccountError);
+  it("alan adı sabiti seed ile tek kaynak; Argon2 parametreleri ve çıktısı password.ts ile uyumlu", async () => {
+    expect(DEMO_ACCOUNT_EMAIL_DOMAIN).toBe(DEMO_EMAIL_DOMAIN);
+    const port = createDemoAccountPort({ authDb: authClient, env: DEMO_ENV });
+    const pw = rnd();
+    const r = await port.ensureAccount({ email: email("interop"), name: "Demo Interop", password: pw });
+    const row = (await q<{ password: string }>("SELECT password FROM public.accounts WHERE user_id = $1", [r.userId]))[0]!;
+    const params = (h: string): string => h.split("$").slice(1, 4).join("$"); // argon2id$v=19$m=…,t=…,p=…
+    const reference = await hashPassword(pw);
+    expect(params(row.password)).toBe(params(reference));
+    expect(params(row.password)).toBe(`argon2id$v=19$m=${ARGON2_PARAMS.memoryCost},t=${ARGON2_PARAMS.timeCost},p=${ARGON2_PARAMS.parallelism}`);
+    expect(await verifyPassword({ hash: row.password, password: pw })).toBe(true);
+    // password.ts özetini de kabul eder (aynı parola → güncelleme yok).
+    await q("UPDATE public.accounts SET password = $2 WHERE user_id = $1", [r.userId, reference]);
+    expect((await port.ensureAccount({ email: email("interop"), name: "Demo Interop", password: pw })).passwordUpdated).toBe(false);
+  });
+
+  it("MFA'lı mevcut kullanıcı devralınır: two_factor_enabled=false, two_factors silinir, oturumlar kapanır, olay yazılır", async () => {
+    const port = createDemoAccountPort({ authDb: authClient, env: DEMO_ENV });
+    const e = email("mfa");
+    const first = await port.ensureAccount({ email: e, name: "Demo Mfa", password: PASSWORD });
+    await q("UPDATE public.users SET two_factor_enabled = true WHERE id = $1", [first.userId]);
+    await q("INSERT INTO public.two_factors (secret, backup_codes, user_id) VALUES ('s', 'b', $1)", [first.userId]);
+    await q("INSERT INTO public.sessions (expires_at, token, user_id) VALUES (now() + interval '1 hour', $1, $2)", [randomBytes(16).toString("hex"), first.userId]);
+    const r = await port.ensureAccount({ email: e, name: "Demo Mfa", password: PASSWORD });
+    expect(r).toEqual({ userId: first.userId, created: false, passwordUpdated: false });
+    expect((await q<{ two_factor_enabled: boolean }>("SELECT two_factor_enabled FROM public.users WHERE id = $1", [first.userId]))[0]!.two_factor_enabled).toBe(false);
+    expect(await q("SELECT 1 FROM public.two_factors WHERE user_id = $1", [first.userId])).toHaveLength(0);
+    expect(await q("SELECT 1 FROM public.sessions WHERE user_id = $1", [first.userId])).toHaveLength(0);
+    const ev = await q<{ event_type: string }>("SELECT event_type FROM public.security_events WHERE user_id = $1", [first.userId]);
+    expect(ev.map((x) => x.event_type)).toContain(DEMO_ACCOUNT_EVENT.passwordReset);
+  });
+
+  it("rol doğrulaması: wms_auth dışı bağlantı FORBIDDEN, hiçbir şey yazılmaz", async () => {
+    const wrong = createDbClient({ url: env.databaseUrl, poolMax: 1, prepare: env.prepare ?? DB_CLIENT_SETTINGS.prepare });
+    try {
+      const port = createDemoAccountPort({ authDb: wrong, env: DEMO_ENV });
+      await expect(port.verifyRole()).rejects.toMatchObject({ code: "FORBIDDEN" });
+      await expect(port.ensureAccount({ email: email("role"), name: "R", password: PASSWORD })).rejects.toMatchObject({ code: "FORBIDDEN" });
+      expect(await q("SELECT 1 FROM public.users WHERE email = $1", [email("role")])).toHaveLength(0);
+      await expect(createDemoAccountPort({ authDb: authClient, env: DEMO_ENV }).verifyRole()).resolves.toBeUndefined();
+    } finally {
+      await wrong.close();
+    }
+  });
+
+  it("Better Auth şeması (users/accounts) beklenen sütun kümesinde: sürüm yükseltmesinde yeni zorunlu sütun bu testi kırar", async () => {
+    const cols = async (t: string): Promise<string[]> =>
+      (await q<{ column_name: string }>("SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name=$1", [t]))
+        .map((r) => r.column_name)
+        .sort();
+    expect(await cols("users")).toEqual(
+      ["created_at", "email", "email_verified", "id", "image", "invitation_claim_id", "name", "two_factor_enabled", "updated_at"].sort(),
+    );
+    expect(await cols("accounts")).toEqual(
+      [
+        "access_token", "access_token_expires_at", "account_id", "created_at", "id", "id_token", "password",
+        "provider_id", "refresh_token", "refresh_token_expires_at", "scope", "updated_at", "user_id",
+      ].sort(),
+    );
+    // Bağdaştırıcının yazdığı sütunlar zorunlu (NOT NULL, varsayılansız) tüm sütunları kapsamalı.
+    const required = async (t: string): Promise<string[]> =>
+      (await q<{ column_name: string }>(
+        "SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name=$1 AND is_nullable='NO' AND column_default IS NULL",
+        [t],
+      )).map((r) => r.column_name).sort();
+    expect(await required("users")).toEqual(["email", "name"]);
+    expect(await required("accounts")).toEqual(["account_id", "provider_id", "user_id"]);
   });
 
   it("parola hiçbir tabloda/olayda düz değil; hata mesajı değer taşımaz", async () => {
