@@ -16,6 +16,8 @@
     "@wms/domain": "workspace:*",
     "@wms/queue-adapter": "workspace:*",
     "@wms/shared": "workspace:*",
+    "@wms/ui": "workspace:*",
+    "better-auth": "1.7.7",
     "next": "16.3.8",
     "next-intl": "4.14.9",
     "react": "19.3.0",
