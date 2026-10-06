@@ -352,3 +352,46 @@ describe("migrations — süper kullanıcı olmayan migrator (ikinci Testcontain
     );
   });
 });
+
+// 0004_audit (T-107; security-reviewer @79b2011 MAJOR-2): yukarıdaki testler 0001–0003 kopyasında kalır; 0004 ayrı kopyada.
+describe("0004_audit down bekçisi — süper kullanıcı olmayan sahip", () => {
+  let thru4Dir: string | undefined;
+  const thru4 = (): string => (thru4Dir ??= copyMigrations("0004"));
+
+  it("dolu audit_logs ile staging geri alma RAISE eder; veri ve FORCE RLS korunur; ci bayrağıyla geri alma ve yeniden ileri çalışır", async () => {
+    await setProbeMemberships(STANDARD_GRANT);
+    const u = await freshDatabase();
+    expect((await migrateUp({ url: u, dir: thru4() })).applied).toEqual(["0001", "0002", "0003", "0004"]);
+
+    const tenantId = randomUUID();
+    await withClient(u, async (c) => {
+      await c.query("BEGIN");
+      await c.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+      await c.query("INSERT INTO public.tenants (id, slug, name) VALUES ($1, $2, 'NS Audit')", [tenantId, `ns-${randomBytes(4).toString("hex")}`]);
+      await c.query("INSERT INTO public.audit_logs (action, entity_id) VALUES ('tenant.created', 'ns-keep')");
+      await c.query("COMMIT");
+      // Önkoşul (testin anlamı): FORCE RLS altında, bağlamsız sahip audit satırını GÖRMEZ.
+      const blind = await c.query<{ n: string }>("SELECT count(*)::text AS n FROM public.audit_logs");
+      expect(blind.rows[0]?.n, "bağlamsız FORCE RLS sahibi satır görmemeli").toBe("0");
+    });
+
+    await expect(migrateDown({ url: u, dir: thru4(), to: "0003", wmsEnv: "staging" })).rejects.toThrow(/0004_audit down:.*satır var/);
+
+    await withClient(u, async (c) => {
+      const ledger = await c.query<{ version: string }>("SELECT version FROM wms_meta.schema_migrations ORDER BY version");
+      expect(ledger.rows.map((r) => r.version)).toEqual(["0001", "0002", "0003", "0004"]);
+      const force = await c.query<{ relname: string; relforcerowsecurity: boolean; relrowsecurity: boolean }>(
+        "SELECT relname, relforcerowsecurity, relrowsecurity FROM pg_class WHERE oid = 'public.audit_logs'::regclass",
+      );
+      expect(force.rows).toEqual([{ relname: "audit_logs", relforcerowsecurity: true, relrowsecurity: true }]);
+      await c.query("BEGIN");
+      await c.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+      const kept = await c.query<{ n: string }>("SELECT count(*)::text AS n FROM public.audit_logs WHERE entity_id = 'ns-keep'");
+      await c.query("ROLLBACK");
+      expect(kept.rows[0]?.n).toBe("1");
+    });
+
+    expect((await migrateDown({ url: u, dir: thru4(), to: "0003", wmsEnv: "ci" })).reverted).toEqual(["0004"]);
+    expect((await migrateUp({ url: u, dir: thru4() })).applied).toEqual(["0004"]);
+  });
+});
