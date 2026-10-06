@@ -21,7 +21,8 @@ import {
   type AccessPrincipal,
   type AccessTx,
 } from "../identity/access.ts";
-import { PHASE1_STEP_KEYS, getTemplate, type OnboardingStepKey, type SectorTemplate } from "./templates.ts";
+import { applyLocationsStep, applyUnitsStep, type SetupCallParams } from "./stock-setup.ts";
+import { PHASE1_STEP_KEYS, PHASE2_STEP_KEYS, getTemplate, type OnboardingStepKey, type SectorTemplate } from "./templates.ts";
 
 export const SUPPORTED_LOCALES: readonly string[] = Object.freeze(["tr", "en"]);
 
@@ -277,7 +278,7 @@ function parseSteps(raw: unknown): StepState[] {
 type StepHandler = (tx: AccessTx, tenantId: string, row: SettingsRow, template: SectorTemplate) => Promise<void>;
 
 /** Adım uygulayıcıları: idempotent ve kullanıcı değişikliğini ezmeyen uzlaştırma (kayıtlı şablon sürümünden). */
-const STEP_HANDLERS: Readonly<Record<OnboardingStepKey, StepHandler>> = {
+const STEP_HANDLERS: Readonly<Record<(typeof PHASE1_STEP_KEYS)[number], StepHandler>> = {
   "settings.applied": async (tx, tenantId, row, template) => {
     if (row.sector_template_key === null || row.sector_template_version === null) {
       await tx.execute(
@@ -297,63 +298,116 @@ const STEP_HANDLERS: Readonly<Record<OnboardingStepKey, StepHandler>> = {
   },
 };
 
-function isStepKey(k: string): k is OnboardingStepKey {
+function isPhase1Key(k: string): k is Extract<OnboardingStepKey, (typeof PHASE1_STEP_KEYS)[number]> {
   return (PHASE1_STEP_KEYS as readonly string[]).includes(k);
 }
+function isPhase2Key(k: string): k is (typeof PHASE2_STEP_KEYS)[number] {
+  return (PHASE2_STEP_KEYS as readonly string[]).includes(k);
+}
+function isStepKey(k: string): k is OnboardingStepKey {
+  return isPhase1Key(k) || isPhase2Key(k);
+}
+
+/**
+ * Faz 2 adımları (T-223): T-205/T-208 komutlarıyla, kendi transaction'larında uygulanır (adım satırı kilidi tutulmaz). Komutlar
+ * idempotenttir (`CODE_TAKEN` = uygulanmış); adım ancak etkiler tamamlandıktan SONRA DONE yazılır → yarıda kesilen adım yeniden çağrıda biter.
+ */
+const PHASE2_HANDLERS: Readonly<
+  Record<(typeof PHASE2_STEP_KEYS)[number], (params: SetupCallParams, template: SectorTemplate) => Promise<unknown>>
+> = {
+  "units.applied": applyUnitsStep,
+  "locations.applied": applyLocationsStep,
+};
+
+type Pick1 =
+  | { readonly kind: "done" }
+  | { readonly kind: "again" }
+  | { readonly kind: "step"; readonly step: string; readonly allDone: boolean }
+  | { readonly kind: "external"; readonly step: (typeof PHASE2_STEP_KEYS)[number]; readonly template: SectorTemplate };
 
 export async function continueOnboarding(input: ContinueOnboardingInput): Promise<OnboardingProgress> {
   const { db, principal, slug } = input;
   const applied: string[] = [];
+  const access = { db, principal, tenantSlug: slug } as const;
   // Her yineleme TEK adımı kendi transaction'ında uygular; hata önceki tamamlanmış adımları geri almaz.
   for (let guard = 0; guard < 32; guard++) {
-    const outcome = await runTenantCommand(
-      { db, principal, tenantSlug: slug, permission: "settings.manage" },
-      async (tx, membership): Promise<{ done: boolean; step?: string }> => {
+    const picked = await runTenantCommand(
+      { ...access, permission: "settings.manage" },
+      async (tx, membership): Promise<Pick1> => {
         const rows = await tx.execute<SettingsRow>(
           sql`SELECT sector_template_key, sector_template_version, terminology, onboarding_status, onboarding_steps
                 FROM public.tenant_settings WHERE tenant_id = ${membership.tenantId}::uuid FOR UPDATE`,
         );
         const row = rows[0];
         if (row === undefined) throw new AppError("NOT_FOUND");
-        if (row.onboarding_status === "COMPLETED") return { done: true };
-        const steps = parseSteps(row.onboarding_steps);
+        let steps = parseSteps(row.onboarding_steps);
+
+        // Mevcut tenant (v1 vb.): kayıtlı sürüm en yüksek sürümden eskiyse eksik adımlar PENDING eklenir (A-47, T-223).
+        const latest = row.sector_template_key === null ? undefined : getTemplate(row.sector_template_key);
+        const behind = latest !== undefined && (row.sector_template_version ?? 0) < latest.version;
+        if (behind) {
+          const missing = latest.steps.filter((k) => !steps.some((s) => s.key === k));
+          if (missing.length > 0) {
+            steps = [...steps, ...missing.map((key): StepState => ({ key, status: "PENDING" }))];
+            await tx.execute(
+              sql`UPDATE public.tenant_settings
+                     SET onboarding_steps = ${JSON.stringify(steps)}::jsonb, onboarding_status = 'IN_PROGRESS'
+                   WHERE tenant_id = ${membership.tenantId}::uuid`,
+            );
+          }
+        }
+        if (row.onboarding_status === "COMPLETED" && !behind) return { kind: "done" };
+
         const next = steps.find((s) => s.status === "PENDING" && isStepKey(s.key));
         if (next === undefined) {
-          // Bilinmeyen (Faz 2) bekleyen adım varsa tamamlanmış sayılmaz.
-          if (steps.some((s) => s.status === "PENDING")) return { done: true };
+          // Bilinmeyen (sonraki sürüm) bekleyen adım varsa tamamlanmış sayılmaz.
+          if (steps.some((s) => s.status === "PENDING")) return { kind: "done" };
           await tx.execute(
-            sql`UPDATE public.tenant_settings SET onboarding_status = 'COMPLETED' WHERE tenant_id = ${membership.tenantId}::uuid`,
+            sql`UPDATE public.tenant_settings
+                   SET onboarding_status = 'COMPLETED',
+                       sector_template_version = ${behind ? latest.version : row.sector_template_version}
+                 WHERE tenant_id = ${membership.tenantId}::uuid`,
           );
-          return { done: true };
+          return { kind: "done" };
+        }
+        if (isPhase2Key(next.key)) {
+          // Faz 2 içeriği en yüksek sürümün şablonundadır (A-78); kayıtlı v1 tanımında `setup` yoktur.
+          if (latest?.setup === undefined) throw new Error("onboarding: sector template has no phase 2 setup");
+          return { kind: "external", step: next.key, template: latest };
         }
         const template = getTemplate(row.sector_template_key ?? "", row.sector_template_version ?? undefined);
         if (template === undefined) throw new Error("onboarding: sector template is not registered");
-        await STEP_HANDLERS[next.key as OnboardingStepKey](tx, membership.tenantId, row, template);
-        const updated = steps.map((s) =>
-          s.key === next.key ? { key: s.key, status: "DONE" as const, completedAt: new Date().toISOString() } : s,
-        );
-        const allDone = updated.every((s) => s.status === "DONE");
-        await tx.execute(
-          sql`UPDATE public.tenant_settings
-                 SET onboarding_steps = ${JSON.stringify(updated)}::jsonb,
-                     onboarding_status = ${allDone ? "COMPLETED" : "IN_PROGRESS"}
-               WHERE tenant_id = ${membership.tenantId}::uuid`,
-        );
-        await appendAudit(tx, {
-          action: "onboarding.step_completed",
-          actorUserId: membership.userId,
-          entityType: "tenant",
-          entityId: membership.tenantId,
-          changeSummary: { step: next.key },
-        });
-        return { done: allDone, step: next.key };
+        await STEP_HANDLERS[next.key as Extract<OnboardingStepKey, (typeof PHASE1_STEP_KEYS)[number]>](tx, membership.tenantId, row, template);
+        const allDone = await markStepDone(tx, membership, next.key, steps, behind ? latest.version : null);
+        return { kind: "step", step: next.key, allDone };
       },
     );
-    if (outcome.step !== undefined) applied.push(outcome.step);
-    if (outcome.done) break;
+    if (picked.kind === "done") break;
+    if (picked.kind === "step") {
+      applied.push(picked.step);
+      if (picked.allDone) break;
+      continue;
+    }
+    if (picked.kind === "external") {
+      await PHASE2_HANDLERS[picked.step]({ ...access }, picked.template);
+      const marked = await runTenantCommand({ ...access, permission: "settings.manage" }, async (tx, membership) => {
+        const rows = await tx.execute<SettingsRow>(
+          sql`SELECT sector_template_key, sector_template_version, terminology, onboarding_status, onboarding_steps
+                FROM public.tenant_settings WHERE tenant_id = ${membership.tenantId}::uuid FOR UPDATE`,
+        );
+        const row = rows[0];
+        if (row === undefined) throw new AppError("NOT_FOUND");
+        const steps = parseSteps(row.onboarding_steps);
+        if (steps.find((s) => s.key === picked.step)?.status !== "PENDING") return { marked: false, allDone: false }; // eşzamanlı çağrı tamamladı
+        const allDone = await markStepDone(tx, membership, picked.step, steps, picked.template.version);
+        return { marked: true, allDone };
+      });
+      if (marked.marked) applied.push(picked.step);
+      if (marked.allDone) break;
+    }
   }
   const final = await runTenantCommand(
-    { db, principal, tenantSlug: slug, permission: "settings.manage" },
+    { ...access, permission: "settings.manage" },
     async (tx, membership) => {
       const rows = await tx.execute<{ onboarding_status: string }>(
         sql`SELECT onboarding_status FROM public.tenant_settings WHERE tenant_id = ${membership.tenantId}::uuid`,
@@ -362,6 +416,35 @@ export async function continueOnboarding(input: ContinueOnboardingInput): Promis
     },
   );
   return { status: final === "COMPLETED" ? "COMPLETED" : "IN_PROGRESS", applied };
+}
+
+/** Adımı DONE yapar + tekil `onboarding.step_completed` audit'i; hepsi bittiyse COMPLETED (ve gerekirse sürüm yükseltme). */
+async function markStepDone(
+  tx: AccessTx,
+  membership: { readonly tenantId: string; readonly userId: string },
+  stepKey: string,
+  steps: readonly StepState[],
+  upgradeToVersion: number | null,
+): Promise<boolean> {
+  const updated = steps.map((s) =>
+    s.key === stepKey ? { key: s.key, status: "DONE" as const, completedAt: new Date().toISOString() } : s,
+  );
+  const allDone = updated.every((s) => s.status === "DONE");
+  await tx.execute(
+    sql`UPDATE public.tenant_settings
+           SET onboarding_steps = ${JSON.stringify(updated)}::jsonb,
+               onboarding_status = ${allDone ? "COMPLETED" : "IN_PROGRESS"}
+               ${allDone && upgradeToVersion !== null ? sql`, sector_template_version = ${upgradeToVersion}` : sql``}
+         WHERE tenant_id = ${membership.tenantId}::uuid`,
+  );
+  await appendAudit(tx, {
+    action: "onboarding.step_completed",
+    actorUserId: membership.userId,
+    entityType: "tenant",
+    entityId: membership.tenantId,
+    changeSummary: { step: stepKey },
+  });
+  return allDone;
 }
 
 // ---------------------------------------------------------------------------------------------

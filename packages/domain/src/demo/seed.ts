@@ -10,6 +10,7 @@
 // - Demo tenant'ta T-117b üyelik komutları kapalıdır (M9, `assertTenantNotDemo`); onarım bu yüzden bu dosyadaki dar,
 //   demo'ya özgü yazımlardır (aynı kurallar: önce sahiplik devri, sonra çıkarma; son sahip hiçbir adımda sıfırlanmaz).
 // - Parola yalnızca `DemoAccountPort.ensureAccount` argümanıdır: audit/log/hata mesajına girmez (G-09).
+import { createHash, randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import {
   DEMO_TENANT_ID,
@@ -18,6 +19,7 @@ import {
   MembershipError,
   appendAudit,
   demoModeEnabled,
+  uuidV5,
   lockOwners,
   withMembership,
   withSystemTenant,
@@ -25,8 +27,13 @@ import {
 import { AppError } from "@wms/shared/errors";
 import type { AccessDbClient, AccessTx } from "../identity/access.ts";
 import { ROLE_KEYS, hasPermission, type RoleKey } from "../identity/permissions.ts";
+import { createItem, listItems, listUnits, setUnitConversion } from "../catalog/index.ts";
+import { runTenantQuery } from "../identity/access.ts";
+import { applyLocationsStep, applyUnitsStep } from "../onboarding/stock-setup.ts";
 import { getTemplate } from "../onboarding/templates.ts";
 import { updateTenantSettings } from "../onboarding/workspace.ts";
+import { approveDocument, createStockDocument, fromMicro, postDocument, readAvailability, toMicro, type DocumentLineInput } from "../stock/index.ts";
+import { createLocation, findLocationByCode, type LocationKindValue } from "../warehouse/index.ts";
 
 export { DEMO_TENANT_ID, DEMO_TENANT_NAME, DEMO_TENANT_SLUG };
 
@@ -465,7 +472,209 @@ export async function repairDemoSettings(db: AccessDbClient, adminUserId: string
 }
 
 // ---------------------------------------------------------------------------------------------
-// 4. Bileşik: hesaplar → bootstrap → üyelik → ayar
+// 4. Demo içeriği: ürün kartları, lokasyon ağacı, açılış stoğu (T-223; A-43, A-78, A-79)
+// ---------------------------------------------------------------------------------------------
+// Tamamen sentetik ambalaj/hırdavat verisi (G-09). Stok YALNIZCA stok komutlarıyla (createStockDocument → approveDocument →
+// postDocument; STOCK_IN/RECEIPT, A-79) oluşur; bakiyeye doğrudan yazılmaz (G-01). Defter değişmezdir (I-04): yeniden tohumlamada
+// önceki stok silinmez; yalnızca HEDEF dizisindeki (ürün, lokasyon) bakiyeleri hedefe STOCK_IN/STOCK_OUT FARKIYLA getirilir.
+// A-223-4: hedef dışı boyutlara (başka lokasyon/durum) dokunulmaz. A-223-5: STOCK_OUT düzeltmesi defter nedeni olarak SHIPMENT alır
+// (A-79: yeni neden yok). A-223-6: Z=0 farkta belge oluşturulmaz.
+
+export interface DemoItemDef {
+  readonly code: string;
+  readonly name: string;
+  /** Birim kodu → 1 birim = kaç ADET (ürün bazında katsayı, A-32). */
+  readonly conversions: Readonly<Record<string, string>>;
+}
+
+/** X ve Y: 16 Senaryo D adlandırması (R-01 → X, R-02 → Y). */
+export const DEMO_ITEMS: readonly DemoItemDef[] = Object.freeze<readonly DemoItemDef[]>([
+  { code: "KRT-3020", name: "Karton kutu 30x20", conversions: { KOLI: "50", PAKET: "10" } },
+  { code: "BNT-45", name: "Koli bandı 45mm", conversions: { KOLI: "36" } },
+]);
+
+export interface DemoLocationDef {
+  readonly code: string;
+  readonly name: string;
+  readonly parent: string | null;
+  readonly kind: LocationKindValue;
+}
+
+/** `Bölge A > Raf 1 > Göz 01 / Göz 02` (A-14); `R-01`, `R-02` yaprak STORAGE lokasyonlarıdır (Senaryo D). */
+export const DEMO_LOCATIONS: readonly DemoLocationDef[] = Object.freeze<readonly DemoLocationDef[]>([
+  { code: "A", name: "Bölge A", parent: null, kind: "STORAGE" },
+  { code: "A-R1", name: "Raf 1", parent: "A", kind: "STORAGE" },
+  { code: "R-01", name: "Göz 01", parent: "A-R1", kind: "STORAGE" },
+  { code: "R-02", name: "Göz 02", parent: "A-R1", kind: "STORAGE" },
+]);
+
+export interface DemoStockTarget {
+  readonly item: string;
+  readonly location: string;
+  /** Temel birimde (ADET) hedef fiziksel bakiye. */
+  readonly quantity: string;
+}
+
+export const DEMO_STOCK_TARGETS: readonly DemoStockTarget[] = Object.freeze<readonly DemoStockTarget[]>([
+  { item: "KRT-3020", location: "R-01", quantity: "1200" }, // 24 koli
+  { item: "KRT-3020", location: "R-02", quantity: "300" },
+  { item: "BNT-45", location: "R-02", quantity: "720" }, // 20 koli
+]);
+
+/** Sabit ad alanı (uuidv5; yalnızca demo anahtarları için). */
+const DEMO_KEY_NAMESPACE = "6f1d2c1e-7b0a-4a6e-9f55-3d0f6c9a2b11";
+
+export interface DemoStockDelta {
+  readonly item: string;
+  readonly location: string;
+  /** Miktar mikro birimde (6 hane), işaretli: + STOCK_IN, − STOCK_OUT. */
+  readonly delta: bigint;
+}
+
+/** Hedef ile güncel bakiye (anahtar `item|location`) arasındaki sıfırdan farklı farklar; sıralı ve belirlenimli. */
+export function diffDemoStock(targets: readonly DemoStockTarget[], current: ReadonlyMap<string, bigint>): readonly DemoStockDelta[] {
+  const out: DemoStockDelta[] = [];
+  for (const t of targets) {
+    const delta = toMicro(t.quantity) - (current.get(`${t.item}|${t.location}`) ?? 0n);
+    if (delta !== 0n) out.push({ item: t.item, location: t.location, delta });
+  }
+  return out.sort((a, b) => (`${a.item}|${a.location}` < `${b.item}|${b.location}` ? -1 : 1));
+}
+
+/** Fark özetinin kanonik dizgisi (ürün, lokasyon, işaretli miktar). */
+export function demoDiffDigest(diff: readonly DemoStockDelta[]): string {
+  return createHash("sha256")
+    .update(diff.map((d) => `${d.item}|${d.location}|${d.delta.toString()}`).join("\n"), "utf8")
+    .digest("hex");
+}
+
+/**
+ * Koşu anahtarı (MINOR-11): `uuidv5(koşu kimliği + fark özeti [+ tür + aşama])`. Aynı işin yeniden teslimi aynı anahtarı üretir
+ * (önceki sonuç); farklı koşu ya da farklı fark yeni anahtar üretir (sabit anahtar + değişken içerik çelişkisi oluşmaz).
+ */
+export function demoStockKey(runId: string, digest: string, kind: "STOCK_IN" | "STOCK_OUT", phase: "create" | "approve" | "post"): string {
+  return uuidV5(`${runId}|${digest}|${kind}|${phase}`, DEMO_KEY_NAMESPACE);
+}
+
+export interface DemoCatalogResult {
+  readonly itemsCreated: number;
+  readonly locationsCreated: number;
+  readonly stockDocuments: number;
+  readonly stockLines: number;
+}
+
+/**
+ * Demo ürünleri + lokasyon ağacı + açılış stoğu farkı (idempotent). Önkoşul: `units.applied`/`locations.applied` etkileri
+ * (`warehouseId` = `D1`). Kimlik: demo yöneticisi (belge, onay ve işleme izinleri TENANT_ADMIN'dedir).
+ */
+export async function seedDemoCatalogAndStock(
+  db: AccessDbClient,
+  adminUserId: string,
+  warehouseId: string,
+  runId: string,
+): Promise<DemoCatalogResult> {
+  const access = { db, principal: { userId: adminUserId, mfaVerified: false }, tenantSlug: DEMO_TENANT_SLUG } as const; // demo: MFA kapalı (A-38)
+
+  // Ürünler (kod → kimlik). Arşivli demo ürünü yanıltıcı stok girişi yapılamaz: açık hata.
+  const units = new Map((await listUnits(access)).map((u) => [u.code, u.id]));
+  const adet = units.get("ADET");
+  if (adet === undefined) throw fail("INTERNAL", "demo.reseed: base unit ADET is missing (units.applied)");
+  const existing = new Map((await listItems(access)).map((i) => [i.code, i]));
+  let itemsCreated = 0;
+  const itemIds = new Map<string, string>();
+  for (const def of DEMO_ITEMS) {
+    const item = existing.get(def.code);
+    if (item === undefined) {
+      const { itemId } = await createItem(access, { code: def.code, name: def.name, baseUnitId: adet });
+      itemIds.set(def.code, itemId);
+      itemsCreated++;
+    } else {
+      if (item.status !== "ACTIVE") throw fail("INTERNAL", "demo.reseed: demo item is archived");
+      itemIds.set(def.code, item.id);
+    }
+    const itemId = itemIds.get(def.code) as string;
+    const have = await runTenantQuery({ ...access, permission: "stock.view" }, async (tx, m) =>
+      tx.execute<{ unit_id: string; f: string }>(
+        sql`SELECT unit_id, to_base_factor::text AS f FROM public.unit_conversions
+             WHERE tenant_id = ${m.tenantId}::uuid AND item_id = ${itemId}::uuid`,
+      ),
+    );
+    for (const [unitCode, factor] of Object.entries(def.conversions)) {
+      const unitId = units.get(unitCode);
+      if (unitId === undefined) throw fail("INTERNAL", "demo.reseed: conversion unit is missing (units.applied)");
+      const cur = have.find((r) => r.unit_id === unitId);
+      if (cur === undefined || toMicro(cur.f) !== toMicro(factor)) await setUnitConversion(access, { itemId, unitId, factor });
+    }
+  }
+
+  // Lokasyon ağacı (ebeveyn önce).
+  const locIds = new Map<string, string>();
+  let locationsCreated = 0;
+  for (const def of DEMO_LOCATIONS) {
+    const found = await findLocationByCode(access, { warehouseId, code: def.code });
+    if (found !== null) {
+      if (found.status !== "ACTIVE") throw fail("INTERNAL", "demo.reseed: demo location is archived");
+      locIds.set(def.code, found.id);
+      continue;
+    }
+    const parentId = def.parent === null ? null : (locIds.get(def.parent) as string);
+    const { locationId } = await createLocation(access, { warehouseId, parentId, code: def.code, name: def.name, kind: def.kind });
+    locIds.set(def.code, locationId);
+    locationsCreated++;
+  }
+
+  // Güncel bakiye: `readAvailability` (stok modülünün salt okuma sorgusu; kural 5: AVAILABLE ∧ STORAGE|STAGING ∧ pick_blocked=false).
+  // A-223-4: hedef dışı boyutlara (başka lokasyon/durum) dokunulmaz; pick_blocked lokasyon (3A) bakiyesi görünmez → yalnızca demo'da yoktur.
+  const rows = await runTenantQuery({ ...access, permission: "stock.view" }, async (tx, m) => {
+    const out: { item_id: string; location_id: string; q: string }[] = [];
+    for (const itemId of itemIds.values()) {
+      for (const r of await readAvailability(tx, m.tenantId, { itemId })) out.push({ item_id: r.itemId, location_id: r.locationId, q: r.physical });
+    }
+    return out;
+  });
+  const codeOfItem = new Map([...itemIds].map(([c, id]) => [id.toLowerCase(), c]));
+  const codeOfLoc = new Map([...locIds].map(([c, id]) => [id.toLowerCase(), c]));
+  const current = new Map<string, bigint>();
+  for (const r of rows) {
+    const ic = codeOfItem.get(r.item_id.toLowerCase());
+    const lc = codeOfLoc.get(r.location_id.toLowerCase());
+    if (ic !== undefined && lc !== undefined) current.set(`${ic}|${lc}`, toMicro(r.q));
+  }
+
+  const diff = diffDemoStock(DEMO_STOCK_TARGETS, current);
+  if (diff.length === 0) return { itemsCreated, locationsCreated, stockDocuments: 0, stockLines: 0 };
+  const digest = demoDiffDigest(diff);
+  let stockDocuments = 0;
+  for (const kind of ["STOCK_IN", "STOCK_OUT"] as const) {
+    const part = diff.filter((d) => (kind === "STOCK_IN" ? d.delta > 0n : d.delta < 0n));
+    if (part.length === 0) continue;
+    const lines: DocumentLineInput[] = part.map((d) => {
+      const qty = fromMicro(d.delta < 0n ? -d.delta : d.delta);
+      const loc = locIds.get(d.location) as string;
+      return {
+        itemId: itemIds.get(d.item) as string,
+        unitId: adet,
+        quantity: qty,
+        conversionFactor: "1",
+        baseQuantity: qty,
+        ...(kind === "STOCK_IN" ? { targetLocationId: loc } : { sourceLocationId: loc }),
+      };
+    });
+    const key = (phase: "create" | "approve" | "post") => demoStockKey(runId, digest, kind, phase);
+    const doc = await createStockDocument(
+      { ...access, clientKey: key("create") },
+      { kind, warehouseId, reason: DEMO_RESEED_REASON, lines },
+    );
+    const documentId = doc.documentId as string;
+    await approveDocument({ ...access, clientKey: key("approve") }, { documentId, expectedVersion: 1 });
+    await postDocument({ ...access, clientKey: key("post") }, { documentId, expectedVersion: 2 });
+    stockDocuments++;
+  }
+  return { itemsCreated, locationsCreated, stockDocuments, stockLines: diff.length };
+}
+
+// ---------------------------------------------------------------------------------------------
+// 4b. Bileşik: hesaplar → bootstrap → üyelik → şablon adımları → ayar → içerik
 // ---------------------------------------------------------------------------------------------
 
 export interface ReseedDemoDeps {
@@ -473,6 +682,11 @@ export interface ReseedDemoDeps {
   readonly accounts: DemoAccountPort;
   /** `loadDemoSeedConfig` sonucu `enabled` iken gelen parola. */
   readonly password: string;
+  /**
+   * Koşu kimliği = yeniden tohumlama işinin kimliği (`ctx.jobId`; MINOR-11). Aynı işin yeniden teslimi aynı kimliği taşır →
+   * stok belgeleri aynı anahtarla önceki sonuca döner. Verilmezse her çağrı yeni bir kimlik alır (yeniden teslim güvencesi yok).
+   */
+  readonly runId?: string;
 }
 
 export interface ReseedDemoResult {
@@ -481,6 +695,7 @@ export interface ReseedDemoResult {
   readonly bootstrapped: boolean;
   readonly memberships: MembershipRepairResult;
   readonly settings: SettingsRepairResult;
+  readonly catalog: DemoCatalogResult;
 }
 
 export async function reseedDemo(deps: ReseedDemoDeps): Promise<ReseedDemoResult> {
@@ -500,8 +715,16 @@ export async function reseedDemo(deps: ReseedDemoDeps): Promise<ReseedDemoResult
   const users = ids as DemoUserIds;
   const boot = await bootstrapDemoOwner(db, { ownerUserId: users.TENANT_ADMIN });
   const memberships = await repairDemoMemberships(db, users);
+  // Şablon Faz 2 adımlarının etkileri (birimler, Ana Depo/KABUL/SEVK) ayar onarımı adımları DONE yazmadan ÖNCE uygulanır.
+  const template = getTemplate(DEMO_TEMPLATE_KEY);
+  if (template === undefined) throw fail("INTERNAL", "demo.reseed: demo sector template is not registered");
+  const setupAccess = { db, principal: { userId: users.TENANT_ADMIN, mfaVerified: false }, tenantSlug: DEMO_TENANT_SLUG } as const;
+  await applyUnitsStep(setupAccess, template);
+  const { warehouseId } = await applyLocationsStep(setupAccess, template);
   const settings = await repairDemoSettings(db, users.TENANT_ADMIN);
-  return { accountsCreated, passwordsUpdated, bootstrapped: boot.written, memberships, settings };
+  // İçerik en sonda: stok adımı başarısız olsa bile hesaplar/üyelikler/ayar onarılmıştır (iş hatayla biter, yeniden denenir).
+  const catalog = await seedDemoCatalogAndStock(db, users.TENANT_ADMIN, warehouseId, deps.runId ?? randomUUID());
+  return { accountsCreated, passwordsUpdated, bootstrapped: boot.written, memberships, settings, catalog };
 }
 
 // ---------------------------------------------------------------------------------------------
