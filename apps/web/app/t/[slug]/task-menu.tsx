@@ -41,6 +41,11 @@ const ICONS = {
       <path d="M21 8 12 3 3 8m18 0-9 5m9-5v8l-9 5m0-8L3 8m9 5v8M3 8v8l9 5" />
     </Icon>
   ),
+  warehouses: (
+    <Icon>
+      <path d="M3 9.5 12 4l9 5.5V20H3ZM9 20v-6h6v6" />
+    </Icon>
+  ),
   receive: (
     <Icon>
       <path d="M12 3v12m0 0-4-4m4 4 4-4M5 21h14" />
@@ -87,6 +92,8 @@ export async function TaskMenu({ slug, allowed }: TaskMenuProps) {
     { key: "audit", kind: "link", allowed: allowed.auditView, href: `/t/${encodeURIComponent(slug)}/audit` },
     // Ürün kartı (T-216): okuma `stock.view`; bayrak yalnızca gösterimdir, sayfa/eylem yetkiyi sunucuda denetler.
     { key: "items", kind: "link", allowed: allowed.stockView, href: `/t/${encodeURIComponent(slug)}/items` },
+    // Okuma `stock.view` (her rol); yazma kilidi hedef sayfada gösterilir, asıl yetki sunucudadır (T-205).
+    { key: "warehouses", kind: "link", allowed: true, href: `/t/${encodeURIComponent(slug)}/warehouses` },
     { key: "receive", kind: "warehouse-soon", tone: "accent" },
     { key: "issue", kind: "warehouse-soon", tone: "accent" },
     { key: "transfer", kind: "warehouse-soon", tone: "accent" },

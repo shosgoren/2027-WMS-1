@@ -10,6 +10,7 @@ import { parseAcceptance, parsePhaseCell } from "./acceptance.mjs";
 import { main, parseArgs, UsageError } from "./cli.mjs";
 import { extractTags } from "./collect.mjs";
 import { evaluateCondition, parseConditions } from "./conditions.mjs";
+import { quarantineJudge } from "./run.mjs";
 import { MarkdownTableError, parsePilotTable } from "../lib/pilot.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -32,10 +33,10 @@ const ACCEPTANCE = `# Kabul
 | AC-32 | ADR-005 ayrı broker seçtiyse | relay | tek etki | 2 |
 `;
 
-/** @param {{ passedGates?: string[] }} [o] */
+/** @param {{ passedGates?: string[], currentGatePhase?: string }} [o] */
 function conditionsJson(o = {}) {
   return JSON.stringify({
-    currentGatePhase: "0",
+    currentGatePhase: o.currentGatePhase ?? "0",
     passedGates: o.passedGates ?? [],
     facts: { adr005_separate_broker: false },
     factSources: { adr005_separate_broker: "fixture" },
@@ -394,6 +395,36 @@ describe("koşturucu fixture senaryoları", { timeout: 60_000 }, () => {
     const r = runCli(makeRepo({}), []);
     expect(r.out).toMatch(/test:ac faz 0: 2 AC/);
     expect(r.code).toBe(1);
+  });
+});
+
+describe("karantina yargıcı kapı AC kümesi = currentGatePhase ∪ passedGates (T-132b)", () => {
+  const ACC = ACCEPTANCE.replace("| AC-01 |", "| AC-10 | faz1 | b | 1 |\n| AC-01 |");
+  const QT = "@" + "quarantine Q-01";
+  /**
+   * @param {{ passedGates: string[], currentGatePhase: string }} o
+   * @param {string} id
+   */
+  function judge(o, id) {
+    const root = makeRepo({ acceptance: ACC, conditions: conditionsJson(o) });
+    return quarantineJudge(root, { type: "ci" })({ file: "tests/a.test.mjs", fullName: `a ${TAG}${id.slice(3)} ${QT}`, status: "failed" }) ?? "";
+  }
+
+  it("passedGates:[0], currentGatePhase:1 → Faz 0 ve Faz 1 AC'si karantinaya alınamaz", () => {
+    const o = { passedGates: ["0"], currentGatePhase: "1" };
+    expect(judge(o, "AC-05")).toContain("QUARANTINE_GATE_AC: kapı AC testi karantinaya alınamaz (AC-05)");
+    expect(judge(o, "AC-10")).toContain("QUARANTINE_GATE_AC: kapı AC testi karantinaya alınamaz (AC-10)");
+  });
+
+  it("geçilmemiş ve güncel olmayan faz AC'si için GATE_AC yok (eskisi gibi)", () => {
+    expect(judge({ passedGates: ["0"], currentGatePhase: "1" }, "AC-01")).not.toContain("QUARANTINE_GATE_AC");
+    expect(judge({ passedGates: [], currentGatePhase: "1" }, "AC-05")).not.toContain("QUARANTINE_GATE_AC");
+  });
+
+  it("passedGates:[] ve currentGatePhase:0 → davranış değişmez", () => {
+    const o = { passedGates: [], currentGatePhase: "0" };
+    expect(judge(o, "AC-05")).toContain("QUARANTINE_GATE_AC");
+    expect(judge(o, "AC-10")).not.toContain("QUARANTINE_GATE_AC");
   });
 });
 

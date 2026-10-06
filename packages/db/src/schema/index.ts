@@ -6,3 +6,4 @@ export * from "./warehouse.ts";
 export * from "./catalog.ts";
 export * from "./documents.ts";
 export * from "./stock.ts";
+export * from "./reliability.ts";

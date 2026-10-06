@@ -20,7 +20,8 @@
     "./catalog/items": "./src/catalog/items.ts",
     "./catalog/barcodes": "./src/catalog/barcodes.ts",
     "./catalog/gs1": "./src/catalog/gs1.ts",
-    "./catalog/quantity": "./src/catalog/quantity.ts"
+    "./catalog/quantity": "./src/catalog/quantity.ts",
+    "./warehouse": "./src/warehouse/index.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"

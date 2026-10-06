@@ -456,6 +456,10 @@
       "undo": {
         "title": "I made a mistake",
         "description": "Let's fix the wrong record together"
+      },
+      "warehouses": {
+        "title": "Warehouses and racks",
+        "description": "Manage warehouses and rack layout"
       }
     },
     "today": {
@@ -758,5 +762,122 @@
     },
     "locked": "You do not have permission to view products.",
     "lockedAction": "Ask your workspace manager."
+  },
+  "warehouses": {
+    "title": "Warehouses and racks",
+    "intro": "Manage your warehouses and rack layout (zone, rack, bin) here.",
+    "lockedReason": "You do not have permission for this task. Ask your manager.",
+    "listLabel": "Warehouse list",
+    "create": "New warehouse",
+    "createTitle": "New warehouse",
+    "empty": "No warehouses yet.",
+    "emptyAction": "Add your first warehouse with “New warehouse”.",
+    "emptyReadOnly": "Ask your manager to add a warehouse.",
+    "codeLabel": "Code: {code}",
+    "locationCount": "{count, plural, =0 {No locations} one {# location} other {# locations}}",
+    "locationCountCapped": "{count}+ locations",
+    "status": {
+      "ACTIVE": "Active",
+      "ARCHIVED": "Archived"
+    },
+    "open": "Open locations",
+    "archive": "Archive",
+    "actionsFor": "Actions for {name}",
+    "paging": "Paging",
+    "more": "Show more",
+    "firstPage": "Back to start",
+    "done": {
+      "created": "Warehouse added.",
+      "archived": "Warehouse archived."
+    },
+    "confirmArchive": {
+      "title": "Archive {name}?",
+      "description": "Warehouse {name} ({code}) will show as archived and no new locations can be added. It cannot be archived while it holds stock or active locations; empty or archive those first.",
+      "button": "Archive"
+    },
+    "kind": {
+      "RECEIVING": "Receiving",
+      "STORAGE": "Storage",
+      "STAGING": "Staging",
+      "TRANSIT": "Transit"
+    },
+    "form": {
+      "code": "Code",
+      "codeHint": "Letters are uppercased automatically; it cannot be changed later.",
+      "name": "Name",
+      "kind": "Type",
+      "submit": "Save",
+      "cancel": "Cancel"
+    },
+    "tree": {
+      "title": "Locations",
+      "back": "Back to warehouse list",
+      "label": "Location tree",
+      "addRoot": "Add location",
+      "addChild": "Add sub-location",
+      "archive": "Archive",
+      "expand": "Expand {name}",
+      "collapse": "Collapse {name}",
+      "more": "Show more",
+      "empty": "This warehouse has no locations yet.",
+      "emptyAction": "Add the first zone with “Add location”.",
+      "emptyReadOnly": "Ask your manager to add locations.",
+      "warehouseArchived": "This warehouse is archived; locations cannot be added.",
+      "level": {
+        "zone": "Zone",
+        "rack": "Rack",
+        "bin": "Bin",
+        "deeper": "Sub-level"
+      },
+      "createRootTitle": "New location",
+      "createChildTitle": "New sub-location",
+      "parentIs": "Placed under: {parent}",
+      "done": {
+        "created": "Location added.",
+        "archived": "Location archived."
+      },
+      "confirmArchive": {
+        "title": "Archive {name}?",
+        "description": "Location {name} ({code}) will be archived. It cannot be archived while it holds stock, has an open count or active sub-locations; empty or archive those first.",
+        "button": "Archive"
+      }
+    },
+    "errors": {
+      "code": "Error code: {code}",
+      "mfaLink": "Set up two-step verification",
+      "loginLink": "Sign in again",
+      "forbidden": "You do not have permission for this action.",
+      "forbiddenAction": "Ask your manager.",
+      "forbidden_mfa_required": "Two-step verification is required for admin actions.",
+      "forbidden_mfa_requiredAction": "Set it up first, then repeat the action.",
+      "forbidden_warehouse_out_of_scope": "This warehouse is outside your scope.",
+      "forbidden_warehouse_out_of_scopeAction": "Ask your manager.",
+      "unauthenticated": "Your session has ended.",
+      "unauthenticatedAction": "Sign in again and repeat the action.",
+      "unauthenticated_recent_auth_required": "You need to verify your identity again for this action.",
+      "unauthenticated_recent_auth_requiredAction": "Sign in again and repeat the action.",
+      "not_found": "Record not found; someone else may have changed it.",
+      "not_foundAction": "Refresh the page and try again.",
+      "validation_failed": "The entered information is invalid.",
+      "validation_failedAction": "Check the code and name, then try again.",
+      "validation_failed_code_taken": "This code is already in use.",
+      "validation_failed_code_takenAction": "Enter a different code.",
+      "validation_failed_in_use": "This warehouse holds stock or active locations.",
+      "validation_failed_in_useAction": "Empty or archive them first, then try again.",
+      "validation_failed_in_use_location": "This location holds stock, has an open count or active sub-locations.",
+      "validation_failed_in_use_locationAction": "Empty it or archive the sub-locations first, then try again.",
+      "validation_failed_parent_invalid": "The parent location is not valid for this action.",
+      "validation_failed_parent_invalidAction": "Choose another parent or change the type.",
+      "version_conflict": "The record was changed by another action at the same time.",
+      "version_conflictAction": "Refresh the page and try again.",
+      "rate_limited": "Too many actions.",
+      "rate_limitedAction": "Wait a moment and try again.",
+      "tenant_suspended": "The workspace is suspended.",
+      "tenant_suspendedAction": "Contact your manager or support.",
+      "tenant_closing": "The workspace is being closed.",
+      "tenant_closingAction": "Contact your manager.",
+      "internal": "Something went wrong.",
+      "internalAction": "Try again shortly; if it persists, send the error code to support."
+    }
   }
 }

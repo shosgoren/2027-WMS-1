@@ -107,9 +107,9 @@ describe("probe üyelik denetimi (ADR-015 5. tur eki MINOR-6)", () => {
     expect(ev([]).problems).toContain("migration-role-not-member");
   });
   it("başka üyede set/inherit → kırmızı; yalnızca-ADMIN satırı kabul + özete adıyla", () => {
-    expect(ev([OK_MEMBER, "other|f|f|t|x"]).problems).toContain("other-member-set-or-inherit:other");
+    expect(ev([OK_MEMBER, "other|f|f|t|x"]).problems).toContain("other-member-set-or-inherit:diğer-rol");
     expect(ev([OK_MEMBER, "wms_app|t|f|f|x"]).problems).toContain("app-role-member:wms_app");
-    expect(ev([OK_MEMBER, "infra|t|f|f|cloud_admin"])).toMatchObject({ ok: true, adminOnly: ["infra"] });
+    expect(ev([OK_MEMBER, "infra|t|f|f|cloud_admin"])).toMatchObject({ ok: true, adminOnly: ["diğer-rol"] });
   });
   it("m1: dolaylı ADMIN → kırmızı; bilinmeyen → kırmızı", () => {
     expect(ev([OK_MEMBER], "t").problems).toContain("migration-role-indirect-admin");
@@ -328,12 +328,13 @@ describe("ensureOpsRole / opsRoleDeviations (A-80)", () => {
     };
     const good = run(adminRow);
     expect(good.r.status).toBe("OK");
-    expect(good.r.adminOnly).toEqual(["neondb_owner"]);
-    expect(good.r.lines.join("\n")).toContain("yalnızca-ADMIN üyeler");
+    expect(good.r.adminOnly).toEqual(["sahip-rol"]);
+    expect(good.r.lines.join("\n")).toContain("yalnızca-ADMIN üye sınıfları");
+    expect(good.r.lines.join("\n")).not.toContain("neondb_owner");
     expect(good.calls.find((c) => c.includes("CREATE ROLE"))).toMatch(/createrole_self_grant = ''/);
     const bad = run(setRow);
     expect(bad.r.status).toBe("BLOCKED");
-    expect(bad.r.lines.join("\n")).toContain("granted-to:neondb_owner");
+    expect(bad.r.lines.join("\n")).toContain("granted-to:sahip-rol");
     expect(bad.calls.some((c) => c.startsWith("DROP ROLE"))).toBe(true);
     // MINOR-1: uygulama rolüne ADMIN → BLOCKED (kendine SET verip SET ROLE wms_ops yapabilir)
     const app = run(appAdminRow);
@@ -506,7 +507,7 @@ describe("main (sahte Neon/psql/flyctl)", () => {
     for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
   });
 
-  /** @param {{ rolesExist?: boolean, ownerCreaterole?: string, existingFly?: string[], rolesBlocked?: boolean, probeBlocked?: boolean, importFails?: boolean, flyAfterMissing?: boolean, opsExists?: "nologin" | "login" }} [o] */
+  /** @param {{ rolesExist?: boolean, ownerCreaterole?: string, existingFly?: string[], rolesBlocked?: boolean, probeBlocked?: boolean, importFails?: boolean, flyAfterMissing?: boolean, opsMembers?: string, opsExists?: "nologin" | "login" }} [o] */
   function harness(o = {}) {
     const outDir = mkdtempSync(path.join(tmpdir(), "t105-"));
     dirs.push(outDir);
@@ -528,7 +529,7 @@ describe("main (sahte Neon/psql/flyctl)", () => {
       if (sql.includes("rolname = 'wms_ops'") || sql.includes("ROLE \"wms_ops\"")) {
         opsSql.push(sql);
         if (sql.includes("CREATE ROLE")) opsCreated = true;
-        if (sql.includes("'role'")) return ok(o.opsExists || opsCreated ? roleRow("wms_ops", { login: o.opsExists === "login" ? "t" : "f" }) : "");
+        if (sql.includes("'role'")) return ok(o.opsExists || opsCreated ? [roleRow("wms_ops", { login: o.opsExists === "login" ? "t" : "f" }), o.opsMembers ?? ""].join("\n") : "");
         return ok("");
       }
       if (sql.includes("'role'")) {
@@ -619,6 +620,24 @@ describe("main (sahte Neon/psql/flyctl)", () => {
     expect(allText(h)).toContain("wms_ops: OK (nologin, nosuperuser, nobypassrls, parolasız, bu koşuda yaratıldı)");
     const imported = h.imports.join("");
     expect(imported).not.toMatch(/wms_ops|OPS/i);
+  });
+
+  it("T-105g: özet dinamik rol adı (sahip rol adı) İÇERMEZ; sızıntı bekçisinden geçer (sınıf yazılır)", async () => {
+    const h = harness({ opsExists: "nologin", opsMembers: `opsmember|${OWNER}|t|f|f|t|t|f|t\nopsmember|infra_other|t|f|f|f|f|f|f` });
+    // infra_other ADMIN-only ve A-67 koşulunu sağlamaz → BLOCKED; yalnızca sahip satırı ile ayrıca yeşil koşu:
+    expect(await h.run()).toBe(2);
+    const blocked = allText(h);
+    expect(blocked).toContain("admin-to:diğer-rol");
+    expect(blocked).not.toContain("infra_other");
+    expect(blocked).not.toContain(OWNER);
+    const g = harness({ opsExists: "nologin", opsMembers: `opsmember|${OWNER}|t|f|f|t|t|f|t` });
+    expect(await g.run()).toBe(0);
+    const text = allText(g);
+    expect(text).toContain("yalnızca-ADMIN üye sınıfları");
+    expect(text).toContain("sahip-rol");
+    expect(text).not.toContain(OWNER);
+    expect(g.redactor.leaks(text)).toEqual([]);
+    expect(text).not.toContain("özet dosyasında sızıntı");
   });
 
   it("wms_ops LOGIN ise BLOCKED: hiçbir şey değiştirilmez, Fly'a yazım yok", async () => {

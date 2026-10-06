@@ -301,7 +301,7 @@ describe(`yetki sınırı: defter, DDL, kimlik (target=${env.target})`, () => {
         ORDER BY 1`,
       [OPS],
     );
-    expect(priv.rows.map((r) => r.n)).toEqual(["audit_logs", "invitations", "membership_roles", "tenant_memberships", "tenant_settings", "tenants"]);
+    expect(priv.rows.map((r) => r.n)).toEqual(["audit_logs", "invitations", "membership_roles", "stock_consistency_signals", "tenant_memberships", "tenant_settings", "tenants"]);
   });
 
   it("DDL 42501 (CREATE TABLE, CREATE SCHEMA, ALTER/DROP TABLE, CREATE FUNCTION)", async () => {
@@ -345,6 +345,7 @@ describe(`yetki sınırı: defter, DDL, kimlik (target=${env.target})`, () => {
       row("audit_logs", "ops_session_required_select", "r"),
       row("invitations", "ops_session_required", "*"),
       row("membership_roles", "ops_session_required", "*"),
+      row("stock_consistency_signals", "ops_session_required", "*"), // T-211 migration 0014
       row("tenant_memberships", "ops_session_required", "*"),
       row("tenant_settings", "ops_session_required", "*"),
       row("tenants", "ops_session_required", "*"),
@@ -366,7 +367,7 @@ describe(`0009 ileri/geri/ileri (target=${env.target})`, () => {
   };
 
   it("geri alınca işlev/politika/yetki yok; yeniden ileri aynı durumu kurar ve oturum çalışır", async () => {
-    expect(await shape()).toEqual({ fns: ["ops_open_session", "ops_session_audited"], pols: 5, ops: 3 });
+    expect(await shape()).toEqual({ fns: ["ops_open_session", "ops_session_audited"], pols: 6, ops: 3 });
     await admin.end();
     clients.splice(clients.indexOf(admin), 1);
     await ops.end();
@@ -381,7 +382,7 @@ describe(`0009 ileri/geri/ileri (target=${env.target})`, () => {
 
     const up = await migrateUp({ url: scratchUrl });
     expect(up.applied).toEqual(EXPECTED_UP);
-    expect(await shape()).toEqual({ fns: ["ops_open_session", "ops_session_audited"], pols: 5, ops: 3 });
+    expect(await shape()).toEqual({ fns: ["ops_open_session", "ops_session_audited"], pols: 6, ops: 3 });
     expect((await migrateUp({ url: scratchUrl })).applied).toEqual([]);
 
     ops = await connect(opsUrl);

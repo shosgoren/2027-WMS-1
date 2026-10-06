@@ -1,9 +1,9 @@
 // Worker giriş noktası: `node dist/main.js`. Web'den bağımsız, uzun ömürlü süreç (ADR-001).
-import { DEMO_TENANT_ID, createDbClient, withSystemTenant } from "@wms/db";
+import { DEMO_TENANT_ID, createDbClient, withSystemTenant, withUser } from "@wms/db";
 import { createJobQueue } from "@wms/queue-adapter";
 import { assertMailModeAllowed, loadMailConfig } from "@wms/shared/mailer";
 import { createSealer } from "@wms/shared/seal";
-import { JOB_TYPES, type JobHandler, type JobType } from "@wms/shared/queue";
+import { JOB_TYPES, PLATFORM_NO_USER_ID, type JobHandler, type JobType } from "@wms/shared/queue";
 import { createDeliverInvitationHandler } from "./jobs/deliver-invitation.js";
 import { DEMO_RESEED_SINGLETON_KEY, registerDemoReseed } from "./jobs/demo-reseed.js";
 import { createMailer, createSendEmailHandler } from "./jobs/send-email.js";
@@ -31,7 +31,13 @@ const HANDLERS: { [T in JobType]?: JobHandler<T> } = {};
 // Koşullu/henüz yazılmamış türler açıkça listelenir: `demo.reseed` yalnızca demo açıkken (T-123: WMS_ENV local|staging +
 // DEMO_MODE=1 + DEMO_PASSWORD) kaydedilir; aksi halde bu türden işler tüketici gelene kadar kuyrukta bekler (kaybolmaz,
 // sahte başarıyla tamamlanmaz). Registry'ye yeni tür eklenirse burada karar verilmeden açılış düşer.
-const DEFERRED_JOB_TYPES: readonly JobType[] = ["demo.reseed"];
+// `stock.document.post` (T-222) ve `stock.consistency.check` (T-225) handler'ları kendi kartlarında gelir; o zamana dek
+// işler kuyrukta bekler (sahte başarı yok) ve ilgili kart kendi türünü bu listeden çıkarır (ADR-019 §5).
+const DEFERRED_JOB_TYPES: readonly JobType[] = ["demo.reseed", "stock.document.post", "stock.consistency.check"];
+
+// Platform işleri (`enqueuePlatform`) için tenant bağlamı BOŞ `wms_app` transaction'ı (processed_events `tenant_id NULL`,
+// ADR-019 §2). `@wms/db` genel yüzeyinde bağlamsız transaction yoktur; `withUser` yalnızca `app.current_user_id` kurar
+// (tenant bağlamı boş kalır). Sıfır UUID (`PLATFORM_NO_USER_ID`) hiçbir kullanıcıya karşılık gelmez; kuyruk actor olarak reddeder (kart eki önerisi: özel `withPlatformTx`).
 
 // İki ayrı bağlantı (T-115c): kuyruk tüketimi `DATABASE_URL_WORKER` (wms_worker: yalnızca pgboss iş tablosu, tüm
 // tenant'ların işleri) ile; tenant verisine erişim `DATABASE_URL` (wms_app, RLS + withSystemTenant) ile. wms_app
@@ -103,6 +109,7 @@ if (demo.handler !== undefined) HANDLERS["demo.reseed"] = demo.handler;
 const queue = createJobQueue({
   connectionString: workerDatabaseUrl,
   runInTenant: (tenantId, reason, fn) => withSystemTenant(db, tenantId, `queue.${reason}`, fn),
+  runPlatform: (fn) => withUser(db, PLATFORM_NO_USER_ID, fn),
   stopTimeoutMs: Math.max(1000, timeoutMs - 1000),
   logger,
 });
