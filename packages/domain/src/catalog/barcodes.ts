@@ -5,14 +5,14 @@
 //   miktar) eşleşmesi vermiyorsa SESSİZCE ilk ürüne atanmaz: `VALIDATION_FAILED`/`BARCODE_AMBIGUOUS` + aday listesi.
 //   Adaylar yalnızca çağıranın tenant'ındandır (RLS).
 // - A-88: `removeBarcode` gerçek silmedir.
-// - Çözümleme sırası: (1) ham metin tam eşleşme; (2) eşleşme yoksa ve metin GTIN içeren GS1 öğe dizgisiyse GTIN'in
-//   depodaki biçimleriyle (GTIN-14/13/12/8) eşleşme (A-99 önerisi). ARŞİVLİ ürünler çözümlemeye girmez (A-98 önerisi).
+// - Çözümleme: ham metin tam eşleşme + (GS1 önek/GS varsa her zaman, yoksa yalnızca tam eşleşme yokken) GTIN'in
+//   depodaki biçimleriyle (GTIN-14/13/12; 8 hane yalnızca önekle) eşleşme; ikisi birleştirilip belirsizlik denetimi yapılır (A-108 önerisi). ARŞİVLİ ürünler çözümlemeye girmez (A-107 önerisi).
 import { sql } from "drizzle-orm";
 import { appendAudit } from "@wms/db";
 import { AppError } from "@wms/shared/errors";
 import { runTenantCommand, runTenantQuery, type AccessTx } from "../identity/access.ts";
-import { gtinLookupForms, parseGs1, type Gs1Parsed } from "./gs1.ts";
-import { assertQuantityScale, compareDecimal, DecimalFormatError } from "./quantity.ts";
+import { gtinLookupForms, parseGs1, type Gs1FailureReason, type Gs1Parsed } from "./gs1.ts";
+import { assertQuantityScale } from "./quantity.ts";
 import { loadItem, parseText, parseUuid, type CatalogCommandParams } from "./units.ts";
 
 const BARCODE_MAX = 128;
@@ -24,6 +24,8 @@ export interface BarcodeCandidate {
   readonly itemName: string;
   readonly unitId: string;
   readonly unitCode: string;
+  /** Okutma başına miktar (kanonik; barkodda yoksa `"1"`). */
+  readonly quantity: string;
 }
 
 /** `BARCODE_AMBIGUOUS`; gövdeye yalnızca `code`/`detail` girer, adaylar çağıran kodun (UI) kullanımı içindir. */
@@ -61,7 +63,7 @@ export async function addBarcode(
   const barcode = parseBarcode(input.barcode);
   const { requestId, ...access } = params;
   return runTenantCommand({ ...access, permission: "settings.manage" }, async (tx, actor) => {
-    const item = await loadItem(tx, actor.tenantId, itemId);
+    const item = await loadItem(tx, actor.tenantId, itemId, "share");
     if (item === undefined) throw new AppError("NOT_FOUND");
     if (item.status !== "ACTIVE") throw new AppError("VALIDATION_FAILED");
     if (unitId !== null) {
@@ -74,14 +76,8 @@ export async function addBarcode(
     let quantity: string | null = null;
     if (input.quantity !== undefined && input.quantity !== null) {
       const inBase = unitId === null || unitId === item.base_unit_id;
-      // Temel birimde ürünün ölçeği; başka birimde en çok 6 ondalık (numeric(20,6) sınırı).
-      try {
-        quantity = assertQuantityScale(input.quantity, inBase ? item.quantity_scale : 6);
-        if (compareDecimal(quantity, "0") <= 0) throw new AppError("VALIDATION_FAILED");
-      } catch (e) {
-        if (e instanceof DecimalFormatError) throw new AppError("VALIDATION_FAILED");
-        throw e;
-      }
+      // Temel birimde ürünün ölçeği; başka birimde en çok 6 ondalık (numeric(20,6) sınırı). > 0 ve ≤ 14 tam hane.
+      quantity = assertQuantityScale(input.quantity, inBase ? item.quantity_scale : 6, "positive");
     }
     const rows = await tx.execute<{ id: string }>(
       sql`INSERT INTO public.item_barcodes (tenant_id, id, item_id, unit_id, barcode, quantity)
@@ -134,7 +130,7 @@ type MatchRow = {
   readonly quantity: string | null;
 };
 
-async function findMatches(tx: AccessTx, values: readonly string[]): Promise<MatchRow[]> {
+async function findMatches(tx: AccessTx, tenantId: string, values: readonly string[]): Promise<MatchRow[]> {
   const list = sql.join(
     values.map((v) => sql`${v}`),
     sql`, `,
@@ -145,56 +141,78 @@ async function findMatches(tx: AccessTx, values: readonly string[]): Promise<Mat
           FROM public.item_barcodes b
           JOIN public.items i ON i.tenant_id = b.tenant_id AND i.id = b.item_id
           JOIN public.units u ON u.tenant_id = i.tenant_id AND u.id = COALESCE(b.unit_id, i.base_unit_id)
-         WHERE b.barcode IN (${list}) AND i.status = 'ACTIVE'
+         WHERE b.tenant_id = ${tenantId}::uuid AND b.barcode IN (${list}) AND i.status = 'ACTIVE'
          ORDER BY i.code, u.code, b.id
          LIMIT ${MAX_CANDIDATES + 1}`,
   );
   return [...rows];
 }
 
-/**
- * Ham taranan metni tek (ürün, birim, miktar) eşleşmesine çözer. Çağıranın açık tenant transaction'ında (`tx`) çalışır;
- * tenant yalnızca transaction bağlamından gelir (RLS; `tenant_id` filtresi RLS'e bırakılır). Eşleşme yok → `NOT_FOUND`; birden çok
- * farklı (ürün, birim, miktar) → `BarcodeAmbiguousError`.
- */
-export async function resolveBarcode(tx: AccessTx, raw: string): Promise<ResolvedBarcode> {
-  const code = typeof raw === "string" ? raw.trim() : "";
-  if (code === "" || code.length > 256) throw new AppError("VALIDATION_FAILED");
-
-  let matches = await findMatches(tx, [code]);
-  let gs1: Gs1Parsed | undefined;
-  if (matches.length === 0) {
-    const parsed = parseGs1(code);
-    if (parsed.ok && parsed.gtin !== undefined) {
-      gs1 = parsed;
-      matches = await findMatches(tx, gtinLookupForms(parsed.gtin));
-    }
-  }
-  if (matches.length === 0) throw new AppError("NOT_FOUND");
-
-  const distinct = new Map<string, MatchRow>();
-  for (const m of matches) distinct.set(`${m.item_id}|${m.unit_id}|${m.quantity ?? ""}`, m);
-  if (distinct.size > 1) {
-    const seen = new Set<string>();
-    const candidates: BarcodeCandidate[] = [];
-    for (const m of distinct.values()) {
-      const key = `${m.item_id}|${m.unit_id}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      candidates.push({ itemId: m.item_id, itemCode: m.item_code, itemName: m.item_name, unitId: m.unit_id, unitCode: m.unit_code });
-    }
-    throw new BarcodeAmbiguousError(candidates.slice(0, MAX_CANDIDATES));
-  }
-  const only = [...distinct.values()][0] as MatchRow;
-  const quantity = only.quantity === null ? "1" : trimDecimal(only.quantity);
-  return { itemId: only.item_id, unitId: only.unit_id, quantity, ...(gs1 === undefined ? {} : { gs1 }) };
+/** `numeric(20,6)` metni (`"12.000000"`) → kanonik (`"12"`); boş miktar `"1"`. */
+function canonicalQuantity(q: string | null): string {
+  if (q === null) return "1";
+  return q.includes(".") ? q.replace(/0+$/, "").replace(/\.$/, "") : q;
 }
 
-/** `numeric(20,6)` metni (`"12.000000"`) → kanonik (`"12"`). */
-function trimDecimal(s: string): string {
-  return s.includes(".") ? s.replace(/0+$/, "").replace(/\.$/, "") : s;
+/** GS1 çözümleme başarısız ve eşleşme yok: `NOT_FOUND`; GS1 neden reddedildi `gs1Reason` ile görünür (gövdeye girmez). */
+export class BarcodeNotFoundError extends AppError {
+  override name = "BarcodeNotFoundError";
+  readonly gs1Reason: Gs1FailureReason | null;
+  constructor(gs1Reason: Gs1FailureReason | null) {
+    super("NOT_FOUND");
+    this.gs1Reason = gs1Reason;
+  }
+}
+
+/**
+ * Ham taranan metni tek (ürün, birim, miktar) eşleşmesine çözer. Çağıranın açık tenant transaction'ında (`tx`)
+ * çalışır; `tenantId` açıkça verilir ve sorguda `b.tenant_id` filtresi + RLS birlikte uygulanır (yanlış/başka tenant
+ * kimliği → `NOT_FOUND`). Eşleşme yok → `NOT_FOUND`; birden çok farklı (ürün, birim, miktar) → `BarcodeAmbiguousError`.
+ *
+ * GS1 önceliği: metin ÖNEK (`]C1`/`]d2`) ya da FNC1 (GS) taşıyorsa GS1 yorumu güçlüdür → ham metin eşleşmesi VE GTIN
+ * eşleşmesi birleştirilip belirsizlik denetiminden geçer (tam eşleşme sessizce kazanmaz). Önek/GS yoksa ("01…" ile
+ * başlayan düz barkod olabilir) GS1 yalnızca tam eşleşme YOKSA denenir; tam eşleşme varsa GS1 yorumlanmaz.
+ */
+export async function resolveBarcode(tx: AccessTx, tenantId: string, raw: string): Promise<ResolvedBarcode> {
+  const code = typeof raw === "string" ? raw.trim() : "";
+  if (code === "" || code.length > 256) throw new AppError("VALIDATION_FAILED");
+  const tenant = parseUuid(tenantId);
+
+  let matches = await findMatches(tx, tenant, [code]);
+  let gs1: Gs1Parsed | undefined;
+  let gs1Reason: Gs1FailureReason | null = null;
+  const parsed = parseGs1(code);
+  if (parsed.ok) {
+    const strong = parsed.symbologyPrefix || parsed.hasFnc1;
+    if (parsed.gtin !== undefined && (strong || matches.length === 0)) {
+      const viaGtin = await findMatches(tx, tenant, gtinLookupForms(parsed.gtin, parsed.symbologyPrefix));
+      if (viaGtin.length > 0) {
+        gs1 = parsed;
+        matches = [...matches, ...viaGtin];
+      }
+    }
+  } else if (matches.length === 0 && parsed.reason !== "EMPTY") {
+    gs1Reason = parsed.reason;
+  }
+  if (matches.length === 0) throw new BarcodeNotFoundError(gs1Reason);
+
+  const distinct = new Map<string, MatchRow>();
+  for (const m of matches) distinct.set(`${m.item_id}|${m.unit_id}|${canonicalQuantity(m.quantity)}`, m);
+  if (distinct.size > 1) {
+    const candidates: BarcodeCandidate[] = [...distinct.values()].slice(0, MAX_CANDIDATES).map((m) => ({
+      itemId: m.item_id,
+      itemCode: m.item_code,
+      itemName: m.item_name,
+      unitId: m.unit_id,
+      unitCode: m.unit_code,
+      quantity: canonicalQuantity(m.quantity),
+    }));
+    throw new BarcodeAmbiguousError(candidates);
+  }
+  const only = [...distinct.values()][0] as MatchRow;
+  return { itemId: only.item_id, unitId: only.unit_id, quantity: canonicalQuantity(only.quantity), ...(gs1 === undefined ? {} : { gs1 }) };
 }
 
 export function resolveBarcodeQuery(params: Omit<CatalogCommandParams, "requestId">, raw: string): Promise<ResolvedBarcode> {
-  return runTenantQuery({ ...params, permission: "stock.view" }, (tx) => resolveBarcode(tx, raw));
+  return runTenantQuery({ ...params, permission: "stock.view" }, (tx, actor) => resolveBarcode(tx, actor.tenantId, raw));
 }

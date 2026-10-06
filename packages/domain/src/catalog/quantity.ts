@@ -90,11 +90,20 @@ function scaleError(): AppError {
   return new AppError("VALIDATION_FAILED", { detail: "QUANTITY_SCALE" });
 }
 
+/** DB `numeric(20,6)`: en çok 14 tam hane. */
+export const QUANTITY_MAX_INT_DIGITS = 14;
+
+export type QuantitySign = "any" | "positive" | "nonNegative";
+
+function intDigitsOfCanonical(canonical: string): number {
+  return (canonical.replace("-", "").split(".")[0] as string).length;
+}
+
 /**
- * Miktar ürünün ondalık hassasiyetini (`quantity_scale`) aşmamalı (`QUANTITY_SCALE`); biçim hatası `VALIDATION_FAILED`.
- * Yuvarlama yapılmaz. Kanonik dizgiyi döndürür.
+ * Miktar ürünün ondalık hassasiyetini (`quantity_scale`) aşmamalı (`QUANTITY_SCALE`); biçim hatası, işaret ihlali
+ * (`sign`; varsayılan `any`) ve 14 tam haneyi aşan değer `VALIDATION_FAILED`. Yuvarlama yapılmaz. Kanonik dizgiyi döndürür.
  */
-export function assertQuantityScale(qty: string, scale: number): string {
+export function assertQuantityScale(qty: string, scale: number, sign: QuantitySign = "any"): string {
   if (!Number.isInteger(scale) || scale < 0 || scale > 6) throw new AppError("VALIDATION_FAILED");
   let parsed: ScaledDecimal;
   try {
@@ -103,9 +112,18 @@ export function assertQuantityScale(qty: string, scale: number): string {
     if (e instanceof DecimalFormatError) throw new AppError("VALIDATION_FAILED");
     throw e;
   }
+  if ((sign === "positive" && parsed.units <= 0n) || (sign === "nonNegative" && parsed.units < 0n)) {
+    throw new AppError("VALIDATION_FAILED");
+  }
   const canonical = formatDecimal(parsed);
+  if (intDigitsOfCanonical(canonical) > QUANTITY_MAX_INT_DIGITS) throw new AppError("VALIDATION_FAILED");
   if (decimalPlaces(canonical) > scale) throw scaleError();
   return canonical;
+}
+
+/** `qty > 0`, biçim ve 14 tam hane denetimi (ölçek denetimi yok). Kanonik dizgiyi döndürür. */
+export function assertPositive(qty: string): string {
+  return assertQuantityScale(qty, 6, "positive");
 }
 
 /** Dönüşüm katsayısı: > 0, ≤ 6 ondalık, ≤ 14 tam hane; aksi `UNIT_CONVERSION_INVALID`. Kanonik dizgiyi döndürür. */
@@ -121,13 +139,12 @@ export function assertConversionFactor(factor: string): string {
   if (parsed.units <= 0n) throw invalid();
   const canonical = formatDecimal(parsed);
   if (decimalPlaces(canonical) > FACTOR_MAX_DECIMALS) throw invalid();
-  const intDigits = (canonical.split(".")[0] as string).length;
-  if (intDigits > FACTOR_MAX_INT_DIGITS) throw invalid();
+  if (intDigitsOfCanonical(canonical) > FACTOR_MAX_INT_DIGITS) throw invalid();
   return canonical;
 }
 
 /**
- * Birim miktarını temel birime çevirir: `qty × factor`. Sonuç ürünün ölçeğini aşarsa yuvarlanmaz, `QUANTITY_SCALE`
+ * Birim miktarını temel birime çevirir: `qty × factor`. Sonuç 14 tam haneyi aşarsa `VALIDATION_FAILED`; ürünün ölçeğini aşarsa yuvarlanmaz, `QUANTITY_SCALE`
  * ile reddedilir (ör. 0.5 koli × 5 = 2.5 adet, ölçek 0 → ret). Kanonik dizgi döner.
  */
 export function toBase(qty: string, factor: string, scale: number): string {
@@ -141,6 +158,7 @@ export function toBase(qty: string, factor: string, scale: number): string {
     throw e;
   }
   const product = formatDecimal({ units: q.units * f.units, scale: q.scale + f.scale });
+  if (intDigitsOfCanonical(product) > QUANTITY_MAX_INT_DIGITS) throw new AppError("VALIDATION_FAILED");
   if (placesOfCanonical(product) > scale) throw scaleError();
   return product;
 }
