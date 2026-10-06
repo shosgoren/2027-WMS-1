@@ -7,7 +7,8 @@
 # Bu iş akışı hiçbir repo sırrı kullanmaz (Neon koşusu T-005d'de, ayrı iş akışında).
 # Üçüncü taraf action'lar tam commit SHA ile sabitlenir; etiket yorumdadır.
 # Henüz kartı tamamlanmamış adımlar (check:all → T-008, test:ac → T-007, migration ileri/geri →
-# ilk migration kartı, Playwright → Faz 1) burada YOKTUR; her biri kendi kartında eklenir.
+# ilk migration kartı) burada YOKTUR; her biri kendi kartında eklenir. `e2e` işi (Playwright duman testi) T-131'de
+# eklendi; sabit ad listesine (branch protection) alınması T-009b kararıdır.
 # Yer tutucu/boş yeşil adım eklenmez (G-07). `int` işi (test:int, compose hedefi) T-005a'da eklendi.
 name: ci
 
@@ -143,6 +144,49 @@ jobs:
           path: ${{ runner.temp }}/int-artifacts/
           if-no-files-found: warn
           retention-days: 14
+
+  # Uçtan uca duman testi (T-131): compose (postgres + pgbouncer) + migration + worker `demo.reseed` + web + yerel TLS vekili
+  # `tests/e2e/global-setup.ts` içinde kurulur; `pnpm test:e2e` masaüstü + mobil projelerini koşar. Sır KULLANILMAZ:
+  # .env.example yer tutucuları; BETTER_AUTH_SECRET/DEMO_PASSWORD/QUEUE_SEAL_KEY koşu başına rastgele üretilir.
+  e2e:
+    name: e2e
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: package.json
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: cp .env.example .env
+      - run: docker compose up -d --wait --wait-timeout 300
+      - name: pnpm test:e2e
+        run: |
+          mkdir -p .artifacts/e2e
+          set -o pipefail
+          pnpm test:e2e 2>&1 | tee .artifacts/e2e/run.log
+      - name: Stage .artifacts/e2e
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/e2e-artifacts"
+          if [ -d .artifacts/e2e ]; then cp -R .artifacts/e2e/. "$RUNNER_TEMP/e2e-artifacts/"; fi
+          rm -f "$RUNNER_TEMP/e2e-artifacts/tls-key.pem"
+      - name: Upload .artifacts/e2e
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-artifacts
+          path: ${{ runner.temp }}/e2e-artifacts/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Compose down
+        if: always()
+        run: docker compose down -v --remove-orphans
 
   secrets:
     name: secrets
