@@ -20,7 +20,7 @@ export interface TaskCardProps {
 const TONE: Record<TaskCardTone, { ring: string; badge: string }> = {
   accent: { ring: "border-accent-soft", badge: "bg-accent-soft text-accent-ink" },
   warning: { ring: "border-warning-bg", badge: "bg-warning-bg text-warning-ink" },
-  undo: { ring: "border-undo-bg", badge: "bg-undo-bg text-undo-ink" },
+  undo: { ring: "border-undo-bg", badge: "bg-undo-bg text-undo" },
 };
 
 const BASE =
@@ -68,7 +68,7 @@ export function TaskCard({ icon, title, description, href, locked, soon, tone = 
         tabIndex={0}
         className={`${BASE} ${FOCUS} border-border bg-locked-bg text-locked-ink`}
       >
-        {head(<Lock aria-hidden="true" className="size-6 shrink-0" />, "bg-border text-locked-ink")}
+        {head(<Lock aria-hidden="true" className="size-6 shrink-0 text-locked-ink" />, "bg-border text-locked-ink")}
         <span className="break-words text-xl font-bold">{title}</span>
         <span className="break-words text-base">{locked.reason}</span>
       </div>
@@ -87,7 +87,7 @@ export function TaskCard({ icon, title, description, href, locked, soon, tone = 
       >
         {head(
           <span className="inline-flex min-h-8 items-center gap-1 rounded-control bg-accent-soft px-3 text-sm font-semibold text-accent-ink">
-            <Clock aria-hidden="true" className="size-4" />
+            <Clock aria-hidden="true" className="size-4 text-accent-ink" />
             {soon.label}
           </span>,
           t.badge,

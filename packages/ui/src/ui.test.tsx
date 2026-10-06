@@ -185,3 +185,53 @@ describe("ConfirmDialog Esc (T-110b)", () => {
     expect(html).toMatch(/<button[^>]*disabled[^>]*>(?:(?!<\/button>).)*Vazgeç/s);
   });
 });
+
+describe("Palet eşlemeleri (T-246a, ADR-020)", () => {
+  it("hata bandı danger, bilgi bandı info belirteçlerini ve anlam renkli ikonu kullanır", () => {
+    const err = renderToStaticMarkup(<Banner kind="error">Hata</Banner>);
+    expect(err).toContain("bg-danger-bg");
+    expect(err).toContain("text-danger-ink");
+    expect(err).toContain("text-danger");
+    expect(err).not.toContain("undo");
+    const info = renderToStaticMarkup(<Banner kind="info">Bilgi</Banner>);
+    expect(info).toContain("bg-info-bg");
+    expect(info).toContain("text-info-ink");
+    expect(info).not.toContain("accent");
+  });
+
+  it("uyarı bandı ikonu warning rengindedir", () => {
+    expect(renderToStaticMarkup(<Banner kind="warning">Dikkat</Banner>)).toMatch(/<svg[^>]*text-warning"/);
+  });
+
+  it("başarı bandı role=status, metin ve success belirteçleri taşır", () => {
+    const html = renderToStaticMarkup(<Banner kind="success">Kayıt tamam</Banner>);
+    expect(html).toContain('role="status"');
+    expect(html).toContain('data-kind="success"');
+    expect(html).toContain("Kayıt tamam");
+    expect(html).toContain("bg-success-bg");
+    expect(html).toContain("text-success-ink");
+    expect(html).toContain("aria-hidden");
+  });
+
+  it("tehlikeli düğme bg-danger, ikincil düğme border-strong kullanır", () => {
+    expect(renderToStaticMarkup(<Button variant="danger">Sil</Button>)).toContain("bg-danger");
+    expect(renderToStaticMarkup(<Button variant="secondary">İptal</Button>)).toContain("border-border-strong");
+  });
+
+  it("alan kenarı border-strong, geçersizken danger; hata metni danger-ink ve gizli ikon", () => {
+    const html = renderToStaticMarkup(<TextField label="Miktar" error={{ reason: "Hatalı.", action: "Düzelt." }} />);
+    expect(html).toContain("border-border-strong");
+    expect(html).toContain("aria-[invalid=true]:border-danger");
+    expect(html).toContain("text-danger-ink");
+    expect(html).toMatch(/<svg[^>]*size-4[^>]*text-danger"[^>]*aria-hidden="true"/);
+  });
+
+  it("kilitli kartta Lock ikonu locked-ink, 'yakında' rozetinde Clock accent-ink; undo tonu undo belirteci", () => {
+    const locked = renderToStaticMarkup(<TaskCard icon={icon} title="K" locked={{ reason: "Yok" }} />);
+    expect(locked).toMatch(/<svg[^>]*size-6[^>]*text-locked-ink/);
+    const soon = renderToStaticMarkup(<TaskCard icon={icon} title="K" soon={{ label: "Yakında" }} />);
+    expect(soon).toMatch(/<svg[^>]*size-4[^>]*text-accent-ink/);
+    const undo = renderToStaticMarkup(<TaskCard icon={icon} title="K" tone="undo" />);
+    expect(undo).toContain("bg-undo-bg text-undo");
+  });
+});
