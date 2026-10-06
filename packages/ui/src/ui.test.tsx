@@ -186,52 +186,77 @@ describe("ConfirmDialog Esc (T-110b)", () => {
   });
 });
 
+/** İlk etiketi `marker`ı içeren öğenin sınıf listesi (tam belirteç eşleşmesi için bölünmüş). */
+function classesOf(html: string, marker: string): string[] {
+  for (const m of html.matchAll(/<[a-z0-9]+\s[^>]*>/g)) {
+    const tag = m[0];
+    if (!tag.includes(marker)) continue;
+    const cls = /\sclass="([^"]*)"/.exec(tag)?.[1];
+    if (cls !== undefined) return cls.split(/\s+/).filter(Boolean);
+  }
+  throw new Error(`öğe bulunamadı: ${marker}`);
+}
+
 describe("Palet eşlemeleri (T-246a, ADR-020)", () => {
-  it("hata bandı danger, bilgi bandı info belirteçlerini ve anlam renkli ikonu kullanır", () => {
-    const err = renderToStaticMarkup(<Banner kind="error">Hata</Banner>);
-    expect(err).toContain("bg-danger-bg");
-    expect(err).toContain("text-danger-ink");
-    expect(err).toContain("text-danger");
-    expect(err).not.toContain("undo");
-    const info = renderToStaticMarkup(<Banner kind="info">Bilgi</Banner>);
-    expect(info).toContain("bg-info-bg");
-    expect(info).toContain("text-info-ink");
-    expect(info).not.toContain("accent");
+  it("hata bandı danger belirteçlerini, ikonu text-danger kullanır; undo yok", () => {
+    const html = renderToStaticMarkup(<Banner kind="error">Hata</Banner>);
+    const root = classesOf(html, 'data-kind="error"');
+    expect(root).toEqual(expect.arrayContaining(["bg-danger-bg", "text-danger-ink"]));
+    expect(classesOf(html, "lucide-circle-alert")).toEqual(expect.arrayContaining(["size-5", "text-danger"]));
+    expect([...root, ...classesOf(html, "lucide-circle-alert")].some((c) => c.includes("undo"))).toBe(false);
   });
 
-  it("uyarı bandı ikonu warning rengindedir", () => {
-    expect(renderToStaticMarkup(<Banner kind="warning">Dikkat</Banner>)).toMatch(/<svg[^>]*text-warning"/);
+  it("bilgi bandı info belirteçlerini, ikonu text-info kullanır; accent yok", () => {
+    const html = renderToStaticMarkup(<Banner kind="info">Bilgi</Banner>);
+    const root = classesOf(html, 'data-kind="info"');
+    const icon = classesOf(html, "lucide-info");
+    expect(root).toEqual(expect.arrayContaining(["bg-info-bg", "text-info-ink"]));
+    expect(icon).toEqual(expect.arrayContaining(["size-5", "text-info"]));
+    expect([...root, ...icon].some((c) => c.includes("accent"))).toBe(false);
+  });
+
+  it("uyarı bandı ikonu text-warning (tam sınıf)", () => {
+    const html = renderToStaticMarkup(<Banner kind="warning">Dikkat</Banner>);
+    expect(classesOf(html, 'data-kind="warning"')).toEqual(expect.arrayContaining(["bg-warning-bg", "text-warning-ink"]));
+    expect(classesOf(html, "lucide-triangle-alert")).toContain("text-warning");
   });
 
   it("başarı bandı role=status, metin ve success belirteçleri taşır", () => {
     const html = renderToStaticMarkup(<Banner kind="success">Kayıt tamam</Banner>);
     expect(html).toContain('role="status"');
-    expect(html).toContain('data-kind="success"');
     expect(html).toContain("Kayıt tamam");
-    expect(html).toContain("bg-success-bg");
-    expect(html).toContain("text-success-ink");
-    expect(html).toContain("aria-hidden");
+    expect(classesOf(html, 'data-kind="success"')).toEqual(expect.arrayContaining(["bg-success-bg", "text-success-ink"]));
+    const icon = classesOf(html, "lucide-circle-check");
+    expect(icon).toEqual(expect.arrayContaining(["size-5", "text-success"]));
+    expect(html).toMatch(/<svg[^>]*lucide-circle-check[^>]*aria-hidden="true"/);
   });
 
-  it("tehlikeli düğme bg-danger, ikincil düğme border-strong kullanır", () => {
-    expect(renderToStaticMarkup(<Button variant="danger">Sil</Button>)).toContain("bg-danger");
-    expect(renderToStaticMarkup(<Button variant="secondary">İptal</Button>)).toContain("border-border-strong");
+  it("tehlikeli düğme bg-danger, ikincil düğme border-border-strong (tam sınıf)", () => {
+    const danger = classesOf(renderToStaticMarkup(<Button variant="danger">Sil</Button>), 'data-variant="danger"');
+    expect(danger).toEqual(expect.arrayContaining(["bg-danger", "text-on-accent"]));
+    expect(danger).not.toContain("bg-undo-ink");
+    const secondary = classesOf(renderToStaticMarkup(<Button variant="secondary">İptal</Button>), 'data-variant="secondary"');
+    expect(secondary).toContain("border-border-strong");
+    expect(secondary).not.toContain("border-border");
   });
 
-  it("alan kenarı border-strong, geçersizken danger; hata metni danger-ink ve gizli ikon", () => {
+  it("alan kenarı border-border-strong, geçersizken danger; hata metni danger-ink, ikon gizli ve text-danger", () => {
     const html = renderToStaticMarkup(<TextField label="Miktar" error={{ reason: "Hatalı.", action: "Düzelt." }} />);
-    expect(html).toContain("border-border-strong");
-    expect(html).toContain("aria-[invalid=true]:border-danger");
-    expect(html).toContain("text-danger-ink");
-    expect(html).toMatch(/<svg[^>]*size-4[^>]*text-danger"[^>]*aria-hidden="true"/);
+    const input = classesOf(html, "<input");
+    expect(input).toEqual(expect.arrayContaining(["border-border-strong", "aria-[invalid=true]:border-danger"]));
+    expect(input).not.toContain("border-border");
+    expect(classesOf(html, 'role="alert"')).toContain("text-danger-ink");
+    expect(classesOf(html, "lucide-circle-alert")).toEqual(expect.arrayContaining(["size-4", "text-danger"]));
+    expect(html).toMatch(/<svg[^>]*lucide-circle-alert[^>]*aria-hidden="true"/);
   });
 
-  it("kilitli kartta Lock ikonu locked-ink, 'yakında' rozetinde Clock accent-ink; undo tonu undo belirteci", () => {
+  it("kilit ikonu text-locked-ink, saat ikonu text-accent-ink, undo tonu rozeti bg-undo-bg + text-undo", () => {
     const locked = renderToStaticMarkup(<TaskCard icon={icon} title="K" locked={{ reason: "Yok" }} />);
-    expect(locked).toMatch(/<svg[^>]*size-6[^>]*text-locked-ink/);
+    expect(classesOf(locked, "lucide-lock")).toEqual(expect.arrayContaining(["size-6", "text-locked-ink"]));
     const soon = renderToStaticMarkup(<TaskCard icon={icon} title="K" soon={{ label: "Yakında" }} />);
-    expect(soon).toMatch(/<svg[^>]*size-4[^>]*text-accent-ink/);
-    const undo = renderToStaticMarkup(<TaskCard icon={icon} title="K" tone="undo" />);
-    expect(undo).toContain("bg-undo-bg text-undo");
+    expect(classesOf(soon, "lucide-clock")).toEqual(expect.arrayContaining(["size-4", "text-accent-ink"]));
+    const badge = classesOf(renderToStaticMarkup(<TaskCard icon={icon} title="K" tone="undo" />), "rounded-full");
+    expect(badge).toEqual(expect.arrayContaining(["bg-undo-bg", "text-undo"]));
+    expect(badge).not.toContain("text-undo-ink");
   });
 });

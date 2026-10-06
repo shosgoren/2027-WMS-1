@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..", "..", "..");
 const css = readFileSync(join(here, "globals.css"), "utf8");
+const paletteMd = readFileSync(join(repoRoot, "docs/design/palette.md"), "utf8");
 
 function block(selector: string): string {
   const start = css.indexOf(selector);
@@ -87,37 +88,167 @@ describe("palet kontrastı (palette.md §7)", () => {
   }
 });
 
+// --- palette.md §2/§3 ile globals.css eşitliği (fail-closed: tablo biçimi bozulursa test kırılır) ---
+
+function section(md: string, from: RegExp, to: RegExp): string {
+  const a = md.search(from);
+  const b = md.search(to);
+  if (a < 0 || b < 0 || b <= a) throw new Error("palette.md: bölüm başlığı bulunamadı");
+  return md.slice(a, b);
+}
+
+/** Tablodaki her veri satırı `| `ad` ... | **#hex** | ... |` olmalı; olmayan satır hata verir. */
+function parseTable(body: string, label: string): Map<string, string> {
+  const rows = body.split("\n").filter((l) => l.trimStart().startsWith("|"));
+  if (rows.length < 3) throw new Error(`palette.md ${label}: tablo yok`);
+  const out = new Map<string, string>();
+  for (const row of rows.slice(2)) {
+    const cells = row.split("|");
+    const name = /^\s*`([a-z-]+)`/.exec(cells[1] ?? "")?.[1];
+    const hex = /^\s*\*\*(#[0-9a-fA-F]{6})\*\*\s*$/.exec(cells[3] ?? "")?.[1];
+    if (!name || !hex) throw new Error(`palette.md ${label}: satır ayrıştırılamadı: ${row}`);
+    if (out.has(name)) throw new Error(`palette.md ${label}: yinelenen belirteç ${name}`);
+    out.set(name, hex.toLowerCase());
+  }
+  return out;
+}
+
+const docFlow = parseTable(section(paletteMd, /^## 2\./m, /^## 3\./m).split("### Nötr")[0] as string, "§2");
+const docCockpit = parseTable(section(paletteMd, /^## 3\./m, /^## 4\./m).split("\n\nAnlam belirteçleri")[0] as string, "§3");
+
+describe("palette.md ile globals.css eşitliği", () => {
+  it("§2 tablosu 28 belirteç, §3 tablosu 8 belirteç ayrıştırır", () => {
+    expect(docFlow.size).toBe(28);
+    expect(docCockpit.size).toBe(8);
+  });
+
+  it("Akış: @theme renk belirteçleri tablodakilerle birebir aynı (iki yönlü)", () => {
+    expect([...flow.keys()].sort()).toEqual([...docFlow.keys()].sort());
+    for (const [k, v] of docFlow) expect(flow.get(k), `--color-${k}`).toBe(v);
+  });
+
+  it("Kokpit: geçersiz kılınan belirteçler §3 tablosuyla birebir aynı (iki yönlü)", () => {
+    const own = tokens(block('[data-view="cockpit"]'));
+    expect([...own.keys()].sort()).toEqual([...docCockpit.keys()].sort());
+    for (const [k, v] of docCockpit) expect(own.get(k), `cockpit --color-${k}`).toBe(v);
+  });
+
+  it("bozuk tablo biçimi hata verir (fail-closed)", () => {
+    const good = "| Belirteç | E | Y | R |\n|---|---|---|---|\n| `ink` | #000000 | **#172133** | x |";
+    expect(parseTable(good, "t").get("ink")).toBe("#172133");
+    expect(() => parseTable(good.replace("**#172133**", "#172133"), "t")).toThrow();
+    expect(() => parseTable(good.replace("`ink`", "ink"), "t")).toThrow();
+    expect(() => parseTable("yok", "t")).toThrow();
+  });
+});
+
+// --- belirteç dışı renk yasağı ---
+
+const PALETTES =
+  "slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose";
+const TW_PREFIX = "bg|text|border|ring|fill|stroke|from|to|via|outline|decoration|divide|placeholder|caret|accent|shadow";
+const NAMED = "red|blue|green|white|black|gray|grey|orange|yellow|purple|pink";
+const CSS_PROP =
+  "color|background(?:-color)?|backgroundColor|border(?:-[a-z]+)*|borderColor|fill|stroke|outline(?:-color)?|stopColor|floodColor|caret-color|accent-color|box-shadow|text-shadow";
+
+export const COLOR_RULES: ReadonlyArray<readonly [string, RegExp]> = [
+  ["hex sabiti", /#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3,4})(?![0-9a-zA-Z_-])/],
+  ["renk işlevi", /(?<![\w-])(?:rgba?|hsla?|oklch|oklab|lab|lch|color)\(/i],
+  [
+    "Tailwind varsayılan palet sınıfı",
+    new RegExp(`(?<![\\w-])(?:${TW_PREFIX})-(?:${PALETTES})-\\d{2,3}(?![\\w-])`),
+  ],
+  ["bg/text-white|black", new RegExp(`(?<![\\w-])(?:${TW_PREFIX})-(?:white|black)(?![\\w-])`)],
+  [
+    "CSS adlı renk (stil bağlamı)",
+    new RegExp(`(?<![\\w-])(?:${CSS_PROP})["']?\\s*[:=]\\s*\\{?\\s*["']?[^;"'}]*?(?<![\\w-])(?:${NAMED})(?![\\w-])`, "i"),
+  ],
+];
+
+// Açık ve dar muafiyet: yalnız globals.css içindeki belirteç tanım satırları (`--color-*`, `--shadow-*`).
+const EXEMPT_LINE: ReadonlyArray<readonly [string, RegExp]> = [["apps/web/app/globals.css", /^\s*--(?:color|shadow)-[a-z-]+:/]];
+
+export function scanLine(rel: string, line: string): string[] {
+  if (EXEMPT_LINE.some(([f, re]) => f === rel && re.test(line))) return [];
+  return COLOR_RULES.filter(([, re]) => re.test(line)).map(([name]) => name);
+}
+
 function walk(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
-    if (name === "node_modules" || name === ".next") continue;
+    if (name === "node_modules" || name === ".next" || name === "dist") continue;
     const p = join(dir, name);
     if (statSync(p).isDirectory()) walk(p, out);
-    else if (p.endsWith(".tsx")) out.push(p);
+    else if (/\.(?:ts|tsx|css)$/.test(p) && !/\.(?:test|spec)\.tsx?$/.test(p) && !p.endsWith(".d.ts")) out.push(p);
   }
   return out;
 }
 
 describe("belirteç dışı renk yasağı", () => {
-  const files = [...walk(join(repoRoot, "apps/web/app")), ...walk(join(repoRoot, "packages/ui/src"))].filter(
-    (f) => !f.endsWith(".test.tsx"),
-  );
-  const rules: ReadonlyArray<readonly [string, RegExp]> = [
-    ["hex sabiti", /#[0-9a-fA-F]{3,8}\b/],
-    ["rgb(", /\brgba?\(/],
-    [
-      "Tailwind varsayılan palet sınıfı",
-      /\b(?:text|bg|border|ring|fill|stroke)-(?:red|green|blue|amber|yellow|orange|gray|slate|zinc|neutral|stone|emerald|teal|sky|indigo)-\d/,
-    ],
-  ];
-  it("taranacak dosya var", () => {
-    expect(files.length).toBeGreaterThan(0);
+  const files = [...walk(join(repoRoot, "apps/web")), ...walk(join(repoRoot, "packages/ui"))].map((f) => relative(repoRoot, f));
+
+  it("taranacak dosyalar var (globals.css ve ui bileşenleri dahil)", () => {
+    expect(files).toContain("apps/web/app/globals.css");
+    expect(files).toContain("packages/ui/src/banner.tsx");
   });
-  it.each(files.map((f) => relative(repoRoot, f)))("%s", (rel) => {
+
+  it.each(files)("%s", (rel) => {
     const lines = readFileSync(join(repoRoot, rel), "utf8").split("\n");
     const hits: string[] = [];
     lines.forEach((line, i) => {
-      for (const [name, re] of rules) if (re.test(line)) hits.push(`${rel}:${i + 1} ${name}`);
+      for (const name of scanLine(rel, line)) hits.push(`${rel}:${i + 1} ${name}`);
     });
     expect(hits).toEqual([]);
+  });
+
+  it.each([
+    ["hex 3", 'style={{ color: "#f00" }}'],
+    ["hex 4", "x = '#f00a'"],
+    ["hex 6", 'c="#1559c7"'],
+    ["hex 8", "c: #1559c7cc;"],
+    ["rgb", "rgb(0 0 0 / .5)"],
+    ["rgba", "rgba(0,0,0,.5)"],
+    ["hsl", "color: hsl(10 20% 30%)"],
+    ["hsla", "hsla(10,20%,30%,.5)"],
+    ["oklch", "background: oklch(0.7 0.1 200)"],
+    ["oklab", "oklab(0.7 0.1 0.1)"],
+    ["lab", "lab(50% 40 59)"],
+    ["lch", "lch(50% 40 59)"],
+    ["color()", "color(display-p3 1 0 0)"],
+    ["tw palet", 'className="text-red-600"'],
+    ["tw varyant", 'className="hover:md:bg-sky-50 flex"'],
+    ["tw from", 'className="from-indigo-500 to-pink-500 via-lime-400"'],
+    ["tw divide", 'className="divide-zinc-200 decoration-rose-500 placeholder-slate-400 caret-teal-500"'],
+    ["tw accent/shadow", 'className="accent-fuchsia-500 shadow-violet-500/50"'],
+    ["tw keyfi", 'className="bg-[#fff] text-white"'],
+    ["tw white", 'className="bg-white"'],
+    ["tw black", 'className="text-black"'],
+    ["tw border-black", 'className="border-black"'],
+    ["css adlı", "  color: red;"],
+    ["css adlı arka plan", "background: white;"],
+    ["css adlı border", "border: 1px solid black;"],
+    ["jsx fill", '<path fill="orange" />'],
+    ["style nesnesi", 'style={{ backgroundColor: "purple" }}'],
+    ["style nesnesi gray", "{ color: 'grey' }"],
+    ["css yellow", "outline-color: yellow"],
+  ] as const)("tarayıcı yakalar: %s", (_n, sample) => {
+    expect(scanLine("x.tsx", sample).length).toBeGreaterThan(0);
+  });
+
+  it.each([
+    'className="bg-accent text-on-accent border-border-strong"',
+    'className="text-danger-ink bg-danger-bg shadow-card ring-focus"',
+    "color: var(--color-ink);",
+    '<a href="#main">Ana içeriğe geç</a>',
+    "const label = 'Kırmızı'",
+    'className="accent-soft stroke-2 text-lg"',
+  ])("tarayıcı yakalamaz: %s", (sample) => {
+    expect(scanLine("x.tsx", sample)).toEqual([]);
+  });
+
+  it("muafiyet yalnız globals.css belirteç tanım satırlarıdır", () => {
+    expect(scanLine("apps/web/app/globals.css", "  --color-ink: #172133;")).toEqual([]);
+    expect(scanLine("apps/web/app/globals.css", "  --shadow-card: 0 1px 2px rgb(23 33 51 / 0.08);")).toEqual([]);
+    expect(scanLine("apps/web/app/globals.css", "  background: #fff;").length).toBeGreaterThan(0);
+    expect(scanLine("apps/web/app/other.css", "  --color-ink: #172133;").length).toBeGreaterThan(0);
   });
 });
