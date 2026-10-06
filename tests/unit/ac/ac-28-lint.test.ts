@@ -415,7 +415,8 @@ describe("AC-28 lint (T-015): yanlış pozitif ve bekçi yükleyicisi muafiyeti"
 // harf duyarsız SET/RESET ve parçalanmış tenant ayarı dizesi. Her madde: saldırı → tek error; yanlış
 // pozitif kontrolü → hata yok.
 const LOADER_RULE_ID = "wms/no-aliased-module-loader";
-const RAW_RULES = new Set([RULE_ID, SYNTAX_RULE_ID, LOADER_RULE_ID]);
+const NORMALIZED_RULE_ID = "wms/no-normalized-path-import";
+const RAW_RULES = new Set([RULE_ID, SYNTAX_RULE_ID, LOADER_RULE_ID, NORMALIZED_RULE_ID]);
 
 /** Madde 2: `createRequire` takma adları ve dönüş değerinin atandığı adlar → `wms/no-aliased-module-loader`. */
 const ALIASED_LOADER_SOURCES: Record<string, string> = {
@@ -560,6 +561,344 @@ describe("AC-28 lint (T-016): createRequire takma adı, dinamik şablon/eval, SE
         const inDb = await lint(code as string, DB_PACKAGE_PATH);
         expect(rawHits(inDb), code).toHaveLength(0);
         expect(inDb.errorCount, code).toBe(0);
+      }
+    },
+    60_000,
+  );
+});
+
+// T-127a eklemeleri (yalnızca ekleme; yukarıdaki vakalar değişmedi): web'de sistem DB yolları, `@wms/storage` iç
+// modülü, `@wms/shared/cache-key`, `@aws-sdk/*` sınırları. Her kural: ihlal → tek error; izinli yol → hata yok.
+const probe = (rel: string): string => path.join(REPO_ROOT, rel);
+const WEB_PATH = probe("apps/web/app/__ac28_probe__.ts");
+const WEB_AUTH_PATH = probe("apps/web/app/api/auth/__ac28_probe__.ts");
+const WEB_AUTH_CLIENT_PATH = probe("apps/web/lib/auth-client.ts");
+const STORAGE_INDEX_PATH = probe("packages/storage/src/index.ts");
+const STORAGE_SRC_PATH = probe("packages/storage/src/__ac28_probe__.ts");
+const STORAGE_OUTSIDE_SRC_PATH = probe("packages/storage/test/__ac28_probe__.ts");
+const INTEGRATION_PATH = probe("tests/integration/__ac28_probe__.ts");
+const INTEGRATION_STORAGE_PROBE_PATH = probe("tests/integration/storage/__ac28_probe__.ts");
+const INTEGRATION_STORAGE_PATH = probe("tests/integration/storage/object-storage.int.test.ts");
+const INTEGRATION_SETUP_PATH = probe("tests/integration/harness/global-setup.ts");
+const AUTH_PACKAGE_PATH = probe("packages/auth/src/__ac28_probe__.ts");
+
+/** Kural 1: web'de `@wms/db` sistem/oturumsuz bağlam yolları. */
+const WEB_DB_SOURCES: Record<string, string> = {
+  "createDbClient": 'import { createDbClient } from "@wms/db";\n\nexport const c = createDbClient;\n',
+  "withSystemTenant": 'import { withSystemTenant } from "@wms/db";\n\nexport const c = withSystemTenant;\n',
+  "withNewTenant": 'import { withNewTenant } from "@wms/db";\n\nexport const c = withNewTenant;\n',
+  "recordSecurityEvent": 'import { recordSecurityEvent } from "@wms/db";\n\nexport const c = recordSecurityEvent;\n',
+  "yeniden adlandırma { withSystemTenant as w }": 'import { withSystemTenant as w } from "@wms/db";\n\nexport const c = w;\n',
+  "ad alanı import * as db": 'import * as db from "@wms/db";\n\nexport const c = db;\n',
+  "yeniden dışa aktarım export { … } from": 'export { withSystemTenant } from "@wms/db";\n',
+  'dinamik import("@wms/db")': 'export const c = (): Promise<unknown> => import("@wms/db");\n',
+  'createRequire(…)("@wms/db")': 'import { createRequire } from "node:module";\n\nexport const c = createRequire(import.meta.url)("@wms/db");\n',
+  "appendAudit": 'import { appendAudit } from "@wms/db";\n\nexport const c = appendAudit;\n',
+  // security MAJOR-1: takma adlı yükleyici ve şablon dizgisi.
+  'const load = createRequire(…); load("@wms/db")':
+    'import { createRequire } from "node:module";\n\nconst load = createRequire(import.meta.url);\nexport const c = load("@wms/db");\n',
+  "const load = createRequire(…); load(`@wms/db`)":
+    'import { createRequire } from "node:module";\n\nconst load = createRequire(import.meta.url);\nexport const c = load(`@wms/db`);\n',
+  "require(`@wms/db`)": 'declare const require: (id: string) => unknown;\n\nexport const c = require(`@wms/db`);\n',
+  "createRequire(u)(`@wms/db`)": 'import { createRequire } from "node:module";\n\nexport const c = createRequire(import.meta.url)(`@wms/db`);\n',
+  "import(`@wms/db`)": "export const c = (): Promise<unknown> => import(`@wms/db`);\n",
+  'import x = require("@wms/db") (TS)': 'import db = require("@wms/db");\n\nexport const c = db;\n',
+};
+
+/** Kural 1 yanlış pozitif: web'de serbest `@wms/db` kullanımı (oturum/üyelik yolları, tipler). */
+const WEB_DB_ALLOWED: Record<string, string> = {
+  "withUser/withMembership": 'import { withMembership, withUser } from "@wms/db";\n\nexport const c = [withMembership, withUser];\n',
+  "yalnızca tip": 'import type { TenantContext } from "@wms/db";\n\nexport type C = TenantContext;\n',
+};
+
+describe("AC-28 lint (T-127a): apps/web @wms/db sistem yolları", () => {
+  it.each(
+    [WEB_PATH, WEB_AUTH_PATH, WEB_AUTH_CLIENT_PATH].flatMap((file) =>
+      Object.entries(WEB_DB_SOURCES).map(([name, code]) => [path.relative(REPO_ROOT, file), name, code, file] as const),
+    ),
+  )(
+    "@AC-28 %s içinde %s → tek error",
+    async (_rel, _name, code, file) => {
+      const hits = rawHits(await lint(code, file));
+      expect(hits).toHaveLength(1);
+      expect(hits[0]?.severity).toBe(2);
+    },
+    60_000,
+  );
+
+  it.each(Object.entries(WEB_DB_ALLOWED))(
+    "@AC-28 web'de serbest (%s)",
+    async (_name, code) => {
+      const result = await lint(code, WEB_PATH);
+      expect(rawHits(result)).toHaveLength(0);
+      expect(result.errorCount).toBe(0);
+    },
+    60_000,
+  );
+
+  it(
+    "@AC-28 aynı sistem yolları web dışında (packages/domain, packages/auth) kuraldan etkilenmez",
+    async () => {
+      const code = WEB_DB_SOURCES.withSystemTenant as string;
+      for (const file of [TENANT_MODULE_PATH, AUTH_PACKAGE_PATH]) {
+        const result = await lint(code, file);
+        expect(rawHits(result), file).toHaveLength(0);
+        expect(result.errorCount, file).toBe(0);
+      }
+    },
+    60_000,
+  );
+});
+
+const AWS_STATIC = 'import { S3Client } from "@aws-sdk/client-s3";\n\nexport const c = S3Client;\n';
+const AWS_SOURCES: Record<string, string> = {
+  "statik @aws-sdk/client-s3": AWS_STATIC,
+  "statik @aws-sdk/s3-request-presigner": 'import { getSignedUrl } from "@aws-sdk/s3-request-presigner";\n\nexport const c = getSignedUrl;\n',
+  'dinamik import("@aws-sdk/client-s3")': 'export const c = (): Promise<unknown> => import("@aws-sdk/client-s3");\n',
+  'createRequire(…)("@aws-sdk/client-sts")':
+    'import { createRequire } from "node:module";\n\nexport const c = createRequire(import.meta.url)("@aws-sdk/client-sts");\n',
+};
+
+const STORAGE_CONTEXT_SOURCES: Record<string, string> = {
+  "paket adı derin yolu @wms/storage/src/context": 'import { issueStorageContextFromVerifiedTenant } from "@wms/storage/src/context";\n\nexport const c = issueStorageContextFromVerifiedTenant;\n',
+  "paket adı alt yolu @wms/storage/context": 'import { isIssuedStorageContext } from "@wms/storage/context";\n\nexport const c = isIssuedStorageContext;\n',
+  "göreli ../../storage/src/context.ts": 'import { isIssuedStorageContext } from "../../storage/src/context.ts";\n\nexport const c = isIssuedStorageContext;\n',
+  "göreli packages/storage/src/context.js": 'import { isIssuedStorageContext } from "../../../packages/storage/src/context.js";\n\nexport const c = isIssuedStorageContext;\n',
+  "mutlak /repo/packages/storage/src/context": 'import { isIssuedStorageContext } from "/repo/packages/storage/src/context";\n\nexport const c = isIssuedStorageContext;\n',
+  'dinamik import("@wms/storage/src/context")': 'export const c = (): Promise<unknown> => import("@wms/storage/src/context");\n',
+  'createRequire(…)("../../storage/src/context.ts")':
+    'import { createRequire } from "node:module";\n\nexport const c = createRequire(import.meta.url)("../../storage/src/context.ts");\n',
+};
+
+const CACHE_KEY_SOURCES: Record<string, string> = {
+  "paket adı @wms/shared/cache-key": 'import { formatTenantCacheKey } from "@wms/shared/cache-key";\n\nexport const c = formatTenantCacheKey;\n',
+  "göreli ../../shared/src/cache-key.ts": 'import { formatTenantCacheKey } from "../../shared/src/cache-key.ts";\n\nexport const c = formatTenantCacheKey;\n',
+  "mutlak /repo/packages/shared/src/cache-key": 'import { formatTenantCacheKey } from "/repo/packages/shared/src/cache-key";\n\nexport const c = formatTenantCacheKey;\n',
+  'dinamik import("@wms/shared/cache-key")': 'export const c = (): Promise<unknown> => import("@wms/shared/cache-key");\n',
+  "yeniden dışa aktarım": 'export { formatTenantCacheKey } from "@wms/shared/cache-key";\n',
+};
+
+describe("AC-28 lint (T-127a): @aws-sdk yalnızca packages/storage", () => {
+  it.each(
+    [TENANT_MODULE_PATH, WEB_PATH, DB_PACKAGE_PATH, AUTH_PACKAGE_PATH, INTEGRATION_PATH, INTEGRATION_STORAGE_PROBE_PATH].flatMap((file) =>
+      Object.entries(AWS_SOURCES).map(([name, code]) => [path.relative(REPO_ROOT, file), name, code, file] as const),
+    ),
+  )(
+    "@AC-28 %s içinde %s → tek error",
+    async (_rel, _name, code, file) => {
+      const hits = rawHits(await lint(code, file));
+      expect(hits).toHaveLength(1);
+      expect(hits[0]?.severity).toBe(2);
+    },
+    60_000,
+  );
+
+  it.each([STORAGE_INDEX_PATH, STORAGE_SRC_PATH, STORAGE_OUTSIDE_SRC_PATH, INTEGRATION_STORAGE_PATH, INTEGRATION_SETUP_PATH].flatMap((file) =>
+    Object.entries(AWS_SOURCES).map(([name, code]) => [path.relative(REPO_ROOT, file), name, code, file] as const),
+  ))(
+    "@AC-28 izinli yol %s içinde %s → hata yok",
+    async (_rel, _name, code, file) => {
+      const result = await lint(code, file);
+      expect(rawHits(result)).toHaveLength(0);
+      expect(result.errorCount).toBe(0);
+    },
+    60_000,
+  );
+});
+
+describe("AC-28 lint (T-127a): @wms/storage context.ts paket dışından yasak", () => {
+  it.each(
+    [TENANT_MODULE_PATH, WEB_PATH, DB_PACKAGE_PATH, INTEGRATION_PATH, INTEGRATION_STORAGE_PROBE_PATH].flatMap((file) =>
+      Object.entries(STORAGE_CONTEXT_SOURCES).map(([name, code]) => [path.relative(REPO_ROOT, file), name, code, file] as const),
+    ),
+  )(
+    "@AC-28 %s içinde %s → tek error",
+    async (_rel, _name, code, file) => {
+      const hits = rawHits(await lint(code, file));
+      expect(hits).toHaveLength(1);
+      expect(hits[0]?.severity).toBe(2);
+    },
+    60_000,
+  );
+
+  it(
+    "@AC-28 node_modules üzerinden context.ts → error (node_modules + context yasakları birlikte raporlar)",
+    async () => {
+      const code = 'import { isIssuedStorageContext } from "../../../node_modules/@wms/storage/src/context.ts";\n\nexport const c = isIssuedStorageContext;\n';
+      const hits = rawHits(await lint(code, TENANT_MODULE_PATH));
+      // Tam iki rapor: node_modules yasağı + storage context yasağı.
+      expect(hits).toHaveLength(2);
+      expect(hits.every((h) => h.severity === 2)).toBe(true);
+    },
+    60_000,
+  );
+
+  it(
+    "@AC-28 packages/storage içinden ama src/ dışından ../src/context.ts → tek error",
+    async () => {
+      const code = 'import { isIssuedStorageContext } from "../src/context.ts";\n\nexport const c = isIssuedStorageContext;\n';
+      const hits = rawHits(await lint(code, STORAGE_OUTSIDE_SRC_PATH));
+      expect(hits).toHaveLength(1);
+      expect(hits[0]?.severity).toBe(2);
+    },
+    60_000,
+  );
+
+  it(
+    "@AC-28 izinli: packages/storage/src/** içinde ./context.ts ve paket yolu; başka yerde paket girişi @wms/storage",
+    async () => {
+      const own = 'import { isIssuedStorageContext } from "./context.ts";\n\nexport const c = isIssuedStorageContext;\n';
+      const viaPath = STORAGE_CONTEXT_SOURCES["göreli ../../storage/src/context.ts"] as string;
+      for (const file of [STORAGE_INDEX_PATH, STORAGE_SRC_PATH]) {
+        for (const code of [own, viaPath]) {
+          const result = await lint(code, file);
+          expect(rawHits(result), `${file}: ${code}`).toHaveLength(0);
+          expect(result.errorCount, `${file}: ${code}`).toBe(0);
+        }
+      }
+      const entry = 'import { createStorageContext } from "@wms/storage";\n\nexport const c = createStorageContext;\n';
+      for (const file of [TENANT_MODULE_PATH, WEB_PATH]) {
+        const result = await lint(entry, file);
+        expect(rawHits(result), file).toHaveLength(0);
+        expect(result.errorCount, file).toBe(0);
+      }
+    },
+    60_000,
+  );
+});
+
+/**
+ * security MAJOR-2: normalize edilmemiş yol yazımları (`.`, `..`, çift `/`). Eşleştirme belirtecin normalize edilmiş ve
+ * içe aktaran dosyaya göre çözülmüş biçimi üzerindendir. `from` = içe aktaran probe dosyası.
+ */
+const NORMALIZED_CASES: ReadonlyArray<readonly [string, string, string]> = [
+  ["src/./context.ts", TENANT_MODULE_PATH, "../../storage/src/./context.ts"],
+  ["src//context.ts", TENANT_MODULE_PATH, "../../storage/src//context.ts"],
+  ["storage/./src/context.ts", TENANT_MODULE_PATH, "../../storage/./src/context.ts"],
+  ["src/../src/context.ts", TENANT_MODULE_PATH, "../../storage/src/../src/context.ts"],
+  ["packages/./storage/src/context", WEB_PATH, "../../../../packages/./storage/src/context"],
+  ["storage/test'ten ../src/./context.ts", STORAGE_OUTSIDE_SRC_PATH, "../src/./context.ts"],
+  ["storage/test'ten ../src//context.ts", STORAGE_OUTSIDE_SRC_PATH, "../src//context.ts"],
+  ["storage/test'ten ./../src/context", STORAGE_OUTSIDE_SRC_PATH, "./../src/context"],
+  ["shared/src/./cache-key.ts", TENANT_MODULE_PATH, "../../shared/src/./cache-key.ts"],
+  ["shared/src//cache-key.ts", TENANT_MODULE_PATH, "../../shared/src//cache-key.ts"],
+  ["shared/src/x/../cache-key.ts", TENANT_MODULE_PATH, "../../shared/src/x/../cache-key.ts"],
+  ["@wms/shared/./cache-key", TENANT_MODULE_PATH, "@wms/shared/./cache-key"],
+  // Yüzde kodlaması, geçersiz kodlama, `file:` ve ters eğik çizgi.
+  ["%2E kodlu: ../../storage/src/%2E/context.ts", TENANT_MODULE_PATH, "../../storage/src/%2E/context.ts"],
+  ["%63ontext.ts kodlu", TENANT_MODULE_PATH, "../../storage/src/%63ontext.ts"],
+  ["%2e%2e kodlu: ../../storage/src/%2e%2e/src/context", TENANT_MODULE_PATH, "../../storage/src/%2e%2e/src/context"],
+  ["%2F kodlu ayırıcı", TENANT_MODULE_PATH, "..%2F..%2Fstorage%2Fsrc%2Fcontext.ts"],
+  ["geçersiz kodlama (%E0%A4%A) güvenli tarafta", TENANT_MODULE_PATH, "../../storage/src/context%E0%A4%A.ts"],
+  ["file: kodlu", TENANT_MODULE_PATH, "file:///repo/packages/storage/src/%63ontext.ts"],
+  ["file: + ./ ", TENANT_MODULE_PATH, "file:///repo/packages/./storage/src/context.ts"],
+  ["ters eğik çizgi ..\\..\\storage\\src\\context.ts", TENANT_MODULE_PATH, "..\\..\\storage\\src\\context.ts"],
+  ["karışık ters eğik çizgi shared", TENANT_MODULE_PATH, "../../shared\\src\\.\\cache-key.ts"],
+  ["storage/src içinden (index.ts değil) ./../src/./cache-key yolu", STORAGE_SRC_PATH, "../../shared/src/./cache-key.ts"],
+];
+
+describe("AC-28 lint (T-127a): normalize edilmemiş yol atlatmaları", () => {
+  it.each(NORMALIZED_CASES)(
+    "@AC-28 %s → tek error (static import)",
+    async (_name, file, spec) => {
+      const hits = rawHits(await lint(`import { x } from ${JSON.stringify(spec)};\n\nexport const c = x;\n`, file));
+      expect(hits).toHaveLength(1);
+      expect(hits[0]?.severity).toBe(2);
+    },
+    60_000,
+  );
+
+  it.each(NORMALIZED_CASES)(
+    "@AC-28 %s → tek error (import(), createRequire, takma ad, export from)",
+    async (_name, file, spec) => {
+      const q = JSON.stringify(spec);
+      const forms = [
+        `export const c = (): Promise<unknown> => import(${q});\n`,
+        `import { createRequire } from "node:module";\n\nexport const c = createRequire(import.meta.url)(${q});\n`,
+        `import { createRequire } from "node:module";\n\nconst load = createRequire(import.meta.url);\nexport const c = load(${q});\n`,
+        `export { x } from ${q};\n`,
+      ];
+      for (const code of forms) {
+        const hits = rawHits(await lint(code, file));
+        expect(hits, code).toHaveLength(1);
+      }
+    },
+    60_000,
+  );
+
+  it(
+    "@AC-28 packages/shared/src içinde de göreli cache-key import'u, `import * as`, import() ve `export … from` yasak (muafiyet yok)",
+    async () => {
+      const file = probe("packages/shared/src/__ac28_probe__.ts");
+      for (const spec of ["./cache-key.ts", "./cache-key", "./x/../cache-key.ts", "../src/./cache-key.ts", "./%63ache-key.ts"]) {
+        const reexports = [`export { x } from ${JSON.stringify(spec)};\n`, `export * from ${JSON.stringify(spec)};\n`];
+        for (const code of reexports) {
+          const hits = rawHits(await lint(code, file));
+          expect(hits, code).toHaveLength(1);
+          expect(hits[0]?.severity, code).toBe(2);
+        }
+        const others = [
+          `import { x } from ${JSON.stringify(spec)};\n\nexport const c = x;\n`,
+          `import * as ns from ${JSON.stringify(spec)};\n\nexport const c = ns;\n`,
+          `export const c = (): Promise<unknown> => import(${JSON.stringify(spec)});\n`,
+          `import { x } from ${JSON.stringify(spec)};\nexport { x };\n`,
+        ];
+        for (const code of others) {
+          const hits = rawHits(await lint(code, file));
+          expect(hits, code).toHaveLength(1);
+          expect(hits[0]?.severity, code).toBe(2);
+        }
+      }
+    },
+    60_000,
+  );
+
+  it(
+    "@AC-28 izinli: storage/src/** içinde normalize edilmemiş ./context; shared/src içinde ./cache-key; storage/src/index.ts cache-key",
+    async () => {
+      const ok: Array<[string, string]> = [
+        [STORAGE_INDEX_PATH, 'import { a } from "./././context.ts";\n\nexport const c = a;\n'],
+        [STORAGE_SRC_PATH, 'import { a } from "../src/./context.ts";\n\nexport const c = a;\n'],
+        [STORAGE_INDEX_PATH, 'import { a } from "../../shared/src/./cache-key.ts";\n\nexport const c = a;\n'],
+      ];
+      for (const [file, code] of ok) {
+        const result = await lint(code, file);
+        expect(rawHits(result), `${file}: ${code}`).toHaveLength(0);
+        expect(result.errorCount, `${file}: ${code}`).toBe(0);
+      }
+    },
+    60_000,
+  );
+});
+
+describe("AC-28 lint (T-127a): @wms/shared/cache-key yalnızca packages/storage/src/index.ts", () => {
+  it.each(
+    [TENANT_MODULE_PATH, WEB_PATH, DB_PACKAGE_PATH, INTEGRATION_PATH, STORAGE_SRC_PATH, STORAGE_OUTSIDE_SRC_PATH].flatMap((file) =>
+      Object.entries(CACHE_KEY_SOURCES).map(([name, code]) => [path.relative(REPO_ROOT, file), name, code, file] as const),
+    ),
+  )(
+    "@AC-28 %s içinde %s → tek error",
+    async (_rel, _name, code, file) => {
+      const hits = rawHits(await lint(code, file));
+      expect(hits).toHaveLength(1);
+      expect(hits[0]?.severity).toBe(2);
+    },
+    60_000,
+  );
+
+  it(
+    "@AC-28 packages/storage/src/index.ts içinde cache-key serbest; @wms/shared diğer alt yolları her yerde serbest",
+    async () => {
+      for (const code of Object.values(CACHE_KEY_SOURCES)) {
+        const result = await lint(code, STORAGE_INDEX_PATH);
+        expect(rawHits(result), code).toHaveLength(0);
+        expect(result.errorCount, code).toBe(0);
+      }
+      const other = 'import { AppError } from "@wms/shared/errors";\n\nexport const c = AppError;\n';
+      for (const file of [TENANT_MODULE_PATH, WEB_PATH, STORAGE_SRC_PATH]) {
+        const result = await lint(other, file);
+        expect(rawHits(result), file).toHaveLength(0);
+        expect(result.errorCount, file).toBe(0);
       }
     },
     60_000,

@@ -42,6 +42,9 @@ Kaynak sözdizimi: `<dosya>#<json.yolu>` (package.json alanı) veya `docker-comp
 | Kuyruk kütüphanesi | pg-boss | 12.36.0 | packages/queue-adapter/package.json#dependencies.pg-boss | ADR-005 |
 | Worker paketleyici (esbuild; yalnızca derleme) | esbuild | 0.28.2 | apps/worker/package.json#devDependencies.esbuild | ADR-013 |
 | TanStack Query / Virtual | @tanstack/* | — ilk kullanan kart | | |
+| S3 istemcisi (yalnızca `packages/storage`) | @aws-sdk/client-s3 | 3.1146.0 | packages/storage/package.json#dependencies.@aws-sdk/client-s3 | ADR-006, T-125 |
+| S3 imzalı URL | @aws-sdk/s3-request-presigner | 3.1146.0 | packages/storage/package.json#dependencies.@aws-sdk/s3-request-presigner | ADR-006, T-125 |
+| MinIO STS (yalnızca test düzeneği: root olmayan geçici anahtar) | @aws-sdk/client-sts | 3.1146.0 | packages/storage/package.json#devDependencies.@aws-sdk/client-sts | T-125 |
 | Zod | zod | 4.6.5 | packages/shared/package.json#dependencies.zod | |
 | Zod (kuyruk bağdaştırıcısı) | zod | 4.6.5 | packages/queue-adapter/package.json#dependencies.zod | ADR-005 |
 | Zod (web Server Action girdi doğrulaması) | zod | 4.6.5 | apps/web/package.json#dependencies.zod | T-109b |
@@ -54,6 +57,7 @@ Kaynak sözdizimi: `<dosya>#<json.yolu>` (package.json alanı) veya `docker-comp
 
 Sürüm notları (kaynak: kurulu `package.json`/`pnpm-lock.yaml`, 2026-10-05):
 - **Kapsam kuralı (T-004b):** Workspace'lerin (`pnpm-lock.yaml#importers`) `package.json` dosyalarındaki her doğrudan bağımlılık (`dependencies`, `devDependencies`, `optionalDependencies`; `workspace:` hariç) bu tabloda kaynağıyla kilitli bir satıra sahip olmalıdır; eksikse `node scripts/check-docs.mjs` FAIL verir.
+- **S3 istemcisi seçimi (T-125):** `@aws-sdk/client-s3` (Apache-2.0; npm son kararlı 3.1146.0, 2026-10-06) seçildi; `aws4fetch` (MIT, 1.0.20) küçük ama imzalı URL'yi elle kurmayı ve S3 hata/XML ayrıştırmayı bize bırakır, STS/çok parçalı yükleme yok. SDK'nın boyutu yalnızca sunucu/worker paketini etkiler (istemci bundle'ına girmez). Tüm `@aws-sdk/*` sürümleri aynı tam sürümde kilitli. Yalnızca `packages/storage` import eder (ADR-006).
 - **pg 8.23.1:** yalnızca testlerde kullanılır (entegrasyon düzeneği: rol/RLS probu, PgBouncer yönetimi); uygulama sürücüsü postgres.js'tir.
 - **TypeScript 6.0.3'te kalınır:** typescript-eslint 8.71.0'ın desteklediği TypeScript aralığı `<6.1.0`; TS yükseltmesi typescript-eslint desteğini bekler.
 - **Node.js:** 24 Active LTS (`engines` `>=24 <25`). Node 26 LTS'e 2026-10-28'de geçer; geçiş ayrı kartla yapılır (`engines`, `@types/node`, CI Node sürümü birlikte).
