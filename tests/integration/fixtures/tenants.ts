@@ -326,8 +326,8 @@ export async function seedWorld(
     "INSERT INTO public.customer_return_lines (tenant_id, id, return_id, line_no, sales_order_line_id, item_id, quantity) VALUES ($1, $2, $3, 1, $4, $5, 1)",
     [tenantId, randomUUID(), customerReturnId, salesOrderLineId, itemNoneId],
   );
-  // T-302: görev, sayım oturumu (+ satır), min-maks politikası ve uyarı. Sayım oturumu CANCELLED tohumlanır (kilit satırını COUNTING yapmaz:
-  // başka testlerin lokasyonlarını LOCATION_LOCKED'a düşürmez); iptal gerekçesi sentetik. Satır, kök lokasyondaki boyuta bağlıdır.
+  // T-302: görev, sayım oturumu (+ satır), min-maks politikası ve uyarı. Sayım oturumu SUBMITTED tohumlanır (terminal olmaz: kapanmış oturumun satırı eklenemez/değişmez; kilit satırını COUNTING yapmaz:
+  // başka testlerin lokasyonlarını LOCATION_LOCKED'a düşürmez). Satır, kök lokasyondaki boyuta bağlıdır.
   await c.query(
     `INSERT INTO public.warehouse_tasks (tenant_id, warehouse_id, kind, location_id, item_id, quantity)
      VALUES ($1, $2, 'PUTAWAY', $3, $4, 1)`,
@@ -343,7 +343,7 @@ export async function seedWorld(
     [tenantId, countSessionId, warehouseId, rootLocationId, dimensionId, itemNoneId],
   );
   await c.query("UPDATE public.count_session_lines SET counted_quantity = 9, counted_by = $2 WHERE tenant_id = $1", [tenantId, ownerMembershipId]);
-  await c.query("UPDATE public.count_sessions SET status = 'CANCELLED', cancel_reason = 'sentetik fikstur' WHERE tenant_id = $1 AND id = $2", [tenantId, countSessionId]);
+  await c.query("UPDATE public.count_sessions SET status = 'SUBMITTED' WHERE tenant_id = $1 AND id = $2", [tenantId, countSessionId]);
   await c.query("INSERT INTO public.item_stock_policies (tenant_id, warehouse_id, item_id, min_quantity, max_quantity) VALUES ($1, $2, $3, 2, 20)", [
     tenantId, warehouseId, itemNoneId,
   ]);
