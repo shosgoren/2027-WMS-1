@@ -126,7 +126,7 @@ describe("tam plan: belge, lokasyon, boyut/bakiye, rezervasyon", () => {
   // BULGU (T-210, Q-56): 0011 `serials` için wms_app'e yalnızca SELECT + INSERT verir; PostgreSQL her satır kilidi modu
   // (FOR UPDATE/SHARE/KEY SHARE) tabloda UPDATE yetkisi ister. Spec adım 6 (`lockSerials` FOR UPDATE) bu yüzden bugün wms_app ile
   // çalışamaz. Seri adımı KAPALI BAYRAKLIDIR (STOCK_SERIAL_LOCK_ENABLED): bayrak yokken plan sorgudan önce reddedilir; bayrak açıkken
-  // işlev KAPALI ÇÖKER (42501, sessiz atlama yok). Migration (Q-56) inince bu test `state.serials` beklentisine çevrilir.
+  // işlev KAPALI ÇÖKERDİ (42501). 0015 (T-237, A-122) yalnız kilit için `UPDATE (created_at)` verir ve satır değişmezliğini tetikleyiciyle zorlar → bayrak açıkken kilit alınır.
   const withSerialFlag = async <T,>(value: string | undefined, fn: () => Promise<T>): Promise<T> => {
     const old = process.env.STOCK_SERIAL_LOCK_ENABLED;
     if (value === undefined) delete process.env.STOCK_SERIAL_LOCK_ENABLED;
@@ -141,8 +141,22 @@ describe("tam plan: belge, lokasyon, boyut/bakiye, rezervasyon", () => {
   it("seri kilidi bayrak KAPALIYKEN reddedilir: VALIDATION_FAILED", async () => {
     expect(await withSerialFlag(undefined, () => codeOf(run(empty({ serialIds: [A.serialId] }))))).toBe("VALIDATION_FAILED");
   });
-  it("seri kilidi bayrak AÇIKKEN bugün wms_app UPDATE yetkisi olmadığından 42501 ile kapalı çöker (Q-56)", async () => {
-    expect(await withSerialFlag("true", () => sqlstateOf(run(empty({ serialIds: [A.serialId] }))))).toBe("42501");
+  it("seri kilidi bayrak AÇIKKEN (0015, Q-56/A-122) wms_app satırı kilitler: state.serials döner, kilit gerçekten tutulur (55P03), satır değişmez", async () => {
+    const before = await admin.query("SELECT * FROM public.serials WHERE id = $1", [A.serialId]);
+    let concurrent: string | undefined;
+    const state = await withSerialFlag("true", () =>
+      run(empty({ serialIds: [A.serialId] }), async () => {
+        // Kilit işlem boyunca tutulur: ikinci bağlantı NOWAIT ile aynı satırı kilitleyemez.
+        concurrent = await admin.query("SELECT 1 FROM public.serials WHERE id = $1 FOR UPDATE NOWAIT", [A.serialId]).then(
+          () => "acquired",
+          (e: { code?: string }) => e.code,
+        );
+      }),
+    );
+    expect(concurrent).toBe("55P03");
+    expect(state.serials).toEqual([{ id: A.serialId, itemId: before.rows[0].item_id, serialNo: before.rows[0].serial_no, lotId: before.rows[0].lot_id }]);
+    const after = await admin.query("SELECT * FROM public.serials WHERE id = $1", [A.serialId]);
+    expect(after.rows).toEqual(before.rows);
   });
 
   it("tenantId transaction bağlamıyla uyuşmuyorsa FORBIDDEN (başka tenant kimliğiyle çağrı)", async () => {
