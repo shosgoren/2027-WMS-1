@@ -75,3 +75,11 @@
 - T-116c 0·1·2 → 0·0·1 (web eylem testi mutasyonla kanıtlandı).
 - T-123 (demo seed) 0·0·4; hesap bağdaştırıcısı T-123a kartına ayrıldı; A-62; T-105/T-106 notları. Ajan trailer'ı yanlış model adıyla yazmıştı → kart dalında amend.
 - Yük notu: load 16–30; protected.test (5 s) ve migrations.int (30 s) zaman aşımları yük kaynaklı, eşikler gevşetilmedi.
+
+## 2026-10-06 05:45Z — Supervisor turu
+- E-03 sürüyor. Repo private (doğrulandı); işler adım çalışmadan 1–2 s'de düşüyor → büyük olasılıkla ücretsiz plan Actions kotası (2000 dk/ay) doldu. Kullanıcı 08:30 TR'de durum sordu; seçenekler (kart + Actions bütçesi önerisi / public / ay başını bekleme) ve public'in güvenlik etkisi açıklandı; karar bekleniyor.
+- HAZIR olanlar: T-116c 0203602, T-119a eb6c733, T-119 0ed52df (error.tsx — Next 16 retry() kurulu dokümanla doğrulandı), T-123 a4a5fb7, T-127 e11695f (son kontrol 0·0·2; MINOR'lar T-131), T-127b 6a943ff (istemci içe aktarım grafı testi fail-closed; 0·0·2 gelecek notları).
+- T-123a: BLOCKER (worker argon2 statik import → imajda yok, worker çöker) kapandı — createRequire ile ilk kullanımda, Dockerfile @node-rs kopyası, imajda kanıt; devralma koruması A-64 (ayrılmış alan, migration yok); A-63 worker wms_auth yalnızca demo. Yeniden inceleme 0·0·5.
+- T-129 (izleme): log maskeleme, request ID, derin sağlık, uptime.yml. İnceleme 1·2·7 — kimliksiz ReDoS (proxy her istekte maskeleme regex'i), sağlık yoklaması havuzu tüketebiliyor, gömülü key:value maskelenmiyor → düzeltiliyor; sığ /api/health/live Fly için.
+- Entegrasyon düzeltmeleri (dilim birleşiminde tekrar): T-117b×T-116b memberships.ts `tenantId: null`; T-115c×T-116c STACK.md; T-116c×T-127 actions.ts (kip denetimi önce, limitVerifiedTenant sonra) + actions.test.ts hız sınırı/tenant mock'ları.
+- Kayıtlar: A-62, A-63, A-64; T-123a, T-127b kartları; T-105 (Fly-Client-IP, DEMO_PASSWORD, prod migrate ortamı), T-106 (staging migrate/DEMO_*), T-131 notları.
