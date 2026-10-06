@@ -186,6 +186,14 @@ export function changedFiles(cwd, base, opts = {}) {
   const out = git(cwd, ["diff", "--name-status", "-z", "-M", "--no-relative", "--no-ext-diff", "--no-textconv", ...range, "--"]);
   const changes = parseNameStatusZ(out);
   if (includeWorktree) {
+    // İndeks-yalnız değişiklik (T-242): commit indeksten yapılır; `git add` sonrası çalışma ağacından
+    // silinen/geri yazılan girdi `git diff <base>` çıktısında görünmez. İndeksin farkı da eklenir.
+    const seen = new Set(touchedPaths(changes));
+    const cached = parseNameStatusZ(git(cwd, ["diff", "--cached", "--name-status", "-z", "-M", "--no-relative", "--no-ext-diff", "--no-textconv", base, "--"]));
+    for (const c of cached) {
+      if (!seen.has(c.path) && (c.oldPath === undefined || !seen.has(c.oldPath))) changes.push(c);
+    }
+
     const untracked = git(cwd, ["ls-files", "--others", "--exclude-standard", "--full-name", "-z", "--", ":/"]);
     for (const p of untracked.split("\0")) {
       if (p !== "") changes.push({ status: "?", path: p });
@@ -383,7 +391,7 @@ export function worktreeEntries(cwd, files) {
         out.set(f, `120000 blob ${id}`);
       } else if (st.isFile()) {
         const id = git(cwd, ["hash-object", `--path=${f}`, "--", f]).trim();
-        out.set(f, `${st.mode & 0o111 ? "100755" : "100644"} blob ${id}`);
+        out.set(f, `${st.mode & 0o100 ? "100755" : "100644"} blob ${id}`);
       } else {
         out.set(f, "?");
       }
@@ -392,4 +400,28 @@ export function worktreeEntries(cwd, files) {
     }
   }
   return out;
+}
+
+/**
+ * İndeks (commit'e girecek) girdileri, `treeEntries` biçiminde: yol → `"<mod> blob <id>"`; indekste
+ * yoksa `""`. Birleşmemiş (stage ≠ 0) ya da tanınmayan girdi `"?"` olur (fail-closed).
+ * @param {string} cwd depo kökü
+ * @param {string[]} files
+ * @returns {Map<string, string>}
+ */
+export function indexEntries(cwd, files) {
+  /** @type {Map<string, string>} */
+  const entries = new Map(files.map((f) => [f, ""]));
+  if (files.length === 0) return entries;
+  const out = git(cwd, ["--literal-pathspecs", "ls-files", "-s", "-z", "--", ...files]);
+  for (const rec of out.split("\0")) {
+    const tab = rec.indexOf("\t");
+    if (tab < 0) continue;
+    const file = rec.slice(tab + 1);
+    if (!entries.has(file)) continue;
+    const [mode, id, stage] = rec.slice(0, tab).split(" ");
+    const prev = entries.get(file);
+    entries.set(file, prev !== "" || stage !== "0" ? "?" : `${mode} blob ${id}`);
+  }
+  return entries;
 }

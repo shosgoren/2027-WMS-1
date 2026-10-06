@@ -13,6 +13,7 @@ import {
   DEFAULT_TARGET,
   fileAtRef,
   GitError,
+  indexEntries,
   isAncestor,
   mergeBase,
   mergeHeads,
@@ -53,7 +54,8 @@ export const SUPERVISOR_PATHS = Object.freeze([
  * kendisi) ve `base` onun atası. Bu durumda bir yol muaf olur ancak şu ikisi birlikte doğruysa:
  *   (1) yol `base`'den `HEAD`'e değişmemiş (dalın kendi işi değil; dalın değiştirdiği yol
  *       her zaman kart listesine tabi kalır) ve
- *   (2) çalışma ağacındaki içeriği (mod + blob) `M`'dekiyle aynı (ya da ikisinde de yok).
+ *   (2) çalışma ağacındaki VE indeksteki (commit'e girecek) içeriği (mod + blob) `M`'dekiyle aynı
+ *       (ya da üçünde de yok).
  * Birleşmeden gelen ama sonradan elle değiştirilen (kart dışı ek değişiklik) yol muaf olmaz.
  * Sahte/ilgisiz MERGE_HEAD (hedefin atası değil, `base`'in soyundan değil) = hiçbir yol muaf değil.
  * @param {string} root
@@ -71,6 +73,7 @@ export function mergeBroughtChanges(root, target, base, changes) {
   const baseE = new Map();
   const headE = new Map();
   const wtE = worktreeEntries(root, paths);
+  const idxE = indexEntries(root, paths);
   /** @type {Map<string, string>[]} */
   const mergeE = heads.map(() => new Map());
   for (let i = 0; i < paths.length; i += 400) {
@@ -83,7 +86,7 @@ export function mergeBroughtChanges(root, target, base, changes) {
   }
   /** @param {string} p */
   const broughtByMerge = (p) =>
-    baseE.get(p) === headE.get(p) && mergeE.some((e) => e.get(p) === wtE.get(p) && wtE.get(p) !== "?");
+    baseE.get(p) === headE.get(p) && mergeE.some((e) => e.get(p) === wtE.get(p) && e.get(p) === idxE.get(p) && wtE.get(p) !== "?");
   for (const c of changes) {
     if (broughtByMerge(c.path) && (c.oldPath === undefined || broughtByMerge(c.oldPath))) exempt.add(c);
   }
