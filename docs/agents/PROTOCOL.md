@@ -20,7 +20,7 @@
 1. `STATE.md` → sıradaki görev. Kart yoksa `architect`'ten fazın kart setini iste (bir kerede tüm faz).
 2. Kartı kontrol et: amaç tek cümle mi, okuma listesi ≤5 öğe mi, dokunulacak dosyalar ≤10 mu, kabul ölçütü test edilebilir mi? Değilse böl.
 3. Ajanı çağır. **Prompt ≤ 15 satır:** rol dosyası yolu + kart yolu + "rapor şablonuna uy". İçerik kopyalama yok.
-4. Raporu al → doğrula: `git diff --stat` kartın dosya listesiyle uyumlu mu, `pnpm verify` özeti var mı, AC testleri gerçekten koşturuldu ve geçti mi (`pnpm test:ac -- AC-xx` çıktısı), `pnpm check:all` beş bekçide de OK mi, raporda "ATLANAN TEST: 0" yazıyor mu; "YENİ KARANTİNA" veya "KORUNAN DOSYA DEĞİŞİKLİĞİ" sıfır değilse her biri için insan onaylı PR bağlantısı var mı ve `check:protected` / `check:tests` bunu doğruluyor mu; mevcut karantinalarda süresi dolmuş kayıt yok mu. Bunlardan biri eksikse rapor kabul edilmez; ajana iade edilir.
+4. Raporu al → doğrula: `git diff --stat` kartın dosya listesiyle uyumlu mu, `pnpm verify` özeti var mı, AC testleri gerçekten koşturuldu ve geçti mi (`pnpm test:ac -- AC-xx` çıktısı; kapı/faz raporlarında ek olarak `pnpm test:ac --ci` özeti — bayraksız `pnpm test:ac` yalnızca `currentGatePhase` AC'lerini koşturur, geçilmiş fazları kapsamaz), `pnpm check:all` beş bekçide de OK mi, raporda "ATLANAN TEST: 0" yazıyor mu; "YENİ KARANTİNA" veya "KORUNAN DOSYA DEĞİŞİKLİĞİ" sıfır değilse her biri için insan onaylı PR bağlantısı var mı ve `check:protected` / `check:tests` bunu doğruluyor mu; mevcut karantinalarda süresi dolmuş kayıt yok mu. Bunlardan biri eksikse rapor kabul edilmez; ajana iade edilir.
    **Supervisor şu durumlarda diff'in ilgili kısmını ve gerekirse çevresindeki kodu kendisi okur:** kart I-01…I-17'dan birine dokunuyorsa; migration veya RLS politikası değiştiyse; rapor "PARTIAL" ise veya varsayım (`A-xx`) içeriyorsa; diff kartın dosya listesi dışına taştıysa; test sayısı azaldıysa ya da bir test atlandıysa (`skip`/`only`). Okuma hedeflidir: `git diff main...<dal> -- <yol>` ve gerekirse çağıranlar (`grep`).
 5. **İnceleme gereksinimi risk matrisine göre belirlenir** (kontroller azaltılmaz, yalnızca doğru yere ve doğru zamana konur):
 
@@ -57,7 +57,7 @@ Bekçilerin kendisi korunan dosyadır: bir ajanın bekçiyi gevşeterek geçmesi
 Kararsız (flaky) veya geçici olarak çalıştırılamayan bir test ancak şu koşulların **hepsiyle** karantinaya alınabilir; aksi hâlde `check:tests` kırmızıdır:
 1. Testte `@quarantine Q-xx` etiketi ve `tests/QUARANTINE.md`'de kaydı vardır: test adı, neden, sahibi olan kart (T-xxx), **bitiş tarihi** (en fazla 14 gün veya sonraki faz kapısı, hangisi önceyse).
 2. Karantinaya **alındığı PR** §Onay kaynağı kuralıyla onaylanmıştır (kayıt `main`'de bulunur).
-3. Test, **o anda kapısı değerlendirilen fazın `@AC` testi değildir.** Kapı AC'si karantinaya alınamaz; kapı AC'si geçmiyorsa kapı kapalıdır.
+3. Test, **kapı AC kümesinin `@AC` testi değildir:** küme = `ACCEPTANCE.conditions.json`'daki `currentGatePhase` ∪ `passedGates` fazlarının AC'leri (tek yardımcı: `gateAcIdsFor`; `check:tests` ve `test:ac` aynısını kullanır). Kapı AC'si karantinaya alınamaz; geçilmiş bir kapının AC'si de kapsamdadır; kapı AC'si geçmiyorsa kapı kapalıdır.
 4. Bitiş tarihi geçen karantina kaydı CI'ı kırmızıya çevirir: test düzeltilir ya da yeniden onaylanır.
 Karantinadaki testler her CI çalıştırmasında yine koşturulur ve sonucu raporlanır (sessizce yok sayılmaz); yalnızca kapıyı kırmazlar.
 

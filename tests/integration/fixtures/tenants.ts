@@ -7,6 +7,9 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type pg from "pg";
 
+/** Fikstürün tohumladığı platform (tenant_id NULL) processed_events satırlarının tüketici adı. */
+export const PLATFORM_FIXTURE_CONSUMER = "t211.platform.fixture";
+
 export interface TenantWorld {
   label: string;
   tenantId: string;
@@ -43,6 +46,11 @@ export interface TenantWorld {
   /** T-232: takip modu NONE olan ürün ve onun belge satırı (dimensionId/rezervasyon bu ürüne aittir; ürün tutarlılığı FK'si). */
   itemNoneId: string;
   documentLineNoneId: string;
+  /** T-211: tenant'a ait processed_events olay kimliği ve stock_consistency_runs satırı. */
+  processedEventId: string;
+  consistencyRunId: string;
+  /** T-211: platform (tenant_id NULL) processed_events satırının olay kimliği (tüketici PLATFORM_FIXTURE_CONSUMER); kalıcı; temizlik yalnızca kayıttaki kimlikleri siler. */
+  platformEventId: string;
   /**
    * AC-04 DELETE kontrol satırları (tablo adı → id): FK ile KORUNMAYAN, wms_app'in gerçekten silebildiği satır. Yalnızca silme
    * kontrolü için zorunlu tablolar: document_lines (defter/rezervasyonun bağlandığı satır silinemez; bu satır başka bir DRAFT
@@ -265,6 +273,17 @@ export async function seedWorld(
     await c.query("ROLLBACK");
     throw e;
   }
+  // T-211: güvenilirlik tabloları (migration rolü RLS'i aşar; tenant başına bir tüketici satırı ve bir tutarlılık koşusu).
+  const processedEventId = randomUUID();
+  const consistencyRunId = randomUUID();
+  const platformEventId = randomUUID();
+  await c.query("INSERT INTO public.processed_events (tenant_id, consumer, event_id) VALUES ($1, 't211.fixture', $2)", [tenantId, processedEventId]);
+  await c.query("INSERT INTO public.processed_events (tenant_id, consumer, event_id) VALUES (NULL, $1, $2)", [PLATFORM_FIXTURE_CONSUMER, platformEventId]);
+  await c.query(
+    `INSERT INTO public.stock_consistency_runs (tenant_id, id, job_id, started_at, finished_at, status, checked_dimensions, mismatch_count)
+     VALUES ($1, $2, $3, now(), now(), 'OK', 2, 0)`,
+    [tenantId, consistencyRunId, randomUUID()],
+  );
   const deletableDocumentId = randomUUID();
   const deletableLineId = randomUUID();
   await c.query(
@@ -310,6 +329,9 @@ export async function seedWorld(
     reservationId,
     itemNoneId,
     documentLineNoneId,
+    processedEventId,
+    consistencyRunId,
+    platformEventId,
     deletableControl: { document_lines: deletableLineId },
   };
   reg.worlds.push(world);
@@ -321,6 +343,7 @@ export async function cleanupRegistry(c: pg.Client, reg: WorldRegistry): Promise
   const tenantIds = reg.worlds.map((w) => w.tenantId);
   const userIds = [...reg.worlds.flatMap((w) => [w.ownerUserId, w.memberUserId]), ...reg.extraUsers];
   if (tenantIds.length > 0) {
+    await cleanupReliability(c, tenantIds, reg.worlds.map((w) => w.platformEventId));
     await cleanupStock(c, tenantIds);
     await cleanupDocuments(c, tenantIds);
     // T-204 tabloları (FK sırası: taşıma birimi [lokasyona bağlı, T-202'den önce] → seri → lot → barkod/dönüşüm → sahip → ürün → birim).
@@ -343,6 +366,15 @@ export async function cleanupRegistry(c: pg.Client, reg: WorldRegistry): Promise
   }
   reg.worlds.length = 0;
   reg.extraUsers.length = 0;
+}
+
+/** T-211 tenant satırları (migration rolü RLS'i aşar; wms_app silemez). stock_consistency_signals tenant'sızdır, burada yok. */
+export async function cleanupReliability(c: pg.Client, tenantIds: string[], platformEventIds: string[]): Promise<void> {
+  // Platform satırları yalnızca BU kaydın tohumladığı olay kimlikleriyle silinir (başka dosyanın satırlarına dokunulmaz).
+  await c.query("DELETE FROM public.processed_events WHERE tenant_id IS NULL AND event_id = ANY($1::uuid[])", [platformEventIds]);
+  for (const t of ["stock_consistency_runs", "processed_events"]) {
+    await c.query(`DELETE FROM public.${t} WHERE tenant_id = ANY($1::uuid[])`, [tenantIds]);
+  }
 }
 
 /**

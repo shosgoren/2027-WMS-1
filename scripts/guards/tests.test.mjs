@@ -497,6 +497,51 @@ describe("pnpm check:tests — karantina kaydı (uçtan uca, T-008e)", () => {
   });
 });
 
+// T-132b: kapı AC kümesi = currentGatePhase ∪ passedGates (check:tests uçtan uca).
+describe("karantina: geçilmiş kapıların AC testleri korunur (T-132b)", () => {
+  const H = "| Q | Test adı | Dosya | Neden | Sahip kart | Eklendiği tarih | Bitiş tarihi |\n|---|---|---|---|---|---|---|\n";
+  const ACCEPT = "| ID | Senaryo | Beklenen | Faz |\n|---|---|---|---|\n| AC-50 | s | b | 0 |\n| AC-51 | s | b | 1 |\n| AC-52 | s | b | 2 |\n";
+  /**
+   * @param {string} acId
+   * @param {string[]} passedGates
+   */
+  async function run(acId, passedGates) {
+    const r = createRepo({ prefix: "guards-tests-q-" });
+    cleanups.push(() => r.cleanup());
+    const today = new Date().toISOString().slice(0, 10);
+    r.writeAll({
+      "docs/ACCEPTANCE.md": ACCEPT,
+      "docs/ACCEPTANCE.conditions.json": JSON.stringify({ currentGatePhase: "1", passedGates, facts: {}, factSources: {}, conditions: {} }),
+      "tests/QUARANTINE.md": `${H}| Q-01 | t | src/a.test.ts | n | T-100 | ${today} | ${today} |\n`,
+      "src/a.test.ts": IMPORT + `it("a ${AC}${acId.slice(3)} ${QT} Q-01", () => { expect(1).toBe(1); });\n`,
+    });
+    r.commit("init").publish("main");
+    /** @type {string[]} */
+    const lines = [];
+    const code = await main(["tests"], { root: r.dir, log: (l) => lines.push(l) });
+    return { code, out: lines.join("\n") };
+  }
+
+  it("passedGates:[0], currentGatePhase:1 → Faz 0 AC testi karantinaya alınamaz", async () => {
+    const r = await run("AC-50", ["0"]);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("FAIL QUARANTINE_GATE_AC src/a.test.ts:2 — kapı AC testi karantinaya alınamaz (AC-50)");
+  });
+
+  it("Faz 1 (güncel) AC testi de karantinaya alınamaz", async () => {
+    const r = await run("AC-51", ["0"]);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("QUARANTINE_GATE_AC src/a.test.ts:2 — kapı AC testi karantinaya alınamaz (AC-51)");
+  });
+
+  it("geçilmemiş faz AC'si için karantina eskisi gibi mümkün; passedGates boşken Faz 0 AC'si de", async () => {
+    const a = await run("AC-52", ["0"]);
+    expect(a.out).not.toContain("QUARANTINE_GATE_AC");
+    const b = await run("AC-50", []);
+    expect(b.out).not.toContain("QUARANTINE_GATE_AC");
+  });
+});
+
 // T-008j madde 3 (bekciler-2 incelemesi MINOR): ileri tarihli "eklendiği tarih" 14 gün sınırını
 // ötelemesin diye `eklendi ≤ bugün (UTC)` zorunlu → aksi QUARANTINE_FUTURE_DATE.
 describe("karantina: eklendiği tarih ≤ bugün (T-008j madde 3)", () => {
