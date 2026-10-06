@@ -292,6 +292,10 @@
     "unauthenticated_recent_auth_requiredAction": "Yeniden giriş yapıp işlemi yinele.",
     "validation_failed_code_taken": "Bu kod zaten kullanılıyor.",
     "validation_failed_code_takenAction": "Başka bir kod yaz.",
+    "validation_failed_feature_disabled": "Bu özellik şu an kapalı.",
+    "validation_failed_feature_disabledAction": "Yöneticinle görüşüp özelliğin açılmasını iste.",
+    "validation_failed_location_warehouse_mismatch": "Satır lokasyonlarının tümü belgenin deposunda olmalı.",
+    "validation_failed_location_warehouse_mismatchAction": "Aynı depodan lokasyonlar seç; depolar arası taşıma için ayrı belge gerekir.",
     "validation_failed_in_use": "Kayıt kullanımda olduğu için bu değişiklik yapılamaz.",
     "validation_failed_in_useAction": "Önce stoğu boşalt veya bağlı kayıtları arşivle, sonra yeniden dene.",
     "validation_failed_parent_invalid": "Seçilen üst lokasyon uygun değil.",
@@ -534,6 +538,7 @@
       "changed": "Bir taşıma birimini değiştirdin."
     },
     "stock_document": {
+      "updated": "Bir stok taslağını güncelledin.",
       "created": "Bir stok belgesi oluşturdun.",
       "approved": "Bir stok belgesini onayladın.",
       "posted": "Bir stok belgesini işledin.",

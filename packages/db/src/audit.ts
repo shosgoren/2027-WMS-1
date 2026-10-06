@@ -47,6 +47,7 @@ export const AUDIT_ACTIONS = [
   "handling_unit.created",
   "handling_unit.changed",
   "stock_document.created",
+  "stock_document.updated",
   "stock_document.approved",
   "stock_document.posted",
   "stock_document.cancelled",
