@@ -69,3 +69,20 @@ export {
   yearOfBusinessDate,
   type NumberedDocumentKind,
 } from "./numbering.ts";
+export { SYNC_POST_MAX_LINES, postDocument, type PostDocumentInput } from "./posting.ts";
+export {
+  REASON_BY_KIND,
+  buildPostingPlan,
+  dimensionIdentity,
+  fromMicro,
+  toMicro,
+  type LedgerEntry,
+  type LedgerReason,
+  type PostingKind,
+  type PostingLine,
+  type PostingPlan,
+  type PostingStatus,
+} from "./plan.ts";
+export { assertLineRules, assertSerialUnique, assertSufficient, type BalanceView, type ItemInfo, type LocationInfo, type SerialInfo } from "./rules.ts";
+export { assertTracking, type TrackedLine, type TrackingMode } from "./tracking.ts";
+export { readAvailability, type AvailabilityFilter, type AvailabilityRow } from "./availability.ts";
