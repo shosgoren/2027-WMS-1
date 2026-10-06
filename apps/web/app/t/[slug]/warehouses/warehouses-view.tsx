@@ -45,7 +45,7 @@ const LINK_CLS =
   "inline-flex min-h-12 min-w-12 items-center justify-center rounded-control px-2 text-base font-semibold text-accent-ink underline focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus";
 const BADGE = "inline-flex items-center rounded-full px-2 text-xs font-bold";
 export const SELECT_CLS =
-  "min-h-12 w-full min-w-0 rounded-card border-2 border-border bg-surface px-4 text-base text-ink focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus";
+  "min-h-12 w-full min-w-0 rounded-card border-2 border-border-strong bg-surface px-4 text-base text-ink focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus";
 
 export function ServerErrorBanner({ error, returnTo, scope = "warehouse" }: { error: ServerError; returnTo: string; scope?: "warehouse" | "location" }) {
   const t = useTranslations("warehouses.errors");
