@@ -4,11 +4,31 @@
 //
 // Uygulama rolü bağlantısı YALNIZCA DATABASE_URL'den kurulur; DATABASE_URL_DIRECT (migration rolü)
 // bu dosyada kullanılmaz (T-002d güvenlik notu).
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { DB_CLIENT_SETTINGS } from "../../../packages/db/src/client.ts";
 import { APP_ROLE, PGBOUNCER_ADMIN_URL_VAR, parsePoolSize, readIntEnv, redactUrl } from "./env.ts";
 
 const env = readIntEnv(process.env);
+
+/**
+ * Beklenen PostgreSQL ana sürümü (T-005e): ortamdaki INT_EXPECTED_PG_MAJOR, yoksa .env.example
+ * (global-setup'ın compose için okuduğu aynı dosya). Hiçbiri yoksa test düşer.
+ */
+function expectedPgMajor(): number {
+  let raw = process.env.INT_EXPECTED_PG_MAJOR?.trim();
+  if (raw === undefined || raw === "") {
+    const file = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../.env.example");
+    raw = /^INT_EXPECTED_PG_MAJOR=(\S+)\s*$/m.exec(readFileSync(file, "utf8"))?.[1];
+  }
+  if (raw === undefined || !/^[0-9]{1,2}$/.test(raw)) {
+    throw new Error("INT_EXPECTED_PG_MAJOR missing or not a major version number");
+  }
+  return Number(raw);
+}
 
 /** Bağlanır; sürücü hatasındaki URL/parola/host maskelenir (G-09). */
 async function connect(url: string): Promise<pg.Client> {
@@ -66,6 +86,19 @@ describe(`harness (target=${env.target}) — app role via pooler`, () => {
     expect(r.rows).toHaveLength(1);
     expect(r.rows[0]?.tenant ?? "").toBe("");
   });
+
+  // Eşdeğerlik (T-005e) yalnızca compose hedefinde: neon tanı koşusu INT_DB_PREPARE'i bilerek çevirir.
+  if (env.target === "compose") {
+    it("PostgreSQL major version = INT_EXPECTED_PG_MAJOR (compose-Neon parity)", async () => {
+      const r = await app.query<{ v: string }>("SELECT current_setting('server_version_num') AS v");
+      expect(Math.floor(Number(r.rows[0]?.v) / 10000)).toBe(expectedPgMajor());
+    });
+
+    it("effective prepare = DB_CLIENT_SETTINGS.prepare (not overridden by INT_DB_PREPARE)", () => {
+      expect(env.prepare ?? DB_CLIENT_SETTINGS.prepare).toBe(DB_CLIENT_SETTINGS.prepare);
+      expect(env.prepare).toBeUndefined();
+    });
+  }
 });
 
 // PgBouncer yönetim konsolu yalnızca compose hedefinde vardır (Neon pooler'ı sağlayıcı yönetir,
