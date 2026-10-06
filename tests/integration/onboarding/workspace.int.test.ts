@@ -11,6 +11,7 @@ import {
   continueOnboarding,
   createWorkspace,
   updateTenantSettings,
+  APP_DB_SETTINGS,
   type WorkspaceEnv,
 } from "../../../packages/domain/src/onboarding/workspace.ts";
 import { readIntEnv } from "../harness/env.ts";
@@ -74,6 +75,10 @@ afterAll(async () => {
   await admin((c) => c.query("DROP FUNCTION IF EXISTS public.t121_fail_step2()"));
 }, 60_000);
 
+it("APP_DB_SETTINGS, DB_CLIENT_SETTINGS ile aynı", () => {
+  expect({ ...APP_DB_SETTINGS }).toEqual({ ...DB_CLIENT_SETTINGS });
+});
+
 describe("createWorkspace", () => {
   it("tenant + sahip TENANT_ADMIN üyeliği + settings + tenant.created audit'i", async () => {
     const user = await newUser();
@@ -118,6 +123,19 @@ describe("createWorkspace", () => {
     expect([a.created, b.created].sort()).toEqual([false, true]);
     expect(await count("SELECT count(*) n FROM public.tenants WHERE created_by_user_id = $1 AND creation_request_id = $2", [user, requestId])).toBe(1);
     expect(await count("SELECT count(*) n FROM public.audit_logs WHERE tenant_id = $1 AND action = 'tenant.created'", [a.tenantId])).toBe(1);
+  });
+
+  it("aynı requestId + AÇIK slug ile eşzamanlı çift istek → aynı sonuç, tek tenant (SLUG_TAKEN yarışı yutulur)", async () => {
+    for (let i = 0; i < 5; i++) {
+      const user = await newUser();
+      const requestId = randomUUID();
+      const slug = `r-${randomBytes(5).toString("hex")}`;
+      const name = uniqueName("Yarış");
+      const [a, b] = await Promise.all([create(user, { requestId, slug, name }), create(user, { requestId, slug, name })]);
+      expect(a.tenantId).toBe(b.tenantId);
+      expect([a.created, b.created].sort()).toEqual([false, true]);
+      expect(await count("SELECT count(*) n FROM public.tenants WHERE created_by_user_id = $1", [user])).toBe(1);
+    }
   });
 
   it("tekrar aynı parametrelerle → created:false; ad ya da şablon değişince ret (ikinci tenant yok)", async () => {

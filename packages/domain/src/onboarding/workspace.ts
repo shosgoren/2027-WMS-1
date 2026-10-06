@@ -85,13 +85,18 @@ function isDemoEmail(email: string | null | undefined, rawDomain: string | undef
 }
 
 /**
- * Uygulama (`wms_app`) bağlantısı: web eylemi `@wms/db`'yi doğrudan bağımlılık olarak taşımadığından (kart dışı
- * `apps/web/package.json`) istemci burada kurulur. Ayarlar `DB_CLIENT_SETTINGS` ile aynıdır (poolMax 10, prepare kapalı;
- * PgBouncer transaction mode). URL boşsa hata (değer hata mesajına girmez, G-09).
+ * Uygulama (`wms_app`) bağlantısı. `DB_CLIENT_SETTINGS` yalnızca `@wms/db/internal`'dadır ve lint domain'e bu yolu
+ * yasaklar; bu yüzden değerler `APP_DB_SETTINGS`'te yinelenir ve int testi `DB_CLIENT_SETTINGS` ile eşitliğini doğrular.
+ * Havuz dev hot-reload'da havuz çoğalmasın diye
+ * `globalThis` üzerinde tekildir. URL boşsa hata (değer hata mesajına girmez, G-09).
  */
+export const APP_DB_SETTINGS = Object.freeze({ poolMax: 10, prepare: false });
+const APP_DB_KEY = Symbol.for("wms.onboarding.appDb");
 export function openAppDb(url: string | undefined): AccessDbClient {
   if (url === undefined || url.trim() === "") throw new AppError("INTERNAL");
-  return createDbClient({ url, poolMax: 10, prepare: false });
+  const g = globalThis as { [APP_DB_KEY]?: AccessDbClient };
+  g[APP_DB_KEY] ??= createDbClient({ url, ...APP_DB_SETTINGS });
+  return g[APP_DB_KEY];
 }
 
 export interface CreateWorkspaceInput {
@@ -166,7 +171,16 @@ export async function createWorkspace(input: CreateWorkspaceInput): Promise<Crea
   let last: unknown;
   for (const slug of candidates) {
     try {
-      return await createWithSlug(db, principal.userId, name, slug, template, requestId);
+      try {
+        return await createWithSlug(db, principal.userId, name, slug, template, requestId);
+      } catch (e) {
+        // Aynı requestId ile eşzamanlı çift istekte kaybeden SLUG_TAKEN alabilir: mevcut-tenant araması bir kez
+        // yeniden yapılır (kazanan commit olduysa aynı sonuç döner; gerçekten başka tenant ise yine SLUG_TAKEN).
+        if (e instanceof MembershipError && e.code === "SLUG_TAKEN") {
+          return await createWithSlug(db, principal.userId, name, slug, template, requestId);
+        }
+        throw e;
+      }
     } catch (e) {
       last = e;
       const retryNext =
