@@ -54,6 +54,8 @@ Q-49 | Durum değiştiren taşımada (ör. AVAILABLE → QUARANTINE) belge satı
 Q-50 | Stok defteri `reason` için izinli değer kümesi nedir (sabit kod listesi mi, serbest metin mi)? Şimdilik yalnızca boş olmama CHECK'i | T-232 | açık — T-213/T-217 komut katmanı kodları belirleyince CHECK daraltılır
 Q-51 | Stok defteri `actor_user_id` zorunlu mu (sistem/worker hareketleri)? Şimdilik nullable, FK yok | T-232 | açık — 0012 geçmiş yazıcısıyla tutarlı karar T-213'te
 Q-52 | Stok defteri satırı hangi belge durumunda yazılabilir (senkron yol ≤200 satır `posting_job_id`'siz; asenkron yol APPROVED+posting_job_id; ters kayıt belgesi)? DB şimdilik belge durumuna bakmıyor | T-232 inceleme MINOR-5, ADR-018 §2 | açık — T-213/T-217 posting akışıyla DB kuralı (tetikleyici, FOR SHARE) eklenir
+Q-54 | Barkod çözümlemesi birden çok adayla sonuçlanınca (BARCODE_AMBIGUOUS) adaylar istemciye nasıl döner: `AppError` gövdesine alan mı, ayrı uç mu? | T-208 | açık — API katmanı kartında karar
+Q-55 | GS1 değişken uzunluklu AI'lar için tam AI uzunluk tablosu (GS ayracı olmadığında ayrıştırma) hangi kaynaktan, hangi kapsamda? | T-208, GS1 Genel Spesifikasyonları | açık — şimdilik tanımsız AI ayrıştırmayı durdurur
 
 ## Varsayımlar
 A-01 | Neon pooler'ı transaction-mode PgBouncer'dır (kullanıcı kararı kaydı, 2026-10-05) — **teyit edildi 2026-10-05, sürüm hariç** (belge + T-005d koşu 3 çoklama gözlemi, https://github.com/shosgoren/2027-WMS-1/actions/runs/37388724069); PgBouncer sürümü gözlenemedi | Neon pooler türünü/kipini değiştirdiğini duyurana veya yeniden spike aksini gösterene kadar | Q-02
@@ -153,3 +155,6 @@ A-94 | `wms_ops` belge tablolarında yetki almaz (0010/0011 deseni; kartın "yal
 A-95 | Belge `reason` (ve kopyalandığı silinemeyen `document_status_history.reason`) serbest metnine kişisel veri girilmez: UI alanında uyarı (T-216/T-226), ≤500 karakter CHECK; KVKK silme yükümlülüğü append-only geçmişle çakışacağından 4P saklama/silme kartı bu sütunu kapsar (anonimleştirme yolu) | 4P saklama kartında karar | T-206 inceleme
 A-96 | CONSUMED/RELEASED rezervasyon sonlanmıştır, değiştirilemez; INSERT yalnızca ACTIVE açar | — | T-232
 A-97 | Seri boyutu yoksa `stock_balances.serial_key` sıfır UUID sentinelidir (tekillik ve CHECK bunun üzerine); gerçek serial_id ile çakışma pratikte imkânsız | — | T-232
+A-107 | `updateItem` değişmez alan (takip modu, temel birim, ölçek) değişimi: stoklu üründe IN_USE, stoksuzda VALIDATION_FAILED (A-87); arşivli ürün güncellenmez, barkod eklenmez ve barkod çözümlemesine girmez; temel birim dışı barkod birimi için dönüşüm satırı zorunlu değil | Pilot katalog akışı | T-208
+A-108 | Barkod tam eşleşmezse ve girdi GTIN içeren GS1 dizgisiyse, GTIN'in kısa biçimleri (14/13/12/8 hane, baştaki sıfırlar atılarak) ile eşleştirilir | GS1 kuralı / pilot barkodları | T-208
+A-109 | GS1 SKT (AI 17) YY → 20YY; DD=00 ayın son günü; GS1 yüzyıl penceresi uygulanmaz | Pilot ürün SKT aralığı | T-208
