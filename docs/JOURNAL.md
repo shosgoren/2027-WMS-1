@@ -38,3 +38,9 @@
 - T-115/T-115b: BLOCKER (migrate.ts worker bundle'ında) kökten düzeltildi → 0·0·1 / 0·0·0. T-116: 0·0·7 → 3 MINOR düzeltildi → 0·0·6 (kalanlar T-105/T-117 eklerinde).
 - T-112b: 0·2·7 (e-posta kilidi TOCTOU, sosyal örtük kayıt) → düzeltildi → 0·0·3 (T-114). T-113: 0·0·5 → 0·0·2. T-112c: T-112b ile birleşti (262/262), inceleme sürüyor. T-110c 0·0·3 (T-131).
 - Yeni kartlar: T-105c (operasyon rolü), T-110c, T-112c, T-133 (hata kodları); ekler: T-105, T-112b, T-113, T-114, T-115, T-115b, T-115c, T-116, T-117.
+
+## 2026-10-06 00:45Z — Supervisor turu
+- #29 Faz 1 planı → main (413a547 tazeleme 0·0·8). #38 T-110c → int/faz1-ui-temel. #30 kapatıldı (T-101 #39 içinde).
+- int/faz1-sema dilimi kuruldu (main + 7 kart), entegrasyon düzeltmeleri (KNOWN_APP_SETTINGS, drift importu, PG 18.6 nonsuper testi), paket incelemesi 0·1·2 → 0·0·1; #39 açıldı.
+- T-112c düzeltmeleri 0·0·2 ile geçti; T-133 hata kodu listesi yazıldı.
+- int/faz1-auth entegrasyonu sürüyor (T-101d × T-115 connection-target çakışması).
