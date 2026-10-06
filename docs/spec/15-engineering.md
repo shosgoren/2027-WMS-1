@@ -26,6 +26,14 @@ Hata kodları: `VALIDATION_FAILED`, `UNAUTHENTICATED`, `FORBIDDEN`, `TENANT_SUSP
 | `VERSION_CONFLICT` | Deadlock/serileştirme (`retryable: true`) | 409 | `errors.version_conflict` |
 | `RATE_LIMITED` | Hız sınırı (Faz 1'de yalnızca kimlik yüzeyinde fırlatılır, aşağıda) | 429 | `errors.rate_limited` |
 | `INTERNAL` | Tanınmayan hata (yukarıdaki kural) | 500 | `errors.internal` |
+| `INSUFFICIENT_STOCK` (Faz 2) | Çıkış/rezervasyon için kullanılabilir stok yetersiz (I-05; negatif stok yok) | 409 | `errors.insufficient_stock` |
+| `TRACKING_VIOLATION` (Faz 2) | Takip modu kuralı ihlali (ör. `NONE` ürüne lot/seri, tekrarlı seri) | 422 | `errors.tracking_violation` |
+| `LOCATION_LOCKED` (Faz 2) | Lokasyon sayım kilidinde | 423 | `errors.location_locked` |
+| `REVERSAL_BLOCKED` (Faz 2) | Ters kayıt stok kullanıldığı için yapılamaz | 409 | `errors.reversal_blocked` |
+| `IDEMPOTENCY_MISMATCH` (Faz 2) | Aynı idempotency anahtarı farklı içerik/aktörle kullanıldı (ADR-018 §8) | 409 | `errors.idempotency_mismatch` |
+| `COUNT_LOCK_ROW_MISSING` (Faz 2) | Lokasyonun sayım kilidi satırı yok; bütünlük alarmı, istemciye yalnızca genel mesaj | 500 | `errors.count_lock_row_missing` |
+
+`PERIOD_CLOSED` ve `ENTITLEMENT_REQUIRED` listede ama kodda yoktur: Faz 2'de fırlatan yok (A-71), Faz 4S'te eklenir.
 
 Ayrıntılar (`detail`; kodu değiştirmez, istemciyi yönlendirir — `ERROR_DETAILS`):
 
@@ -33,6 +41,19 @@ Ayrıntılar (`detail`; kodu değiştirmez, istemciyi yönlendirir — `ERROR_DE
 |---|---|---|---|
 | `FORBIDDEN` + `MFA_REQUIRED` | `TENANT_ADMIN` rolü, oturum MFA doğrulanmamış, tenant `is_demo` değil (A-38) | 403 | `errors.forbidden.mfa_required` |
 | `UNAUTHENTICATED` + `RECENT_AUTH_REQUIRED` | Yakın zamanda kimlik doğrulama reddi (`AuthError` `reason: "REAUTH_REQUIRED"`) | 401 | `errors.unauthenticated.recent_auth_required` |
+| `VALIDATION_FAILED` + `CODE_TAKEN` (Faz 2) | Kod/ad bu tenant'ta zaten kullanımda | 400 | `errors.validation_failed.code_taken` |
+| `VALIDATION_FAILED` + `IN_USE` (Faz 2) | Kayıt kullanımda (stok/aktif alt kayıt) olduğu için arşiv/değişiklik reddi | 400 | `errors.validation_failed.in_use` |
+| `VALIDATION_FAILED` + `PARENT_INVALID` (Faz 2) | Üst lokasyon aynı depoda aktif değil / uygunsuz | 400 | `errors.validation_failed.parent_invalid` |
+| `VALIDATION_FAILED` + `HANDLING_UNIT_CYCLE` (Faz 2) | Taşıma birimi iç içe yerleşimi döngü oluşturur | 400 | `errors.validation_failed.handling_unit_cycle` |
+| `VALIDATION_FAILED` + `BARCODE_AMBIGUOUS` (Faz 2) | Barkod birden çok ürün/birimle eşleşir | 400 | `errors.validation_failed.barcode_ambiguous` |
+| `VALIDATION_FAILED` + `UNIT_CONVERSION_INVALID` (Faz 2) | Dönüşüm katsayısı ≤ 0 ya da > 6 ondalık | 400 | `errors.validation_failed.unit_conversion_invalid` |
+| `VALIDATION_FAILED` + `QUANTITY_SCALE` (Faz 2) | Miktar ürünün ondalık hassasiyetini aşar | 400 | `errors.validation_failed.quantity_scale` |
+| `VALIDATION_FAILED` + `DOCUMENT_TOO_LARGE` (Faz 2) | Belge satır sayısı sert sınırı aşar (A-07) | 400 | `errors.validation_failed.document_too_large` |
+| `VALIDATION_FAILED` + `DOCUMENT_STATE` (Faz 2) | Belge durumu eyleme uygun değil | 400 | `errors.validation_failed.document_state` |
+| `VALIDATION_FAILED` + `IDEMPOTENCY_KEY_REQUIRED` (Faz 2) | Stok komutunda istemci anahtarı yok (ADR-018) | 400 | `errors.validation_failed.idempotency_key_required` |
+| `FORBIDDEN` + `WAREHOUSE_OUT_OF_SCOPE` (Faz 2) | Depo, kullanıcının depo kapsamı dışında (A-46, A-77) | 403 | `errors.forbidden.warehouse_out_of_scope` |
+
+Katalog anahtarı: `messages/*.json`'da üst düzey `errors` ad alanı düzdür (next-intl anahtarda nokta kabul etmez): messageKey'deki ayrıntı noktası `_` olur (`errors.forbidden.mfa_required` → `errors.forbidden_mfa_required`), "sonraki eylem" metni `...Action` kardeşidir. `ERROR_DETAIL_CODE` her ayrıntının bağlı olduğu kodu verir.
 
 #### Kimlik doğrulama yüzeyi (Better Auth uçları, `packages/auth/src/index.ts`; T-112)
 Bu uçlar `AppError` gövdesi kullanmaz: Better Auth `APIError` gövdesinde `code` (mesaj = kod) döner; `messageKey` yoktur. Better Auth'un kendi kodları da bu yüzeyden geçer (kütüphane listesi, burada tekrarlanmaz).
@@ -51,7 +72,7 @@ Bu uçlar `AppError` gövdesi kullanmaz: Better Auth `APIError` gövdesinde `cod
 | Kod | Kaynak | Anlam | İstemciye etkisi |
 |---|---|---|---|
 | `SLUG_TAKEN` | `MembershipError` (`packages/db/src/with-membership.ts`, `withNewTenant`) | Slug başka tenant'ta kullanımda | Faz 1'de üretim çağıranı yok; `mapAccessError`'dan geçerse `INTERNAL`. HTTP eşlemesi tenant oluşturma kartında |
-| `IDEMPOTENCY_MISMATCH` | `MembershipError` (aynı) | Oluşturma isteği farklı parametrelerle tekrar kullanıldı | Listede API kodu, ama `ERROR_CODES`'ta yok; `mapAccessError`'dan geçerse `INTERNAL` |
+| `IDEMPOTENCY_MISMATCH` | `MembershipError` (aynı; iç kullanım) | Tenant oluşturma isteği farklı parametrelerle tekrar kullanıldı | `MembershipError` olarak `mapAccessError`'dan geçerse `INTERNAL`. API kodu olarak (stok komutları, Faz 2) `ERROR_CODES`'ta ve `AppError` ile fırlatılır (409; yukarıdaki tablo) |
 | `MAIL_DELIVERY_DISABLED` | `MailError` (`packages/shared/src/mailer.ts`, worker; T-116), `MailDeliveryDisabledError` (`packages/auth`) | Kip `disabled`/yapılandırma eksik ya da alıcı bu ortamda teslim edilemez; sahte başarı yok | İş/kanca hatası; HTTP karşılığı yalnızca yukarıdaki kimlik yüzeyi satırı |
 | `MAIL_SEND_FAILED` | `MailError` (worker sağlayıcıları; T-116) | Sağlayıcı isteği başarısız ya da başarısız durum kodu | İş hatası |
 | `MAIL_RECIPIENT_INVALID` | `MailError` (T-116) | Mühürden çıkan alıcı tek, çıplak adres değil; kalıcı hata (gönderim yok) | İş hatası |

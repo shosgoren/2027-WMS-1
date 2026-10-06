@@ -255,6 +255,64 @@
     },
     "demoLocked": "This action is disabled for the demo account."
   },
+  "errors": {
+    "validation_failed": "The information entered is not valid.",
+    "validation_failedAction": "Check the fields and try again.",
+    "unauthenticated": "You are not signed in or your session has ended.",
+    "unauthenticatedAction": "Sign in and try again.",
+    "forbidden": "You do not have permission for this action.",
+    "forbiddenAction": "Ask your workspace admin.",
+    "tenant_suspended": "This workspace is suspended.",
+    "tenant_suspendedAction": "Contact support.",
+    "tenant_closing": "This workspace is being closed.",
+    "tenant_closingAction": "Contact support if you need to export your data.",
+    "not_found": "The record was not found.",
+    "not_foundAction": "Refresh the page and try again.",
+    "version_conflict": "The record was changed by another action at the same time.",
+    "version_conflictAction": "Refresh the page and try again.",
+    "rate_limited": "Too many attempts were made.",
+    "rate_limitedAction": "Wait a little and try again.",
+    "internal": "The action could not be completed right now.",
+    "internalAction": "Try again shortly; if it continues, tell your admin the support code.",
+    "insufficient_stock": "There is not enough available stock in this location.",
+    "insufficient_stockAction": "Reduce the quantity or choose another location.",
+    "tracking_violation": "The lot or serial entered does not match this item's tracking rule.",
+    "tracking_violationAction": "Check the item's tracking mode and correct the lot or serial.",
+    "location_locked": "This location is locked for a count.",
+    "location_lockedAction": "Try again when the count ends or choose another location.",
+    "reversal_blocked": "This action cannot be reversed because the stock has since been used.",
+    "reversal_blockedAction": "Bring the related stock back first, or make a partial reversal.",
+    "idempotency_mismatch": "The same request key was used with different details.",
+    "idempotency_mismatchAction": "Reopen the form and send the action as a new request.",
+    "count_lock_row_missing": "The location's count lock record is missing, so the action was stopped.",
+    "count_lock_row_missingAction": "Tell your admin the support code.",
+    "forbidden_mfa_required": "Two-step verification is required for admin actions.",
+    "forbidden_mfa_requiredAction": "Set up two-step verification first, then repeat the action.",
+    "unauthenticated_recent_auth_required": "You need to verify your identity again for this action.",
+    "unauthenticated_recent_auth_requiredAction": "Sign in again and repeat the action.",
+    "validation_failed_code_taken": "This code is already in use.",
+    "validation_failed_code_takenAction": "Enter a different code.",
+    "validation_failed_in_use": "This change is not possible because the record is in use.",
+    "validation_failed_in_useAction": "Empty the stock or archive the linked records first, then try again.",
+    "validation_failed_parent_invalid": "The selected parent location is not valid.",
+    "validation_failed_parent_invalidAction": "Choose an active parent location in the same warehouse.",
+    "validation_failed_handling_unit_cycle": "Handling units cannot be nested in a loop.",
+    "validation_failed_handling_unit_cycleAction": "Choose a different parent handling unit.",
+    "validation_failed_barcode_ambiguous": "This barcode matches more than one item or unit.",
+    "validation_failed_barcode_ambiguousAction": "Choose the item from the list.",
+    "validation_failed_unit_conversion_invalid": "The unit conversion factor is not valid.",
+    "validation_failed_unit_conversion_invalidAction": "Enter a factor greater than zero with at most 6 decimals.",
+    "validation_failed_quantity_scale": "The quantity has more decimals than the item allows.",
+    "validation_failed_quantity_scaleAction": "Adjust the quantity to the item's precision.",
+    "validation_failed_document_too_large": "The document exceeds the maximum number of lines.",
+    "validation_failed_document_too_largeAction": "Split the document into several documents.",
+    "validation_failed_document_state": "The document's status does not allow this action.",
+    "validation_failed_document_stateAction": "Refresh the page and check the document's current status.",
+    "validation_failed_idempotency_key_required": "The request key is missing.",
+    "validation_failed_idempotency_key_requiredAction": "Refresh the page and send the action again.",
+    "forbidden_warehouse_out_of_scope": "This warehouse is outside your scope.",
+    "forbidden_warehouse_out_of_scopeAction": "If you need access, ask your workspace admin to add it to your scope."
+  },
   "serverErrors": {
     "code": "Error code: {code}",
     "supportCode": "Support code: {code}",
@@ -427,6 +485,56 @@
     },
     "audit": {
       "exported": "You exported the audit log."
+    },
+    "warehouse": {
+      "created": "You created a warehouse.",
+      "updated": "You updated a warehouse.",
+      "archived": "You archived a warehouse."
+    },
+    "location": {
+      "created": "You created a location.",
+      "updated": "You updated a location.",
+      "archived": "You archived a location."
+    },
+    "warehouse_scope": {
+      "changed": "You changed a member's warehouse scope."
+    },
+    "unit": {
+      "created": "You created a unit.",
+      "updated": "You updated a unit."
+    },
+    "item": {
+      "created": "You created an item.",
+      "updated": "You updated an item.",
+      "archived": "You archived an item."
+    },
+    "item_barcode": {
+      "added": "You added a barcode to an item.",
+      "removed": "You removed a barcode from an item."
+    },
+    "unit_conversion": {
+      "set": "You set an item's unit conversion."
+    },
+    "lot": {
+      "created": "You created a lot."
+    },
+    "serial": {
+      "registered": "You registered a serial number."
+    },
+    "handling_unit": {
+      "created": "You created a handling unit.",
+      "changed": "You changed a handling unit."
+    },
+    "stock_document": {
+      "created": "You created a stock document.",
+      "approved": "You approved a stock document.",
+      "posted": "You posted a stock document.",
+      "cancelled": "You cancelled a stock document.",
+      "reversed": "You reversed a stock document."
+    },
+    "reservation": {
+      "created": "You reserved stock.",
+      "released": "You released a reservation."
     },
     "other": "You did something."
   },
