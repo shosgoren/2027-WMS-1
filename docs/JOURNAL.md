@@ -65,3 +65,13 @@
 - T-008l: protected.test kök nedeni (git spawn 2092→~1550, 4×paralel 5 tur yeşil). İnceleme BLOCKER 2 · MAJOR 2: check:scope gevşemişti (geri alma, sahte merge, uç öneki, iç merge konusu) → kart keşfi değişikliği geri, taban birleştirme düşürmesi yalnızca dar biçimde; negatif testler.
 - T-116c başladı (taban T-116b + T-117).
 - Yeni kayıtlar: T-119a, T-127b kartları; T-115c/T-127/T-117b/T-119 ekleri; T-105, T-129, T-131 notları; Q-34, A-60, A-61.
+
+## 2026-10-06 04:45Z — Supervisor turu
+- E-03 sürüyor (04:42Z koşuları 3 s'de logsuz FAIL). Birleştirme yok.
+- T-008l HAZIR @eea351e: check:scope gevşemesi tamamen geri alındı (scope.mjs/cards.mjs c181ac5 ile birebir), A–D saldırıları negatif testlerle FAIL, protected.test spawn azaltma + SHA anahtarlı fileAtRef önbelleği; yeniden inceleme 0·0·1 (önceden var olan revParse MINOR → T-008m adayı).
+- T-115c 932dab0 (son kontrol 0·0·1 kapandı; queue 52/52) — verify yalnızca protected.test yük zaman aşımı; düşük yükte tekrar.
+- T-127 yeniden inceleme 0·1·5: MAJOR-1 kapandı; yeni MAJOR saate bağlı üretim guard testi (dakika sınırında kırılıyor) → sabit saat; Fly-Client-IP varsayımı → T-105.
+- T-119a 0·1·7 → 0·0·3 (liste probsuz, membershipId, maskEmail); T-119 UI tamam (rol değişimi gerçek DB'de, bağlantı yenilemede yok), inceleme 0·0·3.
+- T-116c 0·1·2 → 0·0·1 (web eylem testi mutasyonla kanıtlandı).
+- T-123 (demo seed) 0·0·4; hesap bağdaştırıcısı T-123a kartına ayrıldı; A-62; T-105/T-106 notları. Ajan trailer'ı yanlış model adıyla yazmıştı → kart dalında amend.
+- Yük notu: load 16–30; protected.test (5 s) ve migrations.int (30 s) zaman aşımları yük kaynaklı, eşikler gevşetilmedi.
