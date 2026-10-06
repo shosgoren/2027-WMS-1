@@ -1033,7 +1033,8 @@ export function createAuth(params: CreateAuthParams): AuthService {
       // Better Auth 1.7.7 `runInBackgroundOrAwait` (create-context.mjs:214): işleyici verilirse gönderim beklenmez. Sıfırlama
       // e-postası kuyruğa yazımı yanıtı geciktirmez; hesap var/yok zamanlama farkı oluşmaz. Hata Better Auth günlükçüsüne
       // gider (`Failed to run background task`) ve `sendResetPassword` ayrıca maskeli loglar (yutulmaz). Süreç Node'dur
-      // (sunucusuz değil), bu yüzden bekleyen söz kaybolmaz.
+      // (sunucusuz değil). SINIR: süreç bu söz çözülmeden kapanırsa (yeniden dağıtım/çökme) uçuştaki gönderim kaybolabilir;
+      // kullanıcı 200 almış olur ama e-posta yazılmaz (yeniden talep eder; e-posta başına hız sınırı A-41 geçerli).
       backgroundTasks: {
         handler: (promise) => {
           void promise;

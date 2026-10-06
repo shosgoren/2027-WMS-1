@@ -47,6 +47,15 @@ describe("buildResetMail", () => {
     expect(JSON.stringify(err.mock.calls)).not.toContain(KEY);
   });
 
+  it("kuyruk başvurusu gönderim anında yakalanır: tutucu hemen boşalsa da istek kendi kuyruğuyla yazar", async () => {
+    const { holder, jobs } = mkHolder();
+    const port = buildResetMail(MAILPIT, holder);
+    const sent = port?.sendResetLink({ to: TO, link: "https://app.example.test/x", locale: "tr" });
+    holder.queue = undefined;
+    await sent;
+    expect(jobs).toHaveLength(1);
+  });
+
   it("gönderim sırasında kuyruk kaybolursa hata fırlatır (sahte başarı yok)", async () => {
     const holder: QueueHolder = mkHolder().holder;
     const port = buildResetMail(MAILPIT, holder);
@@ -95,6 +104,11 @@ describe("createRouteHandler (kuyruk hazırlığı yalnızca sıfırlama isteği
       clock = QUEUE_NEGATIVE_CACHE_MS - 1;
       await t.route(post("request-password-reset"));
       expect(t.getQ).toHaveBeenCalledTimes(1);
+      clock = QUEUE_NEGATIVE_CACHE_MS;
+      const retry = t.route(post("request-password-reset"));
+      await vi.advanceTimersByTimeAsync(QUEUE_PREPARE_TIMEOUT_MS);
+      await retry;
+      expect(t.getQ).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();
     }

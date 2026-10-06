@@ -30,26 +30,27 @@ const logError = (msg: string, error: unknown): void => {
  * alıcıya gönderebiliyor (Resend test kipi/`disabled` → false).
  */
 export function buildResetMail(env: EnvLike, holder: QueueHolder): ResetMailPort | undefined {
-  let base: ReturnType<typeof createResetMailPort>;
+  let mailConfig: ReturnType<typeof loadMailConfig>;
+  let sealer: ReturnType<typeof createSealer>;
   try {
-    const mailConfig = loadMailConfig(env);
+    mailConfig = loadMailConfig(env);
     assertMailModeAllowed(mailConfig, env.WMS_ENV?.trim());
-    const sealer = createSealer(env.QUEUE_SEAL_KEY);
-    const queue: EnqueueOnly = {
-      enqueuePlatform: (job) => {
-        const q = holder.queue;
-        if (q === undefined) return Promise.reject(new AppError("INTERNAL"));
-        return q.enqueuePlatform(job);
-      },
-    };
-    base = createResetMailPort({ mailConfig, queue, sealKey: sealer });
+    sealer = createSealer(env.QUEUE_SEAL_KEY);
   } catch (error) {
     logError("password reset mail disabled: invalid configuration", error);
     return undefined;
   }
+  const portFor = (queue: EnqueueOnly): ReturnType<typeof createResetMailPort> => createResetMailPort({ mailConfig, queue, sealKey: sealer });
+  const probe = portFor({ enqueuePlatform: () => Promise.reject(new AppError("INTERNAL")) });
   return {
-    canDeliver: (recipient) => holder.queue !== undefined && base.canDeliver(recipient),
-    sendResetLink: (input) => base.sendResetLink(input),
+    canDeliver: (recipient) => holder.queue !== undefined && probe.canDeliver(recipient),
+    // Kuyruk başvurusu gönderim anında YAKALANIR: paylaşılan tutucu sonradan (başka isteğin hazırlığıyla) boşalsa da bu istek
+    // kendi kuyruğuyla yazar. Kuyruk yoksa hata (sahte başarı yok).
+    sendResetLink: (input) => {
+      const queue = holder.queue;
+      if (queue === undefined) return Promise.reject(new AppError("INTERNAL"));
+      return portFor(queue).sendResetLink(input);
+    },
   };
 }
 
