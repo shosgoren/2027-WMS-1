@@ -12,6 +12,7 @@ Hata kodları: `VALIDATION_FAILED`, `UNAUTHENTICATED`, `FORBIDDEN`, `TENANT_SUSP
 - Domain/uygulama hatası `AppError` (`packages/shared/src/errors.ts`) ya da ondan türeyen sınıfla fırlatılır; kod yalnızca `ERROR_CODES` listesindendir. Listede olmayan kod, onu ilk kullanan kartta hem `ERROR_CODES`/`HTTP_STATUS`'a hem bu bölüme eklenir.
 - Yanıt gövdesi: `{ error: { code, detail?, messageKey, retryable } }`; HTTP durumu koddan (`HTTP_STATUS`). İç mesaj, SQL, SQLSTATE, yığın gövdeye girmez; kök neden yalnızca `cause` ile loga gider (G-07: yutulmaz).
 - `mapAccessError` (`packages/domain/src/identity/access.ts`) tenant erişim/komut sarmalayıcısından çıkan her hatayı eşler: `AppError` olduğu gibi geçer; `MembershipError` `FORBIDDEN`/`TENANT_SUSPENDED`/`TENANT_CLOSING` aynı kodla `AppError` olur; SQLSTATE `40P01`/`40001` → `VERSION_CONFLICT` + `retryable: true` (ADR-016 §11); **tanınmayan her şey** (diğer `MembershipError` kodları ve komut içinde düz `Error` dahil) → `INTERNAL` (500), orijinal hata `cause`'da. Bu yüzden komut gövdesindeki iş kuralı reddi `AppError` değilse istemciye `INTERNAL` olarak döner.
+- Öncelik kuralı (varlık oracle'ı yok): RLS altında görünmeyen ya da başka tenant'a ait kaynak (lokasyon, belge…) için `LOCATION_LOCKED`/423 gibi duruma özgü kodlar değil her zaman `NOT_FOUND` döner; duruma özgü kod yalnızca kaynak çağıranın tenant'ında görünürken kullanılır.
 - i18n anahtarı: `errors.<kod>`, ayrıntılıysa `errors.<kod>.<ayrıntı>` (küçük harf; `errorMessageKey`).
 
 #### Kodda tanımlı `AppError` kodları (Faz 1)
