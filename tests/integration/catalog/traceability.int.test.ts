@@ -4,6 +4,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
 import { sql } from "../../../packages/db/node_modules/drizzle-orm/index.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { migrateUp } from "../../../packages/db/src/migrate.ts";
 import { createDbClient, withTenant } from "../../../packages/db/src/index.ts";
 import { createTenantContext, DB_CLIENT_SETTINGS, type DbClient } from "../../../packages/db/src/client.ts";
 import { AppError } from "../../../packages/shared/src/errors.ts";
@@ -217,12 +218,9 @@ describe("seri", () => {
 
   describe("tenant geneli kapsam bayrağı (sunucu yapılandırmasından enjekte; Q-39, Q-59)", () => {
     const ON = { env: { SERIAL_SCOPE_TENANT_ENABLED: "true" } } as const;
-    const idx = `serials_t239_${rnd()}`;
-    const dropIdx = (): Promise<unknown> => adm.query(`DROP INDEX IF EXISTS public.${idx}`);
     const countByNo = async (no: string, w: TenantWorld = A): Promise<number | null> => (await adm.query("SELECT 1 FROM public.serials WHERE tenant_id = $1 AND serial_no = $2", [w.tenantId, no])).rowCount;
 
     it("indeks yokken bayrak açık: VALIDATION_FAILED, seri oluşmaz (fail-closed)", async () => {
-      await dropIdx();
       const s1 = await mkItem(A, "SERIAL");
       const no = `S${rnd()}`;
       await expectFail(registerSerial(admin(A), { itemId: s1, serialNo: no }, ON), "VALIDATION_FAILED");
@@ -265,30 +263,82 @@ describe("seri", () => {
       }
     });
 
+    it("kısmi indeks (tenant'a özel ya da ilgisiz koşullu) bayrak açıkken yeterli DEĞİL: VALIDATION_FAILED (indpred)", async () => {
+      const s1 = await mkItem(A, "SERIAL");
+      const empty = await seedWorld(adm, reg, "D");
+      const tenantIdx = `serials_t239t_${rnd()}`;
+      const otherIdx = `serials_t239o_${rnd()}`;
+      // Tenant'a özel kısmi indeks: A bu indeksin kapsamında değil, ama A için de açık bayrak geçmemeli.
+      await adm.query(`CREATE UNIQUE INDEX ${tenantIdx} ON public.serials (tenant_id, serial_no) WHERE tenant_id = '${empty.tenantId}'`);
+      try {
+        for (const w of [A, empty]) {
+          const item = w === A ? s1 : await mkItem(w, "SERIAL");
+          const no = `S${rnd()}`;
+          await expectFail(registerSerial(admin(w), { itemId: item, serialNo: no }, ON), "VALIDATION_FAILED");
+          expect(await countByNo(no, w)).toBe(0);
+        }
+        await adm.query(`CREATE UNIQUE INDEX ${otherIdx} ON public.serials (tenant_id, serial_no) WHERE serial_no LIKE 'T239X%'`);
+        const no = `S${rnd()}`;
+        await expectFail(registerSerial(admin(A), { itemId: s1, serialNo: no }, ON), "VALIDATION_FAILED");
+        expect(await countByNo(no)).toBe(0);
+      } finally {
+        await adm.query(`DROP INDEX IF EXISTS public.${tenantIdx}`);
+        await adm.query(`DROP INDEX IF EXISTS public.${otherIdx}`);
+      }
+    });
+
     describe("indeks varken", () => {
+      // Ana veritabanında önceki testler ürünler arası kopya seri bıraktığından tam UNIQUE (tenant_id, serial_no)
+      // kurulamaz; olumlu yol geçici, temiz bir veritabanında koşar (veri silinmez, diğer testlerin varsayımı bozulmaz).
+      const scratch = `wms_t239_${rnd()}`;
+      const urlFor = (u: string, db: string, creds?: string): string => {
+        const x = new URL(u);
+        x.pathname = `/${db}`;
+        if (creds !== undefined) {
+          const c = new URL(creds);
+          x.username = c.username;
+          x.password = c.password;
+        }
+        return x.toString();
+      };
+      let sApp: DbClient;
+      let sAdm: pg.Client;
       let C: TenantWorld;
+      const sAdmin = () => ({ db: sApp, principal: { userId: C.ownerUserId, mfaVerified: true }, tenantSlug: C.slug });
+      const sItem = async (): Promise<string> => (await createItem(sAdmin(), { code: `T${rnd()}`, name: "İzlenebilirlik", baseUnitId: C.unitId, trackingMode: "SERIAL" })).itemId;
+      const sCount = async (no: string): Promise<number | null> => (await sAdm.query("SELECT 1 FROM public.serials WHERE tenant_id = $1 AND serial_no = $2", [C.tenantId, no])).rowCount;
       beforeAll(async () => {
-        // Önceki testler A'da ürünler arası kopya bıraktığından tekil indeks temiz bir tenant'ta kurulur.
-        C = await seedWorld(adm, reg, "C");
-        await adm.query(`CREATE UNIQUE INDEX ${idx} ON public.serials (tenant_id, serial_no) WHERE tenant_id = '${C.tenantId}'`);
-      });
-      afterAll(dropIdx);
+        await adm.query(`CREATE DATABASE ${scratch}`);
+        await migrateUp({ url: urlFor(env.databaseUrlDirect, scratch) });
+        sAdm = new pg.Client({ connectionString: urlFor(env.databaseUrlDirect, scratch) });
+        sAdm.on("error", () => undefined);
+        await sAdm.connect();
+        // wms_app doğrudan (pooler yalnızca ana veritabanını bilir); kimlik bilgisi app URL'sinden.
+        sApp = createDbClient({ url: urlFor(env.databaseUrlDirect, scratch, env.databaseUrl), poolMax: DB_CLIENT_SETTINGS.poolMax, prepare: DB_CLIENT_SETTINGS.prepare });
+        C = await seedWorld(sAdm, newRegistry(), "C");
+        await sAdm.query("CREATE UNIQUE INDEX serials_tenant_serial_no_t239 ON public.serials (tenant_id, serial_no)");
+      }, 120_000);
+      afterAll(async () => {
+        await sApp?.close().catch(() => undefined);
+        await sAdm?.end().catch(() => undefined);
+        await adm.query(`DROP DATABASE IF EXISTS ${scratch} WITH (FORCE)`).catch(() => undefined);
+      }, 60_000);
 
       it("açıkken ardışık ürünler arası tekrar TRACKING_VIOLATION", async () => {
-        const s1 = await mkItem(C, "SERIAL");
-        const s2 = await mkItem(C, "SERIAL");
+        const s1 = await sItem();
+        const s2 = await sItem();
         const no = `S${rnd()}`;
-        await registerSerial(admin(C), { itemId: s1, serialNo: no }, ON);
-        await expectFail(registerSerial(admin(C), { itemId: s2, serialNo: no }, ON), "TRACKING_VIOLATION");
-        expect(await countByNo(no, C)).toBe(1);
+        await registerSerial(sAdmin(), { itemId: s1, serialNo: no }, ON);
+        await expectFail(registerSerial(sAdmin(), { itemId: s2, serialNo: no }, ON), "TRACKING_VIOLATION");
+        expect(await sCount(no)).toBe(1);
       });
 
       it("açıkken iki farklı ürün için aynı serialNo eşzamanlı: yalnızca biri başarılı", async () => {
         for (let i = 0; i < 8; i++) {
-          const s1 = await mkItem(C, "SERIAL");
-          const s2 = await mkItem(C, "SERIAL");
+          const s1 = await sItem();
+          const s2 = await sItem();
           const no = `S${rnd()}`;
-          const res = await Promise.allSettled([registerSerial(admin(C), { itemId: s1, serialNo: no }, ON), registerSerial(admin(C), { itemId: s2, serialNo: no }, ON)]);
+          const res = await Promise.allSettled([registerSerial(sAdmin(), { itemId: s1, serialNo: no }, ON), registerSerial(sAdmin(), { itemId: s2, serialNo: no }, ON)]);
           expect(res.filter((r) => r.status === "fulfilled")).toHaveLength(1);
           const rej = res.find((r) => r.status === "rejected") as PromiseRejectedResult;
           expect((rej.reason as AppError).code).toBe("TRACKING_VIOLATION");
@@ -296,13 +346,13 @@ describe("seri", () => {
       });
 
       it("kapılı: advisory kilit tutulurken registerSerial bekler (kilit kaldırılırsa kırmızı)", async () => {
-        const item = await mkItem(C, "SERIAL");
+        const item = await sItem();
         const no = `S${rnd()}`;
-        await adm.query("BEGIN");
+        await sAdm.query("BEGIN");
         try {
-          await adm.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`serial:${C.tenantId}:${no}`]);
+          await sAdm.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`serial:${C.tenantId}:${no}`]);
           let settled = false;
-          const p = registerSerial(admin(C), { itemId: item, serialNo: no }, ON).then(
+          const p = registerSerial(sAdmin(), { itemId: item, serialNo: no }, ON).then(
             () => {
               settled = true;
             },
@@ -312,10 +362,10 @@ describe("seri", () => {
           );
           await delay(500);
           expect(settled).toBe(false);
-          await adm.query("COMMIT");
+          await sAdm.query("COMMIT");
           await p;
         } catch (e) {
-          await adm.query("ROLLBACK");
+          await sAdm.query("ROLLBACK");
           throw e;
         }
       });

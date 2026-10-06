@@ -7,10 +7,10 @@
 //   `process.env` okumaz; onboarding/workspace.ts deseni, Q-59). `input` bayrak taşımaz: bilinmeyen anahtar
 //   VALIDATION_FAILED ile reddedilir. `config` verilmezse bayrak kapalıdır. Yalnızca tam `"true"` açar.
 //   Açıkken tenant+seri no için `pg_advisory_xact_lock` ile yarış serileşir ve ürünler arası tekrar komutta denetlenir.
-//   FAIL-CLOSED: bayrak açıkken DB'de tenant geneli tekil indeks (anahtar sütunlar tam `tenant_id, serial_no`; geçerli,
-//   hazır, anlık, ifade içermeyen) yoksa komut VALIDATION_FAILED ile reddedilir. Katalog sorgusu her çağrıda yapılır
-//   (önbellek yok). İndeks migration'ı bu kartın kapsamı değildir (Q-59). Kısmi indeksin koşulu burada doğrulanamaz;
-//   koşulun kapsamı indeksi ekleyen migration'ın sorumluluğudur.
+//   FAIL-CLOSED: bayrak açıkken DB'de tenant geneli tekil TAM indeks (anahtar sütunlar tam `tenant_id, serial_no`; geçerli,
+//   hazır, anlık, ifade ve koşul (`indpred`) içermeyen) yoksa komut VALIDATION_FAILED ile reddedilir. Katalog sorgusu her çağrıda yapılır
+//   (önbellek yok). İndeks migration'ı bu kartın kapsamı değildir (Q-59). KISMİ indeks her zaman reddedilir (koşulun
+//   tenant kapsamı burada doğrulanamaz; izin listesi boştur, Q-59 yanıtıyla ayrı kartta ele alınır).
 // - `SERIAL`: lot verilmez; `LOT_AND_SERIAL`: lot zorunlu ve aynı ürünün lotu. Tekrar → `TRACKING_VIOLATION`.
 import { sql } from "drizzle-orm";
 import { appendAudit } from "@wms/db";
@@ -36,13 +36,13 @@ function serialScopeTenantEnabled(config: SerialCommandConfig | undefined): bool
 
 const INPUT_KEYS: ReadonlySet<string> = new Set(["itemId", "serialNo", "lotId"]);
 
-/** Tenant geneli tekil indeks var mı (sütun kümesi tam `tenant_id, serial_no`). */
+/** Tenant geneli tekil indeks var mı (tam, koşulsuz; sütun kümesi tam `tenant_id, serial_no`). */
 async function tenantSerialIndexExists(tx: AccessTx): Promise<boolean> {
   const rows = await tx.execute<{ x: number }>(
     sql`SELECT 1 AS x FROM pg_catalog.pg_index i
          WHERE i.indrelid = 'public.serials'::regclass
            AND i.indisunique AND i.indisvalid AND i.indisready AND i.indislive AND i.indimmediate
-           AND i.indexprs IS NULL AND i.indnatts = 2 AND i.indnkeyatts = 2
+           AND i.indexprs IS NULL AND i.indpred IS NULL AND i.indnatts = 2 AND i.indnkeyatts = 2
            AND (SELECT array_agg(a.attname::text ORDER BY a.attname)
                   FROM pg_catalog.pg_attribute a
                  WHERE a.attrelid = i.indrelid AND a.attnum = ANY (i.indkey::int2[])) = ARRAY['serial_no', 'tenant_id']
