@@ -652,24 +652,60 @@ const STOCK_WRITE_SQL_RE = new RegExp(
  * Değer parametresi (`VALUES (${a})`, `WHERE id = ${y}`) tablo konumunu dinamik yapmaz; önceki (iv) bu yüzden stok tablosu okuyan her dosyada
  * başka tabloya yazmayı yanlış pozitif sayıyordu (katalog/depo dalları).
  */
-/** Tablo adı belirteci: harf/rakam/`_`/`.`/`"` dizisi; içinde ifade (`\u0000`) varsa tablo konumu dinamiktir (`"${t}"`, `public."${t}"`, `stock_${t}`). */
-const DYN_TABLE_TOKEN = `(?:ONLY\\s+)?[\\w."]*\u0000`;
-const STOCK_WRITE_DYN_RE = new RegExp(`(?<![\\w])(?:INSERT\\s+INTO|UPDATE|DELETE\\s+FROM|MERGE\\s+INTO|TRUNCATE(?:\\s+TABLE)?)\\s+${DYN_TABLE_TOKEN}`, "i");
-const STOCK_FROM_START_RE = /(?<![\w])(?:FROM|JOIN)\s+/gi;
-/** `FROM`/`JOIN` listesinin bittiği yer (değer parametreleri bu anahtar sözcüklerden sonra gelir; tablo konumu sayılmaz). */
-const STOCK_FROM_END_RE = /(?<![\w])(?:WHERE|ON|SET|VALUES|GROUP|ORDER|HAVING|LIMIT|OFFSET|FOR|USING|RETURNING|SELECT|WINDOW|UNION|INTERSECT|EXCEPT)(?![\w])|\)/i;
+/** Tablo adı belirteci: isteğe bağlı `ONLY`, noktalı önekler (nokta etrafında boşluk olabilir: `public . ${t}`), ad; içinde ifade (`\u0000`) varsa konum dinamiktir. */
+const DYN_TABLE_TOKEN = `(?:ONLY\\s+)?(?:[\\w"]+\\s*\\.\\s*)*[\\w"]*\u0000`;
+const STOCK_WRITE_DYN_RE = new RegExp(`(?<![\\w])(?:INSERT\\s+INTO|UPDATE|DELETE\\s+FROM|MERGE\\s+INTO)\\s+${DYN_TABLE_TOKEN}`, "i");
+const STOCK_WRITE_VERB_RE = /(?<![\w])(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM|MERGE\s+INTO|TRUNCATE)\s/i;
+const STOCK_LIST_START_RE = /(?<![\w])(?:FROM|JOIN|USING)\s+/gi;
+const STOCK_TRUNCATE_START_RE = /(?<![\w])TRUNCATE(?:\s+TABLE)?\s+/gi;
+const STOCK_TRUNCATE_END_RE = /(?<![\w])(?:RESTART|CONTINUE|CASCADE|RESTRICT)(?![\w])/i;
+/** En dış düzeyde tablo listesini bitiren anahtar sözcükler (değer parametreleri bunlardan sonra gelir; tablo konumu sayılmaz). */
+const STOCK_LIST_END_RE = /^(?:WHERE|ON|USING|SET|VALUES|RETURNING|GROUP|ORDER|HAVING|LIMIT|OFFSET|FOR|WINDOW|UNION|INTERSECT|EXCEPT)(?![\w])/i;
 const DYN_FIRST_RE = new RegExp(`^${DYN_TABLE_TOKEN}`, "i");
 const DYN_COMMA_RE = new RegExp(`,\\s*${DYN_TABLE_TOKEN}`, "i");
-/** `FROM a, ${t} b` / `JOIN ${t}` / `FROM "${t}"`: FROM/JOIN listesinde tablo konumu dinamik mi (kilit için). @param {string} t */
+/** Liste parçasında (virgüllü) bir öğenin tablo konumu dinamik mi. @param {string} seg */
+const listSegmentDynamic = (seg) => DYN_FIRST_RE.test(seg) || DYN_COMMA_RE.test(seg);
+/**
+ * `FROM`/`JOIN`/`USING` listesinde tablo konumu dinamik mi (`FROM a, ${t} b`, `JOIN public . ${t}`, `FROM d, (SELECT 1) s, ${t}`).
+ * Parantez dengesiyle taranır: alt sorgu içeriği atlanır (kendi FROM'u ayrıca taranır), en dış düzeyde anahtar sözcük gelince liste biter.
+ * @param {string} t
+ */
 const fromListDynamic = (t) => {
-  for (const m of t.matchAll(STOCK_FROM_START_RE)) {
+  for (const m of t.matchAll(STOCK_LIST_START_RE)) {
     const rest = t.slice((m.index ?? 0) + m[0].length);
-    const end = rest.search(STOCK_FROM_END_RE);
-    const seg = end === -1 ? rest : rest.slice(0, end);
-    if (DYN_FIRST_RE.test(seg) || DYN_COMMA_RE.test(seg)) return true;
+    let depth = 0;
+    let seg = "";
+    for (let i = 0; i < rest.length; i++) {
+      const ch = rest[i];
+      if (ch === "(") {
+        if (depth === 0) seg += "(";
+        depth++;
+      } else if (ch === ")") {
+        if (depth === 0) break;
+        depth--;
+        if (depth === 0) seg += ")";
+      } else if (depth === 0) {
+        if (/[A-Za-z]/.test(ch ?? "") && !/[\w"]/.test(rest[i - 1] ?? " ") && STOCK_LIST_END_RE.test(rest.slice(i))) break;
+        seg += ch;
+      }
+    }
+    if (listSegmentDynamic(seg)) return true;
   }
   return false;
 };
+/** `TRUNCATE a, ${t}`: virgüllü listenin her öğesi. @param {string} t */
+const truncateDynamic = (t) => {
+  for (const m of t.matchAll(STOCK_TRUNCATE_START_RE)) {
+    const rest = t.slice((m.index ?? 0) + m[0].length);
+    const end = rest.search(STOCK_TRUNCATE_END_RE);
+    if (listSegmentDynamic(end === -1 ? rest : rest.slice(0, end))) return true;
+  }
+  return false;
+};
+/** @param {string} t */
+const dynamicWrite = (t) => STOCK_WRITE_DYN_RE.test(t) || truncateDynamic(t) || (STOCK_WRITE_VERB_RE.test(t) && fromListDynamic(t));
+/** @param {string} t */
+const dynamicWriteSql = (t) => dynamicWrite(t) || dynamicWrite(stripSqlComments(t));
 /** @param {string} t */
 const fromListDynamicSql = (t) => fromListDynamic(t) || fromListDynamic(stripSqlComments(t));
 const STOCK_WRITE_TABLE_ANY_RE = new RegExp(`(?<![\\w])${tableRe(STOCK_WRITE_TABLES)}`, "i");
@@ -758,7 +794,7 @@ const stockSqlGuard = {
     /** @param {any} e */
     const isPgTableRef = (e) => {
       const x = unwrap(e);
-      return (x?.type === "Identifier" && x.name === "pgTable") || (x?.type === "MemberExpression" && !x.computed && x.property.name === "pgTable");
+      return (x?.type === "Identifier" && (x.name === "pgTable" || pgTableAliases.has(x.name))) || (x?.type === "MemberExpression" && !x.computed && x.property.name === "pgTable");
     };
     /** `sql.identifier("…")`/`pgTable("…")` zaten raporlanan ilk argüman düğümleri (tek ihlal = tek rapor). @type {Set<any>} */
     const coveredArgs = new Set();
@@ -797,7 +833,7 @@ const stockSqlGuard = {
       if (testSql(STOCK_WRITE_TABLE_ANY_RE, text)) seen.writeTable = true;
       if (testSql(STOCK_LOCK_TABLE_RE, text)) seen.lockTable = true;
       if (text.includes("\u0000")) {
-        if (!writeAllowed && testSql(STOCK_WRITE_DYN_RE, text)) dynamicVerbs.push({ node, kind: "write" });
+        if (!writeAllowed && dynamicWriteSql(text)) dynamicVerbs.push({ node, kind: "write" });
         if (!isLockFile && testSql(STOCK_LOCK_SQL_RE, text) && fromListDynamicSql(text)) dynamicVerbs.push({ node, kind: "lock" });
       }
       if (!isLockFile && testSql(STOCK_LOCK_SQL_RE, text) && testSql(STOCK_LOCK_TABLE_RE, text)) report(node, "lock");

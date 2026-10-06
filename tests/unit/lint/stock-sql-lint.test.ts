@@ -18,7 +18,9 @@ const AUTH_INDEX = "packages/auth/src/index.ts";
 
 let eslint: ESLint;
 beforeAll(async () => {
-  eslint = new ESLint({ cwd: REPO_ROOT });
+  // T238_ESLINT_CONFIG: MAIN_VIOLATIONS kümesinin `origin/main` kuralında da ihlal verdiğini kanıtlamak için (bkz. küme yorumu); varsayılan repo yapılandırması.
+  const override = process.env.T238_ESLINT_CONFIG;
+  eslint = new ESLint({ cwd: REPO_ROOT, ...(override === undefined || override === "" ? {} : { overrideConfigFile: path.resolve(override) }) });
   // İlk lintText yapılandırmayı yükler (yük altında saniyeler sürer); ısınma beforeAll zaman aşımında (60 sn) yapılır, vaka sınırında değil.
   await eslint.lintText("export {};\n", { filePath: at("packages/domain/src/__stock_sql_warmup__.ts"), warnIgnored: true });
 }, 60_000);
@@ -312,6 +314,9 @@ describe("T-238: pgTable takma adı", () => {
     expect((await hits('import { pgTable } from "drizzle-orm/pg-core";\nlet tbl: typeof pgTable;\ntbl = pgTable;\nexport const t = tbl("reservations", {});\n', CONSISTENCY)).length).toBeGreaterThanOrEqual(1);
     expect((await hits('import * as pg from "drizzle-orm/pg-core";\nconst tbl = pg.pgTable;\nexport const t = tbl("stock_ledger", {});\n', CONSISTENCY)).length).toBeGreaterThanOrEqual(1);
     expect((await hits('import { pgTable } from "drizzle-orm/pg-core";\nexport const t = () => tbl("stock_ledger", {});\nconst tbl = pgTable;\n', CONSISTENCY)).length).toBeGreaterThanOrEqual(1);
+    // zincirleme takma ad
+    expect((await hits('import { pgTable } from "drizzle-orm/pg-core";\nconst a = pgTable;\nconst b = a;\nexport const t = b("stock_balances", {});\n', CONSISTENCY)).length).toBeGreaterThanOrEqual(1);
+    expect((await hits('import { pgTable as p } from "drizzle-orm/pg-core";\nlet b: typeof p;\nb = p;\nexport const t = b("reservations", {});\n', CONSISTENCY)).length).toBeGreaterThanOrEqual(1);
     // Takma ad stok olmayan tabloda ve başka çağrılarda temiz.
     expect(await hits('import { pgTable } from "drizzle-orm/pg-core";\nconst tbl = pgTable;\nexport const t = tbl("widgets", {});\nexport const u = other("stock_ledger");\ndeclare function other(x: string): void;\n', CONSISTENCY)).toEqual([]);
   });
@@ -430,6 +435,86 @@ describe("T-238: (iv) main'deki dinamik biçimler korunur (inceleme BLOCKER; tab
   });
   it("değer parametreleri tablo konumu değildir: VALUES/WHERE/SET/ON sonrası ${} temiz", async () => {
     const code = `${READ}export const q = (a: string, b: string) => \`SELECT 1 FROM public.lots l JOIN public.items i ON i.id = \${a} WHERE l.id = \${b}, \${a} FOR SHARE\`;\nexport const w = (a: string, b: string) => \`INSERT INTO public.warehouses (c, n) VALUES (\${a}, \${b})\`;\n`;
+    expect(await hits(code, CONSISTENCY)).toEqual([]);
+  });
+});
+
+// =================================================================================================================================
+// KALICI REGRESYON GÜVENCESİ (T-238 kart madde 9, G-11). MAIN_VIOLATIONS: `origin/main` (274db5f) kuralında İHLAL veren dinamik/atlatma biçimleri;
+// bu dalda da ihlal vermek ZORUNDADIR. MUST_BE_CLEAN: meşru SQL (katalog/depo/değer parametreleri), temiz kalmak ZORUNDADIR.
+// KÜMELERİ GENİŞLETMEK SERBESTTİR, ELEMAN ÇIKARMAK YASAKTIR (kural gevşemesi sayılır; korunan inceleme gerekir).
+// Her MAIN_VIOLATIONS elemanının main'de de ihlal verdiği şöyle doğrulanır:
+//   git show origin/main:eslint.config.mjs > eslint.main.config.mjs   (geçici, commit'e girmez)
+//   T238_ESLINT_CONFIG=eslint.main.config.mjs pnpm exec vitest run tests/unit/lint/stock-sql-lint.test.ts -t "MAIN_VIOLATIONS"
+// =================================================================================================================================
+const RD = 'export const r = (a: string) => `SELECT quantity FROM public.stock_balances WHERE tenant_id = ${a}`;\n';
+const fn = (sqlText: string): string => `${RD}export const q = (t: string, v: string) => \`${sqlText}\`;\n`;
+const MAIN_VIOLATIONS: [string, string][] = [
+  // inceleme turu 3 (@67eafb2)
+  ["UPDATE public . ${t}", fn("UPDATE public . ${t} SET a = 1")],
+  ['UPDATE "public" . "${t}"', fn('UPDATE "public" . "${t}" SET a = 1')],
+  ["FROM public . ${t} FOR UPDATE", fn("SELECT 1 FROM public . ${t} FOR UPDATE")],
+  ["FROM d, (SELECT 1) s, ${t} b FOR UPDATE", fn("SELECT 1 FROM d, (SELECT 1) s, ${t} b FOR UPDATE")],
+  ["TRUNCATE documents, ${t}", fn("TRUNCATE documents, ${t}")],
+  // inceleme turu 2 (@2608854)
+  ['UPDATE "${t}"', fn('UPDATE "${t}" SET a = 1')],
+  ["FROM documents d, ${t} b FOR UPDATE", fn("SELECT 1 FROM documents d, ${t} b FOR UPDATE")],
+  ['UPDATE public."${t}"', fn('UPDATE public."${t}" SET a = 1')],
+  ['UPDATE "${…}" + { table: "stock_balances" }', 'export const m = { table: "stock_balances" };\nexport const q = (t: string) => `UPDATE "${t}" SET a = 1`;\n'],
+  ['["stock_balances"] + UPDATE "${…}"', 'export const m = ["stock_balances"];\nexport const q = (t: string) => `UPDATE "${t}" SET a = 1`;\n'],
+  ["FROM a, ${…} FOR UPDATE + { table }", 'export const m = { table: "reservations" };\nexport const q = (t: string) => `SELECT 1 FROM a, ${t} FOR UPDATE`;\n'],
+  // önceki rapordaki dinamik biçimler
+  ["UPDATE ${T}", fn("UPDATE ${t} SET a = 1")],
+  ["sql.raw(UPDATE + T)", `${RD}import { sql } from "drizzle-orm";\nexport const q = (t: string) => sql.raw("UPDATE " + t);\n`],
+  ["FROM ${T} WHERE … FOR UPDATE", fn("SELECT 1 FROM ${t} WHERE id = 1 FOR UPDATE")],
+  ["MERGE INTO ${T}", fn("MERGE INTO ${t} USING x ON true WHEN MATCHED THEN DELETE")],
+  ["DELETE FROM public.${T}", fn("DELETE FROM public.${t}")],
+  ["INSERT INTO ${sql.identifier(t)}", `${RD}import { sql } from "drizzle-orm";\nexport const q = (t: string) => sql\`INSERT INTO \${sql.identifier(t)} (a) VALUES (1)\`;\n`],
+  ["JOIN ${T} FOR SHARE", fn("SELECT 1 FROM x JOIN ${t} ON true FOR SHARE")],
+  ["UPDATE stock_${t}", fn("UPDATE stock_${t} SET a = 1")],
+  ["UPDATE /**/ ${t}", fn("UPDATE /**/ ${t} SET a = 1")],
+  ["FROM ${T}, x FOR UPDATE", fn("SELECT 1 FROM ${t}, x FOR UPDATE")],
+  ["FROM ONLY ${T} FOR UPDATE", fn("SELECT 1 FROM ONLY ${t} FOR UPDATE")],
+  ['FROM "${t}" FOR SHARE', fn('SELECT 1 FROM "${t}" FOR SHARE')],
+  ["FROM public.${T} FOR SHARE", 'const T = "reservations";\nexport const q = `SELECT 1 FROM public.${T} FOR SHARE`;\n'],
+  ["DELETE FROM a USING ${t}", fn("DELETE FROM a USING ${t} WHERE a.id = 1")],
+  ["UPDATE items SET … FROM ${t}", fn("UPDATE public.items SET a = 1 FROM ${t} WHERE true")],
+  ["MERGE INTO a USING ${t}", fn("MERGE INTO a USING ${t} ON true WHEN MATCHED THEN DELETE")],
+  // main'in statik kuralları (a)/(b) ve (c)
+  ["UPDATE stock_balances (statik)", 'export const q = "UPDATE stock_balances SET quantity = 0";\n'],
+  ["FOR UPDATE stock_balances (statik)", 'export const q = "SELECT 1 FROM stock_balances FOR UPDATE";\n'],
+  ["sql.identifier(stok)", 'import { sql } from "drizzle-orm";\nexport const q = sql.identifier("stock_balances");\n'],
+  ['qb.for("update")', 'export const f = (qb: any) => qb.for("update");\n'],
+];
+const MUST_BE_CLEAN: [string, string][] = [
+  ["FROM a JOIN b ON b.x = ${v} FOR UPDATE", fn("SELECT 1 FROM a JOIN b ON b.x = ${v} FOR UPDATE")],
+  ["UPDATE items SET name = ${v} FROM stock_balances s WHERE …", fn("UPDATE public.items i SET name = ${v} FROM public.stock_balances s WHERE s.item_id = i.id AND s.tenant_id = ${t}")],
+  ["CTE stok SELECT + UPDATE items", fn("WITH s AS (SELECT item_id FROM public.stock_balances WHERE tenant_id = ${t}) UPDATE public.items SET name = ${v} WHERE id IN (SELECT item_id FROM s)")],
+  ["VALUES (${v}) … DO UPDATE SET b = ${t}", fn("INSERT INTO public.items (a) VALUES (${v}) ON CONFLICT (a) DO UPDATE SET b = ${t}")],
+  ["lots FOR SHARE", fn("SELECT id FROM public.lots WHERE id = ${v} FOR SHARE")],
+  ["katalog: INSERT INTO public.items", fn("INSERT INTO public.items (tenant_id, code) VALUES (${t}, ${v})")],
+  ["katalog: UPDATE public.items", fn("UPDATE public.items SET name = ${v} WHERE id = ${t}")],
+  ["katalog: serials SELECT + lots FOR SHARE", 'export const k = "SELECT id FROM public.serials WHERE lot_id IS NULL";\nexport const l = (a: string) => `SELECT id FROM public.lots WHERE id = ${a} FOR SHARE`;\n'],
+  ["depo: INSERT INTO public.warehouses", fn("INSERT INTO public.warehouses (code, name) VALUES (${t}, ${v})")],
+  ["depo: UPDATE public.locations", fn("UPDATE public.locations SET name = ${v} WHERE id = ${t}")],
+  ["depo: DELETE FROM public.locations", fn("DELETE FROM public.locations WHERE id = ${t}")],
+  ["alt sorgu içinde değer parametresi", fn("SELECT 1 FROM a WHERE x IN (SELECT y FROM b WHERE z = ${v}) FOR UPDATE")],
+  ["TRUNCATE statik stok dışı", fn("TRUNCATE documents RESTART IDENTITY")],
+  ["JOIN ... USING (col) + parametre", fn("SELECT 1 FROM a JOIN b USING (id) WHERE a.x = ${v} FOR UPDATE")],
+];
+describe("MAIN_VIOLATIONS: main'de ihlal veren biçimler bu dalda da ihlaldir (eleman çıkarmak yasak)", () => {
+  it("küme boş değildir", () => {
+    expect(MAIN_VIOLATIONS.length).toBeGreaterThanOrEqual(31);
+  });
+  it.each(MAIN_VIOLATIONS)("MAIN_VIOLATIONS: %s", async (_n, code) => {
+    expect((await hits(code, CONSISTENCY)).length).toBeGreaterThanOrEqual(1);
+  });
+});
+describe("MUST_BE_CLEAN: meşru SQL temiz kalır (eleman çıkarmak yasak)", () => {
+  it("küme boş değildir", () => {
+    expect(MUST_BE_CLEAN.length).toBeGreaterThanOrEqual(14);
+  });
+  it.each(MUST_BE_CLEAN)("MUST_BE_CLEAN: %s", async (_n, code) => {
     expect(await hits(code, CONSISTENCY)).toEqual([]);
   });
 });
