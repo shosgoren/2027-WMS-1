@@ -36,6 +36,11 @@ const ICONS = {
       <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9ZM14 3v6h6M8 13h8M8 17h5" />
     </Icon>
   ),
+  items: (
+    <Icon>
+      <path d="M21 8 12 3 3 8m18 0-9 5m9-5v8l-9 5m0-8L3 8m9 5v8M3 8v8l9 5" />
+    </Icon>
+  ),
   receive: (
     <Icon>
       <path d="M12 3v12m0 0-4-4m4 4 4-4M5 21h14" />
@@ -80,6 +85,8 @@ export async function TaskMenu({ slug, allowed }: TaskMenuProps) {
     { key: "members", kind: "link", allowed: allowed.usersManage, href: `/t/${encodeURIComponent(slug)}/members` },
     { key: "settings", kind: "link", allowed: allowed.settingsManage, href: `/t/${encodeURIComponent(slug)}/settings` },
     { key: "audit", kind: "link", allowed: allowed.auditView, href: `/t/${encodeURIComponent(slug)}/audit` },
+    // Ürün kartı (T-216): okuma `stock.view` (her rol); sayfa/eylem yetkiyi sunucuda denetler, yazma düğmeleri yetkiye göre kilitlenir.
+    { key: "items", kind: "link", allowed: true, href: `/t/${encodeURIComponent(slug)}/items` },
     { key: "receive", kind: "warehouse-soon", tone: "accent" },
     { key: "issue", kind: "warehouse-soon", tone: "accent" },
     { key: "transfer", kind: "warehouse-soon", tone: "accent" },
