@@ -113,11 +113,13 @@ describe("createWorkspace", () => {
       const m = await c.query("SELECT m.is_owner, r.role_key FROM public.tenant_memberships m JOIN public.membership_roles r ON r.membership_id = m.id WHERE m.tenant_id = $1 AND m.user_id = $2", [r.tenantId, user]);
       expect(m.rows).toEqual([{ is_owner: true, role_key: "TENANT_ADMIN" }]);
       const s = await c.query("SELECT * FROM public.tenant_settings WHERE tenant_id = $1", [r.tenantId]);
-      expect(s.rows[0]).toMatchObject({ sector_template_key: "PACKAGING_SUPPLIES", sector_template_version: 1, onboarding_status: "IN_PROGRESS" });
+      expect(s.rows[0]).toMatchObject({ sector_template_key: "PACKAGING_SUPPLIES", sector_template_version: 2, onboarding_status: "IN_PROGRESS" });
       expect(s.rows[0].terminology["location.bin"]).toBe("Göz Kodu");
       expect(s.rows[0].onboarding_steps.map((x: { key: string; status: string }) => `${x.key}:${x.status}`)).toEqual([
         "settings.applied:PENDING",
         "terminology.applied:PENDING",
+        "units.applied:PENDING",
+        "locations.applied:PENDING",
       ]);
       const a = await c.query("SELECT actor_user_id, change_summary FROM public.audit_logs WHERE tenant_id = $1 AND action = 'tenant.created'", [r.tenantId]);
       expect(a.rows).toHaveLength(1);
@@ -262,16 +264,16 @@ describe("continueOnboarding", () => {
     expect(e.code).toBe("INTERNAL");
     const mid = await admin(async (c) => (await c.query("SELECT onboarding_status, onboarding_steps FROM public.tenant_settings WHERE tenant_id = $1", [ws.tenantId])).rows[0]);
     expect(mid.onboarding_status).toBe("IN_PROGRESS");
-    expect(mid.onboarding_steps.map((s: { key: string; status: string }) => s.status)).toEqual(["DONE", "PENDING"]);
+    expect(mid.onboarding_steps.map((s: { key: string; status: string }) => s.status)).toEqual(["DONE", "PENDING", "PENDING", "PENDING"]);
 
     await admin((c) => c.query("DROP TRIGGER t121_fail_step2 ON public.tenant_settings"));
     const r = await continueOnboarding({ db: app, principal: principal(user), slug: ws.slug });
-    expect(r).toEqual({ status: "COMPLETED", applied: ["terminology.applied"] });
+    expect(r).toEqual({ status: "COMPLETED", applied: ["terminology.applied", "units.applied", "locations.applied"] });
     const again = await continueOnboarding({ db: app, principal: principal(user), slug: ws.slug });
     expect(again).toEqual({ status: "COMPLETED", applied: [] });
     expect(
       await count("SELECT count(*) n FROM public.audit_logs WHERE tenant_id = $1 AND action = 'onboarding.step_completed'", [ws.tenantId]),
-    ).toBe(2);
+    ).toBe(4);
   });
 
   it("üye olmayan kullanıcı → NOT_FOUND (varlık sızmaz)", async () => {

@@ -95,7 +95,7 @@ export interface DemoReseedDeps {
 export function createDemoReseedHandler(deps: DemoReseedDeps): JobHandler<"demo.reseed"> {
   return async (ctx) => {
     try {
-      const r = await reseedDemo({ db: deps.db, accounts: deps.accounts, password: deps.password });
+      const r = await reseedDemo({ db: deps.db, accounts: deps.accounts, password: deps.password, runId: ctx.jobId });
       deps.logger.info("demo.reseed done", {
         jobId: ctx.jobId,
         accountsCreated: r.accountsCreated,
@@ -107,6 +107,10 @@ export function createDemoReseedHandler(deps: DemoReseedDeps): JobHandler<"demo.
         membershipsRemoved: r.memberships.removed,
         ownershipChanged: r.memberships.ownershipChanged,
         settingsChanged: r.settings.nameOrLocaleChanged || r.settings.templateChanged,
+        itemsCreated: r.catalog.itemsCreated,
+        locationsCreated: r.catalog.locationsCreated,
+        stockDocuments: r.catalog.stockDocuments,
+        stockLines: r.catalog.stockLines,
       });
     } catch (err) {
       // Ayrıntı (SQL/parametre) loglanmaz: yalnızca hata adı/kodu (G-09). Hata yutulmaz → pg-boss yeniden dener.
