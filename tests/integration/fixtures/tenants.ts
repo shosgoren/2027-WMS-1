@@ -19,6 +19,16 @@ export interface TenantWorld {
   warehouseId: string;
   rootLocationId: string;
   childLocationId: string;
+  // T-204: katalog + izlenebilirlik.
+  unitId: string;
+  boxUnitId: string;
+  itemId: string;
+  itemTwoId: string;
+  lotId: string;
+  lotTwoId: string;
+  serialId: string;
+  ownerId: string;
+  handlingUnitId: string;
 }
 
 export interface WorldRegistry {
@@ -116,6 +126,51 @@ export async function seedWorld(
     ownerMembershipId,
     warehouseId,
   ]);
+  // T-204: ADET + KOLI birimi, iki ürün (ikisi de LOT_AND_SERIAL), dönüşüm, barkod, sahip, ürün başına lot, seri, taşıma birimi.
+  const unitId = randomUUID();
+  const boxUnitId = randomUUID();
+  const itemId = randomUUID();
+  const itemTwoId = randomUUID();
+  const lotId = randomUUID();
+  const lotTwoId = randomUUID();
+  const serialId = randomUUID();
+  const ownerId = randomUUID();
+  const handlingUnitId = randomUUID();
+  await c.query("INSERT INTO public.units (tenant_id, id, code, name) VALUES ($1, $2, 'ADET', 'Adet'), ($1, $3, 'KOLI', 'Koli')", [
+    tenantId,
+    unitId,
+    boxUnitId,
+  ]);
+  await c.query(
+    `INSERT INTO public.items (tenant_id, id, code, name, base_unit_id, tracking_mode)
+     VALUES ($1, $2, 'U1', 'Urun 1', $4, 'LOT_AND_SERIAL'), ($1, $3, 'U2', 'Urun 2', $4, 'LOT_AND_SERIAL')`,
+    [tenantId, itemId, itemTwoId, unitId],
+  );
+  await c.query("INSERT INTO public.unit_conversions (tenant_id, item_id, unit_id, to_base_factor) VALUES ($1, $2, $3, 12)", [
+    tenantId,
+    itemId,
+    boxUnitId,
+  ]);
+  await c.query("INSERT INTO public.item_barcodes (tenant_id, item_id, unit_id, barcode) VALUES ($1, $2, NULL, $3)", [tenantId, itemId, `BC-${hex(6)}`]);
+  await c.query("INSERT INTO public.inventory_owners (tenant_id, id, code, name) VALUES ($1, $2, 'S1', $3)", [tenantId, ownerId, `T204 Sahip ${label}`]);
+  await c.query("INSERT INTO public.lots (tenant_id, id, item_id, lot_code) VALUES ($1, $2, $4, 'L1'), ($1, $3, $5, 'L1')", [
+    tenantId,
+    lotId,
+    lotTwoId,
+    itemId,
+    itemTwoId,
+  ]);
+  await c.query("INSERT INTO public.serials (tenant_id, id, item_id, serial_no, lot_id) VALUES ($1, $2, $3, 'SN1', $4)", [
+    tenantId,
+    serialId,
+    itemId,
+    lotId,
+  ]);
+  await c.query("INSERT INTO public.handling_units (tenant_id, id, kind, code, location_id) VALUES ($1, $2, 'PALET', 'P1', $3)", [
+    tenantId,
+    handlingUnitId,
+    rootLocationId,
+  ]);
   const world: TenantWorld = {
     label,
     tenantId,
@@ -128,6 +183,15 @@ export async function seedWorld(
     warehouseId,
     rootLocationId,
     childLocationId,
+    unitId,
+    boxUnitId,
+    itemId,
+    itemTwoId,
+    lotId,
+    lotTwoId,
+    serialId,
+    ownerId,
+    handlingUnitId,
   };
   reg.worlds.push(world);
   return world;
@@ -138,6 +202,10 @@ export async function cleanupRegistry(c: pg.Client, reg: WorldRegistry): Promise
   const tenantIds = reg.worlds.map((w) => w.tenantId);
   const userIds = [...reg.worlds.flatMap((w) => [w.ownerUserId, w.memberUserId]), ...reg.extraUsers];
   if (tenantIds.length > 0) {
+    // T-204 tabloları (FK sırası: taşıma birimi [lokasyona bağlı, T-202'den önce] → seri → lot → barkod/dönüşüm → sahip → ürün → birim).
+    for (const t of ["handling_units", "serials", "lots", "item_barcodes", "unit_conversions", "inventory_owners", "items", "units"]) {
+      await c.query(`DELETE FROM public.${t} WHERE tenant_id = ANY($1::uuid[])`, [tenantIds]);
+    }
     // T-202 tabloları (FK sırası: kapsam → kilit → lokasyon [tek ifade; NO ACTION FK ifade sonunda denetlenir] → depo).
     await c.query("DELETE FROM public.membership_warehouse_scopes WHERE tenant_id = ANY($1::uuid[])", [tenantIds]);
     await c.query("DELETE FROM public.location_count_locks WHERE tenant_id = ANY($1::uuid[])", [tenantIds]);
