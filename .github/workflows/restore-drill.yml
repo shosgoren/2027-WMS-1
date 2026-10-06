@@ -1,0 +1,88 @@
+# Etkin WMS — restore tatbikatı (T-130 / A-48, docs/spec/14-reliability-ops.md). KORUNAN DOSYA (PROTOCOL §3b).
+# `scripts/restore-drill.mjs`: staging Neon ana dalından bir zaman noktasına (T) GEÇİCİ dal `restore-drill-<run_id>`
+# açar, parmak izini (şema sürümü, satır sayıları, audit_logs/security_events özetleri, RLS rolleri; scripts/db-fingerprint.mjs)
+# ana dalla karşılaştırır, geri yüklenen en yeni commit'in T'den sonra olmadığını doğrular, RPO/RTO ölçer ve geçici dalı
+# HER DURUMDA siler (silinemezse iş kırmızı). Ana dal değiştirilmez/silinmez ve ana dala HİÇBİR yazma yapılmaz
+# (yalnızca salt-okunur transaction). Hedefler (A-48, varsayım): RPO ≤ 15 dk, RTO ≤ 60 dk — aşılırsa raporlanır.
+# Kapsam: yalnızca veritabanı; dosya deposu (Tigris) ve silme işaretleri dahil tam tatbikat AC-17 / Faz 4P.
+#
+# Tetikleyici: workflow_dispatch + üç ayda bir `schedule` (14 §; zamanlanmış koşular yalnızca varsayılan daldadır).
+# `if: github.ref == 'refs/heads/main'` YALNIZCA EK SAVUNMADIR, sır sınırı DEĞİLDİR (repo sırları environment'a bağlı
+# değil — deploy-staging.yml / provision-staging.yml ile aynı bilinen risk). NEON_API_KEY proje kapsamlıdır (U-07).
+#
+# Sır kapsamı (G-09): NEON_API_KEY yalnızca "Restore drill" ve "Cleanup" adımlarının env'indedir (ikisi de betiği çağırır);
+# betik her URI/parola/host/dal kimliğini `::add-mask::` ile maskeler ve özeti sızıntı için tarar. Yalnızca
+# `.artifacts/restore-drill/summary.{json,md}` yüklenir (tarih, T, RPO, RTO, eşitlik bayrakları, sonuç).
+# Üçüncü taraf kodu: action'lar tam commit SHA ile sabit (provision-staging.yml ile aynı).
+name: restore-drill
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Üç ayda bir (Ocak/Nisan/Temmuz/Ekim 1'i, 04:17 UTC).
+    - cron: "17 4 1 1,4,7,10 *"
+
+# Aynı anda tek koşu; koşan iptal edilmez (yarım dal bırakılmaz).
+concurrency:
+  group: restore-drill
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+# .pnpmfile kodu hiçbir adımda yüklenmez (bu iş pnpm kullanmaz).
+env:
+  npm_config_ignore_pnpmfile: "true"
+
+jobs:
+  drill:
+    name: drill
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Node sürümü package.json "engines.node" alanından (betikler yalnızca Node yerleşik modüllerini kullanır).
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: package.json
+          package-manager-cache: false
+      # Parmak izi psql (libpq ≥16: sslrootcert=system) ile alınır.
+      - name: Ensure psql
+        run: |
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -q
+            sudo apt-get install -y -q postgresql-client
+          fi
+          psql --version
+      - name: Restore drill
+        env:
+          NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
+          NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
+        run: node scripts/restore-drill.mjs
+      # Geçici dalı her durumda siler (idempotent; ana adım silemediyse ya da öldürüldüyse devreye girer). Başarısızsa kırmızı.
+      - name: Cleanup temporary branch
+        if: always()
+        env:
+          NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
+          NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
+        run: node scripts/restore-drill.mjs --cleanup
+      # Özet yalnızca tarih, T, RPO/RTO, eşitlik bayrakları ve sonuç içerir (betik sızıntı taramasından geçirir).
+      - name: Stage summary
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/restore-drill"
+          for f in summary.json summary.md; do
+            if [ -f ".artifacts/restore-drill/$f" ]; then cp ".artifacts/restore-drill/$f" "$RUNNER_TEMP/restore-drill/"; fi
+          done
+          if [ -f ".artifacts/restore-drill/summary.md" ]; then cat ".artifacts/restore-drill/summary.md" >> "$GITHUB_STEP_SUMMARY"; fi
+      - name: Upload summary
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: restore-drill-summary
+          path: ${{ runner.temp }}/restore-drill/
+          if-no-files-found: warn
+          retention-days: 90
