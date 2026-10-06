@@ -291,3 +291,27 @@ Sonraki: Faz 2 — int/faz2-sema ve int/faz2-stok-sema PR'ları, ardından T-205
 - 18:10Z katalog inceleme @62b04e9 0·0·4: T-208 MINOR'ları kapandı. T-212: bayrak sunucu tarafı, konumsuz ebeveyn/kapalı ebeveyn reddi, kapılı lot yarışı + eşzamanlı seri + wms_app döngü testi → ajan; MINOR-1 → T-217 notu.
 - 18:15Z kuyruk inceleme @90e45a1 0·0·2 (T-211 MINOR'ları kapandı): T-214 MINOR-8 sıfır-UUID aktör reddi + eşzamanlı e-posta teslim testi → ajan; MINOR-7 davet çift e-posta → A-119 kabul edilen risk.
 - 18:20Z T-207 8f1820d (ekranlar; e2e demo-flow 4/4 — 4 etkin/6 yakında; test:int 1039/1039) → int/faz2-depo 751c522 (+kart eki ac-04-api-slug/demo-flow/ac-baseline, ratchet AC-04 85, A-113/A-114, Q-57). T-207 güvenlik incelemesi sürüyor; sonra depo PR'ı.
+
+## 2026-10-06 16:45Z–17:50Z — Faz 2 W3: dört int dalı PR'a, #60 birleşti
+(Not: ara notların saat etiketleri tutarsızdı; UTC aralığı git/CI zaman damgalarından.)
+- T-207 inceleme @751c522 0·0·4: [warehouseId] UUID doğrulama + tarama üst sınırı, getLocationTree eşzamanlılık ≤4, eylem düzeyi yetki reddi int testi → ajan; MINOR-4 demo kopyası takip. Kart eki Supervisor tarafından yazıldı (teyit).
+- T-210 düzeltmeleri (c01e6c3) int/faz2-defter'e birleşti @552e33c; yeniden inceleme a4d5512'de. verify: yalnız log.test.ts:403 yük düşmesi (tek başına 106/106). Tam int 1022/1022. A önerisi: StockLockErrorCode FORBIDDEN (tenant bağlam uyuşmazlığı).
+- T-214 MINOR-7/8 (97f2b46) int/faz2-kuyruk'a birleşti @8226f01; tam int 1048/1048 (ajan). Son inceleme a4d8876'da. Uygulama ajanları: T-207, T-212, T-236, T-237 (4/4).
+- T-214 inceleme son sayım 0·0·1 @8226f01 (MINOR-9: tüketici sıfır UUID testi yok) → Supervisor testi ekledi (feat/T-214 577cd7c, mutasyon: kontrol kapalıyken kırmızı) → int/faz2-kuyruk @2dedbd1. Tam koşu sürüyor, sonra PR.
+- T-207 düzeltmeleri (02ea19b, ajan --no-verify kullandı: kart eki yokken scope hook kırmızı — süreç notu) + kart eki 2 → int/faz2-depo @75b1e46; check:all OK. Son inceleme 0·0·1 @75b1e46 (yalnız demo kopyası takip). PR öncesi: T-215 QA + tam int/verify.
+- T-212 düzeltmeleri (2f53ddb) + Q-59 notu → int/faz2-katalog @80489a9; yeniden inceleme a539754'te.
+- Başlatıldı: T-215 qa-verifier (feat/T-215-qa-warehouse ← int/faz2-depo), T-216 frontend-dev (feat/T-216-catalog-ui ← int/faz2-katalog + int/faz2-depo). Uygulama ajanları: T-236, T-237, T-215, T-216 (4/4).
+- Son incelemeler: defter (T-210) 0·0·6 @552e33c; katalog (T-208+T-212) 0·0·2 @80489a9; depo (T-205+T-207) 0·0·1 @75b1e46. Hepsi merge'e açık.
+- defter @1530d06: A-110'a FORBIDDEN, A-121 (STOCK_SERIAL_LOCK_ENABLED), T-213 notu (4), takip kartı T-238 (bekçi/kilit testleri sertleştirme). Katalog MINOR-1 (ACTIVE/FOR SHARE) T-213 (3) ve T-217'de zaten var.
+- katalog: T-239 (seri kapsam bayrağı enjeksiyonu + indeks önkoşulu); T-216 kart eki (depo birleştirmesi kaldırıldı — scope; int test dosyası); T-240 katalog okumaları (T-216 önkoşulu, ajan aynı) @f14f221.
+- T-236 bitti (74e7aed; dosya 25/25, tam int 1051/1051) → inceleme a4d8876'da. Kuyruk PR'ı (0014+T-211+T-214) T-236'sız.
+- T-236 inceleme 0·0·0 @74e7aed → int/faz2-kuyruk @60cda8b. Kuyruk dalı son sayım 0·0·0 @60cda8b (MINOR-1..9 kapalı/izlenen). Tam koşu sürüyor → PR.
+- T-237 bitti (966f5bb; yeni test 11/11, tam int 1056/1056). Sapma: wms_app no-op UPDATE geçer (korumalı ac-04-db-isolation "UPDATE ≥1" yüzünden; G-11 gevşetme yok), lot_id dışı değişim her rol için 23514. Supervisor A-122 adayı. G-04: PG 18.6'da kilit için ayrı yetki yok (deneyle). İnceleme a4d8876'da.
+- T-237 inceleme 0·0·2 @966f5bb: A-122 kabul doğru (kayıt eksik → kuyruk PR sonrası); MINOR-2 (elle sütun listesi, fail-open) Supervisor düzeltti 5e9f7ab (to_jsonb(NEW)-'lot_id'; mutasyon kanıtlı; 12/12, migrations 28/28). Son sayım a4d8876'da.
+- Kuyruk ucu yeniden yazıldı (T-236 merge konusu scope'a tanıtıldı; ağaç aynı) @209c6b6; son sayım 0·0·0 @209c6b6; tam int 1055/1055 (aynı ağaç). PR #60 açıldı. Ders: kart merge'leri git varsayılan konusuyla ('Merge remote-tracking branch 'origin/feat/T-xxx…'').
+- T-215 QA bitti (0ac3591; 35 test, 7 mutasyon kanıtı, tam int 1078/1078, uygulama hatası yok) → int/faz2-depo @c2abb82 (varsayılan merge konusu). Son sayım a151f6d'de; tam verify/int/e2e sürüyor → depo PR. T-239 başlatıldı (uygulama ajanları: T-240→T-216, T-238, T-241, T-239).
+- PR #60 (int/faz2-kuyruk: 0014+T-211+T-214+T-236) CI 15/15 yeşil → birleşti, main ca15599. Deploy kontrolü 20 dk sonra. Depo son sayım 0·0·1 @c2abb82 (yalnız demo kopyası → takip kartı).
+- defter: main birleştirmesi OPEN_QUESTIONS çakışması → hook (scope yerel modu çakışmalı merge sırasında eski HEAD merge-base'ini kullanıyor; main dosyalarını kart dışı sayıyor) — --no-verify yerine: sıralı birleşim docs commit + `merge -X ours` (yalnız OQ çakışıyordu; dosya birleşimle bayt-eşit). Takip: scope hook MERGE_HEAD farkındalığı (bekçi kartı). PR #61 açıldı @f6ba8b9 (security 0·0·6 @552e33c).
+- depo tam: verify OK (2153), int 1078/1078 @c2abb82; e2e yerelde çalıştırılamadı (compose postgres kapalı, ECONNREFUSED) → CI e2e.
+- PR #62 (kuyruk 0015, int 1067/1067 @5990110, security 0·0·0) ve PR #63 (depo T-205/207/215, main birleşik @233e7ff; OQ birleşim + ratchet yeniden hesap AC-04 98) açıldı. Üç PR (#61/#62/#63) CI bekliyor. Not: #61/#62/#63 birbirinin ardından main'e girdikçe OQ çakışması tekrar edebilir.
+- deploy-staging #34 (ca15599): migrate yeşil (0014 Neon'da); deploy işi Fly token doğrulama zaman aşımıyla (Fly tarafı, `context deadline exceeded`) düştü — başarısız iş bir kez yeniden koşturuldu, sonuç izleniyor.
