@@ -1,6 +1,6 @@
 // İşlemsel e-posta sözleşmesi (ADR-013, T-116): gönderim kipi, `canDeliver` ve kuyruk yükü kurucusu.
 // Ağ çağrısı yoktur; sağlayıcı gerçeklemeleri `apps/worker/src/mail` altındadır.
-import { createSealer, type SealedBox, type Sealer } from "./seal.ts";
+import { PLATFORM_SEAL_SCOPE, createSealer, type SealedBox, type Sealer } from "./seal.ts";
 
 export const MAIL_MODES = ["resend", "mailpit", "disabled"] as const;
 export type MailMode = (typeof MAIL_MODES)[number];
@@ -26,14 +26,42 @@ export interface MailConfig {
   readonly mailpitUrl: string | undefined;
 }
 
+/**
+ * Kalıcı hata işareti: kuyruk bağdaştırıcısı (`@wms/queue-adapter`) `permanent === true` taşıyan hatayı yeniden
+ * denemeden sonlandırır (iş `failed` kalır). Sınıfa bağımlılık yoktur; paketler arası yalnızca bu alan okunur.
+ */
+export interface PermanentFailure {
+  readonly permanent: true;
+}
+
 /** 15 §Hata kodlarına eklenmesi gereken kod için bkz. rapor bulgusu; T-112 aynı adı kullanır. */
 export class MailError extends Error {
   override name = "MailError";
   readonly code: "MAIL_DELIVERY_DISABLED" | "MAIL_SEND_FAILED" | "MAIL_RECIPIENT_INVALID";
-  constructor(code: MailError["code"], message: string) {
+  /** Sağlayıcı HTTP durumu (yalnızca `MAIL_SEND_FAILED`; mesajdaki `status NNN` kalıbından da okunur). */
+  readonly status: number | undefined;
+  /**
+   * Yeniden denemenin sonucu değiştirmeyeceği hata: kip kapalı, alıcı geçersiz, sağlayıcı 4xx (429 hariç).
+   * Ağ hatası, 5xx ve 429 geçicidir.
+   */
+  readonly permanent: boolean;
+  constructor(code: MailError["code"], message: string, options?: { readonly status?: number }) {
     super(message);
     this.code = code;
+    // Sağlayıcı gerçeklemeleri (resend/mailpit) durumu mesajda taşır: "... responded with status 422".
+    const parsed = /\bstatus (\d{3})\b/.exec(message);
+    this.status = options?.status ?? (parsed?.[1] === undefined ? undefined : Number(parsed[1]));
+    this.permanent =
+      code === "MAIL_SEND_FAILED"
+        ? this.status !== undefined && this.status >= 400 && this.status < 500 && this.status !== 429
+        : true;
   }
+}
+
+/** Mühürden çıkan yük kullanılamaz (bilinmeyen şablon, eksik alan): yeniden denemek sonucu değiştirmez. */
+export class MailPayloadError extends Error implements PermanentFailure {
+  override name = "MailPayloadError";
+  readonly permanent = true as const;
 }
 
 function blankToUndefined(v: string | undefined): string | undefined {
@@ -61,12 +89,34 @@ export function loadMailConfig(env: Readonly<Record<string, string | undefined>>
   };
 }
 
+/** `mailpit` kipine izin verilen ortamlar (A-50 ile aynı küme). */
+const MAILPIT_ENVS: readonly string[] = ["local", "ci"];
+
+/**
+ * `mailpit` kipi yalnızca açıkça `WMS_ENV` ∈ {local, ci} iken açılabilir; tanımsız, staging, production veya
+ * bilinmeyen değer reddedilir (fail-closed). Aksi halde mailpit arayüzüne erişen doğrulanmış bir hesap, gönderilen
+ * davet/sıfırlama bağlantılarını okuyup hesap açabilir. Açılışta çağrılır; mesaj değer içermez (G-09).
+ */
+export function assertMailModeAllowed(config: Pick<MailConfig, "mode">, wmsEnv: string | undefined): void {
+  if (config.mode === "mailpit" && !MAILPIT_ENVS.includes(wmsEnv ?? "")) {
+    throw new Error("MAIL_MODE=mailpit is only allowed when WMS_ENV is local or ci");
+  }
+}
+
 /** Tek, çıplak `local@domain` adresi: virgül, `<`, `>`, boşluk, CRLF, tırnak vb. içeremez. */
 const BARE_ADDRESS_RE = /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/;
 const ADDRESS_MAX = 254;
+/** RFC 5321 §4.5.3.1.1: yerel kısım en çok 64 sekizli. */
+const LOCAL_PART_MAX = 64;
+
+/** Yerel kısım: en çok 64 karakter; baş/son nokta ve ardışık nokta (`..`) yok (RFC 5321/5322 dot-atom). */
+function isValidLocalPart(local: string): boolean {
+  return local.length >= 1 && local.length <= LOCAL_PART_MAX && !local.startsWith(".") && !local.endsWith(".") && !local.includes("..");
+}
 
 export function isBareAddress(value: string): boolean {
-  return value.length <= ADDRESS_MAX && BARE_ADDRESS_RE.test(value);
+  if (value.length > ADDRESS_MAX || !BARE_ADDRESS_RE.test(value)) return false;
+  return isValidLocalPart(value.slice(0, value.indexOf("@")));
 }
 
 /** Mühürden çıkan alıcı çıplak adres değilse kalıcı hata (gönderim yok). Değer mesaja girmez (G-09). */
@@ -118,6 +168,8 @@ export interface EmailSendInput {
   readonly locale: MailLocale;
   readonly to: string;
   readonly link: string;
+  /** Tenant işinde tenant kimliği (işin yazıldığı tenant); platform işinde (`enqueuePlatform`) `null`. */
+  readonly tenantId: string | null;
 }
 
 /**
@@ -131,7 +183,7 @@ export function buildEmailSendPayload(
   const sealer = typeof sealerOrKey === "object" ? sealerOrKey : createSealer(sealerOrKey);
   const sealed = sealer.seal(
     { to: input.to, link: input.link },
-    { jobType: EMAIL_SEND_JOB_TYPE, template: input.template },
+    { jobType: EMAIL_SEND_JOB_TYPE, template: input.template, tenantId: input.tenantId ?? PLATFORM_SEAL_SCOPE },
   );
   return { template: input.template, locale: input.locale, sealed };
 }

@@ -21,7 +21,7 @@ import {
   type JobType,
 } from "@wms/shared/queue";
 import { sql } from "drizzle-orm";
-import { PgBoss, fromDrizzle, getMigrationPlans, type Job as BossJob } from "pg-boss";
+import { PgBoss, fromDrizzle, getMigrationPlans, type Job as BossJob, type JobResult } from "pg-boss";
 import { z } from "zod";
 
 /** Tenant transaction'ı: `@wms/db` genel yüzeyindeki `withTenant` callback'inin `tx` tipi. */
@@ -50,6 +50,26 @@ function safeErrorFields(err: unknown): Record<string, unknown> {
   return {
     name: err instanceof Error ? err.name : "unknown",
     ...(typeof code === "string" && /^[0-9A-Z]{5}$/.test(code) ? { sqlstate: code } : {}),
+  };
+}
+
+/**
+ * Kalıcı hata: yeniden denemek sonucu değiştirmez. Handler `permanent: true` taşıyan bir hata fırlatırsa iş
+ * yeniden denenmeden sonlandırılır (pg-boss `perJobResults` `deadletter` durumu: kalan deneme hakkını atlar, işi
+ * `failed` bırakır; kuyrukta ölü mektup kuyruğu tanımlı değilse yalnızca `failed`). Başarı sayılmaz (G-07).
+ * Sınıf bağımlılığı yoktur: yalnızca alan okunur (`MailError`, `SealOpenError`, `MailPayloadError`).
+ */
+export function isPermanentFailure(err: unknown): boolean {
+  return typeof err === "object" && err !== null && (err as { permanent?: unknown }).permanent === true;
+}
+
+/** `failed` işin çıktısına yalnızca hata adı ve kodu yazılır (mesaj adres/bağlantı taşıyabilir, G-09). */
+function failureOutput(err: unknown): Record<string, unknown> {
+  const code = (err as { code?: unknown } | null)?.code;
+  return {
+    permanent: true,
+    name: err instanceof Error ? err.name : "unknown",
+    ...(typeof code === "string" && /^[A-Z][A-Z0-9_]{2,63}$/.test(code) ? { code } : {}),
   };
 }
 
@@ -193,24 +213,34 @@ export function createJobQueue(options: JobQueueOptions): PgBossJobQueue {
         throw new QueueError("VALIDATION_FAILED", "job type is not registered");
       }
       await start();
-      await boss.work<unknown>(type, { batchSize: 1, pollingIntervalSeconds }, async (jobs: BossJob<unknown>[]) => {
+      // `perJobResults`: handler sonucu iş başına bildirilir. Geçici hata fırlatılırsa pg-boss işi yeniden dener
+      // (batchSize 1: tek iş); kalıcı hata `deadletter` durumuyla yeniden denenmeden `failed` olur.
+      await boss.work<unknown>(type, { batchSize: 1, pollingIntervalSeconds, perJobResults: true }, async (jobs: BossJob<unknown>[]) => {
+        const results: JobResult[] = [];
         for (const bossJob of jobs) {
           const envelope = EnvelopeSchema.parse(bossJob.data);
           const payload = JOB_PAYLOAD_SCHEMAS[type].parse(envelope.payload);
           const { tenantId } = envelope;
-          await handler({
-            jobId: bossJob.id,
-            type,
-            hasTenant: tenantId !== null,
-            actorUserId: envelope.actorUserId,
-            payload,
-            inTenant: async (fn) => {
-              if (tenantId === null) throw new QueueError("FORBIDDEN", "platform job has no tenant context");
-              if (runInTenant === undefined) throw new QueueError("FORBIDDEN", "no tenant runner configured");
-              return runInTenant(tenantId, type, fn);
-            },
-          } as Parameters<JobHandler<T, TenantTx>>[0]);
+          try {
+            await handler({
+              jobId: bossJob.id,
+              type,
+              hasTenant: tenantId !== null,
+              actorUserId: envelope.actorUserId,
+              payload,
+              inTenant: async (fn) => {
+                if (tenantId === null) throw new QueueError("FORBIDDEN", "platform job has no tenant context");
+                if (runInTenant === undefined) throw new QueueError("FORBIDDEN", "no tenant runner configured");
+                return runInTenant(tenantId, type, fn);
+              },
+            } as Parameters<JobHandler<T, TenantTx>>[0]);
+            results.push({ id: bossJob.id, status: "completed" });
+          } catch (err) {
+            if (!isPermanentFailure(err)) throw err;
+            results.push({ id: bossJob.id, status: "deadletter", output: failureOutput(err) });
+          }
         }
+        return results;
       });
     },
     async stop() {

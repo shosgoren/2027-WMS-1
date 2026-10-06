@@ -4,7 +4,10 @@ import { describe, expect, it, vi } from "vitest";
 import {
   EMAIL_SEND_JOB_TYPE,
   MailError,
+  MailPayloadError,
+  assertMailModeAllowed,
   buildEmailSendPayload,
+  isBareAddress,
   canDeliver,
   loadMailConfig,
   maskRecipient,
@@ -12,7 +15,7 @@ import {
   type Mailer,
 } from "@wms/shared/mailer";
 import { JOB_PAYLOAD_SCHEMAS, parseJob } from "@wms/shared/queue";
-import { QUEUE_SEAL_KEY_PLACEHOLDER, SealConfigError, SealOpenError, createSealer } from "@wms/shared/seal";
+import { PLATFORM_SEAL_SCOPE, QUEUE_SEAL_KEY_PLACEHOLDER, SealConfigError, SealOpenError, createSealer } from "@wms/shared/seal";
 import { createMailer, createSendEmailHandler } from "../jobs/send-email.js";
 import { createJsonLogger } from "../lifecycle.js";
 import { createMailpitMailer, parseFrom } from "./mailpit.js";
@@ -24,7 +27,7 @@ const newKey = (): string => randomBytes(32).toString("hex");
 const apiKey = `k_${randomBytes(12).toString("hex")}`;
 const RECIPIENT = `alice.${randomBytes(3).toString("hex")}@example.invalid`;
 const LINK = `https://app.example.invalid/reset/${randomBytes(16).toString("hex")}`;
-const CTX = { jobType: EMAIL_SEND_JOB_TYPE, template: "password_reset" };
+const CTX = { jobType: EMAIL_SEND_JOB_TYPE, template: "password_reset", tenantId: PLATFORM_SEAL_SCOPE };
 
 function config(env: Record<string, string>): MailConfig {
   return loadMailConfig(env);
@@ -107,6 +110,16 @@ describe("seal", () => {
     const box = s.seal(plain, CTX);
     expect(() => s.open(box, { ...CTX, template: "invitation" })).toThrow(SealOpenError);
     expect(() => s.open(box, { ...CTX, jobType: "demo.reseed" })).toThrow(SealOpenError);
+    expect(() => s.open(box, { ...CTX, tenantId: randomUUID() })).toThrow(SealOpenError);
+  });
+  it("sürüm 2; v1 mühür (tenantsız AAD) açılmaz", () => {
+    const s = createSealer(newKey());
+    const box = s.seal(plain, CTX);
+    expect(box.v).toBe(2);
+    expect(() => s.open({ ...box, v: 1 }, CTX)).toThrow(SealOpenError);
+  });
+  it("SealOpenError kalıcı hata işaretini taşır", () => {
+    expect(new SealOpenError("x").permanent).toBe(true);
   });
   it("bozuk biçim -> hata", () => {
     const s = createSealer(newKey());
@@ -140,7 +153,7 @@ describe("seal", () => {
 
 describe("kuyruk yükü", () => {
   it("buildEmailSendPayload yalnızca { template, locale, sealed } üretir ve kuyruk şemasına uyar", () => {
-    const payload = buildEmailSendPayload(newKey(), { template: "password_reset", locale: "tr", to: RECIPIENT, link: LINK });
+    const payload = buildEmailSendPayload(newKey(), { template: "password_reset", locale: "tr", to: RECIPIENT, link: LINK, tenantId: null });
     expect(Object.keys(payload).sort()).toEqual(["locale", "sealed", "template"]);
     expect(JOB_PAYLOAD_SCHEMAS["email.send"].safeParse(payload).success).toBe(true);
     expect(() => parseJob({ type: "email.send", payload })).not.toThrow();
@@ -149,7 +162,7 @@ describe("kuyruk yükü", () => {
     expect(raw).not.toContain(LINK);
   });
   it("anahtar yoksa kuyruğa yazılamaz (açık hata)", () => {
-    expect(() => buildEmailSendPayload(undefined, { template: "invitation", locale: "en", to: RECIPIENT, link: LINK })).toThrow(SealConfigError);
+    expect(() => buildEmailSendPayload(undefined, { template: "invitation", locale: "en", to: RECIPIENT, link: LINK, tenantId: null })).toThrow(SealConfigError);
   });
 });
 
@@ -203,6 +216,61 @@ describe("Resend istemcisi", () => {
   });
 });
 
+describe("hata sınıflaması (kalıcı / geçici)", () => {
+  const resend = (status: number) =>
+    createResendMailer({ apiKey, from: "a@b.c", fetch: vi.fn<typeof fetch>().mockResolvedValue(new Response("{}", { status })) })
+      .send({ to: RECIPIENT, subject: "S", text: "T", html: "H", idempotencyKey: "k" })
+      .then(
+        () => Promise.reject(new Error("hata bekleniyordu")),
+        (e: unknown) => e as MailError,
+      );
+  it("Resend 4xx (429 hariç) kalıcı; 429 ve 5xx geçici", async () => {
+    for (const status of [400, 401, 403, 404, 422]) expect((await resend(status)).permanent, String(status)).toBe(true);
+    for (const status of [429, 500, 502, 503]) expect((await resend(status)).permanent, String(status)).toBe(false);
+  });
+  it("ağ hatası geçici", async () => {
+    const f = vi.fn<typeof fetch>().mockRejectedValue(new TypeError("fetch failed"));
+    const err = (await createResendMailer({ apiKey, from: "a@b.c", fetch: f }).send({ to: RECIPIENT, subject: "S", text: "T", html: "H", idempotencyKey: "k" }).catch((e: unknown) => e)) as MailError;
+    expect(err.permanent).toBe(false);
+  });
+  it("Mailpit durum kodu aynı kuralla sınıflanır", async () => {
+    const f = (status: number) => vi.fn<typeof fetch>().mockResolvedValue(new Response("{}", { status }));
+    const run = (status: number) => createMailpitMailer({ baseUrl: "http://x", from: "n@e.local", fetch: f(status) }).send({ to: RECIPIENT, subject: "S", text: "T", html: "H", idempotencyKey: "k" }).then(() => Promise.reject(new Error("hata bekleniyordu")), (e: unknown) => e as MailError);
+    expect((await run(400)).permanent).toBe(true);
+    expect((await run(503)).permanent).toBe(false);
+  });
+  it("MailError: kip kapalı ve geçersiz alıcı kalıcı; durumsuz MAIL_SEND_FAILED geçici", () => {
+    expect(new MailError("MAIL_DELIVERY_DISABLED", "x").permanent).toBe(true);
+    expect(new MailError("MAIL_RECIPIENT_INVALID", "x").permanent).toBe(true);
+    expect(new MailError("MAIL_SEND_FAILED", "request failed").permanent).toBe(false);
+    expect(new MailError("MAIL_SEND_FAILED", "x", { status: 404 }).permanent).toBe(true);
+  });
+});
+
+describe("alıcı adresi (yerel kısım)", () => {
+  it.each([".a@x.example", "a.@x.example", "a..b@x.example", `${"a".repeat(65)}@x.example`, "@x.example", "a b@x.example", "a@b.invalid,c@d.invalid"])("reddedilir: %s", (v) => {
+    expect(isBareAddress(v)).toBe(false);
+    expect(canDeliver(config({ MAIL_MODE: "mailpit", MAILPIT_URL: "http://localhost:8025", MAIL_FROM: "a@b.c" }), v)).toBe(false);
+  });
+  it.each(["a@x.example", "a.b@x.example", `${"a".repeat(64)}@x.example`, "a+tag@x.example"])("kabul edilir: %s", (v) => {
+    expect(isBareAddress(v)).toBe(true);
+  });
+});
+
+describe("mailpit kipi ortam kısıtı", () => {
+  it("yalnızca WMS_ENV local|ci; tanımsız/staging/production/bilinmeyen reddedilir", () => {
+    const mailpit = config({ MAIL_MODE: "mailpit", MAILPIT_URL: "http://localhost:8025", MAIL_FROM: "a@b.c" });
+    for (const ok of ["local", "ci"]) expect(() => assertMailModeAllowed(mailpit, ok)).not.toThrow();
+    for (const bad of [undefined, "", "staging", "production", "prod", "LOCAL"]) expect(() => assertMailModeAllowed(mailpit, bad)).toThrow(/WMS_ENV/);
+  });
+  it("diğer kiplere kısıt uygulanmaz", () => {
+    for (const mode of ["disabled", "resend"]) expect(() => assertMailModeAllowed({ mode } as MailConfig, "production")).not.toThrow();
+  });
+  it("worker açılışı denetimi çağırır", () => {
+    expect(readFileSync(new URL("../main.ts", import.meta.url), "utf8")).toContain("assertMailModeAllowed(mailConfig, process.env.WMS_ENV");
+  });
+});
+
 describe("Mailpit istemcisi", () => {
   it("POST /api/v1/send, büyük harfli alanlar", async () => {
     const f = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(200));
@@ -222,19 +290,22 @@ describe("email.send işleyicisi", () => {
   const MAILPIT_ENV = { MAIL_MODE: "mailpit", MAILPIT_URL: "http://localhost:8025", MAIL_FROM: "a@b.c" };
   const key = newKey();
   const sealer = createSealer(key);
-  function setup(env: Record<string, string>, opts: { hasTenant?: boolean; inTenant?: () => Promise<void> } = {}) {
+  function setup(env: Record<string, string>, opts: { hasTenant?: boolean; inTenant?: () => Promise<void>; tenantId?: string; sealTenantId?: string | null; to?: string } = {}) {
+    const runTenant = opts.tenantId ?? randomUUID();
     const lines: string[] = [];
     const logger = createJsonLogger((l) => lines.push(l));
     const send = vi.fn<Mailer["send"]>().mockResolvedValue(undefined);
     const cfg = config(env);
-    const handler = createSendEmailHandler({ sealer, config: cfg, mailer: { send }, logger });
-    const payload = buildEmailSendPayload(sealer, { template: "password_reset", locale: "tr", to: RECIPIENT, link: LINK });
+    const handler = createSendEmailHandler({ sealer, config: cfg, mailer: { send }, logger, readTenantId: () => Promise.resolve(runTenant) });
+    const hasTenant = opts.hasTenant ?? false;
+    const sealTenantId = opts.sealTenantId === undefined ? (hasTenant ? runTenant : null) : opts.sealTenantId;
+    const payload = buildEmailSendPayload(sealer, { template: "password_reset", locale: "tr", to: opts.to ?? RECIPIENT, link: LINK, tenantId: sealTenantId });
     const jobId = randomUUID();
     const inTenant = vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => {
       await opts.inTenant?.();
       return fn(undefined);
     });
-    const ctx = { jobId, type: "email.send" as const, hasTenant: opts.hasTenant ?? false, actorUserId: null, payload, inTenant } as unknown as Parameters<typeof handler>[0];
+    const ctx = { jobId, type: "email.send" as const, hasTenant, actorUserId: null, payload, inTenant } as unknown as Parameters<typeof handler>[0];
     return { handler, ctx, send, lines, inTenant, jobId, payload };
   }
 
@@ -275,6 +346,37 @@ describe("email.send işleyicisi", () => {
     t.send.mockRejectedValue(new MailError("MAIL_SEND_FAILED", "resend responded with status 500"));
     await expect(t.handler(t.ctx)).rejects.toBeInstanceOf(MailError);
     expect(t.lines.join("\n")).not.toContain(RECIPIENT);
+  });
+  it("başka tenant'a taşınan mühür açılmaz ve kalıcı hata sayılır; platform mührü tenant işinde açılmaz", async () => {
+    const other = setup(MAILPIT_ENV, { hasTenant: true, sealTenantId: randomUUID() });
+    const err = await other.handler(other.ctx).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SealOpenError);
+    expect((err as SealOpenError).permanent).toBe(true);
+    expect(other.send).not.toHaveBeenCalled();
+    const platformSealInTenantJob = setup(MAILPIT_ENV, { hasTenant: true, sealTenantId: null });
+    await expect(platformSealInTenantJob.handler(platformSealInTenantJob.ctx)).rejects.toBeInstanceOf(SealOpenError);
+    const tenantSealInPlatformJob = setup(MAILPIT_ENV, { hasTenant: false, sealTenantId: randomUUID() });
+    await expect(tenantSealInPlatformJob.handler(tenantSealInPlatformJob.ctx)).rejects.toBeInstanceOf(SealOpenError);
+    expect(tenantSealInPlatformJob.send).not.toHaveBeenCalled();
+  });
+  it("geçersiz alıcı canDeliver'dan önce MAIL_RECIPIENT_INVALID (kalıcı); disabled kipte de aynı kod", async () => {
+    for (const env of [MAILPIT_ENV, { MAIL_MODE: "disabled" }]) {
+      const t = setup(env, { to: `a@b.invalid, c@d.invalid` });
+      const err = await t.handler(t.ctx).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(MailError);
+      expect((err as MailError).code).toBe("MAIL_RECIPIENT_INVALID");
+      expect((err as MailError).permanent).toBe(true);
+      expect(t.send).not.toHaveBeenCalled();
+      expect(t.lines.join("\n")).not.toContain("a@b.invalid");
+    }
+  });
+  it("bilinmeyen şablon kalıcı hata (MailPayloadError), gönderim yok", async () => {
+    const t = setup(MAILPIT_ENV);
+    const ctx = { ...t.ctx, payload: { ...t.payload, template: "bilinmeyen" } } as unknown as typeof t.ctx;
+    const err = await t.handler(ctx).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MailPayloadError);
+    expect((err as MailPayloadError).permanent).toBe(true);
+    expect(t.send).not.toHaveBeenCalled();
   });
   it("başka şablona taşınan mühür açılmaz", async () => {
     const t = setup(MAILPIT_ENV);

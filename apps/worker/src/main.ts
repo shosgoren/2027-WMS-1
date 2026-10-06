@@ -1,7 +1,7 @@
 // Worker giriş noktası: `node dist/main.js`. Web'den bağımsız, uzun ömürlü süreç (ADR-001).
 import { createDbClient, withSystemTenant } from "@wms/db";
 import { createJobQueue } from "@wms/queue-adapter";
-import { loadMailConfig } from "@wms/shared/mailer";
+import { assertMailModeAllowed, loadMailConfig } from "@wms/shared/mailer";
 import { createSealer } from "@wms/shared/seal";
 import { JOB_TYPES, type JobHandler, type JobType } from "@wms/shared/queue";
 import { createDeliverInvitationHandler } from "./jobs/deliver-invitation.js";
@@ -41,6 +41,8 @@ if (databaseUrl === undefined || databaseUrl.trim() === "") {
 // Hata mesajları değer içermez (G-09).
 try {
   const mailConfig = loadMailConfig(process.env);
+  // mailpit kipi yalnızca WMS_ENV local|ci (T-117 inceleme MINOR-3): staging/production'da açılış reddedilir.
+  assertMailModeAllowed(mailConfig, process.env.WMS_ENV?.trim());
   HANDLERS["email.send"] = createSendEmailHandler({
     sealer: createSealer(process.env.QUEUE_SEAL_KEY),
     config: mailConfig,
