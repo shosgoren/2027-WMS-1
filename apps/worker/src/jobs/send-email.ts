@@ -1,17 +1,24 @@
 // `email.send` işi (T-116): mühürlü yükü açar, şablonu üretir, `Mailer` ile gönderir.
 // - Tenant işiyse (`ctx.hasTenant`) tenant'ın ACTIVE olduğu `ctx.inTenant` (withSystemTenant) ile doğrulanır;
 //   platform işinde (parola sıfırlama, `enqueuePlatform`) tenant yoktur ve bu adım atlanır.
-// - Alıcı adresi ve bağlantı loglanmaz (maskeli alıcı). Hata yutulmaz: fırlatılır, pg-boss yeniden dener.
+// - Mühür AAD'si tenant kimliğini içerir (tenant işinde işin yazıldığı tenant, `ctx.inTenant` içinde okunur;
+//   platform işinde `platform`): başka tenant'ın işine taşınan mühür açılmaz.
+// - Alıcı adresi ve bağlantı loglanmaz (maskeli alıcı). Hata yutulmaz: fırlatılır. Kalıcı hatalar
+//   (`permanent === true`: kip kapalı, geçersiz alıcı, mühür açılamadı, bilinmeyen şablon, sağlayıcı 4xx ≠ 429)
+//   kuyruk bağdaştırıcısında yeniden denenmeden `failed` olur; geçici hatalar (ağ, 5xx, 429) yeniden denenir.
+import { currentTenantId } from "@wms/db";
 import {
   EMAIL_SEND_JOB_TYPE,
   MailError,
+  MailPayloadError,
+  assertBareRecipient,
   canDeliver,
   maskRecipient,
   type MailConfig,
   type Mailer,
 } from "@wms/shared/mailer";
 import type { JobHandler } from "@wms/shared/queue";
-import type { Sealer } from "@wms/shared/seal";
+import { PLATFORM_SEAL_SCOPE, type Sealer } from "@wms/shared/seal";
 import type { Logger } from "../lifecycle.js";
 import { createMailpitMailer } from "../mail/mailpit.js";
 import { createResendMailer } from "../mail/resend.js";
@@ -43,21 +50,30 @@ export interface SendEmailDeps {
   readonly config: MailConfig;
   readonly mailer: Mailer;
   readonly logger: Logger;
+  /** Tenant transaction'ından tenant kimliğini okur; varsayılan `@wms/db` `currentTenantId` (testte değiştirilebilir). */
+  readonly readTenantId?: (tx: unknown) => Promise<string | undefined>;
 }
 
 export function createSendEmailHandler(deps: SendEmailDeps): JobHandler<"email.send"> {
   return async (ctx) => {
     const { template, locale, sealed } = ctx.payload;
     try {
+      let sealTenant: string = PLATFORM_SEAL_SCOPE;
       if (ctx.hasTenant) {
-        // Tenant ACTIVE değilse withSystemTenant reddeder; iş hata ile döner.
-        await ctx.inTenant(() => Promise.resolve());
+        // Tenant ACTIVE değilse withSystemTenant reddeder; iş hata ile döner. Kimlik transaction-local ayardan
+        // okunur (zarftan değil): mühür, işin gerçekten çalıştığı tenant'a bağlıdır.
+        const read = deps.readTenantId ?? ((tx: unknown) => currentTenantId(tx as Parameters<typeof currentTenantId>[0]));
+        const tenantId = await ctx.inTenant((tx) => read(tx));
+        if (tenantId === undefined) throw new Error("tenant context is not available in job transaction");
+        sealTenant = tenantId;
       }
-      if (!isMailTemplate(template)) throw new Error("unknown email template");
-      const data = deps.sealer.open(sealed, { jobType: EMAIL_SEND_JOB_TYPE, template });
+      if (!isMailTemplate(template)) throw new MailPayloadError("unknown email template");
+      const data = deps.sealer.open(sealed, { jobType: EMAIL_SEND_JOB_TYPE, template, tenantId: sealTenant });
       const to = data.to;
       const link = data.link;
-      if (to === undefined || link === undefined) throw new Error("sealed payload is incomplete");
+      if (to === undefined || link === undefined) throw new MailPayloadError("sealed payload is incomplete");
+      // Alıcı doğrulaması canDeliver'dan ÖNCE: biçimsiz adres "teslim edilemez ortam" diye yanlış kodla düşmesin.
+      assertBareRecipient(to);
       // Alıcı bu işin yazıldığı andan sonra yapılandırma değişmiş olabilir: gönderimden önce yeniden denetlenir.
       if (!canDeliver(deps.config, to)) {
         throw new MailError("MAIL_DELIVERY_DISABLED", "recipient cannot be delivered in this environment");
@@ -72,6 +88,7 @@ export function createSendEmailHandler(deps: SendEmailDeps): JobHandler<"email.s
         template,
         error: err instanceof Error ? err.name : "unknown",
         ...(err instanceof MailError ? { code: err.code } : {}),
+        permanent: (err as { permanent?: unknown } | null)?.permanent === true,
       });
       throw err;
     }
