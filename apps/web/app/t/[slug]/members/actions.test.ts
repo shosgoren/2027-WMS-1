@@ -5,11 +5,17 @@ const inviteMember = vi.hoisted(() => vi.fn());
 const getSenderQueue = vi.hoisted(() => vi.fn());
 const getPrincipal = vi.hoisted(() => vi.fn());
 
-vi.mock("next/headers", () => ({ headers: () => Promise.resolve(new Headers({ origin: "https://app.example.test" })) }));
+vi.mock("next/headers", () => ({ headers: () => Promise.resolve(new Headers({ origin: "https://app.example.test", "fly-client-ip": "203.0.113.7" })) }));
 vi.mock("@wms/auth", () => ({ getAuthService: () => ({ getPrincipal }) }));
 vi.mock("@wms/db", () => ({ getAppDb: () => ({}) }));
 vi.mock("@wms/domain/identity/invitations", () => ({ inviteMember, revokeInvitation: vi.fn() }));
 vi.mock("../../../../lib/queue.ts", () => ({ getSenderQueue }));
+// T-127 entegrasyonu: hız sınırı ve doğrulanmış tenant çözümü bu testin konusu değil (web-hardening testleri kapsar).
+vi.mock("../../../../lib/rate-limit.ts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../../lib/rate-limit.ts")>()),
+  createProductionLimiter: () => ({ check: () => Promise.resolve() }),
+}));
+vi.mock("@wms/domain/identity/access", () => ({ runTenantQuery: () => Promise.resolve("t1") }));
 
 import { inviteMemberAction } from "./actions.ts";
 
