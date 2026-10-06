@@ -393,6 +393,31 @@ describe(`auth çekirdek (target=${env.target})`, () => {
     expect(((await res.json()) as { code?: string }).code).toBe("CLIENT_IP_REQUIRED");
   });
 
+  it("T-112e: DEMO_EMAIL_DOMAIN tanımlıyken demo OLMAYAN kullanıcının login_succeeded/login_failed satırlarında ip/user_agent DOLU", async () => {
+    const svc = newService(authClient, { DEMO_EMAIL_DOMAIN: "demo.example.test" });
+    const u = await mkUser();
+    const ip = nextIp();
+    const post3 = (body: unknown): Promise<Response> =>
+      svc.handler(
+        new Request(`${BASE}/api/auth/sign-in/email`, {
+          method: "POST",
+          headers: { "content-type": "application/json", origin: BASE, "fly-client-ip": ip, "user-agent": "t112e-int-test" },
+          body: JSON.stringify(body),
+        }),
+      );
+    expect((await post3({ email: u.email, password: WRONG_PASSWORD })).status).toBeGreaterThanOrEqual(400);
+    expect((await post3({ email: u.email, password: PASSWORD })).status).toBe(200);
+    const rows = await adm.query<{ event_type: string; ip: string | null; user_agent: string | null }>(
+      "SELECT event_type, ip, user_agent FROM public.security_events WHERE user_id = $1 AND event_type IN ('login_failed','login_succeeded')",
+      [u.id],
+    );
+    expect(rows.rows.map((r) => r.event_type).sort()).toEqual(["login_failed", "login_succeeded"]);
+    for (const r of rows.rows) {
+      expect(r.ip, r.event_type).toBe(ip);
+      expect(r.user_agent, r.event_type).toBe("t112e-int-test");
+    }
+  });
+
   it("MINOR-3/4: büyük harfli e-posta bilinen kullanıcıya bağlanır; doğrulama hatası da login_failed", async () => {
     const u = await mkUser();
     const ip = nextIp();
