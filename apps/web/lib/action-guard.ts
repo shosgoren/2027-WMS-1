@@ -2,11 +2,13 @@
 //
 // Sıra: (1) `Origin` başlığı YOKSA veya `BETTER_AUTH_URL` kökeniyle eşleşmezse ret (FORBIDDEN); (2) principal çözümü;
 // (3) Zod doğrulaması (VALIDATION_FAILED); (4) işleyici; (5) `AppError` → güvenli yanıt (i18n anahtarı + istek kimliği;
-// yığın izi/SQL/SQLSTATE yok), beklenmeyen hata loglanır ve genel `INTERNAL` döner (G-07). Hız sınırı (T-127) `rateLimit`
-// kancasına bağlanacak: bu kartta kanca tanımlıdır, varsayılan yoktur.
+// yığın izi/SQL/SQLSTATE yok), beklenmeyen hata loglanır ve genel `INTERNAL` döner (G-07). Hız sınırı (T-127): IP (principal
+// çözümünden ÖNCE, DB'ye yük bindirmesin), kullanıcı ve (isteğe bağlı `tenantKey`) tenant; aşım `RATE_LIMITED`.
+// `routeGuard` aynı denetimleri `/api/t/**` route handler'ları için yapar (POST'ta `Origin` yoksa FORBIDDEN, m4).
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { AppError, type AppErrorBody } from "@wms/shared/errors";
+import { RateLimitedError, clientIp, type RateLimiter } from "./rate-limit.ts";
 
 /** Sarmalayıcının ihtiyaç duyduğu principal şekli (`@wms/auth` `Principal` atanabilir). */
 export interface GuardPrincipal {
@@ -31,14 +33,18 @@ export interface GuardDeps {
   readonly appUrl: string | undefined;
   readonly log: (entry: Readonly<Record<string, unknown>>) => void;
   readonly newRequestId: () => string;
-  /** T-127 hız sınırı kancası: reddederse `AppError("RATE_LIMITED")` fırlatmalıdır. */
-  readonly rateLimit?: (ctx: ActionContext, headers: Headers) => Promise<void>;
+  /** T-127 hız sınırı (IP/kullanıcı/tenant). Tanımsızsa sınır uygulanmaz (yalnızca birim testleri). */
+  readonly limiter?: RateLimiter;
+  /** Yerelde `Fly-Client-IP` yokken kullanılacak soket adresi (M6). */
+  readonly socketIp?: (headers: Headers) => string | undefined;
 }
 
 export interface ActionOptions<S extends z.ZodType> {
   readonly schema: S;
   /** Varsayılan `true`: principal yoksa `UNAUTHENTICATED`. Davet kabulü gibi anonim eylemler `false`. */
   readonly requireAuth?: boolean;
+  /** Doğrulanmış girdiden tenant sayaç anahtarı (slug/kimlik); verilirse tenant başına yazma sınırı uygulanır. */
+  readonly tenantKey?: (input: z.infer<S>) => string | undefined;
 }
 
 function originOf(appUrl: string | undefined): string | undefined {
@@ -72,6 +78,22 @@ function safeBody(err: AppError, requestId: string): SafeError {
   return { ...err.toBody().error, requestId };
 }
 
+/** Köken denetimi: `Origin` yoksa veya uygulama kökeniyle eşleşmezse FORBIDDEN (fail-closed). Doğrulanmış kökeni döndürür. */
+function assertOrigin(deps: GuardDeps, headers: Headers): string {
+  const origin = originOf(deps.appUrl);
+  const sent = headers.get("origin");
+  if (origin === undefined || sent === null || sent !== origin) throw new AppError("FORBIDDEN");
+  return origin;
+}
+
+async function limit(deps: GuardDeps, kind: "ip" | "user" | "tenant", subject: string): Promise<void> {
+  if (deps.limiter !== undefined) await deps.limiter.check(kind, subject);
+}
+
+function ipOf(deps: GuardDeps, headers: Headers): string {
+  return clientIp(headers, deps.socketIp?.(headers));
+}
+
 export function createActionGuard(deps: GuardDeps) {
   return function guardedAction<S extends z.ZodType, R>(
     options: ActionOptions<S>,
@@ -81,15 +103,16 @@ export function createActionGuard(deps: GuardDeps) {
       const requestId = deps.newRequestId();
       try {
         const headers = await deps.getHeaders();
-        const origin = originOf(deps.appUrl);
-        const sent = headers.get("origin");
-        if (origin === undefined || sent === null || sent !== origin) throw new AppError("FORBIDDEN");
+        const origin = assertOrigin(deps, headers);
+        await limit(deps, "ip", ipOf(deps, headers));
         const principal = await deps.resolvePrincipal(headers);
         if ((options.requireAuth ?? true) && principal === null) throw new AppError("UNAUTHENTICATED");
+        if (principal !== null) await limit(deps, "user", principal.userId);
         const ctx: ActionContext = { requestId, principal, origin };
-        if (deps.rateLimit !== undefined) await deps.rateLimit(ctx, headers);
         const parsed = options.schema.safeParse(raw);
         if (!parsed.success) throw new AppError("VALIDATION_FAILED");
+        const tenant = options.tenantKey?.(parsed.data as z.infer<S>);
+        if (tenant !== undefined) await limit(deps, "tenant", tenant);
         return { ok: true, data: await handler(parsed.data as z.infer<S>, ctx) };
       } catch (e) {
         if (e instanceof AppError) {
@@ -103,14 +126,58 @@ export function createActionGuard(deps: GuardDeps) {
   };
 }
 
+export interface RouteContext {
+  readonly requestId: string;
+  readonly principal: GuardPrincipal | null;
+}
+
+function jsonResponse(err: AppError, requestId: string): Response {
+  const headers = new Headers({ "content-type": "application/json", "cache-control": "no-store" });
+  if (err instanceof RateLimitedError) headers.set("retry-after", String(err.retryAfterSeconds));
+  return new Response(JSON.stringify({ error: safeBody(err, requestId) }), { status: err.httpStatus, headers });
+}
+
+/**
+ * `/api/t/**` route handler sarmalayıcısı: actionGuard ile aynı köken/hız sınırı/hata maskeleme kuralları.
+ * Yalnızca durum değiştiren yöntemlerde (POST/PUT/PATCH/DELETE) `Origin` zorunludur; GET/HEAD yalnızca IP/kullanıcı sınırına
+ * tabidir. Aşımda `Retry-After` başlığı eklenir.
+ */
+export function createRouteGuard(deps: GuardDeps) {
+  return function routeGuard(
+    options: { readonly requireAuth?: boolean },
+    handler: (request: Request, ctx: RouteContext) => Promise<Response>,
+  ): (request: Request) => Promise<Response> {
+    return async (request) => {
+      const requestId = deps.newRequestId();
+      try {
+        const headers = request.headers;
+        if (!["GET", "HEAD", "OPTIONS"].includes(request.method.toUpperCase())) assertOrigin(deps, headers);
+        await limit(deps, "ip", ipOf(deps, headers));
+        const principal = await deps.resolvePrincipal(headers);
+        if ((options.requireAuth ?? true) && principal === null) throw new AppError("UNAUTHENTICATED");
+        if (principal !== null) await limit(deps, "user", principal.userId);
+        return await handler(request, { requestId, principal });
+      } catch (e) {
+        if (e instanceof AppError) {
+          if (e.code === "INTERNAL") deps.log({ level: "error", msg: "route failed", requestId, ...describe(e) });
+          return jsonResponse(e, requestId);
+        }
+        deps.log({ level: "error", msg: "route failed", requestId, ...describe(e) });
+        return jsonResponse(new AppError("INTERNAL"), requestId);
+      }
+    };
+  };
+}
+
 // ---------------------------------------------------------------------------------------------
 // Üretim bağlamı (@wms/auth + ortam; veritabanı yalnızca `@wms/db` `getAppDb()` ile); Next istek başlıkları çağıran `actions.ts`'ten verilir (`headers` from "next/headers").
 // Bu modül Next'e bağımlı değildir: kök typecheck/entegrasyon testleri `createActionGuard`'ı doğrudan kullanır.
 // ---------------------------------------------------------------------------------------------
 
-export function createProductionGuard(getHeaders: GuardDeps["getHeaders"]) {
+export function createProductionGuard(getHeaders: GuardDeps["getHeaders"], limiter?: RateLimiter) {
   return createActionGuard({
     getHeaders,
+    ...(limiter === undefined ? {} : { limiter }),
     resolvePrincipal: async (headers) => {
       const { getAuthService } = await import("@wms/auth");
       const p = await getAuthService().getPrincipal(headers);
