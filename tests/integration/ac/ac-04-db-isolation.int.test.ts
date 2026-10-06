@@ -21,7 +21,7 @@ import { sql } from "../../../packages/db/node_modules/drizzle-orm/index.js";
 import { createDbClient, type DbClient } from "../../../packages/db/src/client.ts";
 import { withUser } from "../../../packages/db/src/index.ts";
 import { APP_ROLE, AUTH_ROLE, PROBE_ROLE, WORKER_ROLE, readIntEnv, redactErrorChain } from "../harness/env.ts";
-import { cleanupDocuments, cleanupReliability, cleanupStock, mkMembership, mkUser, newRegistry, seedWorld, type TenantWorld } from "../fixtures/tenants.ts";
+import { PLATFORM_FIXTURE_CONSUMER, cleanupDocuments, cleanupReliability, cleanupStock, mkMembership, mkUser, newRegistry, seedWorld, type TenantWorld } from "../fixtures/tenants.ts";
 
 const env = readIntEnv(process.env);
 const urls = [env.databaseUrl, env.databaseUrlDirect];
@@ -55,6 +55,12 @@ const setTenant = (id: string): Pre => ["SELECT set_config('app.current_tenant_i
  * yalnızca bu tabloların hem B anahtarlı (RLS reddi beklenir; tenant koşulu hâlâ sınanır) hem A anahtarlı kontrol denemesine eklenir.
  */
 const SYSTEM_REASON_WRITE: Readonly<Record<string, string>> = { stock_consistency_runs: "queue.stock.consistency.check" };
+/**
+ * T-211: platform satırı (tenant_id NULL) taşıyabilen tenant tabloları (adıyla, tam eşleşme). Bu tablolarda "bağlamsız 0 satır" yerine
+ * "bağlamsızken YALNIZCA NULL tenant satırları görünür; tenant bağlamında NULL satır görünmez ve yazılamaz" sınanır. Liste katalogdan
+ * doğrulanır (tenant_id NULL'lanabilir + politika `tenant_id IS NULL` içerir); başka tablo eklenemez/çıkarılamaz.
+ */
+const NULL_TENANT_TABLES: ReadonlySet<string> = new Set(["processed_events"]);
 const setSystemReason = (reason: string): Pre => ["SELECT set_config('app.system_reason', $1, true)", [reason]];
 const setUser = (id: string): Pre => ["SELECT set_config('app.current_user_id', $1, true)", [id]];
 
@@ -397,6 +403,22 @@ describe("AC-04 DB — A bağlamında B kimliğiyle erişim (tablo başına)", (
     ];
     for (const t of tables) {
       for (const [label, pre] of contexts) {
+        if (NULL_TENANT_TABLES.has(t.name) && label !== "var olmayan tenant") {
+          // Bağlam boşken yalnızca tenant_id NULL satırlar görünür: sayı yöneticinin saydığı NULL satır sayısına eşit (≥1, fikstür tohumlar),
+          // tenant'lı satır görünmez.
+          const nulls = Number(((await admin.query<{ n: string }>(`SELECT count(*)::text AS n FROM public.${q(t.name)} WHERE ${q(t.key)} IS NULL`)).rows[0] as { n: string }).n);
+          const r = await attempt(
+            appClient,
+            pre,
+            `SELECT count(*)::int AS total, count(*) FILTER (WHERE ${q(t.key)} IS NULL)::int AS nulls, count(*) FILTER (WHERE ${q(t.key)} IS NOT NULL)::int AS tenanted FROM public.${q(t.name)}`,
+          );
+          if (nulls < 1) failures.push(`${t.name} [${label}]: fikstür platform (NULL tenant) satırı tohumlamamış`);
+          const row = r.ok ? (r.rows[0] as { total: number; nulls: number; tenanted: number }) : undefined;
+          if (row === undefined || row.tenanted !== 0 || row.nulls !== nulls || row.total !== nulls) {
+            failures.push(`${t.name} [${label}]: yalnızca ${nulls} NULL tenant satırı görünmeli, gelen ${fmt(r)} ${JSON.stringify(row)}`);
+          }
+          continue;
+        }
         const r = await attempt(appClient, pre, `SELECT count(*)::int AS n FROM public.${q(t.name)}`);
         if (!r.ok || (r.rows[0] as { n: number }).n !== 0) failures.push(`${t.name} [${label}]: 0 satır beklenir, gelen ${fmt(r)}`);
       }
@@ -415,6 +437,52 @@ describe("AC-04 DB — A bağlamında B kimliğiyle erişim (tablo başına)", (
     const upd = await attempt(appClient, [], `UPDATE public.tenant_settings SET locale = locale WHERE tenant_id = $1`, [A.tenantId]);
     if (!upd.ok || upd.rowCount !== 0) failures.push(`bağlamsız UPDATE 0 satır değil: ${fmt(upd)}`);
     expect(failures).toEqual([]);
+  });
+});
+
+describe("AC-04 DB — platform satırı (tenant_id NULL) ve sistem gerekçeli yazma tabloları (T-211, katalogla kilitli)", () => {
+  it("@AC-04 NULL tenant istisna listesi katalogdan birebir: tenant_id NULL'lanabilir + politika `tenant_id IS NULL` içerir", async () => {
+    const nullable = await admin.query<{ table_name: string }>(
+      `SELECT c.table_name FROM information_schema.columns c
+         JOIN information_schema.tables t ON t.table_schema = c.table_schema AND t.table_name = c.table_name AND t.table_type = 'BASE TABLE'
+        WHERE c.table_schema = 'public' AND c.column_name = 'tenant_id' AND c.is_nullable = 'YES' ORDER BY 1`,
+    );
+    const pol = await admin.query<{ tablename: string }>(
+      `SELECT DISTINCT tablename FROM pg_policies WHERE schemaname = 'public' AND (qual ~* 'tenant_id IS NULL' OR with_check ~* 'tenant_id IS NULL') ORDER BY 1`,
+    );
+    // document_type_versions (T-206) küresel sistem tablosudur (discoverTables dışı); NULL satırı politikasız SELECT ile görünür.
+    const dtv = new Set(["document_type_versions"]);
+    expect(nullable.rows.map((r) => r.table_name).filter((n) => !dtv.has(n))).toEqual([...NULL_TENANT_TABLES].sort());
+    expect(pol.rows.map((r) => r.tablename).filter((n) => !dtv.has(n))).toEqual([...NULL_TENANT_TABLES].sort());
+  });
+
+  it("@AC-04 platform satırı: bağlamsızken yalnızca NULL tenant satırı görünür; tenant bağlamında görünmez ve yazılamaz", async () => {
+    for (const name of NULL_TENANT_TABLES) {
+      const total = Number(((await admin.query<{ n: string }>(`SELECT count(*)::text AS n FROM public.${q(name)} WHERE tenant_id IS NULL AND consumer = $1`, [PLATFORM_FIXTURE_CONSUMER])).rows[0] as { n: string }).n);
+      expect(total, `${name}: fikstür A ve B için platform satırı tohumlar`).toBe(2);
+      const blind = await attempt(appClient, [], `SELECT count(*)::int AS n FROM public.${q(name)} WHERE consumer = $1`, [PLATFORM_FIXTURE_CONSUMER]);
+      expect(blind.ok && (blind.rows[0] as { n: number }).n, `${name}: bağlamsız NULL satırları görür`).toBe(2);
+      for (const w of [A, B]) {
+        const ctx = await attempt(appClient, [setTenant(w.tenantId)], `SELECT count(*)::int AS n FROM public.${q(name)} WHERE tenant_id IS NULL`);
+        expect(ctx.ok && (ctx.rows[0] as { n: number }).n, `${name}: tenant bağlamında NULL satır görünmez`).toBe(0);
+        const wr = await attempt(appClient, [setTenant(w.tenantId)], `INSERT INTO public.${q(name)} (tenant_id, consumer, event_id) VALUES (NULL, 'ac04.platform', gen_random_uuid())`);
+        expect(!wr.ok && wr.code === INSUFFICIENT_PRIVILEGE && RLS_MESSAGE.test(wr.message), `${name}: tenant bağlamında NULL tenant yazımı RLS reddi, gelen ${fmt(wr)}`).toBe(true);
+      }
+      const platformWrite = await attempt(appClient, [], `INSERT INTO public.${q(name)} (tenant_id, consumer, event_id) VALUES (NULL, 'ac04.platform', gen_random_uuid())`);
+      expect(platformWrite.ok, `${name}: bağlamsız (platform) yazım kabul: ${fmt(platformWrite)}`).toBe(true);
+      const tenantedBlind = await attempt(appClient, [], `INSERT INTO public.${q(name)} (tenant_id, consumer, event_id) VALUES ($1, 'ac04.platform', gen_random_uuid())`, [A.tenantId]);
+      expect(!tenantedBlind.ok && tenantedBlind.code === INSUFFICIENT_PRIVILEGE, `${name}: bağlamsız tenant'lı yazım reddi: ${fmt(tenantedBlind)}`).toBe(true);
+    }
+  });
+
+  it("@AC-04 SYSTEM_REASON_WRITE anahtarları katalogla birebir: WITH CHECK politikasında app.system_reason geçen tenant tabloları", async () => {
+    const r = await admin.query<{ tablename: string; with_check: string }>(
+      `SELECT tablename, with_check FROM pg_policies WHERE schemaname = 'public' AND with_check ~* 'system_reason' ORDER BY 1`,
+    );
+    const tenantTables = new Set(tables.map((t) => t.name));
+    const derived = r.rows.filter((p) => tenantTables.has(p.tablename));
+    expect([...new Set(derived.map((p) => p.tablename))].sort()).toEqual(Object.keys(SYSTEM_REASON_WRITE).sort());
+    for (const p of derived) expect(p.with_check, p.tablename).toContain(SYSTEM_REASON_WRITE[p.tablename] as string);
   });
 });
 
@@ -444,11 +512,22 @@ describe("AC-04 DB — withUser kapsamı", () => {
     });
   }
 
+  /** Her tablo 0 satır; yalnızca NULL tenant istisna tablolarında yöneticinin saydığı platform (NULL) satır sayısı (kullanıcı bağlamında tenant bağlamı boştur). */
+  async function expectedOthers(seen: Record<string, number>): Promise<Record<string, number>> {
+    const out: Record<string, number> = {};
+    for (const name of Object.keys(seen)) {
+      out[name] = NULL_TENANT_TABLES.has(name)
+        ? Number(((await admin.query<{ n: string }>(`SELECT count(*)::text AS n FROM public.${q(name)} WHERE tenant_id IS NULL`)).rows[0] as { n: string }).n)
+        : 0;
+    }
+    return out;
+  }
+
   it("@AC-04 tek tenantlı kullanıcı: yalnızca kendi üyeliği + yalnızca kendi tenant satırı; diğer tenant tablolarında 0 satır", async () => {
     const s = await snapshot(A.ownerUserId);
     expect(s.memberships).toEqual([{ tenant_id: A.tenantId, user_id: A.ownerUserId }]);
     expect(s.tenants).toEqual([A.tenantId]);
-    expect(Object.values(s.others).every((n) => n === 0), JSON.stringify(s.others)).toBe(true);
+    expect(s.others, "NULL tenant istisna tabloları dışında 0; istisnada yalnızca platform satırları").toEqual(await expectedOthers(s.others));
     expect(Object.keys(s.others).length).toBeGreaterThanOrEqual(3);
   });
 
@@ -463,7 +542,7 @@ describe("AC-04 DB — withUser kapsamı", () => {
     expect(s.memberships.map((m) => m.user_id)).toEqual([multi.userId, multi.userId]);
     expect(s.memberships.map((m) => m.tenant_id).sort()).toEqual([A.tenantId, B.tenantId].sort());
     expect(s.tenants.sort()).toEqual([A.tenantId, B.tenantId].sort());
-    expect(Object.values(s.others).every((n) => n === 0)).toBe(true);
+    expect(s.others).toEqual(await expectedOthers(s.others));
   });
 
   it("@AC-04 üyeliği REMOVED olan kullanıcı: tenants satırı görünmez (yalnızca ACTIVE üyelik)", async () => {
