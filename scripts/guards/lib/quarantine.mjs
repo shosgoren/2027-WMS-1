@@ -11,7 +11,8 @@
 //   (b) kayıt satırı `main`'de (varsayılan `origin/main`) birebir aynı → aksi QUARANTINE_NOT_APPROVED
 //       (karantinayı ekleyen PR birleşmiş; PR'da eklenen/değişen kayıt korunan dosya değişikliğidir,
 //       onayı `check:protected` denetler — §Onay kaynağı)
-//   (c) test, kapısı değerlendirilen fazın (`currentGatePhase`) `@AC` testi değil → aksi QUARANTINE_GATE_AC
+//   (c) test, kapısı değerlendirilen veya geçilmiş fazların (`currentGatePhase` ∪ `passedGates`) `@AC`
+//       testi değil → aksi QUARANTINE_GATE_AC
 //   (d) bitiş ≤ eklendiği tarih + 14 gün → aksi QUARANTINE_TOO_LONG; bugün (UTC) ≤ bitiş →
 //       aksi QUARANTINE_EXPIRED; eklendiği tarih ≤ bugün (UTC) → aksi QUARANTINE_FUTURE_DATE (T-008j:
 //       ileri tarihli "eklendi" 14 gün sınırını öteler). Bu üçü kayıt satırı için etiketten bağımsız da hatadır.
@@ -243,6 +244,18 @@ export function approvalProblem(entry, state) {
 export function gateAcIds(acs, phases) {
   const ps = new Set(phases);
   return new Set(acs.filter((a) => ps.has(a.phase) || (a.fallbackPhase !== undefined && ps.has(a.fallbackPhase))).map((a) => a.id));
+}
+
+/**
+ * Kapı AC kümesi = `currentGatePhase` ∪ `passedGates` (∪ ek fazlar). Karantina kuralı (c) için tek kaynak:
+ * `check:tests` ve `test:ac` yargıcı bunu kullanır (T-132b).
+ * @param {Array<{ id: string, phase: string, fallbackPhase?: string }>} acs
+ * @param {{ currentGatePhase: string, passedGates: readonly string[] }} conds
+ * @param {Iterable<string>} [extraPhases]
+ * @returns {Set<string>}
+ */
+export function gateAcIdsFor(acs, conds, extraPhases = []) {
+  return gateAcIds(acs, [conds.currentGatePhase, ...conds.passedGates, ...extraPhases]);
 }
 
 /**

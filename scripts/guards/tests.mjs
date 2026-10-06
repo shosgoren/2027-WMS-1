@@ -31,7 +31,7 @@
 // `@quarantine Q-xx` olan her test/describe için kayıt denetlenir (test yine koşar):
 //   QUARANTINE_UNREGISTERED   kayıt yok / kimliksiz etiket / kayıt başka dosya için
 //   QUARANTINE_NOT_APPROVED   kayıt satırı `origin/main`'de birebir yok (karantinayı ekleyen PR birleşmemiş)
-//   QUARANTINE_GATE_AC        test (veya altındaki test) `currentGatePhase` fazının `@AC` testi
+//   QUARANTINE_GATE_AC        test (veya altındaki test) `currentGatePhase` ∪ `passedGates` fazlarının `@AC` testi
 //   QUARANTINE_FUTURE_DATE    (kayıt satırı) eklendi tarihi bugünden (UTC) ileri (T-008j)
 //   QUARANTINE_EXPIRED        (kayıt satırı) bitiş tarihi geçti (UTC)
 //   QUARANTINE_TOO_LONG       (kayıt satırı) bitiş > eklendiği tarih + 14 gün
@@ -43,7 +43,7 @@ import ts from "typescript";
 import { loadAcceptance } from "../test-ac/acceptance.mjs";
 import { loadConditions } from "../test-ac/conditions.mjs";
 import { UsageError } from "./lib/output.mjs";
-import { acTagsOf, entryDateFindings, evaluateSite, gateAcIds, loadQuarantine, QUARANTINE_FILE, quarantineSummary } from "./lib/quarantine.mjs";
+import { acTagsOf, entryDateFindings, evaluateSite, gateAcIdsFor, loadQuarantine, QUARANTINE_FILE, quarantineSummary } from "./lib/quarantine.mjs";
 
 /** Taramadan hariç tutulan dizin adları (herhangi bir derinlikte). Başka muafiyet yok. */
 export const EXCLUDED_DIRS = Object.freeze(["node_modules", ".artifacts", ".next", "dist", ".git"]);
@@ -851,7 +851,7 @@ function checkQuarantine(root, sites, out) {
   if (sites.length > 0) {
     try {
       const acs = loadAcceptance(root);
-      gateAcs = gateAcIds(acs, [loadConditions(root, acs).currentGatePhase]);
+      gateAcs = gateAcIdsFor(acs, loadConditions(root, acs));
     } catch (e) {
       gateError = e instanceof Error ? e.message : String(e);
     }
