@@ -3,9 +3,12 @@
 // Platform (tenant_id NULL) satırları ve sinyaller YALNIZCA geri alınan transaction'larda yazılır: AC-04'ün "bağlamsız 0 satır"
 // taraması hiçbir kalıcı platform satırı görmemeli ve stock_consistency_signals append-only olduğundan silinemez.
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { cleanupRegistry, newRegistry, seedWorld, type TenantWorld } from "../fixtures/tenants.ts";
+import { MIGRATIONS_DIR } from "../../../packages/db/src/migrate.ts";
 import { PROBE_ROLE, readAuthDatabaseUrl, readIntEnv, readWorkerDatabaseUrl, redactErrorChain } from "../harness/env.ts";
 
 const env = readIntEnv(process.env);
@@ -464,5 +467,47 @@ describe("T-211 wms_probe.active_tenant_ids (ADR-019 §1)", () => {
       [PROBE_ROLE],
     );
     expect(probeWrite.rows[0]?.v, "probe salt okunur kalır").toBe(false);
+  });
+});
+
+describe("T-211 down migration (ADR-015 §9; dolu tablo bekçisi)", () => {
+  // Down SQL'i paylaşılan veritabanında YIKMADAN sınamak için: dosya tek BEGIN ... ROLLBACK içinde, tablo sahibi bağlantıyla çalıştırılır
+  // (DDL transaction'lıdır; koşturucunun tek-transaction davranışıyla aynı). Fikstür A/B processed_events satırları tabloyu doludur.
+  const downSql = (): string => readFileSync(path.join(MIGRATIONS_DIR, "0014_reliability.down.sql"), "utf8");
+  const exists = async (q: Q): Promise<{ tables: number; fn: number }> => {
+    const t = await q("SELECT count(*)::int AS n FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relname IN ('processed_events', 'stock_consistency_runs', 'stock_consistency_signals')");
+    const f = await q("SELECT count(*)::int AS n FROM pg_proc WHERE oid = to_regprocedure('wms_probe.active_tenant_ids(uuid, integer)')");
+    return { tables: (t.rows[0] as { n: number }).n, fn: (f.rows[0] as { n: number }).n };
+  };
+
+  it("dolu tablolarla bayraksız down RAISE eder (satır var); veri ve işlev yerinde kalır", async () => {
+    const r = await rolled(admin, {}, async (q, sp) => {
+      const a = await sp(downSql());
+      expect(a.ok, "bayraksız down reddedilmeli").toBe(false);
+      if (!a.ok) expect(a.message).toMatch(/0014_reliability down: public\.\w+ tablosunda satır var/);
+    });
+    expect(r.ok, JSON.stringify(r)).toBe(true);
+    expect(await exists((s, p) => admin.query(s, p))).toEqual({ tables: 3, fn: 1 });
+    const kept = await admin.query<{ n: string }>("SELECT count(*)::text AS n FROM public.processed_events WHERE consumer = 't211.fixture' AND tenant_id = ANY($1::uuid[])", [[A.tenantId, B.tenantId]]);
+    expect(kept.rows[0]?.n).toBe("2");
+    const force = await admin.query<{ relforcerowsecurity: boolean }>("SELECT relforcerowsecurity FROM pg_class WHERE oid = 'public.processed_events'::regclass");
+    expect(force.rows[0]?.relforcerowsecurity, "bekçi sayımı geri alındı: FORCE RLS yerinde").toBe(true);
+  });
+
+  it("wms_meta.allow_destructive_down = on ile down her şeyi kaldırır (işlev, tablolar, tetikleyici işlevleri, şema USAGE); ROLLBACK ile geri gelir", async () => {
+    const r = await rolled(admin, {}, async (q) => {
+      await q("SELECT set_config('wms_meta.allow_destructive_down', 'on', true)");
+      await q(downSql());
+      expect(await exists(q)).toEqual({ tables: 0, fn: 0 });
+      const left = await q(
+        `SELECT count(*)::int AS n FROM pg_proc WHERE pronamespace = 'public'::regnamespace
+          AND proname IN ('reliability_reject_change', 'stock_consistency_runs_force_server_fields', 'stock_consistency_signals_force_server_fields')`,
+      );
+      expect(left.rows[0]).toEqual({ n: 0 });
+      const usage = await q("SELECT has_schema_privilege('wms_worker', 'wms_probe', 'USAGE') AS v");
+      expect(usage.rows[0]).toEqual({ v: false });
+    });
+    expect(r.ok, JSON.stringify(r)).toBe(true);
+    expect(await exists((s, p) => admin.query(s, p))).toEqual({ tables: 3, fn: 1 });
   });
 });
