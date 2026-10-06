@@ -81,7 +81,7 @@ export default async function SettingsPage({ params, searchParams }: { params: P
               id="locale"
               name="locale"
               defaultValue={settings?.locale ?? "tr"}
-              className="min-h-12 w-full min-w-0 rounded-card border-2 border-border bg-surface px-4 text-base text-ink focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus disabled:opacity-60"
+              className="min-h-12 w-full min-w-0 rounded-card border-2 border-border-strong bg-surface px-4 text-base text-ink focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus disabled:opacity-60"
             >
               <option value="tr">{t("localeTr")}</option>
               <option value="en">{t("localeEn")}</option>
@@ -95,7 +95,7 @@ export default async function SettingsPage({ params, searchParams }: { params: P
               id="timeZone"
               name="timeZone"
               defaultValue={settings?.timeZone ?? "Europe/Istanbul"}
-              className="min-h-12 w-full min-w-0 rounded-card border-2 border-border bg-surface px-4 text-base text-ink focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus disabled:opacity-60"
+              className="min-h-12 w-full min-w-0 rounded-card border-2 border-border-strong bg-surface px-4 text-base text-ink focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus disabled:opacity-60"
             >
               {TIME_ZONES.map((z) => (
                 <option key={z} value={z}>
@@ -111,7 +111,7 @@ export default async function SettingsPage({ params, searchParams }: { params: P
       <div>
         <Link
           href={home}
-          className="inline-flex min-h-12 min-w-12 items-center justify-center rounded-control border-2 border-border bg-surface px-6 text-base font-bold text-ink focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus"
+          className="inline-flex min-h-12 min-w-12 items-center justify-center rounded-control border-2 border-border-strong bg-surface px-6 text-base font-bold text-ink focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus"
         >
           {t("back")}
         </Link>

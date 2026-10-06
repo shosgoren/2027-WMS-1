@@ -2,7 +2,7 @@
 
 import { useEffect, useId, useRef } from "react";
 import type { ButtonHTMLAttributes, InputHTMLAttributes } from "react";
-import { LoaderCircle } from "lucide-react";
+import { CircleAlert, LoaderCircle } from "lucide-react";
 
 export type ButtonVariant = "primary" | "secondary" | "danger";
 
@@ -14,8 +14,8 @@ export interface ButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement
 
 const VARIANT: Record<ButtonVariant, string> = {
   primary: "bg-accent text-on-accent",
-  secondary: "border-2 border-border bg-surface text-ink",
-  danger: "bg-undo-ink text-on-accent",
+  secondary: "border-2 border-border-strong bg-surface text-ink",
+  danger: "bg-danger text-on-accent",
 };
 
 export function Button({ variant = "primary", loading = false, disabled, children, type = "button", ...rest }: ButtonProps) {
@@ -67,11 +67,14 @@ export function TextField({ label, hint, error, ...rest }: TextFieldProps) {
         id={id}
         aria-invalid={error ? true : undefined}
         aria-describedby={describedBy}
-        className="min-h-12 w-full min-w-0 rounded-card border-2 border-border bg-surface px-4 text-base text-ink focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus aria-[invalid=true]:border-undo-ink"
+        className="min-h-12 w-full min-w-0 rounded-card border-2 border-border-strong bg-surface px-4 text-base text-ink focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus aria-[invalid=true]:border-danger"
       />
       {error ? (
-        <span id={errId} role="alert" className="break-words text-sm font-medium text-undo-ink">
-          {error.reason} {error.action}
+        <span id={errId} role="alert" className="flex items-start gap-1 break-words text-sm font-medium text-danger-ink">
+          <CircleAlert aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-danger" />
+          <span className="min-w-0">
+            {error.reason} {error.action}
+          </span>
         </span>
       ) : null}
     </div>

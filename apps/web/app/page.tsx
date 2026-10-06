@@ -72,7 +72,7 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
           {t("landing.signIn")}
         </Link>
         {signup ? (
-          <Link href="/onboarding" className={`${BUTTON} border-2 border-border bg-surface text-ink`}>
+          <Link href="/onboarding" className={`${BUTTON} border-2 border-border-strong bg-surface text-ink`}>
             {t("landing.createWorkspace")}
           </Link>
         ) : null}
@@ -103,7 +103,7 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
                 name="role"
                 value={role}
                 disabled={demoState !== "ready"}
-                className={`${BUTTON} cursor-pointer border-2 border-border bg-surface text-ink disabled:cursor-not-allowed disabled:opacity-60`}
+                className={`${BUTTON} cursor-pointer border-2 border-border-strong bg-surface text-ink disabled:cursor-not-allowed disabled:opacity-60`}
               >
                 {t("landing.demo.enter", { role: t(`roles.${role}`) })}
               </button>

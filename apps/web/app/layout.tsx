@@ -4,6 +4,7 @@ import Link from "next/link";
 import { NextIntlClientProvider } from "next-intl";
 import { getLocale, getTranslations } from "next-intl/server";
 import type { ReactNode } from "react";
+import { Package } from "@wms/ui";
 import { SignOutButton } from "./auth-forms.tsx";
 import "./globals.css";
 
@@ -55,9 +56,7 @@ export default async function RootLayout({ children }: Readonly<{ children: Reac
                 aria-hidden="true"
                 className="flex size-12 shrink-0 items-center justify-center rounded-2xl bg-accent text-on-accent"
               >
-                <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M12 3 4 7.5v9L12 21l8-4.5v-9L12 3Zm0 9 8-4.5M12 12 4 7.5M12 12v9" />
-                </svg>
+                <Package className="size-6" strokeWidth={2} aria-hidden="true" />
               </span>
               <div className="flex min-w-0 flex-col leading-tight">
                 <span className="truncate text-xl font-extrabold">{t("productName")}</span>
