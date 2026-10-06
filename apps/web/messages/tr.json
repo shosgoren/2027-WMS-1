@@ -292,6 +292,10 @@
     "unauthenticated_recent_auth_requiredAction": "Yeniden giriş yapıp işlemi yinele.",
     "validation_failed_code_taken": "Bu kod zaten kullanılıyor.",
     "validation_failed_code_takenAction": "Başka bir kod yaz.",
+    "validation_failed_feature_disabled": "Bu özellik şu an kapalı.",
+    "validation_failed_feature_disabledAction": "Yöneticinle görüşüp özelliğin açılmasını iste.",
+    "validation_failed_location_warehouse_mismatch": "Satır lokasyonlarının tümü belgenin deposunda olmalı.",
+    "validation_failed_location_warehouse_mismatchAction": "Aynı depodan lokasyonlar seç; depolar arası taşıma için ayrı belge gerekir.",
     "validation_failed_in_use": "Kayıt kullanımda olduğu için bu değişiklik yapılamaz.",
     "validation_failed_in_useAction": "Önce stoğu boşalt veya bağlı kayıtları arşivle, sonra yeniden dene.",
     "validation_failed_parent_invalid": "Seçilen üst lokasyon uygun değil.",
@@ -534,6 +538,7 @@
       "changed": "Bir taşıma birimini değiştirdin."
     },
     "stock_document": {
+      "updated": "Bir stok taslağını güncelledin.",
       "created": "Bir stok belgesi oluşturdun.",
       "approved": "Bir stok belgesini onayladın.",
       "posted": "Bir stok belgesini işledin.",
@@ -878,6 +883,60 @@
       "tenant_closingAction": "Sorumluna başvur.",
       "internal": "Bir sorun oluştu.",
       "internalAction": "Biraz sonra yeniden dene; sürerse hata kodunu destek ekibine ilet."
+    }
+  },
+  "field": {
+    "title": "Saha",
+    "intro": "Bir iş seç; tara, doğrula, miktarı onayla.",
+    "menuLabel": "Saha işleri",
+    "actionBarLabel": "Saha eylemleri",
+    "fieldHome": "Saha işleri",
+    "mainMenu": "Ana ekran",
+    "lockedReason": "Bu ekran henüz açılmadı.",
+    "tasks": {
+      "receive": {
+        "title": "Kabul",
+        "description": "Gelen malı tara ve say."
+      },
+      "putaway": {
+        "title": "Yerleştirme",
+        "description": "Malı rafa yerleştir."
+      },
+      "pick": {
+        "title": "Toplama",
+        "description": "Sipariş için malı topla."
+      },
+      "ship": {
+        "title": "Sevk",
+        "description": "Toplanan malı sevk et."
+      },
+      "return": {
+        "title": "İade",
+        "description": "İade gelen malı kabul et."
+      },
+      "count": {
+        "title": "Sayım",
+        "description": "Rafı say, farkı göster."
+      }
+    }
+  },
+  "labels": {
+    "title": "Etiket yazdır",
+    "preview": "Etiket önizleme",
+    "print": "Yazdır",
+    "downloadZpl": "ZPL indir",
+    "bridge": "Yerel köprüyle gönder (hazır değil)",
+    "summary": "{count} etiket · şablon {version}",
+    "noSource": "Etiket için bir ürün ya da lokasyon seçilmedi.",
+    "noSourceAction": "Ürün ayrıntısından ya da lokasyon ağacından bu sayfaya gel.",
+    "locked": "Etiket görme yetkin yok.",
+    "lockedAction": "Çalışma alanı yöneticine sor.",
+    "errors": {
+      "copies": "Adet 1 ile {max} arasında, toplam etiket sayısı {max}'i aşmayan bir sayı olmalı.",
+      "charset": "Barkod içeriği yalnızca ASCII karakter taşıyabilir (Türkçe harf, ö, ş, ğ gibi karakterler olmaz).",
+      "charsetAction": "Ürün kodunu ya da barkodu ASCII karakterlerle düzelt.",
+      "tooLong": "Barkod etiket genişliğine sığmıyor.",
+      "tooLongAction": "Kodu ya da barkodu kısalt."
     }
   }
 }

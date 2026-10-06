@@ -292,6 +292,10 @@
     "unauthenticated_recent_auth_requiredAction": "Sign in again and repeat the action.",
     "validation_failed_code_taken": "This code is already in use.",
     "validation_failed_code_takenAction": "Enter a different code.",
+    "validation_failed_feature_disabled": "This feature is currently turned off.",
+    "validation_failed_feature_disabledAction": "Ask your administrator to enable it.",
+    "validation_failed_location_warehouse_mismatch": "All line locations must belong to the document's warehouse.",
+    "validation_failed_location_warehouse_mismatchAction": "Choose locations from the same warehouse; moving between warehouses needs a separate document.",
     "validation_failed_in_use": "This change is not possible because the record is in use.",
     "validation_failed_in_useAction": "Empty the stock or archive the linked records first, then try again.",
     "validation_failed_parent_invalid": "The selected parent location is not valid.",
@@ -534,6 +538,7 @@
       "changed": "You changed a handling unit."
     },
     "stock_document": {
+      "updated": "You updated a stock draft.",
       "created": "You created a stock document.",
       "approved": "You approved a stock document.",
       "posted": "You posted a stock document.",
@@ -878,6 +883,60 @@
       "tenant_closingAction": "Contact your manager.",
       "internal": "Something went wrong.",
       "internalAction": "Try again shortly; if it persists, send the error code to support."
+    }
+  },
+  "field": {
+    "title": "Field",
+    "intro": "Pick a job; scan, verify, confirm the quantity.",
+    "menuLabel": "Field jobs",
+    "actionBarLabel": "Field actions",
+    "fieldHome": "Field jobs",
+    "mainMenu": "Home",
+    "lockedReason": "This screen is not open yet.",
+    "tasks": {
+      "receive": {
+        "title": "Receiving",
+        "description": "Scan and count incoming goods."
+      },
+      "putaway": {
+        "title": "Putaway",
+        "description": "Put goods on a shelf."
+      },
+      "pick": {
+        "title": "Picking",
+        "description": "Pick goods for an order."
+      },
+      "ship": {
+        "title": "Shipping",
+        "description": "Ship the picked goods."
+      },
+      "return": {
+        "title": "Returns",
+        "description": "Receive returned goods."
+      },
+      "count": {
+        "title": "Counting",
+        "description": "Count a shelf and show the difference."
+      }
+    }
+  },
+  "labels": {
+    "title": "Print labels",
+    "preview": "Label preview",
+    "print": "Print",
+    "downloadZpl": "Download ZPL",
+    "bridge": "Send via local bridge (not ready)",
+    "summary": "{count} labels · template {version}",
+    "noSource": "No item or location was selected for labels.",
+    "noSourceAction": "Open this page from an item detail or the location tree.",
+    "locked": "You do not have permission to view labels.",
+    "lockedAction": "Ask your workspace administrator.",
+    "errors": {
+      "copies": "Copies must be a number from 1 to {max}, and the total label count must not exceed {max}.",
+      "charset": "Barcode content can only contain ASCII characters (no Turkish letters such as ö, ş, ğ).",
+      "charsetAction": "Fix the item code or barcode to use ASCII characters.",
+      "tooLong": "The barcode does not fit the label width.",
+      "tooLongAction": "Shorten the code or barcode."
     }
   }
 }
