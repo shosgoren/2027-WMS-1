@@ -533,6 +533,32 @@ describe("0007–0012 — süper kullanıcı olmayan migrator", () => {
     expect(await schemaDigest(u)).toEqual(base);
   });
 
+  it("sütun ACL parmak izi gerçek veri taşır; tek sütun yetkisi REVOKE edilirse yalnızca columnAcl değişir; GRANT ile eşitlenir", async () => {
+    await setProbeMemberships(STANDARD_GRANT);
+    const u = await freshDatabase();
+    expect((await migrateUp({ url: u, dir: thru12() })).applied).toEqual(ALL);
+    const base = await schemaDigest(u);
+    await withClient(u, async (c) => {
+      // Boş-küme md5'i değil; 0010/0011/0012'nin sütun GRANT'ları katalogda gerçekten var.
+      const empty = await c.query<{ d: string }>("SELECT md5('') AS d");
+      expect(base.columnAcl).not.toBe(empty.rows[0]?.d);
+      const n = await c.query<{ n: string; hist: string }>(
+        `SELECT count(*)::text AS n,
+                count(*) FILTER (WHERE c.relname = 'document_status_history' AND a.attname = 'reason' AND x.grantee = 'wms_app'::regrole AND x.privilege_type = 'INSERT')::text AS hist
+           FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace ns ON ns.oid = c.relnamespace
+           CROSS JOIN LATERAL aclexplode(a.attacl) x WHERE a.attacl IS NOT NULL AND NOT a.attisdropped AND ns.nspname = 'public'`,
+      );
+      expect(Number(n.rows[0]?.n)).toBeGreaterThan(20);
+      expect(n.rows[0]?.hist).toBe("1");
+      await c.query("REVOKE INSERT (reason) ON public.document_status_history FROM wms_app");
+    });
+    const changed = await schemaDigest(u);
+    expect(changed.columnAcl).not.toBe(base.columnAcl);
+    expect({ ...changed, columnAcl: base.columnAcl }).toEqual(base);
+    await withClient(u, (c) => c.query("GRANT INSERT (reason) ON public.document_status_history TO wms_app"));
+    expect(await schemaDigest(u)).toEqual(base);
+  });
+
   // Her bekçi testi: tenant bağlamında tek kalıcı satır; staging down RAISE eder, satır yerinde kalır; ci down geçer.
   async function guardCase(opts: { target: string; fail: string; down: RegExp; table: string; insert: string; keep: string }): Promise<void> {
     await setProbeMemberships(STANDARD_GRANT);
