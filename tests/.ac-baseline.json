@@ -1,7 +1,8 @@
 {
   "acTests": {
-    "AC-04": 75,
+    "AC-04": 84,
     "AC-05": 2,
+    "AC-09": 8,
     "AC-18": 9,
     "AC-28": 59,
     "AC-37": 14,
@@ -13,15 +14,17 @@
     "tests/guards/ac-43.test.mjs": 37,
     "tests/guards/ac-44.test.mjs": 42,
     "tests/integration/ac/ac-04-api-slug.int.test.ts": 46,
-    "tests/integration/ac/ac-04-db-isolation.int.test.ts": 81,
+    "tests/integration/ac/ac-04-db-isolation.int.test.ts": 83,
     "tests/integration/ac/ac-04-export-route.int.test.ts": 50,
     "tests/integration/ac/ac-04-file-cache.int.test.ts": 59,
     "tests/integration/ac/ac-05-pooler-isolation.int.test.ts": 15,
+    "tests/integration/ac/ac-09-db-serial.int.test.ts": 18,
     "tests/integration/ac/ac-18-membership-db.int.test.ts": 21,
     "tests/integration/ac/ac-28-runtime.int.test.ts": 16,
     "tests/integration/audit-immutability.int.test.ts": 43,
     "tests/integration/schema/documents-qa.int.test.ts": 27,
     "tests/integration/schema/phase2-catalog-qa.int.test.ts": 49,
+    "tests/integration/schema/stock-guard-qa.int.test.ts": 51,
     "tests/unit/ac/ac-28-lint.test.ts": 119
   }
 }

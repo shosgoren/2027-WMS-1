@@ -116,6 +116,7 @@ export const documentLines = pgTable(
   (t) => [
     unique("document_lines_tenant_id_id_key").on(t.tenantId, t.id),
     unique("document_lines_tenant_document_id_key").on(t.tenantId, t.documentId, t.id),
+    unique("document_lines_tenant_id_id_item_key").on(t.tenantId, t.id, t.itemId),
     unique("document_lines_tenant_document_line_no_key").on(t.tenantId, t.documentId, t.lineNo),
     index("document_lines_tenant_item_idx").on(t.tenantId, t.itemId),
     index("document_lines_tenant_unit_idx").on(t.tenantId, t.unitId),

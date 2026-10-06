@@ -141,3 +141,16 @@ export { DEMO_TENANT_ID, DEMO_TENANT_NAME, DEMO_TENANT_NAMESPACE, DEMO_TENANT_SL
 // Sağlık yoklamaları (T-129): `/api/health` DB ve kuyruk şeması erişimi (satır okumaz).
 export { createHealthProbe, getHealthProbe } from "./health.ts";
 export type { HealthProbe, HealthProbeOptions, HealthSnapshot, ProbeResult } from "./health.ts";
+// Stok çekirdeği tabloları (T-232): yalnızca TİPLER; tablo nesneleri `@wms/db/internal/schema` alt yolundadır.
+export type {
+  NewReservation,
+  NewStockBalance,
+  NewStockDimension,
+  NewStockLedgerEntry,
+  Reservation,
+  ReservationStatus,
+  StockBalance,
+  StockDimension,
+  StockLedgerEntry,
+  StockStatus,
+} from "./schema/stock.ts";
