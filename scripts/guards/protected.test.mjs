@@ -2,13 +2,14 @@
 // GitHub istemcisi (`lib/github.mjs`, sahte `fetch` yalnızca burada), kipler ve fail-closed davranış.
 // Fixture depolar `lib/testkit.mjs` ile geçici dizinde gerçek git ile kurulur. "… saldırısı" adlı
 // testler security-reviewer'ın (int/faz0-bekciler-1) denediği atlatmanın kendisidir (T-008h).
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { main } from "./cli.mjs";
+import { isMissingRef, revParse, verifyPushMerge } from "./protected.mjs";
 import { approvalLine, REASONS, securityLine } from "./lib/approval.mjs";
-import { gitEnv } from "./lib/git.mjs";
+import { GitError, gitEnv } from "./lib/git.mjs";
 import { API_VERSION, contextFromEnv, createGitHubClient, GitHubError, toPullInfo } from "./lib/github.mjs";
 import { createReporter, UsageError } from "./lib/output.mjs";
 import { createRepo } from "./lib/testkit.mjs";
@@ -135,10 +136,16 @@ const ROOT_PKG = {
   devDependencies: { vitest: "5.0.3" },
 };
 
-/** Korunan ve korunmayan dosyalar içeren `main`; origin/main yayımlı; çalışma dalı `feat/T-100-x`. */
-function fixture() {
-  const r = createRepo({ prefix: "guards-protected-" });
-  cleanups.push(() => r.cleanup());
+/**
+ * Paylaşılan fikstür şablonu (T-008l madde 1): `main` + `origin/main` + `feat/T-100-x` deposu
+ * dosya sistemi kopyasıyla çoğaltılır; her testte `git init/add/commit/update-ref/checkout`
+ * (≈8 alt süreç) yerine yalnızca `createRepo` (init + 2 config) koşar. Şablon testlerce
+ * DEĞİŞTİRİLMEZ (her test kendi kopyasında çalışır).
+ * @type {import("./lib/testkit.mjs").TestRepo | null}
+ */
+let template = null;
+beforeAll(() => {
+  const r = createRepo({ prefix: "guards-protected-tpl-" });
   r.writeAll({
     ".gitignore": ".artifacts/\n",
     "package.json": JSON.stringify(ROOT_PKG, null, 2) + "\n",
@@ -156,6 +163,19 @@ function fixture() {
   });
   r.commit("init").publish("main");
   r.branch("feat/T-100-x");
+  template = r;
+});
+afterAll(() => {
+  template?.cleanup();
+  template = null;
+});
+
+/** Korunan ve korunmayan dosyalar içeren `main`; origin/main yayımlı; çalışma dalı `feat/T-100-x`. */
+function fixture() {
+  if (template === null) throw new Error("fikstür şablonu hazır değil (beforeAll)");
+  const r = createRepo({ prefix: "guards-protected-" });
+  cleanups.push(() => r.cleanup());
+  cpSync(template.dir, r.dir, { recursive: true, force: true, preserveTimestamps: true });
   return r;
 }
 
@@ -1035,6 +1055,92 @@ describe("check:protected", () => {
     expect(res.text).toContain("ikinci ebeveyni");
   });
 
+  it("T-008m: ikinci ebeveyn yok (squash) → revParse null; ağaç önizlemeye eşit → null (OK)", () => {
+    const r = fixture();
+    r.write("docs/INVARIANTS.md", "# I2\n").commit("x");
+    const prHead = head(r);
+    r.checkout("main");
+    r.git("merge", "--quiet", "--squash", "feat/T-100-x");
+    r.commit("Squash PR #7");
+    expect(verifyPushMerge(r.dir, prHead)).toBeNull();
+  });
+
+  it("T-008m: ikinci ebeveyn nesnesi silinmiş → sessiz atlama yok; PR head'ine eşit değilse FAIL", () => {
+    const r = fixture();
+    r.write("docs/INVARIANTS.md", "# I2\n").commit("x");
+    r.checkout("main").merge("feat/T-100-x", "Merge pull request #7");
+    const second = r.git("rev-parse", "HEAD^2").trim();
+    rmSync(path.join(r.dir, ".git", "objects", second.slice(0, 2), second.slice(2)), { force: true });
+    const res = verifyPushMerge(r.dir, "0".repeat(40));
+    expect(res).not.toBeNull();
+    expect(res).toContain("ikinci ebeveyni");
+  });
+
+  it("T-008m: silinmiş ikinci ebeveyn + ağacı önizlemeye eşit birleştirme → FAIL (eski kod null sayıp geçerdi)", () => {
+    const r = fixture();
+    r.write("docs/INVARIANTS.md", "# I2\n").commit("x");
+    const prHead = head(r);
+    r.checkout("main");
+    const base = r.git("rev-parse", "HEAD").trim();
+    const tree = (r.git("merge-tree", "--write-tree", "--no-messages", base, prHead).split("\n")[0] ?? "").trim();
+    const prTree = r.git("rev-parse", `${prHead}^{tree}`).trim();
+    const second = r.git("commit-tree", prTree, "-m", "sahte ikinci ebeveyn").trim();
+    const merged = r.git("commit-tree", tree, "-p", base, "-p", second, "-m", "Merge pull request #7").trim();
+    r.git("reset", "--quiet", "--hard", merged);
+    rmSync(path.join(r.dir, ".git", "objects", second.slice(0, 2), second.slice(2)), { force: true });
+    const res = verifyPushMerge(r.dir, prHead);
+    expect(res).not.toBeNull();
+    expect(res).toContain("ikinci ebeveyni");
+  });
+
+  it("T-008m: isMissingRef — yalnızca çıkış 1 + boş stdout/stderr; uyarılı stderr veya çıkış ≠ 1 gerçek hata", () => {
+    const err = (/** @type {number | null} */ status, /** @type {boolean} */ out, /** @type {boolean} */ se) =>
+      new GitError("x", ["rev-parse"], { status, stdoutEmpty: out, stderrEmpty: se });
+    expect(isMissingRef(err(1, true, true))).toBe(true);
+    expect(isMissingRef(err(1, true, false))).toBe(false); // uyarı (ör. belirsiz refname)
+    expect(isMissingRef(err(1, false, true))).toBe(false);
+    expect(isMissingRef(err(128, true, true))).toBe(false);
+    expect(isMissingRef(err(null, true, true))).toBe(false); // sinyal
+    expect(isMissingRef(new Error("x"))).toBe(false);
+  });
+
+  it("T-008m: revParse — olmayan ref null, bozuk depoda GitError fırlatır", () => {
+    const r = fixture();
+    expect(revParse(r.dir, "HEAD^9")).toBeNull();
+    expect(revParse(r.dir, "HEAD")).toMatch(/^[0-9a-f]{40}$/);
+    writeFileSync(path.join(r.dir, ".git", "HEAD"), "bozuk\n");
+    expect(() => revParse(r.dir, "HEAD^2")).toThrow(GitError);
+  });
+
+  it("T-008m: findPull içinde git hatası (PR alındıktan sonra bozulan depo) → GIT_ERROR, FAIL", async () => {
+    const r = fixture();
+    r.write("docs/INVARIANTS.md", "# I2\n").commit("x");
+    const h = head(r);
+    const inner = fakeClient({ pulls: [pull({ headSha: h })] }).client;
+    /** @type {GitHubClient} */
+    const client = {
+      ...inner,
+      getPull: async (n) => {
+        writeFileSync(path.join(r.dir, ".git", "HEAD"), "bozuk\n");
+        return inner.getPull(n);
+      },
+    };
+    const res = await check(r, { env: prEnv(r), client });
+    expect(res.code).toBe(1);
+    expect(res.text).toContain("FAIL GIT_ERROR");
+  });
+
+  it("T-008m: gerçek git hatası (bozuk HEAD) → 'ref yok' sayılmaz, git ile doğrulanamadı (GIT_ERROR yolu)", () => {
+    const r = fixture();
+    r.write("docs/INVARIANTS.md", "# I2\n").commit("x");
+    const prHead = head(r);
+    r.checkout("main").merge("feat/T-100-x", "Merge pull request #7");
+    writeFileSync(path.join(r.dir, ".git", "HEAD"), "bozuk\n");
+    const res = verifyPushMerge(r.dir, prHead);
+    expect(res).not.toBeNull();
+    expect(res).toContain("git ile doğrulanamadı");
+  });
+
   it("MINOR 6 saldırısı: birleştirme commit'ine PR dışı içerik eklenmiş (evil merge) → APPROVAL_UNVERIFIABLE", async () => {
     const r = fixture();
     r.write("docs/INVARIANTS.md", "# I2\n").commit("x");
@@ -1083,7 +1189,7 @@ describe("check:protected", () => {
     expect(res.text).toContain("yerelde yok");
   });
 
-  it("MINOR 8: PR kipinde rapor SHA'sından sonra korunan değişiklik → SECURITY_REPORT_STALE; yalnızca korunmayan değişiklik → OK", async () => {
+  it("MINOR 8: PR kipinde rapor SHA'sından sonra yalnızca korunmayan değişiklik → OK", async () => {
     const r = fixture();
     r.write("docs/INVARIANTS.md", "# I2\n").commit("x");
     const reviewed = head(r);
@@ -1091,6 +1197,14 @@ describe("check:protected", () => {
     const body = () => `${approvalLine(head(r))}\n${SEC0(reviewed)}\n`;
     const fresh = await check(r, { env: prEnv(r), client: fakeClient({ pulls: [pull({ headSha: head(r), body: body() })] }).client });
     expect(fresh.code).toBe(0);
+  });
+
+  it("MINOR 8: PR kipinde rapor SHA'sından sonra korunan değişiklik → SECURITY_REPORT_STALE", async () => {
+    const r = fixture();
+    r.write("docs/INVARIANTS.md", "# I2\n").commit("x");
+    const reviewed = head(r);
+    r.write("docs/STATE.md", "# durum\n").commit("supervisor");
+    const body = () => `${approvalLine(head(r))}\n${SEC0(reviewed)}\n`;
     r.write("package.json", JSON.stringify({ ...ROOT_PKG, scripts: { ...ROOT_PKG.scripts, postinstall: "node x" } }, null, 2) + "\n").commit("y");
     const stale = await check(r, { env: prEnv(r), client: fakeClient({ pulls: [pull({ headSha: head(r), body: body() })] }).client });
     expect(stale.code).toBe(1);
@@ -1098,7 +1212,8 @@ describe("check:protected", () => {
     expect(stale.text).toContain("rapordan sonra korunan değişiklik: package.json");
   });
 
-  it("T-008k madde 8: tabanı birleştirmek raporu bayatlatmaz; PR'ın kendi korunan dosyasına veya başka daldan gelen korunan değişikliğe dokunmak bayatlatır", async () => {
+  /** T-008k madde 8 ortak kurulum: PR kendi korunan değişikliğini yapar, rapor o commit'e bağlanır. */
+  const madde8 = () => {
     const r = fixture();
     r.write("docs/INVARIANTS.md", "# I2\n").commit("PR: kendi korunan değişikliği");
     const reviewed = head(r);
@@ -1107,6 +1222,11 @@ describe("check:protected", () => {
     // Taban ilerler (korunan yola dokunur) ve PR'a birleştirilir.
     r.checkout("main").write("scripts/guards/x.mjs", "export const baseSide = 1;\n").commit("taban: korunan değişiklik").publish("main");
     r.checkout("feat/T-100-x").merge("main", "Merge main into feat");
+    return { r, reviewed, run };
+  };
+
+  it("T-008k madde 8: tabanı birleştirmek raporu bayatlatmaz", async () => {
+    const { r, reviewed, run } = madde8();
     const merged = head(r);
     // Eski hesap (taban bilgisiz `reviewed..head` farkı) bu birleştirmeyi bayat sayardı; yeni hesap saymaz.
     expect(securityFreshness(r.dir, merged)(reviewed)).toContain("scripts/guards/x.mjs");
@@ -1114,12 +1234,17 @@ describe("check:protected", () => {
     const fresh = await run();
     expect(fresh.text).not.toContain(REASONS.SECURITY_STALE);
     expect(fresh.code).toBe(0);
-    // Yanlış pozitif kontrolü: PR kendi korunan dosyasına dokunursa bayat.
+  });
+
+  it("T-008k madde 8: tabanı birleştirdikten sonra PR kendi korunan dosyasına dokunursa bayat (yanlış pozitif kontrolü)", async () => {
+    const { r, run } = madde8();
     r.write("docs/INVARIANTS.md", "# I3\n").commit("PR: rapordan sonra kendi korunan dosyası");
     const own = await run();
     expect(own.code).toBe(1);
     expect(own.text).toContain("rapordan sonra korunan değişiklik: docs/INVARIANTS.md");
-    // Saldırı: taban olmayan bir daldan korunan değişiklik getirmek (PR'ın kendi kümesine girer) bayat.
+  });
+
+  it("T-008k madde 8: taban olmayan daldan korunan değişiklik getirmek (PR'ın kendi kümesine girer) bayat; taban yoksa fail-closed", () => {
     const r2 = fixture();
     r2.write("docs/INVARIANTS.md", "# I2\n").commit("PR");
     const reviewed2 = head(r2);
@@ -1199,13 +1324,16 @@ describe("check:protected", () => {
     });
 
     for (const f of [":x/package.json", ":x/eslint.config.mjs", "a*b/tsconfig.json", "[x]/package.json", "a?b/package.json"]) {
-      it(`güvenlik MAJOR-1: pathspec sihirli karakterli yol (${f}) rapordan sonra eklenince bayat; taban birleştirmesiyle gelince taze`, () => {
-        const body = f.endsWith("package.json") ? JSON.stringify({ scripts: { postinstall: "node x" } }) + "\n" : "{}\n";
+      const body = f.endsWith("package.json") ? JSON.stringify({ scripts: { postinstall: "node x" } }) + "\n" : "{}\n";
+      it(`güvenlik MAJOR-1: pathspec sihirli karakterli yol (${f}) rapordan sonra eklenince bayat`, () => {
         const r = fixture();
         r.write("docs/INVARIANTS.md", "# I2\n").commit("PR");
         const reviewed = head(r);
         r.write(f, body).commit("rapordan sonra sihirli yol");
         expect(securityFreshness(r.dir, head(r), "origin/main")(reviewed)).toContain(f);
+      });
+
+      it(`güvenlik MAJOR-1: pathspec sihirli karakterli yol (${f}) taban birleştirmesiyle gelince taze`, () => {
         const r2 = fixture();
         r2.write("docs/INVARIANTS.md", "# I2\n").commit("PR");
         const reviewed2 = head(r2);
@@ -1214,6 +1342,60 @@ describe("check:protected", () => {
         expect(securityFreshness(r2.dir, head(r2), "origin/main")(reviewed2)).toBeNull();
       });
     }
+
+    it("T-008l madde 4: tabanda zaten bulunan korunan değişiklik (head == taban, PR dokunmadı) taze", () => {
+      const r = fixture();
+      r.write("docs/INVARIANTS.md", "# I2\n").commit("PR");
+      const reviewed = head(r);
+      r.checkout("main").write(X, "export const v = 1;\n").commit("taban 1").publish("main");
+      r.checkout("feat/T-100-x").merge("main", "Merge main (1)");
+      expect(securityFreshness(r.dir, head(r), "origin/main")(reviewed)).toBeNull();
+    });
+
+    it("T-008l madde 4: taban birleştirmeden sonra aynı dosyayı yeniden değiştirince ara durum bayat (muhafazakâr)", () => {
+      const r = fixture();
+      r.write("docs/INVARIANTS.md", "# I2\n").commit("PR");
+      const reviewed = head(r);
+      r.checkout("main").write(X, "export const v = 1;\n").commit("taban 1").publish("main");
+      r.checkout("feat/T-100-x").merge("main", "Merge main (1)");
+      // Ara durum: taban, birleştirilen dosyayı yeniden değiştirdi; head[X] artık ne rapor ne taban.
+      // Eski sürüme dönmüş bir head'i meşru birleştirmeden ayırt etmek için bu durum bayat sayılır
+      // (gevşetme riski: head'i eski taban sürümüne geri almak korunan değişikliktir).
+      r.checkout("main").write(X, "export const v = 2;\n").commit("taban 2").publish("main");
+      r.checkout("feat/T-100-x");
+      expect(securityFreshness(r.dir, head(r), "origin/main")(reviewed)).toContain(X);
+    });
+
+    it("T-008l madde 4: tabanın son hâlini birleştirmek (head == taban) taze yapar", () => {
+      const r = fixture();
+      r.write("docs/INVARIANTS.md", "# I2\n").commit("PR");
+      const reviewed = head(r);
+      r.checkout("main").write(X, "export const v = 2;\n").commit("taban 2").publish("main");
+      r.checkout("feat/T-100-x").merge("main", "Merge main (2)");
+      expect(securityFreshness(r.dir, head(r), "origin/main")(reviewed)).toBeNull();
+    });
+
+    /** PR X'i v1 yapar (rapor bu commit'e bağlı); taban X'i v2 yapar ve yayımlanır. */
+    const madde4Neg = () => {
+      const r = fixture();
+      r.write(X, "export const v = 1;\n").commit("PR: incelenen değişiklik");
+      const reviewed = head(r);
+      r.checkout("main").write(X, "export const v = 2;\n").commit("taban 2").publish("main");
+      r.checkout("feat/T-100-x");
+      return { r, reviewed };
+    };
+
+    it("T-008l madde 4 negatif: PR head'i rapordan sonra dosyayı eski taban sürümüne geri alırsa (taban sonradan ilerlemiş) bayat", () => {
+      const { r, reviewed } = madde4Neg();
+      r.write(X, "export {};\n").commit("eski sürüme dön");
+      expect(securityFreshness(r.dir, head(r), "origin/main")(reviewed)).toContain(X);
+    });
+
+    it("T-008l madde 4 karşılaştırma: aynı dosya rapor anındaki hâlinde kalırsa taze", () => {
+      const { r, reviewed } = madde4Neg();
+      r.write("docs/STATE.md", "# durum\n").commit("belge");
+      expect(securityFreshness(r.dir, head(r), "origin/main")(reviewed)).toBeNull();
+    });
 
     it("güvenlik MINOR-1: rapor anında PR'ın değiştirdiği dosya sonradan tabandaki sürüme döndürülürse bayat", () => {
       const r = fixture();
@@ -1337,14 +1519,12 @@ describe("check:protected", () => {
     expect(res.text).toContain(`FAIL ${REASONS.NO_APPROVAL} ${file}`);
   });
 
-  it("B2 saldırısı: package.json'a pre/post/yaşam döngüsü betiği → FAIL PROTECTED_NO_APPROVAL", async () => {
-    for (const k of ["precheck:protected", "preverify", "postinstall", "prepare"]) {
-      const r = fixture();
-      r.write("package.json", JSON.stringify({ ...ROOT_PKG, scripts: { ...ROOT_PKG.scripts, [k]: "node -e 0" } }, null, 2) + "\n").commit("x");
-      const res = await check(r, { env: prEnv(r), client: fakeClient({ pulls: [pull({ headSha: head(r), body: SEC0(head(r)) })] }).client });
-      expect(res.code, k).toBe(1);
-      expect(res.text, k).toContain(`FAIL ${REASONS.NO_APPROVAL} package.json`);
-    }
+  it.each(["precheck:protected", "preverify", "postinstall", "prepare"])("B2 saldırısı: package.json'a pre/post/yaşam döngüsü betiği (%s) → FAIL PROTECTED_NO_APPROVAL", async (k) => {
+    const r = fixture();
+    r.write("package.json", JSON.stringify({ ...ROOT_PKG, scripts: { ...ROOT_PKG.scripts, [k]: "node -e 0" } }, null, 2) + "\n").commit("x");
+    const res = await check(r, { env: prEnv(r), client: fakeClient({ pulls: [pull({ headSha: head(r), body: SEC0(head(r)) })] }).client });
+    expect(res.code, k).toBe(1);
+    expect(res.text, k).toContain(`FAIL ${REASONS.NO_APPROVAL} package.json`);
   });
 
   it("CLI üzerinden: --local uyarı + OK; bilinmeyen argüman çıkış 2", async () => {
