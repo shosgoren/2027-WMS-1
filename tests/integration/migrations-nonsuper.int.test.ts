@@ -469,8 +469,17 @@ describe("0007–0012 — süper kullanıcı olmayan migrator", () => {
         ),
         indexes: await q(`SELECT md5(coalesce(string_agg(indexdef, ',' ORDER BY indexname), '')) AS d FROM pg_indexes WHERE schemaname IN ('public', 'wms_probe')`),
         functions: await q(
-          `SELECT md5(coalesce(string_agg(concat_ws('|', n.nspname, p.oid::regprocedure::text, p.proowner::regrole::text, p.prosecdef, p.proconfig::text, p.proacl::text), ',' ORDER BY n.nspname, p.oid::regprocedure::text), '')) AS d
+          `SELECT md5(coalesce(string_agg(concat_ws('|', n.nspname, p.oid::regprocedure::text, p.proowner::regrole::text, p.prosecdef, p.proconfig::text, p.proacl::text, md5(p.prosrc)), ',' ORDER BY n.nspname, p.oid::regprocedure::text), '')) AS d
              FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname IN ('public', 'wms_probe')`,
+        ),
+        triggers: await q(
+          `SELECT md5(coalesce(string_agg(concat_ws('|', t.tgrelid::regclass::text, t.tgname, t.tgenabled, t.tgfoid::regprocedure::text), ',' ORDER BY t.tgrelid::regclass::text, t.tgname), '')) AS d
+             FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE NOT t.tgisinternal AND ${nsp}`,
+        ),
+        columnAcl: await q(
+          `SELECT md5(coalesce(string_agg(concat_ws('|', n.nspname, c.relname, a.attname, x.grantee::regrole::text, x.privilege_type, x.is_grantable), ',' ORDER BY n.nspname, c.relname, a.attname, x.grantee::regrole::text, x.privilege_type), '')) AS d
+             FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+             CROSS JOIN LATERAL aclexplode(a.attacl) x WHERE a.attacl IS NOT NULL AND NOT a.attisdropped AND ${nsp}`,
         ),
         tableAcl: await q(
           `SELECT md5(coalesce(string_agg(concat_ws('|', n.nspname, c.relname, c.relowner::regrole::text, c.relacl::text), ',' ORDER BY n.nspname, c.relname), '')) AS d
@@ -503,6 +512,51 @@ describe("0007–0012 — süper kullanıcı olmayan migrator", () => {
 
     expect((await migrateUp({ url: u, dir: thru12() })).applied).toEqual(["0010", "0011", "0012"]);
     expect(await schemaDigest(u)).toEqual(before);
+  });
+
+  it("negatif kontrol: tek tetikleyici ALWAYS yerine ENABLE yapılırsa parmak izi değişir; geri alınca eşitlenir", async () => {
+    await setProbeMemberships(STANDARD_GRANT);
+    const u = await freshDatabase();
+    expect((await migrateUp({ url: u, dir: thru12() })).applied).toEqual(ALL);
+    const base = await schemaDigest(u);
+    const trg = async (): Promise<string[]> =>
+      withClient(u, async (c) => (await c.query<{ e: string }>(
+        `SELECT tgenabled AS e FROM pg_trigger WHERE tgname = 'document_type_versions_immutable' AND tgrelid = 'public.document_type_versions'::regclass`,
+      )).rows.map((r) => r.e));
+    expect(await trg()).toEqual(["A"]);
+    await withClient(u, (c) => c.query("ALTER TABLE public.document_type_versions ENABLE TRIGGER document_type_versions_immutable"));
+    expect(await trg()).toEqual(["O"]);
+    const changed = await schemaDigest(u);
+    expect(changed.triggers).not.toBe(base.triggers);
+    expect({ ...changed, triggers: base.triggers }).toEqual(base);
+    await withClient(u, (c) => c.query("ALTER TABLE public.document_type_versions ENABLE ALWAYS TRIGGER document_type_versions_immutable"));
+    expect(await schemaDigest(u)).toEqual(base);
+  });
+
+  it("sütun ACL parmak izi gerçek veri taşır; tek sütun yetkisi REVOKE edilirse yalnızca columnAcl değişir; GRANT ile eşitlenir", async () => {
+    await setProbeMemberships(STANDARD_GRANT);
+    const u = await freshDatabase();
+    expect((await migrateUp({ url: u, dir: thru12() })).applied).toEqual(ALL);
+    const base = await schemaDigest(u);
+    await withClient(u, async (c) => {
+      // Boş-küme md5'i değil; 0010/0011/0012'nin sütun GRANT'ları katalogda gerçekten var.
+      const empty = await c.query<{ d: string }>("SELECT md5('') AS d");
+      expect(base.columnAcl).not.toBe(empty.rows[0]?.d);
+      const n = await c.query<{ n: string; hist: string }>(
+        `SELECT count(*)::text AS n,
+                count(*) FILTER (WHERE c.relname = 'document_status_history' AND a.attname = 'reason' AND x.grantee = 'wms_app'::regrole AND x.privilege_type = 'INSERT')::text AS hist
+           FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace ns ON ns.oid = c.relnamespace
+           CROSS JOIN LATERAL aclexplode(a.attacl) x WHERE a.attacl IS NOT NULL AND NOT a.attisdropped AND ns.nspname = 'public'`,
+      );
+      expect(Number(n.rows[0]?.n)).toBeGreaterThan(20);
+      expect(n.rows[0]?.hist).toBe("1");
+      await c.query("REVOKE INSERT (reason) ON public.document_status_history FROM wms_app");
+    });
+    const changed = await schemaDigest(u);
+    expect(changed.columnAcl).not.toBe(base.columnAcl);
+    expect({ ...changed, columnAcl: base.columnAcl }).toEqual(base);
+    await withClient(u, (c) => c.query("GRANT INSERT (reason) ON public.document_status_history TO wms_app"));
+    expect(await schemaDigest(u)).toEqual(base);
   });
 
   // Her bekçi testi: tenant bağlamında tek kalıcı satır; staging down RAISE eder, satır yerinde kalır; ci down geçer.
