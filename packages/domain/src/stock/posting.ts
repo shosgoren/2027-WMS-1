@@ -9,6 +9,11 @@
 // - Yazımlar açık sütun listelidir: türetilen sütunlar (`item_id`, `created_xid`, `occurred_at`, `serial_key`) yazılmaz (sunucu/tetikleyici doldurur).
 // - Bakiye güncellemesi: ÖNCE tüm azaltmalar, SONRA artırmalar (seri kısmi tekil indeksi ertelenemez; ADR-017 §3). Yalnızca kilitli satırlara yazılır.
 //
+// T-221 (ADR-009; 16 kural 2/5, Senaryo A adım 6-7): `STOCK_OUT` satırının KENDİ rezervasyonları (kaynak boyutta) işlemde tüketilir
+// (`CONSUMED`; kısmi kalan ACTIVE) ve yeterlilik `quantity − (reserved − kendi rezervasyonu)` ile hesaplanır; `STOCK_MOVE` satırı `reservationMoves`
+// ile verilen rezervasyonları malla birlikte hedef boyuta taşır. Rezervasyon satırı ve `reserved_quantity` yazımları `reservations.ts`'tedir;
+// bakiye yazımı TEK ifadede (miktar + rezerve) yapılır: ÖNCE miktarı azalan boyutlar, SONRA diğerleri (CHECK 0 ≤ reserved ≤ quantity satır başına).
+//
 // A-xx: A-217-1 hedef durum sütunu yok (bkz. plan.ts); A-217-2 yeterlilik girişleri saymaz; A-217-3 defter nedeni belge türünden gelir
 // (STOCK_IN→RECEIPT, STOCK_OUT→SHIPMENT, STOCK_MOVE→MOVE; diğer nedenler 3A belge türlerinde); A-145 satır lokasyonları belge deposunda;
 // A-07 senkron üst sınırı 200 satır (üstü T-222; o zamana dek `VALIDATION_FAILED`/`DOCUMENT_STATE`, sahte başarı yok).
@@ -20,7 +25,24 @@ import { pgUuidArray } from "../warehouse/scope.ts";
 import { EMPTY_LOCK_PLAN, executeStockCommand, type StockCommandPlan } from "./command.ts";
 import { assertItemsActive, assertLocationsActiveInWarehouse, assertNotProcessing, readDocumentHeader, type StockDocCallParams } from "./documents.ts";
 import type { StockCommandResult } from "./idempotency.ts";
-import { buildPostingPlan, dimensionIdentity, fromMicro, toMicro, type PostingKind, type PostingLine, type PostingPlan, type PostingStatus } from "./plan.ts";
+import {
+  buildPostingPlan,
+  dimensionIdentity,
+  fromMicro,
+  reservedExcluding,
+  toMicro,
+  type PostingKind,
+  type PostingLine,
+  type PostingPlan,
+  type PostingStatus,
+} from "./plan.ts";
+import {
+  assertReservableDimensions,
+  closeReservations,
+  moveReservations,
+  planReservationEffects,
+  type ReservationMoveInput,
+} from "./reservations.ts";
 import {
   assertLineRules,
   assertSerialUnique,
@@ -38,6 +60,8 @@ const KINDS: ReadonlySet<string> = new Set(["STOCK_IN", "STOCK_OUT", "STOCK_MOVE
 export interface PostDocumentInput {
   readonly documentId: string;
   readonly expectedVersion: number;
+  /** Yalnızca `STOCK_MOVE`: satır → taşınacak rezervasyonlar (toplama; rezervasyon malla birlikte hedef boyuta gider). */
+  readonly reservationMoves?: readonly ReservationMoveInput[];
   readonly requestId?: string | null;
 }
 
@@ -102,10 +126,37 @@ async function locationWarehouses(tx: AccessTx, tenantId: string, ids: readonly 
   return rows.map((r) => r.warehouse_id);
 }
 
-function lockPlanOf(documentId: string, expectedVersion: number, p: PostingPlan | undefined): StockCommandPlan["locks"] {
+function lockPlanOf(documentId: string, expectedVersion: number, p: PostingPlan | undefined, reservationIds: readonly string[]): StockCommandPlan["locks"] {
   const document = { id: documentId, expectedVersion };
   if (p === undefined) return { ...EMPTY_LOCK_PLAN, document };
-  return { ...EMPTY_LOCK_PLAN, document, locationIds: p.locationIds, dimensions: p.dimensions, serialIds: p.serialIds };
+  return { ...EMPTY_LOCK_PLAN, document, locationIds: p.locationIds, dimensions: p.dimensions, serialIds: p.serialIds, reservationIds };
+}
+
+/** Belge satırlarının ACTIVE rezervasyon kimlikleri (kilitsiz okuma; plan kilidine girer — kümeyi belge kilidi sabitler). */
+async function activeReservationIdsOfDocument(tx: AccessTx, tenantId: string, documentId: string): Promise<string[]> {
+  const rows = await tx.execute<{ id: string }>(
+    sql`SELECT r.id FROM public.reservations r JOIN public.document_lines l ON l.tenant_id = r.tenant_id AND l.id = r.document_line_id
+         WHERE r.tenant_id = ${tenantId}::uuid AND l.document_id = ${documentId}::uuid AND r.status = 'ACTIVE' ORDER BY r.id`,
+  );
+  return rows.map((r) => r.id);
+}
+
+/** `reservationMoves` girdisini normalleştirir (UUID, küçük harf, sıralı); biçim hatası `VALIDATION_FAILED`. */
+function normalizeMoves(raw: unknown): ReservationMoveInput[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw) || raw.length > SYNC_POST_MAX_LINES) throw new AppError("VALIDATION_FAILED");
+  const out = (raw as unknown[]).map((m) => {
+    const x = m as { lineId?: unknown; reservationIds?: unknown } | null;
+    if (x === null || typeof x !== "object" || typeof x.lineId !== "string" || !UUID_RE.test(x.lineId) || !Array.isArray(x.reservationIds)) {
+      throw new AppError("VALIDATION_FAILED");
+    }
+    const ids = (x.reservationIds as unknown[]).map((i) => {
+      if (typeof i !== "string" || !UUID_RE.test(i)) throw new AppError("VALIDATION_FAILED");
+      return i.toLowerCase();
+    });
+    return { lineId: x.lineId.toLowerCase(), reservationIds: [...new Set(ids)].sort() };
+  });
+  return out.sort((a, b) => (a.lineId < b.lineId ? -1 : a.lineId > b.lineId ? 1 : 0));
 }
 
 /** Plan kilitli görüntüyü tam kapsıyor mu (I-15: yalnızca kilitli satırlara yazılır). */
@@ -131,7 +182,9 @@ export async function postDocument(
   }
   const documentId = input.documentId.toLowerCase();
   const expectedVersion = input.expectedVersion;
-  const hashInput = { documentId, expectedVersion };
+  const moves = normalizeMoves(input.reservationMoves);
+  // Yalnızca verildiyse özete girer: önceki (taşımasız) isteklerin özeti değişmez.
+  const hashInput = moves === undefined ? { documentId, expectedVersion } : { documentId, expectedVersion, reservationMoves: moves };
   const outcome = await executeStockCommand<typeof hashInput, StockCommandResult>({
     db: params.db,
     principal: params.principal,
@@ -159,9 +212,12 @@ export async function postDocument(
           if (!(e instanceof AppError)) throw e;
         }
       }
+      // T-221: STOCK_OUT satırlarının rezervasyonları (tüketim) ve STOCK_MOVE'un taşıdığı rezervasyonlar kilit planındadır (I-15 adım 5).
+      const reservationIds =
+        built === undefined ? [] : h.kind === "STOCK_OUT" ? await activeReservationIdsOfDocument(tx, m.tenantId, documentId) : (moves ?? []).flatMap((x) => x.reservationIds);
       // A-145: satır lokasyonlarının depoları da kapsam denetimine girer (depo uyuşmazlığı apply'da reddedilir).
       const extra = built === undefined ? [] : await locationWarehouses(tx, m.tenantId, built.locationIds);
-      return { warehouseIds: [...new Set([h.warehouse_id, ...extra])], locks: lockPlanOf(documentId, expectedVersion, built) };
+      return { warehouseIds: [...new Set([h.warehouse_id, ...extra])], locks: lockPlanOf(documentId, expectedVersion, built, [...new Set(reservationIds)].sort()) };
     },
     apply: async (tx, locked, ctx) => {
       if (locked.document === undefined) throw new AppError("INTERNAL");
@@ -187,13 +243,16 @@ export async function postDocument(
 
       const dimIdByIdentity = new Map(locked.dimensions.map((d) => [dimensionIdentity(d.key), d.id]));
       const balanceByDim = new Map(locked.balances.map((b) => [b.stockDimensionId, b]));
+      // Rezervasyon etkisi (T-221): kilitli görüntüden; yeterlilikte işlenen satırın KENDİ rezervasyonu rezerveden düşülür.
+      const fx = planReservationEffects({ kind, entries: built.entries, locked, dimIdByIdentity, moves });
       const balances = new Map<string, BalanceView>();
       for (const [identity, dimId] of dimIdByIdentity) {
         const b = balanceByDim.get(dimId);
         if (b === undefined) throw new AppError("INTERNAL");
-        balances.set(identity, { quantity: toMicro(b.quantity), reserved: toMicro(b.reservedQuantity) });
+        balances.set(identity, { quantity: toMicro(b.quantity), reserved: reservedExcluding(toMicro(b.reservedQuantity), fx.ownReserved.get(identity) ?? 0n) });
       }
       assertSufficient(built, balances);
+      await assertReservableDimensions(tx, ctx.tenantId, fx.targetDims); // taşınan rezervasyonun hedefi de kural 5'e uygun olmalı
 
       const netByDimensionId = new Map<string, bigint>();
       const serialOfDimension = new Map<string, string>();
@@ -208,12 +267,16 @@ export async function postDocument(
       }
 
       await writeLedger(tx, ctx.tenantId, documentId, header.businessDate, ctx.userId, built, dimIdByIdentity);
-      await writeBalances(tx, ctx.tenantId, netByDimensionId);
+      await writeBalances(tx, ctx.tenantId, netByDimensionId, fx.reservedDelta);
+      const consumed = await closeReservations(tx, ctx.tenantId, "CONSUMED", fx.consumeOps);
+      const moved = await moveReservations(tx, ctx.tenantId, fx.moveOps);
+      const touched = [...consumed, ...moved];
 
       return {
         result: {
           documentId,
           status: "POSTED",
+          ...(touched.length === 0 ? {} : { reservationIds: touched }),
           lines: lines.map((l) => ({ lineId: l.lineId, lineNo: l.lineNo, quantity: l.quantity, baseQuantity: l.baseQuantity })),
         },
         audit: {
@@ -221,7 +284,7 @@ export async function postDocument(
           entityType: "stock_document",
           entityId: documentId,
           requestId: input.requestId ?? null,
-          changeSummary: { kind, lineCount: lines.length, ledgerRows: built.entries.length, warehouseId: header.warehouseId },
+          changeSummary: { kind, lineCount: lines.length, ledgerRows: built.entries.length, warehouseId: header.warehouseId, reservationsConsumed: consumed.length, reservationsMoved: moved.length },
         },
         // Numara EN SON; aynı UPDATE belgeyi POSTED yapar (sürüm +1 ve durum geçmişi DB tetikleyicilerindedir).
         numbering: { documentId, kind: kind, businessDate: header.businessDate, status: "POSTED" },
@@ -278,20 +341,31 @@ async function writeLedger(
   if (rows.length !== plan.entries.length) throw new AppError("INTERNAL");
 }
 
-/** Bakiye: ÖNCE tüm azaltmalar, SONRA artırmalar (iki ifade; seri kısmi tekil indeksi anında denetlenir). Net 0 olan boyuta dokunulmaz. */
-async function writeBalances(tx: AccessTx, tenantId: string, netByDimensionId: ReadonlyMap<string, bigint>): Promise<void> {
-  const dec = [...netByDimensionId].filter(([, n]) => n < 0n);
-  const inc = [...netByDimensionId].filter(([, n]) => n > 0n);
+/**
+ * Bakiye: miktarı AZALAN boyutlar ÖNCE, sonra diğerleri (iki ifade; seri kısmi tekil indeksi anında denetlenir). Her ifade satır başına miktar ve
+ * rezerve değişimini birlikte uygular (CHECK 0 ≤ reserved ≤ quantity satırın nihai değerine bakar). Değişmeyen boyuta dokunulmaz.
+ */
+async function writeBalances(
+  tx: AccessTx,
+  tenantId: string,
+  netByDimensionId: ReadonlyMap<string, bigint>,
+  reservedDelta: ReadonlyMap<string, bigint>,
+): Promise<void> {
+  const ids = new Set<string>([...netByDimensionId.keys(), ...reservedDelta.keys()]);
+  const rows = [...ids]
+    .map((id) => ({ id, q: netByDimensionId.get(id) ?? 0n, r: reservedDelta.get(id) ?? 0n }))
+    .filter((x) => x.q !== 0n || x.r !== 0n);
+  const dec = rows.filter((x) => x.q < 0n);
+  const inc = rows.filter((x) => x.q >= 0n);
   for (const group of [dec, inc]) {
     if (group.length === 0) continue;
-    const json = JSON.stringify(group.map(([dimension_id, n]) => ({ dimension_id, delta: fromMicro(n) })));
-    const rows = await tx.execute<{ stock_dimension_id: string }>(
-      sql`UPDATE public.stock_balances b SET quantity = b.quantity + w.delta, version = b.version + 1
-            FROM jsonb_to_recordset(${json}::jsonb) AS w(dimension_id uuid, delta numeric)
+    const json = JSON.stringify(group.map((x) => ({ dimension_id: x.id, delta: fromMicro(x.q), reserved_delta: fromMicro(x.r) })));
+    const updated = await tx.execute<{ stock_dimension_id: string }>(
+      sql`UPDATE public.stock_balances b SET quantity = b.quantity + w.delta, reserved_quantity = b.reserved_quantity + w.reserved_delta, version = b.version + 1
+            FROM jsonb_to_recordset(${json}::jsonb) AS w(dimension_id uuid, delta numeric, reserved_delta numeric)
            WHERE b.tenant_id = ${tenantId}::uuid AND b.stock_dimension_id = w.dimension_id
           RETURNING b.stock_dimension_id`,
     );
-    if (rows.length !== group.length) throw new AppError("INTERNAL");
+    if (updated.length !== group.length) throw new AppError("INTERNAL");
   }
 }
-
