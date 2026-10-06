@@ -536,7 +536,7 @@ export function createResetMailPort(deps: ResetMailPortDeps): {
     canDeliver: (recipient) => canDeliver(deps.mailConfig, recipient),
     async sendResetLink(input) {
       if (!canDeliver(deps.mailConfig, input.to)) throw new AppError("VALIDATION_FAILED");
-      const payload = buildEmailSendPayload(deps.sealKey, { template: "password_reset", locale: input.locale, to: input.to, link: input.link });
+      const payload = buildEmailSendPayload(deps.sealKey, { template: "password_reset", tenantId: null, locale: input.locale, to: input.to, link: input.link });
       await deps.queue.enqueuePlatform({ type: "email.send", payload: { ...payload, sealed: { ...payload.sealed } } });
     },
   };
