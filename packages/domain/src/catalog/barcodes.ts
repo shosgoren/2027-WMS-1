@@ -61,6 +61,10 @@ export async function addBarcode(
   const itemId = parseUuid(input.itemId);
   const unitId = input.unitId === undefined || input.unitId === null ? null : parseUuid(input.unitId);
   const barcode = parseBarcode(input.barcode);
+  // Geçerli GTIN içeren GS1 dizgisi ham barkod olarak KAYDEDİLMEZ: çözümleme o GTIN'i başka ürünle eşler ve dizgideki
+  // lot/SKT/seri okutmaya özgüdür. Normalize etmek yerine reddederiz (girdiyi sessizce değiştirmez); GTIN'in kendisi eklenir.
+  const gs1 = parseGs1(barcode);
+  if (gs1.ok && gs1.gtin !== undefined) throw new AppError("VALIDATION_FAILED");
   const { requestId, ...access } = params;
   return runTenantCommand({ ...access, permission: "settings.manage" }, async (tx, actor) => {
     const item = await loadItem(tx, actor.tenantId, itemId, "share");
@@ -169,9 +173,9 @@ export class BarcodeNotFoundError extends AppError {
  * çalışır; `tenantId` açıkça verilir ve sorguda `b.tenant_id` filtresi + RLS birlikte uygulanır (yanlış/başka tenant
  * kimliği → `NOT_FOUND`). Eşleşme yok → `NOT_FOUND`; birden çok farklı (ürün, birim, miktar) → `BarcodeAmbiguousError`.
  *
- * GS1 önceliği: metin ÖNEK (`]C1`/`]d2`) ya da FNC1 (GS) taşıyorsa GS1 yorumu güçlüdür → ham metin eşleşmesi VE GTIN
- * eşleşmesi birleştirilip belirsizlik denetiminden geçer (tam eşleşme sessizce kazanmaz). Önek/GS yoksa ("01…" ile
- * başlayan düz barkod olabilir) GS1 yalnızca tam eşleşme YOKSA denenir; tam eşleşme varsa GS1 yorumlanmaz.
+ * GS1 önceliği: metin geçerli GTIN içeren bir GS1 dizgisiyse (önek/GS olsun olmasın) ham metin eşleşmesi VE GTIN
+ * eşleşmesi birleştirilip belirsizlik denetiminden geçer; tam eşleşme sessizce kazanmaz. 8 haneli GTIN biçimi yalnızca
+ * sembol önekiyle denenir.
  */
 export async function resolveBarcode(tx: AccessTx, tenantId: string, raw: string): Promise<ResolvedBarcode> {
   const code = typeof raw === "string" ? raw.trim() : "";
@@ -183,8 +187,9 @@ export async function resolveBarcode(tx: AccessTx, tenantId: string, raw: string
   let gs1Reason: Gs1FailureReason | null = null;
   const parsed = parseGs1(code);
   if (parsed.ok) {
-    const strong = parsed.symbologyPrefix || parsed.hasFnc1;
-    if (parsed.gtin !== undefined && (strong || matches.length === 0)) {
+    // Geçerli GTIN (kontrol hanesi doğru) varsa önek/GS olsun olmasın tam eşleşme + GTIN eşleşmesi birleştirilir:
+    // HID okuyucular önek göndermez, yalnızca sabit AI'li etiketlerde GS de yoktur (çakışma → BARCODE_AMBIGUOUS).
+    if (parsed.gtin !== undefined) {
       const viaGtin = await findMatches(tx, tenant, gtinLookupForms(parsed.gtin, parsed.symbologyPrefix));
       if (viaGtin.length > 0) {
         gs1 = parsed;

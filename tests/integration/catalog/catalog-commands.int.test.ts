@@ -252,12 +252,29 @@ async function mkItem(w: TenantWorld, name: string): Promise<string> {
 const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 describe("GS1 önceliği ve belirsizlik (A-108)", () => {
+  /** Eski/içe aktarılmış ham GS1 dizgisi barkodu (addBarcode artık kabul etmez): doğrudan tabloya (migration rolü) yazılır. */
+  async function legacyRawBarcode(itemId: string, barcode: string): Promise<void> {
+    await adm.query("INSERT INTO public.item_barcodes (tenant_id, item_id, unit_id, barcode) VALUES ($1, $2, NULL, $3)", [A.tenantId, itemId, barcode]);
+  }
+
+  it("addBarcode geçerli GTIN içeren GS1 dizgisini reddeder (VALIDATION_FAILED); GTIN'in kendisi ve GS1 olmayan metin kabul", async () => {
+    const itemId = await mkItem(A, "GS1 ham ret");
+    const gtin14 = gtinOf(`0${digits(12)}`);
+    for (const bad of [`01${gtin14}`, `]C101${gtin14}`, `]d201${gtin14}`, `01${gtin14}10LOT1`, `01${gtin14}17261231`]) {
+      await expectFail(addBarcode(admin(A), { itemId, barcode: bad }), "VALIDATION_FAILED");
+    }
+    expect((await adm.query("SELECT 1 FROM public.item_barcodes WHERE item_id = $1", [itemId])).rowCount).toBe(0);
+    await addBarcode(admin(A), { itemId, barcode: gtin14.slice(1) }); // GTIN-13
+    await addBarcode(admin(A), { itemId, barcode: `01-ABC-${rnd()}` }); // GS1 değil
+    await addBarcode(admin(A), { itemId, barcode: `0100${rnd()}` }); // GS1 olarak ayrıştırılamaz (kısa)
+  });
+
   it("önek/FNC1 varken tam eşleşme ile GTIN eşleşmesi birleştirilir: farklı ürünler → BARCODE_AMBIGUOUS", async () => {
     const gtin14 = gtinOf(`0${digits(12)}`);
     const gtin13 = gtin14.slice(1);
     const p = await mkItem(A, "Tam eşleşme");
     const q = await mkItem(A, "GTIN eşleşme");
-    await addBarcode(admin(A), { itemId: p, barcode: `]C101${gtin14}` });
+    await legacyRawBarcode(p, `]C101${gtin14}`);
     await addBarcode(admin(A), { itemId: q, barcode: gtin13 });
     const err = await fail(resolveBarcodeQuery(picker(A), `]C101${gtin14}`));
     expect(err).toBeInstanceOf(BarcodeAmbiguousError);
@@ -265,21 +282,23 @@ describe("GS1 önceliği ve belirsizlik (A-108)", () => {
     // Aynı ürün hem tam hem GTIN ile eşleşirse sahte belirsizlik yok.
     const r = await mkItem(A, "Aynı ürün");
     const g2 = gtinOf(`0${digits(12)}`);
-    await addBarcode(admin(A), { itemId: r, barcode: `]C101${g2}` });
+    await legacyRawBarcode(r, `]C101${g2}`);
     await addBarcode(admin(A), { itemId: r, barcode: g2.slice(1) });
     expect(await resolveBarcodeQuery(picker(A), `]C101${g2}`)).toMatchObject({ itemId: r });
   });
 
-  it("önek/GS yokken '01…' düz barkod: tam eşleşme varsa GS1 yorumlanmaz; yoksa GTIN yedeği", async () => {
+  it("ÖNEKSİZ/GS'siz '01<gtin14>' (HID okuyucu): tam eşleşme + GTIN eşleşmesi birleşir; çakışmada BARCODE_AMBIGUOUS, sessiz atama yok", async () => {
     const gtin14 = gtinOf(`0${digits(12)}`);
-    const p = await mkItem(A, "Düz barkod sahibi");
+    const p = await mkItem(A, "Ham dizgi sahibi");
     const q = await mkItem(A, "GTIN sahibi");
     await addBarcode(admin(A), { itemId: q, barcode: gtin14.slice(1) });
-    // Tam eşleşme yok → GTIN yedeği q'yu bulur.
+    // Tam eşleşme yok → GTIN eşleşmesi q'yu bulur.
     expect(await resolveBarcodeQuery(picker(A), `01${gtin14}`)).toMatchObject({ itemId: q });
-    // Tam eşleşme eklenince düz dizgi p'ye aittir; GS1 yorumu araya girmez.
-    await addBarcode(admin(A), { itemId: p, barcode: `01${gtin14}` });
-    expect(await resolveBarcodeQuery(picker(A), `01${gtin14}`)).toMatchObject({ itemId: p });
+    // Eski veri: p'ye ham dizgi bağlı → artık belirsiz (eskiden sessizce p'ye giderdi).
+    await legacyRawBarcode(p, `01${gtin14}`);
+    const err = await fail(resolveBarcodeQuery(picker(A), `01${gtin14}`));
+    expect(err).toBeInstanceOf(BarcodeAmbiguousError);
+    expect((err as BarcodeAmbiguousError).candidates.map((c) => c.itemId).sort()).toEqual([p, q].sort());
   });
 
   it("kısa biçimler: 12 hane öneksiz da; 8 hane yalnızca sembol önekiyle", async () => {
@@ -377,8 +396,10 @@ describe("arşiv eşzamanlılığı (FOR SHARE ↔ FOR UPDATE)", () => {
     expect(err).toMatchObject({ code: "VALIDATION_FAILED" });
     expect((await adm.query("SELECT 1 FROM public.unit_conversions WHERE item_id = $1", [itemId])).rowCount).toBe(0);
   });
-  it("gerçek yarış: archiveItem ∥ addBarcode ∥ setUnitConversion — hata yalnızca VALIDATION_FAILED; arşivli üründe sonradan satır yok", async () => {
-    for (let i = 0; i < 8; i++) {
+  it("paralel archiveItem ∥ addBarcode ∥ setUnitConversion: 40P01/INTERNAL yok; hata yalnızca VALIDATION_FAILED", async () => {
+    // NOT: bu test FOR SHARE'i AYIRT ETMEZ (xid/created_at sırası kilit alma anında atandığı için commit sırasını kanıtlamaz;
+    // mutasyonla da kırmızıya dönmez). Ayırt edici kanıt yukarıdaki iki deterministik test: kilit kaldırılınca kırmızı olur.
+    for (let i = 0; i < 25; i++) {
       const itemId = await mkItem(A, `Yarış ${i}`);
       const [arch, add, conv] = await Promise.allSettled([
         archiveItem(admin(A), { itemId }),

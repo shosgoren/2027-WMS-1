@@ -101,9 +101,9 @@ function intDigitsOfCanonical(canonical: string): number {
 
 /**
  * Miktar ürünün ondalık hassasiyetini (`quantity_scale`) aşmamalı (`QUANTITY_SCALE`); biçim hatası, işaret ihlali
- * (`sign`; varsayılan `any`) ve 14 tam haneyi aşan değer `VALIDATION_FAILED`. Yuvarlama yapılmaz. Kanonik dizgiyi döndürür.
+ * (`sign` ZORUNLU: `any` | `positive` | `nonNegative`) ve 14 tam haneyi aşan değer `VALIDATION_FAILED`. Yuvarlama yapılmaz. Kanonik dizgiyi döndürür.
  */
-export function assertQuantityScale(qty: string, scale: number, sign: QuantitySign = "any"): string {
+export function assertQuantityScale(qty: string, scale: number, sign: QuantitySign): string {
   if (!Number.isInteger(scale) || scale < 0 || scale > 6) throw new AppError("VALIDATION_FAILED");
   let parsed: ScaledDecimal;
   try {
@@ -145,9 +145,9 @@ export function assertConversionFactor(factor: string): string {
 
 /**
  * Birim miktarını temel birime çevirir: `qty × factor`. Sonuç 14 tam haneyi aşarsa `VALIDATION_FAILED`; ürünün ölçeğini aşarsa yuvarlanmaz, `QUANTITY_SCALE`
- * ile reddedilir (ör. 0.5 koli × 5 = 2.5 adet, ölçek 0 → ret). Kanonik dizgi döner.
+ * ile reddedilir (ör. 0.5 koli × 5 = 2.5 adet, ölçek 0 → ret). Negatif `qty` varsayılan olarak `VALIDATION_FAILED`; işaretli dönüşüm için `allowNegative: true`. Kanonik dizgi döner.
  */
-export function toBase(qty: string, factor: string, scale: number): string {
+export function toBase(qty: string, factor: string, scale: number, options: { readonly allowNegative?: boolean } = {}): string {
   if (!Number.isInteger(scale) || scale < 0 || scale > 6) throw new AppError("VALIDATION_FAILED");
   const f = parseDecimal(assertConversionFactor(factor));
   let q: ScaledDecimal;
@@ -157,6 +157,8 @@ export function toBase(qty: string, factor: string, scale: number): string {
     if (e instanceof DecimalFormatError) throw new AppError("VALIDATION_FAILED");
     throw e;
   }
+  // Negatif miktar yalnızca açık `allowNegative` ile (işaretli dönüşüm); varsayılan ret.
+  if (q.units < 0n && options.allowNegative !== true) throw new AppError("VALIDATION_FAILED");
   const product = formatDecimal({ units: q.units * f.units, scale: q.scale + f.scale });
   if (intDigitsOfCanonical(product) > QUANTITY_MAX_INT_DIGITS) throw new AppError("VALIDATION_FAILED");
   if (placesOfCanonical(product) > scale) throw scaleError();

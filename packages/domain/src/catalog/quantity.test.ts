@@ -35,17 +35,17 @@ describe("decimal aritmetik (yuvarlama yok)", () => {
 
 describe("assertQuantityScale", () => {
   it("ölçeği aşan miktar QUANTITY_SCALE; eşit ya da sıfır sonlu uygun", () => {
-    expect(assertQuantityScale("5", 0)).toBe("5");
-    expect(assertQuantityScale("5.00", 0)).toBe("5");
-    expect(assertQuantityScale("2.125", 3)).toBe("2.125");
-    expect(detailOf(() => assertQuantityScale("2.5", 0))).toBe("VALIDATION_FAILED/QUANTITY_SCALE");
-    expect(detailOf(() => assertQuantityScale("0.0001", 3))).toBe("VALIDATION_FAILED/QUANTITY_SCALE");
+    expect(assertQuantityScale("5", 0, "any")).toBe("5");
+    expect(assertQuantityScale("5.00", 0, "any")).toBe("5");
+    expect(assertQuantityScale("2.125", 3, "any")).toBe("2.125");
+    expect(detailOf(() => assertQuantityScale("2.5", 0, "any"))).toBe("VALIDATION_FAILED/QUANTITY_SCALE");
+    expect(detailOf(() => assertQuantityScale("0.0001", 3, "any"))).toBe("VALIDATION_FAILED/QUANTITY_SCALE");
   });
   it("biçim hatası ve geçersiz ölçek VALIDATION_FAILED", () => {
     for (const bad of ["", "abc", "1e3", "1,5", " 1", "1.", ".5", "1".repeat(41)]) {
-      expect(detailOf(() => assertQuantityScale(bad, 3))).toBe("VALIDATION_FAILED/");
+      expect(detailOf(() => assertQuantityScale(bad, 3, "any"))).toBe("VALIDATION_FAILED/");
     }
-    expect(detailOf(() => assertQuantityScale("1", 7))).toBe("VALIDATION_FAILED/");
+    expect(detailOf(() => assertQuantityScale("1", 7, "any"))).toBe("VALIDATION_FAILED/");
   });
 });
 
@@ -90,14 +90,16 @@ describe("işaret ve taşma denetimi", () => {
     }
   });
   it("assertQuantityScale işaret seçenekleri; negatif varsayılan 'any' ile geçer", () => {
-    expect(assertQuantityScale("-2", 0)).toBe("-2");
+    expect(assertQuantityScale("-2", 0, "any")).toBe("-2");
     expect(detailOf(() => assertQuantityScale("-2", 0, "nonNegative"))).toBe("VALIDATION_FAILED/");
     expect(assertQuantityScale("0", 0, "nonNegative")).toBe("0");
     expect(detailOf(() => assertQuantityScale("0", 0, "positive"))).toBe("VALIDATION_FAILED/");
-    expect(detailOf(() => assertQuantityScale("-100000000000000", 0))).toBe("VALIDATION_FAILED/");
+    expect(detailOf(() => assertQuantityScale("-100000000000000", 0, "any"))).toBe("VALIDATION_FAILED/");
   });
-  it("negatif miktar toBase'te işaretini korur; ölçek yine denetlenir", () => {
-    expect(toBase("-3", "12", 0)).toBe("-36");
-    expect(detailOf(() => toBase("-0.5", "5", 0))).toBe("VALIDATION_FAILED/QUANTITY_SCALE");
+  it("toBase negatif miktarı varsayılan reddeder; allowNegative ile işaret korunur ve ölçek yine denetlenir", () => {
+    expect(detailOf(() => toBase("-3", "12", 0))).toBe("VALIDATION_FAILED/");
+    expect(toBase("-3", "12", 0, { allowNegative: true })).toBe("-36");
+    expect(detailOf(() => toBase("-0.5", "5", 0, { allowNegative: true }))).toBe("VALIDATION_FAILED/QUANTITY_SCALE");
+    expect(toBase("0", "12", 0)).toBe("0");
   });
 });
