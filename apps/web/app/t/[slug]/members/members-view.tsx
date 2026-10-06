@@ -37,10 +37,6 @@ interface Confirm {
   readonly roleKey?: string;
 }
 
-// GEÇİCİ ÇÖZÜM (Bulgu, rapora yazıldı): `globals.css` `packages/ui/src` için `@source` içermediğinden Tailwind yalnızca
-// ui paketinde geçen yardımcı sınıfları üretmiyor (düğme yatay dolgusu ve devre dışı görünümü, danger düğmesi arka planı, Banner arka planı, ikon boyutu, dönen
-// yükleniyor ikonu). `@source "../../../packages/ui/src";` eklenince bu yorum silinir (globals.css bu kartın dışındadır).
-// tailwind-safelist: px-6 disabled:opacity-60 border-dashed bg-border bg-undo-ink bg-undo-bg size-4 size-5 animate-spin mt-0.5 mb-2 mb-6 py-3 text-center border-undo-bg border-accent-soft aria-[invalid=true]:border-undo-ink
 const SELECT =
   "min-h-12 w-full min-w-0 rounded-card border-2 border-border bg-surface px-3 text-base text-ink sm:w-auto focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus";
 const BADGE = "inline-flex items-center rounded-full px-2 text-xs font-bold";
