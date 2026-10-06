@@ -1551,6 +1551,7 @@ describe(`wms_meta / wms_probe erişimi ve katalog (target=${env.target})`, () =
     });
     expect(r.funcs.map((f) => f.proname)).toEqual([
       "admin_reset_cleanup_on_membership", "consume_admin_reset_grant", "identity_exclusive_to_tenant", "invitation_for_account_creation",
+      "invitation_preview_for_token", // T-117d migration 0008 (salt okunur; ad+rol+süre; ilke değişmedi)
       "invitation_tenant_for_token", // T-117 migration 0006 (salt okunur; ilke değişmedi)
     ]);
     for (const f of r.funcs) {

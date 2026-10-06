@@ -12,7 +12,7 @@
 // - Hatalar `docs/spec/15-engineering.md` kodlarıdır; geçersiz/süresi dolmuş/iptal/kabul edilmiş belirteç tek tip `NOT_FOUND`.
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
-import { MembershipError, appendAudit, withInvitationTenant } from "@wms/db";
+import { MembershipError, appendAudit, withInvitationTenant, withUser } from "@wms/db";
 import { AppError } from "@wms/shared/errors";
 import { canDeliver, isBareAddress, type MailConfig } from "@wms/shared/mailer";
 import type { JobQueue } from "@wms/shared/queue";
@@ -109,6 +109,40 @@ function mapInvitationError(e: unknown): unknown {
   }
   if (sqlstateOf(e) === "23505") return withCause(new AppError("VERSION_CONFLICT", { retryable: true }), e);
   return mapAccessError(e);
+}
+
+// ---------------------------------------------------------------------------------------------
+// previewInvitation (T-117d, migration 0008)
+// ---------------------------------------------------------------------------------------------
+
+export interface InvitationPreview {
+  readonly tenantName: string;
+  readonly roleKey: RoleKey;
+  readonly expiresAt: Date;
+}
+
+/** Bağlamsız okuma için yer tutucu kullanıcı kimliği (hiçbir kullanıcıyla eşleşmez; işlev bağlama bakmaz). */
+const NIL_USER_ID = "00000000-0000-0000-0000-000000000000";
+
+/**
+ * Kabulden önce davet önizlemesi: belirteç biçimi doğrulanır, özetlenir, `wms_probe.invitation_preview_for_token`
+ * çağrılır. Geçerli davet yoksa (yok/biçimsiz/süresi dolmuş/iptal/kabul/askıda/demo — hepsi aynı) `null`; e-posta,
+ * tenant kimliği ve slug dönmez. Salt okunur; hiçbir durum değişmez.
+ */
+export async function previewInvitation(params: { readonly db: AccessDbClient; readonly token: unknown }): Promise<InvitationPreview | null> {
+  const { db, token } = params;
+  if (!isWellFormedInvitationToken(token)) return null;
+  const tokenHash = hashInvitationToken(token);
+  const rows = await withUser(db, NIL_USER_ID, (tx) =>
+    tx.execute<{ tenant_name: string; role_key: string; expires_at: Date | string }>(
+      sql`SELECT tenant_name, role_key, expires_at FROM wms_probe.invitation_preview_for_token(${tokenHash})`,
+    ),
+  );
+  const row = rows[0];
+  if (row === undefined) return null;
+  const roleKey = (ROLE_KEYS as readonly string[]).includes(row.role_key) ? (row.role_key as RoleKey) : null;
+  if (roleKey === null) return null;
+  return { tenantName: row.tenant_name, roleKey, expiresAt: new Date(row.expires_at) };
 }
 
 // ---------------------------------------------------------------------------------------------

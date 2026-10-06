@@ -19,6 +19,7 @@ import {
   signupAllowed,
 } from "./policy.ts";
 import type { InvitedAccountDeps } from "./policy.ts";
+import { principalIdentityFlags } from "./index.ts";
 
 const rnd = (): string => randomBytes(18).toString("hex");
 const dbUrl = (user: string): string => ["postgresql://", user, ":", rnd(), "@localhost:6432/wms"].join("");
@@ -237,5 +238,20 @@ describe("createInvitedAccountWith", () => {
   it("yazım hatası yayılır (telafi/silme kodu yok)", async () => {
     const { d } = deps({ invite: [{ email_normalized: "x@example.invalid", delivered_via: "EMAIL" }], failCreate: true });
     await expect(createInvitedAccountWith(d, input)).rejects.toThrow("boom");
+  });
+});
+
+describe("Principal alanları (T-118: isDemo, twoFactorEnabled)", () => {
+  const domain = "example.invalid";
+  it("isDemo isDemoEmail ile aynı kuralı kullanır", () => {
+    expect(principalIdentityFlags({ email: "A@EXAMPLE.INVALID", twoFactorEnabled: false }, domain).isDemo).toBe(true);
+    expect(principalIdentityFlags({ email: "a@evil-example.invalid" }, domain).isDemo).toBe(false);
+    expect(principalIdentityFlags({ email: "a@example.invalid" }, null).isDemo).toBe(false);
+  });
+  it("twoFactorEnabled yalnızca tam true iken true", () => {
+    expect(principalIdentityFlags({ email: "a@x.com", twoFactorEnabled: true }, null).twoFactorEnabled).toBe(true);
+    expect(principalIdentityFlags({ email: "a@x.com", twoFactorEnabled: false }, null).twoFactorEnabled).toBe(false);
+    expect(principalIdentityFlags({ email: "a@x.com", twoFactorEnabled: null }, null).twoFactorEnabled).toBe(false);
+    expect(principalIdentityFlags({ email: "a@x.com" }, null).twoFactorEnabled).toBe(false);
   });
 });

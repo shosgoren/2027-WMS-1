@@ -7,8 +7,13 @@
     "./identity/permissions": "./src/identity/permissions.ts",
     "./identity/access": "./src/identity/access.ts",
     "./identity/invitations": "./src/identity/invitations.ts",
+    "./identity/memberships": "./src/identity/memberships.ts",
+    "./identity/member-queries": "./src/identity/member-queries.ts",
     "./onboarding/workspace": "./src/onboarding/workspace.ts",
-    "./onboarding/templates": "./src/onboarding/templates.ts"
+    "./onboarding/settings-queries": "./src/onboarding/settings-queries.ts",
+    "./audit/today": "./src/audit/today.ts",
+    "./onboarding/templates": "./src/onboarding/templates.ts",
+    "./demo/seed": "./src/demo/seed.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"

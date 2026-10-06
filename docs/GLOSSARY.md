@@ -35,3 +35,17 @@ Kod, tip, DB şeması, API ve ajan istemleri **İngilizce**; arayüz metinleri *
 | Seri no | `serial` | |
 | Stok sahibi | `inventory_owner` | |
 | Paket / hak | `plan`, `entitlement` | |
+| Çalışma alanı | `tenant` (`tenants`, URL `/t/<slug>`) | Kullanıcıya "çalışma alanı"; kod/DB'de `tenant` |
+| Sektör şablonu | `sector_template` (`SectorTemplate`, `PACKAGING_SUPPLIES`, `GENERIC`) | Sürümlüdür (`version`); uygulanan sürüm `tenant_settings.sector_template_version` |
+| Terminoloji | `terminology` (`tenant_settings.terminology`) | Etiket eşlemesi (örn. `location.bin` → "Göz Kodu"); teknik kimliği değiştirmez |
+| Onboarding adımı | `onboarding_step` (`settings.applied`, `terminology.applied`; Faz 2: `units.applied`, `locations.applied`) | Her adım idempotent, kendi transaction'ında |
+| Stok görüntüleme izni | `stock.view` | ADR-016 izin anahtarı |
+| Fiş oluşturma izni | `document.create` | ADR-016 izin anahtarı |
+| Fiş onaylama izni | `document.approve` | ADR-016 izin anahtarı |
+| Stok işleme izni | `stock.post` | ADR-016 izin anahtarı |
+| Ters kayıt oluşturma izni | `reversal.create` | ADR-016 izin anahtarı |
+| Sayım farkı onaylama izni | `count_diff.approve` | ADR-016 izin anahtarı |
+| Veri dışa aktarma isteme izni | `takeout.request` | ADR-016 izin anahtarı |
+| Ayar yönetimi izni | `settings.manage` | ADR-016 izin anahtarı |
+| Kullanıcı yönetimi izni | `users.manage` | ADR-016 izin anahtarı |
+| Denetim kaydı görüntüleme izni | `audit.view` | ADR-016 izin anahtarı |

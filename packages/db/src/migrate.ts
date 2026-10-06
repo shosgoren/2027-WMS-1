@@ -12,6 +12,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import postgres from "postgres";
 import { parseTarget, sameConnectionTarget } from "./connection-target.ts";
+import { demoModeEnabled, ensureDemoTenant, type DemoEnv, type EnsureDemoTenantResult } from "./demo-tenant.ts";
 export type { ConnectionTarget } from "./connection-target.ts";
 
 // Geriye dönük uyum: yardımcı yan etkisiz `connection-target.ts` modülündedir (index.ts migrate.ts'i içe aktarmaz).
@@ -467,6 +468,21 @@ async function runOne<T>(
   }
 }
 
+/**
+ * Demo tenant satırı (T-123 2. tur m4): yalnızca `WMS_ENV` ∈ local|staging ve `DEMO_MODE=1` iken, migration rolüyle ve
+ * ayrı bağlantıda idempotent kurulur; aksi halde bağlantı bile açılmaz.
+ */
+export async function ensureDemoTenantStep(url: string, env: DemoEnv): Promise<EnsureDemoTenantResult> {
+  if (!demoModeEnabled(env)) return "disabled";
+  const sql = connect(url);
+  try {
+    await assertMigrationRole(sql);
+    return await ensureDemoTenant(sql, env);
+  } finally {
+    await sql.end();
+  }
+}
+
 /** Bekleyen migration'ları sırayla uygular; her biri tek transaction ve ayrı bağlantıdır. */
 export async function migrateUp(options: RunOptions): Promise<UpResult> {
   const migrations = loadMigrations(options.dir);
@@ -644,6 +660,8 @@ export async function main(
           ? `migrate: 0 bekleyen migration (uygulanmış toplam: ${r.totalApplied})`
           : `migrate: ${r.applied.length} migration uygulandı (${r.applied.join(", ")}); uygulanmış toplam: ${r.totalApplied}`,
       );
+      const demo = await ensureDemoTenantStep(url, env);
+      if (demo !== "disabled") io.log(`migrate: demo tenant ${demo === "created" ? "kuruldu" : "mevcut"}`);
     } else {
       const r = await migrateDown({ url, to: cmd.to, wmsEnv: env.WMS_ENV });
       io.log(`rollback: ${r.reverted.length} migration geri alındı${r.reverted.length > 0 ? ` (${r.reverted.join(", ")})` : ""}`);
