@@ -4,7 +4,8 @@ import { getTranslations } from "next-intl/server";
 import { Banner } from "@wms/ui";
 import { getAppDb } from "@wms/db";
 import { isWellFormedInvitationToken, previewInvitation } from "@wms/domain/identity/invitations";
-import { RateLimitedError, clientIp, createProductionLimiter } from "../../../lib/rate-limit.ts";
+import { guardInvitePreview } from "../../../lib/invite-guard.ts";
+import { createProductionLimiter } from "../../../lib/rate-limit.ts";
 import { InviteAcceptForm } from "../../auth-forms.tsx";
 
 export const dynamic = "force-dynamic";
@@ -27,11 +28,10 @@ export default async function InvitePage({ params }: { params: Promise<{ token: 
   );
   if (!isWellFormedInvitationToken(token)) return notFound;
   const requestHeaders = await headers();
-  // Belirteç denemesi hız sınırı (T-127 IP sınırı; A-41): sayfa render'ı DB'ye belirteç sorar. Aşımda tek tip nötr uyarı.
-  try {
-    await createProductionLimiter().check("ip", clientIp(requestHeaders));
-  } catch (e) {
-    if (!(e instanceof RateLimitedError)) throw e;
+  // Belirteç denemesi hız sınırı (T-127 IP sınırı; A-41). IP çözülemezse nötr metin (500 yok, belirteçli URL hata günlüğüne düşmez).
+  const guard = await guardInvitePreview(requestHeaders, createProductionLimiter());
+  if (guard === "unavailable") return notFound;
+  if (guard === "rate_limited") {
     return (
       <main className={MAIN}>
         <h1 className="break-words text-2xl font-extrabold text-ink">{t("invite.title")}</h1>
