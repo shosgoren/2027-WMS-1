@@ -355,7 +355,7 @@ export interface UpdateDraftInput {
 
 /**
  * `document.create`: `DRAFT` belgeyi sürüm denetimiyle günceller. Sürüm uyuşmazlığı `VERSION_CONFLICT`; `DRAFT` değilse ya da işleme kilidi
- * varsa `DOCUMENT_STATE`. Kayıtlı bir audit eylemi (`stock_document.updated`) yoktur → audit YAZILMAZ (rapor Bulgusu; kart eki gerekli).
+ * varsa `DOCUMENT_STATE`. Audit: `stock_document.updated`.
  */
 export async function updateDraft(
   params: StockDocCallParams,
@@ -395,7 +395,16 @@ export async function updateDraft(
           await tx.execute(sql`DELETE FROM public.document_lines WHERE tenant_id = ${ctx.tenantId}::uuid AND document_id = ${documentId}::uuid`);
           resultLines = await insertLines(tx, ctx.tenantId, documentId, lines);
         }
-        return { result: { documentId, status: "DRAFT", ...(resultLines === undefined ? {} : { lines: resultLines }) }, audit: null };
+        return {
+          result: { documentId, status: "DRAFT", ...(resultLines === undefined ? {} : { lines: resultLines }) },
+          audit: {
+            action: "stock_document.updated",
+            entityType: "stock_document",
+            entityId: documentId,
+            requestId: input.requestId ?? null,
+            changeSummary: { warehouseId: warehouseId ?? header.warehouseId, businessDate: date, linesReplaced: lines !== undefined, lineCount: lines?.length ?? null },
+          },
+        };
       },
     }),
   );

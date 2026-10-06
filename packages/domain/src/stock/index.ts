@@ -6,7 +6,6 @@ export {
   STOCK_TIMEOUTS,
   executeStockCommand,
   mapStockError,
-  setStockTimeouts,
   type StockAudit,
   type StockCommandApplied,
   type StockCommandContext,

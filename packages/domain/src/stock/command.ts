@@ -55,26 +55,13 @@ export interface StockTimeouts {
   readonly statementTimeoutMs: number;
 }
 
-/** Transaction-local zaman aşımları (G-02 uyumlu; oturum düzeyi ayar yok). `withMembership`'in ilk ifadelerinden hemen sonra çağrılır. */
-export async function setStockTimeouts(tx: AccessTx, t: StockTimeouts): Promise<void> {
-  if (!Number.isSafeInteger(t.lockTimeoutMs) || t.lockTimeoutMs < 1 || !Number.isSafeInteger(t.statementTimeoutMs) || t.statementTimeoutMs < 1) {
-    throw new TypeError("stock timeouts must be positive integers (ms)");
-  }
-  await tx.execute(
-    sql`SELECT set_config('lock_timeout', ${`${t.lockTimeoutMs}ms`}, true), set_config('statement_timeout', ${`${t.statementTimeoutMs}ms`}, true)`,
-  );
-}
-
-/** A-121: kapalı özellik reddi; kullanıcıya genel doğrulama hatasından AYRI, anlamlı mesaj anahtarı. Kaydedilmez (yapılandırmaya bağlıdır). */
+/** A-121: kapalı özellik reddi: `VALIDATION_FAILED`/`FEATURE_DISABLED` (ayrı, anlamlı mesaj). Kaydedilmez (yapılandırmaya bağlıdır). */
 export class FeatureDisabledError extends AppError {
   override name = "FeatureDisabledError";
   readonly feature: string;
   constructor(feature: string) {
-    super("VALIDATION_FAILED");
+    super("VALIDATION_FAILED", { detail: "FEATURE_DISABLED" });
     this.feature = feature;
-  }
-  override get messageKey(): string {
-    return "errors.validation_failed.feature_disabled";
   }
 }
 
@@ -244,7 +231,6 @@ export async function executeStockCommand<I, R extends StockCommandResult = Stoc
     seen.tenantId = m.tenantId;
     seen.userId = m.userId;
     try {
-      await setStockTimeouts(tx, timeouts); // withMembership'ten HEMEN sonra (A-75, MINOR-2)
       const plan = await p.plan(tx, p.input, m);
       await assertWarehouseInScope(tx, m, plan.warehouseIds);
       const key: IdempotencyKey = { tenantId: m.tenantId, commandType: p.commandType, clientKey, actorUserId: m.userId, requestHash: hash };
@@ -280,8 +266,8 @@ export async function executeStockCommand<I, R extends StockCommandResult = Stoc
 
   const attempt = (): Promise<StockCommandOutcome<R>> =>
     p.tenantId !== undefined
-      ? runTenantCommandById({ db: p.db, principal: p.principal, tenantId: p.tenantId, permission: p.permission }, body)
-      : runTenantCommand({ db: p.db, principal: p.principal, tenantSlug: p.tenantSlug as string, permission: p.permission }, body);
+      ? runTenantCommandById({ db: p.db, principal: p.principal, tenantId: p.tenantId, permission: p.permission, timeouts }, body)
+      : runTenantCommand({ db: p.db, principal: p.principal, tenantSlug: p.tenantSlug as string, permission: p.permission, timeouts }, body);
 
   try {
     return await withRetry(attempt, {
@@ -326,11 +312,8 @@ async function persistRejection<I, R extends StockCommandResult>(
 ): Promise<IdempotencyOutcome | undefined> {
   try {
     const outcome = await runTenantCommandById(
-      { db: p.db, principal: p.principal, tenantId: key.tenantId, permission: p.permission },
-      async (tx) => {
-        await setStockTimeouts(tx, timeouts);
-        return recordRejection(tx, key, err.code, err.detail, err.httpStatus);
-      },
+      { db: p.db, principal: p.principal, tenantId: key.tenantId, permission: p.permission, timeouts },
+      (tx) => recordRejection(tx, key, err.code, err.detail, err.httpStatus),
     );
     return outcome.written ? undefined : outcome.existing;
   } catch (e) {

@@ -157,6 +157,7 @@ describe("mapStockError (command.ts): alt katman hatalarının AppError eşlemes
   it("seri bayrağı kapalı VALIDATION_FAILED → FeatureDisabledError (ayrı mesaj anahtarı); diğer VALIDATION_FAILED genel", () => {
     const off = mapStockError(lockErr("VALIDATION_FAILED", "serial locking is disabled (STOCK_SERIAL_LOCK_ENABLED, Q-56)"));
     expect(off).toBeInstanceOf(FeatureDisabledError);
+    expect([(off as AppError).code, (off as AppError).detail]).toEqual(["VALIDATION_FAILED", "FEATURE_DISABLED"]);
     expect((off as AppError).messageKey).toBe("errors.validation_failed.feature_disabled");
     const other = mapStockError(lockErr("VALIDATION_FAILED", "serialIds must be an array")) as AppError;
     expect(other).not.toBeInstanceOf(FeatureDisabledError);

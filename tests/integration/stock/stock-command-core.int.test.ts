@@ -427,6 +427,7 @@ describe("özellik bayrağı, hata eşlemesi, ürün durumu", () => {
     );
     expect(e).toBeInstanceOf(FeatureDisabledError);
     expect(e.code).toBe("VALIDATION_FAILED");
+    expect(e.detail).toBe("FEATURE_DISABLED");
     expect(e.messageKey).toBe("errors.validation_failed.feature_disabled");
     expect(e.messageKey).not.toBe(new AppError("VALIDATION_FAILED").messageKey);
     expect(plans).toBe(1);
@@ -564,6 +565,7 @@ describe("belge yaşam döngüsü (DRAFT → APPROVED → POSTED | CANCELLED)", 
     expect((await failure(approveDocument(ownerP(A), { documentId: id, expectedVersion: 4 }))).detail).toBe("DOCUMENT_STATE");
     expect((await failure(cancelDocument(ownerP(A), { documentId: id, expectedVersion: 4 }))).detail).toBe("DOCUMENT_STATE");
     expect((await failure(updateDraft(ownerP(A), { documentId: id, expectedVersion: 4, reason: "z" }))).detail).toBe("DOCUMENT_STATE");
+    expect(await auditCount(A, "stock_document.updated", id)).toBe(1); // yalnızca başarılı updateDraft
   });
 
   it("satır sayısı > 2.000 → VALIDATION_FAILED/DOCUMENT_TOO_LARGE; tam 2.000 satır kabul", async () => {
@@ -615,11 +617,11 @@ describe("belge yaşam döngüsü (DRAFT → APPROVED → POSTED | CANCELLED)", 
     const row = await docRow(id);
     expect(row.posting_job_id).not.toBeNull();
     for (const [name, p] of [
-      ["cancel", cancelDocument(ownerP(A), { documentId: id, expectedVersion: row.version })],
-      ["approve", approveDocument(ownerP(A), { documentId: id, expectedVersion: row.version })],
-      ["update", updateDraft(ownerP(A), { documentId: id, expectedVersion: row.version, reason: "x" })],
+      ["cancel", () => cancelDocument(ownerP(A), { documentId: id, expectedVersion: row.version })],
+      ["approve", () => approveDocument(ownerP(A), { documentId: id, expectedVersion: row.version })],
+      ["update", () => updateDraft(ownerP(A), { documentId: id, expectedVersion: row.version, reason: "x" })],
     ] as const) {
-      const e = await failure(p);
+      const e = await failure(p());
       expect([name, e.code, e.detail]).toEqual([name, "VALIDATION_FAILED", "DOCUMENT_STATE"]);
     }
     expect((await docRow(id)).status).toBe("APPROVED");

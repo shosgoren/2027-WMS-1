@@ -4,7 +4,7 @@
 // Domain kodu Next / Better Auth import etmez; kimlik `@wms/auth` tarafında doğrulanır, buraya düz veri gelir.
 import { sql } from "drizzle-orm";
 import { MembershipError, withMembership, withUser } from "@wms/db";
-import type { Membership } from "@wms/db";
+import type { LocalTimeouts, Membership } from "@wms/db";
 import { AppError } from "@wms/shared/errors";
 import { hasPermission, type Permission } from "./permissions.ts";
 
@@ -28,6 +28,8 @@ export interface TenantAccessParams {
   readonly permission: Permission;
   /** Yakın zamanda kimlik doğrulama denetimi (çağıran `auth.requireRecentAuth`'u bağlar); reddederse (`reason === "REAUTH_REQUIRED"`) `RECENT_AUTH_REQUIRED`. Üyelik/izin/MFA denetiminden SONRA, transaction dışında çağrılır. */
   readonly recentAuth?: () => Promise<void>;
+  /** İsteğe bağlı transaction-local zaman aşımları (stok komutları, A-75): komut transaction'ının tenant/üyelik FOR SHARE okumasından ÖNCE kurulur. */
+  readonly timeouts?: LocalTimeouts;
 }
 
 export type TenantAccessByIdParams = Omit<TenantAccessParams, "tenantSlug"> & { readonly tenantId: string };
@@ -110,13 +112,14 @@ async function runOnce<T>(
   params: TenantAccessByIdParams,
   fn: (tx: AccessTx, membership: Membership) => Promise<T>,
 ): Promise<T> {
-  const { db, principal, tenantId, permission, recentAuth } = params;
+  const { db, principal, tenantId, permission, recentAuth, timeouts } = params;
   if (principal === null || principal === undefined) throw new AppError("UNAUTHENTICATED");
   const membershipParams = (): WithMembershipParams => ({
     client: db,
     userId: principal.userId,
     tenantId,
     permission: (roles) => hasPermission(roles, permission),
+    ...(timeouts === undefined ? {} : { timeouts }),
   });
   if (recentAuth !== undefined) {
     // Sıra: (1) üyelik + izin + MFA (kısa transaction, hiçbir şey yazmaz) → (2) recentAuth (transaction DIŞINDA:
