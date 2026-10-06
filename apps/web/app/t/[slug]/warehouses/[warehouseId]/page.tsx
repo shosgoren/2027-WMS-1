@@ -13,6 +13,9 @@ import { LocationTree } from "./location-tree.tsx";
 export const dynamic = "force-dynamic";
 
 const TREE_PAGE = 200;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** Tek depo okuyucusu gelene kadar (Q-57) tarama üst sınırı: en çok 5 sayfa x 200 = 1000 depo. */
+const MAX_SCAN_PAGES = 5;
 
 export async function generateMetadata(): Promise<Metadata> {
   const t = await getTranslations("warehouses");
@@ -27,6 +30,8 @@ export default async function LocationTreePage({ params }: { params: Promise<{ s
   const principal = await getAuthService().getPrincipal(await headers());
   const returnTo = `/t/${encodeURIComponent(slug)}/warehouses/${encodeURIComponent(warehouseId)}`;
   if (principal === null) redirect(`/login?next=${encodeURIComponent(returnTo)}`);
+  // Geçersiz kimlik: tarama/DB çağrısı yapmadan 404 (varlık sızdırmaz).
+  if (!UUID_RE.test(warehouseId)) notFound();
   const db = getAppDb();
   const call = { db, principal, tenantSlug: slug };
 
@@ -40,10 +45,15 @@ export default async function LocationTreePage({ params }: { params: Promise<{ s
     canManage = hasPermission(current.roles, "settings.manage");
     // `getWarehouse` okuyucusu yok (Bulgular): kapsamlı listeden anahtar kümesiyle aranır.
     let afterCode: string | undefined;
-    for (;;) {
+    for (let scanned = 1; ; scanned++) {
       const page = await listWarehouses(call, { includeArchived: true, ...(afterCode === undefined ? {} : { afterCode }) });
       warehouse = page.items.find((w) => w.id === warehouseId.toLowerCase());
       if (warehouse !== undefined || page.nextAfterCode === null) break;
+      if (scanned >= MAX_SCAN_PAGES) {
+        // Sınır aşıldı: bulunamadı gibi davranılır; maskeli günlük (yalnızca neden, G-09).
+        console.error(JSON.stringify({ level: "error", msg: "warehouse lookup scan limit reached", maxPages: MAX_SCAN_PAGES }));
+        notFound();
+      }
       afterCode = page.nextAfterCode;
     }
     if (warehouse === undefined) notFound();
