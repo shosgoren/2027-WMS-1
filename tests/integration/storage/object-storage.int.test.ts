@@ -170,9 +170,27 @@ describe("ObjectStorage (MinIO)", () => {
 
     it("süre dolunca reddedilir", async () => {
       const key = await storage.put(ctxA, `signed/${randomUUID()}.txt`, enc.encode("kisa"), { contentType: "application/octet-stream" });
-      const url = await storage.signedGetUrl(ctxA, key, 1);
-      expect((await fetch(url)).status).toBe(200);
-      await new Promise((r) => setTimeout(r, 2500));
+      // T-244: TTL 1 sn + X-Amz-Date saniyeye yuvarlandığı için imza saniye sonunda atılınca URL
+      // ilk istekten önce doluyordu (yük altında 403). TTL 5 sn: yuvarlama (<=1 sn) ve yük payı
+      // sonrası ilk istek süre içinde kalır; kalmazsa aşağıdaki koruma anlamlı hata verir.
+      // Bekleme sabit değil: URL'deki X-Amz-Date + X-Amz-Expires'tan hesaplanır (+1,5 sn pay).
+      const ttl = 5;
+      const url = await storage.signedGetUrl(ctxA, key, ttl);
+      const params = new URL(url).searchParams;
+      expect(params.get("X-Amz-Expires")).toBe(String(ttl));
+      const d = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/.exec(params.get("X-Amz-Date") ?? "");
+      expect(d, "X-Amz-Date biçimi YYYYMMDDTHHMMSSZ olmalı").not.toBeNull();
+      const [, y, mo, da, h, mi, s] = d!.map(Number);
+      const expiresAtMs = Date.UTC(y!, mo! - 1, da, h, mi, s) + ttl * 1000;
+      const firstFetchAt = Date.now();
+      expect(
+        firstFetchAt,
+        `ilk istek URL süresinden önce başlamalı (kalan ${expiresAtMs - firstFetchAt} ms); ortam aşırı yavaş`,
+      ).toBeLessThan(expiresAtMs - 1000);
+      const first = await fetch(url);
+      expect(first.status).toBe(200);
+      expect(await first.text()).toBe("kisa");
+      await new Promise((r) => setTimeout(r, Math.max(0, expiresAtMs + 1500 - Date.now())));
       expect((await fetch(url)).status).toBe(403);
       await storage.delete(ctxA, key);
     });
