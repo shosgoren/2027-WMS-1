@@ -456,11 +456,12 @@ export function pgBossAsyncCommandsForVerification(): string[] {
   return out;
 }
 
-function describeFailure(err: unknown): QueueInstallError {
+/** Kurulum hatasını yalnızca (temizlenmiş) ad + SQLSTATE ile sarar; install-cli stderr'e basar. */
+export function describeFailure(err: unknown): QueueInstallError {
   if (err instanceof QueueInstallError) return err;
   const code = (err as { code?: unknown } | null)?.code;
   const sqlstate = typeof code === "string" && /^[0-9A-Z]{5}$/.test(code) ? code : undefined;
-  return new QueueInstallError(`queue schema install failed (${err instanceof Error ? err.name : "unknown"})`, sqlstate);
+  return new QueueInstallError(`queue schema install failed (${safeErrorName(err)})`, sqlstate);
 }
 
 /**

@@ -9,7 +9,7 @@ import { runTenantCommandById } from "../../../packages/domain/src/identity/acce
 import { AppError } from "../../../packages/shared/src/errors.ts";
 import { createDbClient, currentTenantId, withTenant } from "../../../packages/db/src/index.ts";
 import { DB_CLIENT_SETTINGS, createTenantContext, type DbClient } from "../../../packages/db/src/client.ts";
-import { QUEUE_SCHEMA, createJobQueue, installQueueSchema, workerPrincipal, type PgBossJobQueue } from "../../../packages/queue-adapter/src/index.ts";
+import { QUEUE_SCHEMA, QueueInstallError, createJobQueue, describeFailure, installQueueSchema, workerPrincipal, type PgBossJobQueue } from "../../../packages/queue-adapter/src/index.ts";
 import type { Job } from "../../../packages/shared/src/queue.ts";
 import { readIntEnv, readWorkerDatabaseUrl } from "../harness/env.ts";
 
@@ -380,6 +380,15 @@ describe("wms_worker: tüm tenant'ların işini tüketir (fetch/complete/fail/re
 });
 
 describe("hata adı temizliği", () => {
+  it("describeFailure: e-posta içeren hata adı QueueInstallError mesajına girmez", () => {
+    const e = describeFailure(Object.assign(new Error(`m ${LEAK_EMAIL}`), { name: `Bad ${LEAK_EMAIL}`, code: "28P01" }));
+    expect(e).toBeInstanceOf(QueueInstallError);
+    expect(e.message).toBe("queue schema install failed (Error)");
+    expect(e.message).not.toContain(LEAK_EMAIL);
+    expect(JSON.stringify(e)).not.toContain(LEAK_EMAIL);
+    expect(String(e.stack)).not.toContain(LEAK_EMAIL);
+  });
+
   it("dinamik/veri taşıyan hata adı (kalıcı yol) output'a ve loga girmez; 'Error' olur", async () => {
     const t = newTenant();
     const id = await adminInsertJob(envelope(t));
@@ -393,7 +402,7 @@ describe("hata adı temizliği", () => {
     const out = (await stateOf(id))?.output;
     expect(out).toMatchObject({ permanent: true, name: "Error", code: "BAD_THING" });
     expect(JSON.stringify(out)).not.toContain(LEAK_EMAIL);
-    expect(logged.some((f) => f.jobId === id || (f.type === "demo.reseed" && f.name === "Error"))).toBe(true);
+    expect(logged.some((f) => f.jobId === id && f.name === "Error")).toBe(true);
     expect(JSON.stringify(logged)).not.toContain(LEAK_EMAIL);
   });
 });
