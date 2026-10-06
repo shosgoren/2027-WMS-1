@@ -44,3 +44,9 @@
 - int/faz1-sema dilimi kuruldu (main + 7 kart), entegrasyon düzeltmeleri (KNOWN_APP_SETTINGS, drift importu, PG 18.6 nonsuper testi), paket incelemesi 0·1·2 → 0·0·1; #39 açıldı.
 - T-112c düzeltmeleri 0·0·2 ile geçti; T-133 hata kodu listesi yazıldı.
 - int/faz1-auth entegrasyonu sürüyor (T-101d × T-115 connection-target çakışması).
+
+## 2026-10-06 01:45Z — Supervisor turu
+- E-03: 00:32Z'den beri Actions işleri başlamıyor (tüm dallar, docs-only dahil; yeniden koşu da aynı) → U-08 kullanıcıya (Actions dakika/harcama sınırı). Birleştirme durdu.
+- Hazır: #39 (şema dilimi), #40 (ui dilimi), int/faz1-auth paketi (0·0·2; T-113 × T-115 connection-target çakışması sertleştirilmiş sürümle çözüldü; kuyruk kartları auth dilimine).
+- Yeni kartlar: T-109b (paket bağlantıları ✓), T-116b, T-117c (not), T-105c→0007. Kararlar: T-117 B seçeneği (probe salt okunur; tek okuma işlevi + token bağlı withInvitationTenant). OPEN_QUESTIONS: Q-33, A-57…A-59.
+- T-121 ✓, T-125 MAJOR düzeltiliyor, T-117 inceleniyor.
