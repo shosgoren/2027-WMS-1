@@ -57,7 +57,7 @@ Q-52 | Stok defteri satırı hangi belge durumunda yazılabilir (senkron yol ≤
 Q-54 | Barkod çözümlemesi birden çok adayla sonuçlanınca (BARCODE_AMBIGUOUS) adaylar istemciye nasıl döner: `AppError` gövdesine alan mı, ayrı uç mu? | T-208 | açık — API katmanı kartında karar
 Q-55 | GS1 değişken uzunluklu AI'lar için tam AI uzunluk tablosu (GS ayracı olmadığında ayrıştırma) hangi kaynaktan, hangi kapsamda? | T-208, GS1 Genel Spesifikasyonları | açık — şimdilik tanımsız AI ayrıştırmayı durdurur
 Q-58 | Taşıma birimi iç içe koyma kuralları: KOLI içine KOLI/PALET, kapalı/boşaltılmış ebeveyne alt bağlama serbest mi? Şimdilik yalnız varlık ve konum denetleniyor | T-212 | açık — T-217 nest kuralıyla
-Q-59 | `SERIAL_SCOPE_TENANT_ENABLED` bayrağı hangi mekanizmayla okunur (ortam değişkeni / tenant_settings)? Şimdilik çağıran parametre veriyor, varsayılan kapalı | T-212, Q-39 | açık
+Q-59 | `SERIAL_SCOPE_TENANT_ENABLED` bayrağı hangi mekanizmayla okunur (ortam değişkeni / tenant_settings)? Şimdilik yalnız sunucu ortamı `SERIAL_SCOPE_TENANT_ENABLED="true"` (çağrı anında okunur; çağıran açamaz), varsayılan kapalı. Açmadan önce DB'de tenant geneli kısmi tekil indeks şart (yalnız komut düzeyi koruma, komutu dolanan yazmaları kapsamaz) — T-212 inceleme | T-212, Q-39 | açık
 
 ## Varsayımlar
 A-01 | Neon pooler'ı transaction-mode PgBouncer'dır (kullanıcı kararı kaydı, 2026-10-05) — **teyit edildi 2026-10-05, sürüm hariç** (belge + T-005d koşu 3 çoklama gözlemi, https://github.com/shosgoren/2027-WMS-1/actions/runs/37388724069); PgBouncer sürümü gözlenemedi | Neon pooler türünü/kipini değiştirdiğini duyurana veya yeniden spike aksini gösterene kadar | Q-02
