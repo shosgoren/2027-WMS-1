@@ -214,8 +214,8 @@ const logger = createJsonLogger(
   { service: "web" },
 );
 
-export function createProductionGuard(getHeaders: GuardDeps["getHeaders"], limiter: RateLimiter = createProductionLimiter()) {
-  return createActionGuard({
+function productionDeps(getHeaders: GuardDeps["getHeaders"], limiter: RateLimiter): GuardDeps {
+  return {
     getHeaders,
     limiter,
     resolvePrincipal: async (headers) => {
@@ -232,5 +232,14 @@ export function createProductionGuard(getHeaders: GuardDeps["getHeaders"], limit
       logger.error(typeof msg === "string" ? msg : "guard log", code === undefined ? rest : { ...rest, errorCode: code });
     },
     newRequestId: randomUUID,
-  });
+  };
+}
+
+export function createProductionGuard(getHeaders: GuardDeps["getHeaders"], limiter: RateLimiter = createProductionLimiter()) {
+  return createActionGuard(productionDeps(getHeaders, limiter));
+}
+
+/** `/api/t/**` route handler'ları için üretim sarmalayıcısı (T-126): `routeGuard` istek başlıklarını kendisi okur. */
+export function createProductionRouteGuard(limiter: RateLimiter = createProductionLimiter()) {
+  return createRouteGuard(productionDeps(() => Promise.resolve(new Headers()), limiter));
 }

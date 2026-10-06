@@ -72,7 +72,6 @@ type TaskKey = keyof typeof ICONS;
 
 type Entry =
   | { key: TaskKey; kind: "link"; allowed: boolean; href: `/${string}` }
-  | { key: TaskKey; kind: "screen-soon"; allowed: boolean }
   | { key: TaskKey; kind: "warehouse-soon"; tone: TaskCardTone };
 
 export async function TaskMenu({ slug, allowed }: TaskMenuProps) {
@@ -80,8 +79,7 @@ export async function TaskMenu({ slug, allowed }: TaskMenuProps) {
   const entries: Entry[] = [
     { key: "members", kind: "link", allowed: allowed.usersManage, href: `/t/${encodeURIComponent(slug)}/members` },
     { key: "settings", kind: "link", allowed: allowed.settingsManage, href: `/t/${encodeURIComponent(slug)}/settings` },
-    // Denetim ekranı T-126'dadır: o gelene kadar "yakında".
-    { key: "audit", kind: "screen-soon", allowed: allowed.auditView },
+    { key: "audit", kind: "link", allowed: allowed.auditView, href: `/t/${encodeURIComponent(slug)}/audit` },
     { key: "receive", kind: "warehouse-soon", tone: "accent" },
     { key: "issue", kind: "warehouse-soon", tone: "accent" },
     { key: "transfer", kind: "warehouse-soon", tone: "accent" },
@@ -100,10 +98,8 @@ export async function TaskMenu({ slug, allowed }: TaskMenuProps) {
           card = <TaskCard icon={icon} title={title} description={t("soonWarehouse")} soon={{ label: t("soonLabel") }} tone={e.tone} />;
         } else if (!e.allowed) {
           card = <TaskCard icon={icon} title={title} locked={{ reason: t("lockedReason") }} />;
-        } else if (e.kind === "link") {
-          card = <TaskCard icon={icon} title={title} description={t(`tasks.${e.key}.description`)} href={e.href} />;
         } else {
-          card = <TaskCard icon={icon} title={title} description={t("soonScreen")} soon={{ label: t("soonLabel") }} />;
+          card = <TaskCard icon={icon} title={title} description={t(`tasks.${e.key}.description`)} href={e.href} />;
         }
         return (
           <li key={e.key} className="flex min-w-0">
