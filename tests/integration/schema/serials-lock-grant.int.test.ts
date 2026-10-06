@@ -151,6 +151,20 @@ describe("T-237 serials satır kilidi yetkisi (0015)", () => {
     expectOk(await asAdmin(A.tenantId, (q) => q("UPDATE public.serials SET created_at = created_at WHERE id = $1", [A.serialId])), "sahip no-op");
   });
 
+  it("sonradan eklenen sütun da değişmezlik kapsamında (tüm satır karşılaştırması, lot_id hariç; MINOR-2)", async () => {
+    expectFail(
+      await asAdmin(A.tenantId, async (q) => {
+        await q("ALTER TABLE public.serials ADD COLUMN t237_probe text");
+        await q("UPDATE public.serials SET t237_probe = 'x' WHERE id = $1", [A.serialId]);
+      }),
+      "23514",
+      "sahip yeni sütun",
+      "SERIAL_IMMUTABLE",
+    );
+    const cols = await admin.query("SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'serials' AND column_name = 't237_probe'");
+    expect(cols.rowCount).toBe(0);
+  });
+
   it("wms_app replica ayarı yapamaz; sahip lot_id değişimi 0013 kuralıyla (kullanılan seri reddi, kullanılmayan geçer)", async () => {
     expectFail(await asAdmin(A.tenantId, (q) => q("UPDATE public.serials SET lot_id = NULL WHERE id = $1", [A.serialId])), "23514", "kullanılan seri", "TRACKING_VIOLATION");
     const fresh = randomUUID();

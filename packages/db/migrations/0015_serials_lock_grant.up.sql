@@ -12,7 +12,8 @@ CREATE FUNCTION public.serials_reject_update() RETURNS trigger
   SET search_path = pg_catalog, pg_temp
 AS $fn$
 BEGIN
-  IF (NEW.tenant_id, NEW.id, NEW.item_id, NEW.serial_no, NEW.created_at) IS DISTINCT FROM (OLD.tenant_id, OLD.id, OLD.item_id, OLD.serial_no, OLD.created_at) THEN
+  -- Tüm satır karşılaştırılır (yalnız lot_id hariç): ileride eklenecek sütunlar da kendiliğinden kapsamda (fail-closed; T-237 inceleme MINOR-2).
+  IF (to_jsonb(NEW) - 'lot_id') IS DISTINCT FROM (to_jsonb(OLD) - 'lot_id') THEN
     RAISE EXCEPTION 'SERIAL_IMMUTABLE: serials satırı değiştirilemez (UPDATE yetkisi yalnızca satır kilidi içindir; lot_id yalnızca 0013 kuralıyla)' USING ERRCODE = '23514';
   END IF;
   RETURN NEW;
