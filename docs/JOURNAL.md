@@ -89,3 +89,9 @@
 - HAZIR: T-123a e002035 (Dockerfile korunan; son kontrol 0·0·1 → T-106 staging demo/argon2 doğrulaması), T-129 ce74c03 (ReDoS BLOCKER kapandı; maskeleme turları 1·2·7 → 0·0·6 → 0·0·3 → kapandı; uptime.yml son rapor sonrası değişmedi), T-122a eeb6c60 (A-65; now genel API'den çıktı).
 - T-122: landing, demo girişi (demo-config ortak karar, DEMO_EMAIL_DOMAIN fail-closed), sihirbaz (POST + httpOnly taslak çerezi, sabit requestId, guard), ana ekran + "Bugün yaptıkların" + ayarlar (47 IANA saat dilimi sabit listesi); inceleme turları 0·1·6 → 0·0·3 → 0·0·2; son tur sürüyor.
 - Yeni kartlar: T-122a. Kayıtlar: A-65; T-106, T-131 notları (layout next hedefi, demo giriş sayacı, maskeli members logu, saat dilimi tek kaynak, toplam karakter bütçesi, CSP oturumlu denetim, isProductionEnv tek kaynak).
+
+## 2026-10-06 07:45Z — Supervisor turu
+- E-03 sürüyor (07:20Z 4 s'de FAIL). Kullanıcı kararı bekleniyor.
+- HAZIR: T-122 eb64192 (landing, demo girişi, sihirbaz, ana ekran, Bugün yaptıkların, ayarlar — inceleme turları 0·1·6 → 0·0·3 → 0·0·2 → kapandı), T-112d 7d0e0de (migration 0007 kimlik olayı sınıfı: account[_.], demo.(account|password)[_.]; demo.action_forbidden wms_app'e açık), T-116d 6263a75 (self-servis sıfırlama e-postası üretimde; kuyruk yalnızca reset isteğinde, backgroundTasks ile zamanlama farkı kapandı — 20/20 ölçüm), T-115c düşük yükte verify OK.
+- Yeni kartlar: T-112d, T-116d, T-117d (davet önizlemesi, 0008). Migration numaraları: 0007 T-112d, 0008 T-117d, 0009 T-105c.
+- Başladı: T-126 (denetim ekranı + CSV export), T-117d.
