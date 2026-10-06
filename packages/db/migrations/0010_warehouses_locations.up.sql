@@ -124,16 +124,31 @@ AS $fn$
 DECLARE
   parent_depth smallint;
 BEGIN
+  -- BEFORE tetikleyici WITH CHECK'ten ÖNCE çalışır: bağlam tenant'ı doluyken başka tenant'a satır yazma denemesi, ebeveyn
+  -- hatasına dönüşmeden RLS ile aynı hata kodu/iletiyle reddedilir (rol bağımsız; BYPASSRLS rolde de geçerli).
+  IF NULLIF(pg_catalog.current_setting('app.current_tenant_id', true), '') IS NOT NULL
+     AND NEW.tenant_id IS DISTINCT FROM NULLIF(pg_catalog.current_setting('app.current_tenant_id', true), '')::uuid THEN
+    RAISE EXCEPTION 'new row violates row-level security policy for table "locations"' USING ERRCODE = '42501';
+  END IF;
   IF NEW.parent_id IS NULL THEN
     IF NEW.depth <> 0 THEN
       RAISE EXCEPTION 'locations: kök lokasyonun depth değeri 0 olmalı' USING ERRCODE = '23514';
     END IF;
     RETURN NEW;
   END IF;
+  IF NEW.parent_id = NEW.id THEN
+    RAISE EXCEPTION 'locations: lokasyon kendisinin ebeveyni olamaz' USING ERRCODE = '23514', CONSTRAINT = 'locations_parent_not_self_chk';
+  END IF;
   SELECT p.depth INTO parent_depth FROM public.locations p
    WHERE p.tenant_id = NEW.tenant_id AND p.warehouse_id = NEW.warehouse_id AND p.id = NEW.parent_id;
-  -- Ebeveyn görünmüyorsa (yok/başka tenant) FK de reddeder; burada yalnızca derinlik tutarlılığı denetlenir.
-  IF FOUND AND NEW.depth <> parent_depth + 1 THEN
+  -- Fail-closed: ebeveyn verilmiş ama bu tenant/depoda görünmüyorsa (yok, başka depo/tenant, ya da AYNI ifadede sonradan
+  -- eklenecek satır) reddedilir. NO ACTION FK ifade sonunda denetlendiğinden bu bekçi olmadan çocuk ebeveynden önce
+  -- keyfi depth ile yazılabilir ve iki satır birbirine ebeveyn olarak döngü kurabilirdi. Çok satırlı INSERT'te kökler önce.
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'locations: ebeveyn lokasyon bulunamadı (ebeveyn önceden var olmalı; çok satırlı INSERT''te kökler önce)'
+      USING ERRCODE = '23503';
+  END IF;
+  IF NEW.depth <> parent_depth + 1 THEN
     RAISE EXCEPTION 'locations: depth, ebeveyn depth + 1 olmalı' USING ERRCODE = '23514';
   END IF;
   RETURN NEW;
