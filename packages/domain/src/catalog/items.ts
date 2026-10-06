@@ -43,6 +43,8 @@ export interface CreateItemInput {
 
 export interface UpdateItemInput {
   readonly itemId: string;
+  /** Yeni ürün kodu (T-251): tenant içi benzersiz; değişimde `code_history` + `item.code_changed` aynı transaction'da yazılır. */
+  readonly code?: string;
   readonly name?: string;
   readonly pickPolicy?: PickPolicy;
   // Değişmez alanlar (A-87): farklı değer istenirse ret (bkz. dosya başlığı).
@@ -117,8 +119,18 @@ async function hasStockDimension(tx: AccessTx, tenantId: string, itemId: string)
   return r[0] !== undefined;
 }
 
+function isUniqueViolation(e: unknown): boolean {
+  let cur: unknown = e;
+  for (let i = 0; i < 6 && cur !== undefined && cur !== null; i++) {
+    if ((cur as { code?: unknown }).code === "23505") return true;
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 export async function updateItem(params: CatalogCommandParams, input: UpdateItemInput): Promise<{ readonly itemId: string; readonly changed: boolean }> {
   const itemId = parseUuid(input.itemId);
+  const code = input.code === undefined ? undefined : parseCode(input.code);
   const name = input.name === undefined ? undefined : parseName(input.name);
   const pickPolicy = input.pickPolicy === undefined ? undefined : parsePick(input.pickPolicy);
   const trackingMode = input.trackingMode === undefined ? undefined : parseTracking(input.trackingMode);
@@ -139,11 +151,34 @@ export async function updateItem(params: CatalogCommandParams, input: UpdateItem
     if (cur.status !== "ACTIVE") throw new AppError("VALIDATION_FAILED");
     const newName = name ?? cur.name;
     const newPick = pickPolicy ?? (cur.pick_policy as PickPolicy);
-    if (newName === cur.name && newPick === cur.pick_policy) return { itemId, changed: false };
-    await tx.execute(
-      sql`UPDATE public.items SET name = ${newName}, pick_policy = ${newPick}
-           WHERE tenant_id = ${actor.tenantId}::uuid AND id = ${itemId}::uuid`,
-    );
+    const newCode = code ?? cur.code;
+    const codeChanged = newCode !== cur.code;
+    if (newName === cur.name && newPick === cur.pick_policy && !codeChanged) return { itemId, changed: false };
+    try {
+      await tx.execute(
+        sql`UPDATE public.items SET name = ${newName}, pick_policy = ${newPick}, code = ${newCode}
+             WHERE tenant_id = ${actor.tenantId}::uuid AND id = ${itemId}::uuid`,
+      );
+    } catch (e) {
+      // Eşzamanlı aynı koda iki değişim: kaybeden `items_tenant_code_key` 23505 alır (tx zaten geri alınır).
+      if (codeChanged && isUniqueViolation(e)) throw new AppError("VALIDATION_FAILED", { detail: "CODE_TAKEN" });
+      throw e;
+    }
+    if (codeChanged) {
+      await tx.execute(
+        sql`INSERT INTO public.code_history (tenant_id, id, entity_type, entity_id, old_code, new_code, changed_by)
+            VALUES (${actor.tenantId}::uuid, gen_random_uuid(), 'item', ${itemId}::uuid, ${cur.code}, ${newCode}, ${actor.userId}::uuid)`,
+      );
+      await appendAudit(tx, {
+        action: "item.code_changed",
+        actorUserId: actor.userId,
+        entityType: "item",
+        entityId: itemId,
+        requestId: requestId ?? null,
+        changeSummary: { from_code: cur.code, to_code: newCode },
+      });
+    }
+    if (newName === cur.name && newPick === cur.pick_policy) return { itemId, changed: true };
     await appendAudit(tx, {
       action: "item.updated",
       actorUserId: actor.userId,

@@ -501,12 +501,14 @@
     "warehouse": {
       "created": "You created a warehouse.",
       "updated": "You updated a warehouse.",
-      "archived": "You archived a warehouse."
+      "archived": "You archived a warehouse.",
+      "code_changed": "You changed a warehouse code."
     },
     "location": {
       "created": "You created a location.",
       "updated": "You updated a location.",
-      "archived": "You archived a location."
+      "archived": "You archived a location.",
+      "code_changed": "You changed a location code."
     },
     "warehouse_scope": {
       "changed": "You changed a member's warehouse scope."
@@ -518,7 +520,8 @@
     "item": {
       "created": "You created an item.",
       "updated": "You updated an item.",
-      "archived": "You archived an item."
+      "archived": "You archived an item.",
+      "code_changed": "You changed an item code."
     },
     "item_barcode": {
       "added": "You added a barcode to an item.",
@@ -665,7 +668,7 @@
     "form": {
       "createTitle": "New product",
       "code": "Product code",
-      "codeHint": "Cannot be changed later; the server tidies the format.",
+      "codeHint": "The server tidies the format. The code can be changed later; searching by the old code finds the renamed card.",
       "name": "Product name",
       "baseUnit": "Base unit",
       "baseUnitHint": "Stock is counted in this unit; it cannot be changed later.",
@@ -808,7 +811,7 @@
     },
     "form": {
       "code": "Code",
-      "codeHint": "Letters are uppercased automatically; it cannot be changed later.",
+      "codeHint": "Letters are uppercased automatically. The code can be changed later.",
       "name": "Name",
       "kind": "Type",
       "submit": "Save",

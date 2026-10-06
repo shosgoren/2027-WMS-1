@@ -37,6 +37,11 @@ export interface SearchItemsResult {
   readonly items: readonly ItemRow[];
   /** Sonraki sayfa yoksa `null`. */
   readonly nextCursor: string | null;
+  /**
+   * T-251: `q` bir kartın ESKİ koduyla tam eşleştiyse (kod değişmiş) o kart `items` içinde döner ve burada "bu kod X olarak değişti"
+   * bilgisi yer alır. Eski kod eşleşmesi yoksa alan hiç bulunmaz.
+   */
+  readonly renamedFrom?: readonly { readonly oldCode: string; readonly itemId: string; readonly currentCode: string }[];
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -109,7 +114,9 @@ export async function searchItems(params: CatalogReadParams, input: SearchItemsI
     if (q !== undefined) {
       filters.push(
         sql`(starts_with(lower(i.code), lower(${q})) OR starts_with(lower(i.name), lower(${q}))
-             OR EXISTS (SELECT 1 FROM public.item_barcodes b WHERE b.tenant_id = i.tenant_id AND b.item_id = i.id AND b.barcode = ${q}))`,
+             OR EXISTS (SELECT 1 FROM public.item_barcodes b WHERE b.tenant_id = i.tenant_id AND b.item_id = i.id AND b.barcode = ${q})
+             OR EXISTS (SELECT 1 FROM public.code_history h WHERE h.tenant_id = i.tenant_id AND h.entity_type = 'item' AND h.entity_id = i.id
+                                AND lower(h.old_code) = lower(${q})))`,
       );
     }
     if (after !== undefined) filters.push(sql`(i.code, i.id) > (${after.code}, ${after.id}::uuid)`);
@@ -123,7 +130,18 @@ export async function searchItems(params: CatalogReadParams, input: SearchItemsI
     const page = rows.slice(0, limit);
     const last = page[page.length - 1];
     const nextCursor = rows.length > limit && last !== undefined ? encodeCursor(last.code, last.id) : null;
-    return { items: page.map(toItemRow), nextCursor };
+    const items = page.map(toItemRow);
+    if (q === undefined || items.length === 0) return { items, nextCursor };
+    const ids = items.map((r) => r.id);
+    const hist = await tx.execute<{ old_code: string; item_id: string; current_code: string }>(
+      sql`SELECT DISTINCT ON (h.entity_id) h.old_code, h.entity_id AS item_id, i.code AS current_code
+            FROM public.code_history h JOIN public.items i ON i.tenant_id = h.tenant_id AND i.id = h.entity_id
+           WHERE h.tenant_id = ${tenant}::uuid AND h.entity_type = 'item' AND lower(h.old_code) = lower(${q})
+             AND lower(i.code) <> lower(${q}) AND h.entity_id IN (${sql.join(ids.map((id) => sql`${id}::uuid`), sql`, `)})
+           ORDER BY h.entity_id, h.changed_at DESC, h.id DESC`,
+    );
+    if (hist.length === 0) return { items, nextCursor };
+    return { items, nextCursor, renamedFrom: hist.map((h) => ({ oldCode: h.old_code, itemId: h.item_id, currentCode: h.current_code })) };
   });
 }
 

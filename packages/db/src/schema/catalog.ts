@@ -188,3 +188,31 @@ export type Serial = typeof serials.$inferSelect;
 export type NewSerial = typeof serials.$inferInsert;
 export type HandlingUnit = typeof handlingUnits.$inferSelect;
 export type NewHandlingUnit = typeof handlingUnits.$inferInsert;
+
+/**
+ * Kod geçmişi (T-251, `0018_code_history`): ürün/depo/lokasyon kodu değişimlerinin ekle-yalnız kaydı. POLİMORFİKTİR
+ * (`entity_type` + `entity_id`): bileşik FK kasıtlı olarak yoktur (tenant sınırı RLS ile). `wms_app` yalnızca SELECT/INSERT.
+ */
+export const CODE_HISTORY_ENTITY_TYPES = ["item", "warehouse", "location"] as const;
+export type CodeHistoryEntityType = (typeof CODE_HISTORY_ENTITY_TYPES)[number];
+
+export const codeHistory = pgTable(
+  "code_history",
+  {
+    tenantId: uuid("tenant_id").notNull(),
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    entityType: text("entity_type").notNull(),
+    entityId: uuid("entity_id").notNull(),
+    oldCode: text("old_code").notNull(),
+    newCode: text("new_code").notNull(),
+    changedAt: timestamptz("changed_at").notNull().defaultNow(),
+    changedBy: uuid("changed_by").notNull(),
+  },
+  (t) => [
+    unique("code_history_tenant_id_id_key").on(t.tenantId, t.id),
+    index("code_history_tenant_old_code_idx").on(t.tenantId, t.entityType, t.oldCode, t.changedAt.desc()),
+    index("code_history_tenant_entity_idx").on(t.tenantId, t.entityType, t.entityId, t.changedAt.desc()),
+    check("code_history_entity_type_chk", sql`${t.entityType} IN ('item', 'warehouse', 'location')`),
+    check("code_history_codes_chk", sql`btrim(${t.oldCode}) <> '' AND btrim(${t.newCode}) <> '' AND ${t.oldCode} <> ${t.newCode}`),
+  ],
+);

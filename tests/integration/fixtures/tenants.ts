@@ -350,6 +350,12 @@ export async function seedWorld(
   await c.query("INSERT INTO public.stock_alerts (tenant_id, kind, warehouse_id, item_id, observed_quantity, threshold) VALUES ($1, 'MIN_MAX', $2, $3, 1, 2)", [
     tenantId, warehouseId, itemNoneId,
   ]);
+  // T-251: kod geçmişi satırı (AC-04 db-isolation her tenant tablosunda fikstür satırı arar).
+  await c.query(
+    `INSERT INTO public.code_history (tenant_id, entity_type, entity_id, old_code, new_code, changed_by)
+     VALUES ($1, 'item', $2, 'ESKI-KOD', 'YENI-KOD', $3)`,
+    [tenantId, itemNoneId, ownerUserId],
+  );
   const world: TenantWorld = {
     label,
     tenantId,
@@ -401,7 +407,7 @@ export async function cleanupRegistry(c: pg.Client, reg: WorldRegistry): Promise
     await cleanupStock(c, tenantIds);
     await cleanupDocuments(c, tenantIds);
     // T-204 tabloları (FK sırası: taşıma birimi [lokasyona bağlı, T-202'den önce] → seri → lot → barkod/dönüşüm → sahip → ürün → birim).
-    for (const t of ["handling_units", "serials", "lots", "item_barcodes", "unit_conversions", "inventory_owners", "items", "units"]) {
+    for (const t of ["code_history", "handling_units", "serials", "lots", "item_barcodes", "unit_conversions", "inventory_owners", "items", "units"]) {
       await c.query(`DELETE FROM public.${t} WHERE tenant_id = ANY($1::uuid[])`, [tenantIds]);
     }
     // T-202 tabloları (FK sırası: kapsam → kilit → lokasyon [tek ifade; NO ACTION FK ifade sonunda denetlenir] → depo).
