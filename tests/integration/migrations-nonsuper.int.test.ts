@@ -19,8 +19,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { MIGRATIONS_DIR, migrateDown, migrateUp } from "../../packages/db/src/migrate.ts";
 import { redactErrorChain } from "./harness/env.ts";
 
-// docker-compose.yml ile aynı imaj (yerel PostgreSQL 17.11).
-const IMAGE = "postgres:17.11-trixie";
+// docker-compose.yml ile aynı imaj (PostgreSQL 18.6 — Neon ile aynı ana sürüm, T-005e).
+const IMAGE = "postgres:18.6-trixie";
 const MIGRATOR = "wms_ns_migrator";
 const INFRA = "wms_ns_infra";
 const PROBE = "wms_identity_probe";
