@@ -1,6 +1,16 @@
 "use server";
-// Üye davet eylemleri (T-117). İnce giriş: doğrulama + sarmalayıcı `guardedAction`; iş kuralı `@wms/domain`.
+// Üye davet (T-117) ve üyelik (T-117b) eylemleri. İnce giriş: doğrulama + sarmalayıcı `guardedAction`; iş kuralı
+// `@wms/domain`. Tenant erişimi yalnızca domain komutları (`runTenantCommand`) üzerinden; bu dosyada DB bağlantısı açılmaz.
 import { z } from "zod";
+import { createPasswordResetToken, discardPasswordResetToken, ensureRecentAuth, recordPasswordResetLinkIssued } from "@wms/auth";
+import {
+  changeRole,
+  issuePasswordResetLink,
+  leaveTenant,
+  removeMember,
+  transferOwnership,
+  type MembershipDeps,
+} from "@wms/domain/identity/memberships";
 import { inviteMember, revokeInvitation, type InvitationDeps } from "@wms/domain/identity/invitations";
 import { ROLE_KEYS } from "@wms/domain/identity/permissions";
 import { loadMailConfig } from "@wms/shared/mailer";
@@ -63,5 +73,95 @@ export async function revokeInvitationAction(raw: unknown) {
       requestId: ctx.requestId,
     });
     return { revoked: true as const };
+  })(raw);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Üyelik eylemleri (T-117b)
+// ---------------------------------------------------------------------------------------------
+
+const changeRoleSchema = z.object({ slug: slugSchema, memberId: z.string().uuid(), roleKey: z.enum(ROLE_KEYS) }).strict();
+const memberSchema = z.object({ slug: slugSchema, memberId: z.string().uuid() }).strict();
+const leaveSchema = z.object({ slug: slugSchema }).strict();
+const transferSchema = z.object({ slug: slugSchema, toMemberId: z.string().uuid() }).strict();
+
+function membershipDeps(): MembershipDeps {
+  return { demoEmailDomain: process.env.DEMO_EMAIL_DOMAIN?.trim().toLowerCase() || null };
+}
+
+export async function changeRoleAction(raw: unknown) {
+  return guardedAction({ schema: changeRoleSchema }, async (input, ctx) => {
+    const principal = ctx.principal;
+    if (principal === null) throw new Error("unreachable: principal required");
+    const result = await changeRole(
+      { db: getAppDb(), principal, tenantSlug: input.slug, memberId: input.memberId, roleKey: input.roleKey, requestId: ctx.requestId },
+      membershipDeps(),
+    );
+    return { membershipId: result.membershipId, roleKey: result.roleKey, changed: result.changed };
+  })(raw);
+}
+
+export async function removeMemberAction(raw: unknown) {
+  return guardedAction({ schema: memberSchema }, async (input, ctx) => {
+    const principal = ctx.principal;
+    if (principal === null) throw new Error("unreachable: principal required");
+    const result = await removeMember(
+      { db: getAppDb(), principal, tenantSlug: input.slug, memberId: input.memberId, requestId: ctx.requestId },
+      membershipDeps(),
+    );
+    return { membershipId: result.membershipId };
+  })(raw);
+}
+
+export async function leaveTenantAction(raw: unknown) {
+  return guardedAction({ schema: leaveSchema }, async (input, ctx) => {
+    const principal = ctx.principal;
+    if (principal === null) throw new Error("unreachable: principal required");
+    const result = await leaveTenant({ db: getAppDb(), principal, tenantSlug: input.slug, requestId: ctx.requestId });
+    return { membershipId: result.membershipId };
+  })(raw);
+}
+
+export async function transferOwnershipAction(raw: unknown) {
+  return guardedAction({ schema: transferSchema }, async (input, ctx) => {
+    const principal = ctx.principal;
+    if (principal === null) throw new Error("unreachable: principal required");
+    const result = await transferOwnership(
+      { db: getAppDb(), principal, tenantSlug: input.slug, toMemberId: input.toMemberId, requestId: ctx.requestId },
+      membershipDeps(),
+    );
+    return { fromMembershipId: result.fromMembershipId, toMembershipId: result.toMembershipId };
+  })(raw);
+}
+
+/** Yönetici kaynaklı sıfırlama bağlantısı (B1): bağlantı yalnızca bu yanıtta, yalnızca yöneticiye döner (A-42). */
+export async function issuePasswordResetLinkAction(raw: unknown) {
+  return guardedAction({ schema: memberSchema }, async (input, ctx) => {
+    const principal = ctx.principal;
+    if (principal === null) throw new Error("unreachable: principal required");
+    const requestHeaders = await headers();
+    const result = await issuePasswordResetLink(
+      {
+        db: getAppDb(),
+        principal,
+        tenantSlug: input.slug,
+        memberId: input.memberId,
+        requestId: ctx.requestId,
+        // Yeniden doğrulama penceresi (A-39); transaction DIŞINDA çağrılır (access.ts).
+        recentAuth: () => ensureRecentAuth(requestHeaders),
+      },
+      {
+        ...membershipDeps(),
+        port: {
+          createToken: createPasswordResetToken,
+          discardToken: discardPasswordResetToken,
+          recordIssued: recordPasswordResetLinkIssued,
+        },
+        log: logInvitation,
+      },
+    );
+    // Better Auth `GET /reset-password/:token?callbackURL=` belirteci geri çağrı adresine taşır.
+    const link = `${ctx.origin}/api/auth/reset-password/${result.token}?callbackURL=${encodeURIComponent("/reset-password")}`;
+    return { resetLink: link, expiresAt: result.expiresAt.toISOString() };
   })(raw);
 }
