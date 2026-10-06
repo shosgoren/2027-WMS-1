@@ -16,15 +16,25 @@ import {
 } from "../../../packages/domain/src/onboarding/workspace.ts";
 import { readIntEnv } from "../harness/env.ts";
 
-// withNewTenant çağrı sayacı (yalnızca gözlem; davranış aynen geçer): SLUG_TAKEN yeniden deneme dalının çalıştığını kanıtlar.
-const spy = vi.hoisted(() => ({ calls: 0 }));
+// withNewTenant sarmalayıcısı: çağrıları sayar ve istenirse İLK çağrıda "yarışı kaybeden" davranışını benzetir.
+// Gerçek yarışta SLUG_TAKEN yalnızca dar bir pencerede oluşur (kaybeden istek ON CONFLICT ön denetimini kazananın INSERT'inden
+// ÖNCE geçer, slug indeksine kazananın ARDINDAN ulaşır); PostgreSQL'de bu pencere kancayla deterministik tutulamaz. Bu yüzden
+// benzetim: 1. çağrı gerçek withNewTenant'ı çalıştırır (kazanan commit olur), sonra kaybedenin göreceği `SLUG_TAKEN`'ı
+// fırlatır; domain'in yeniden denemesi GERÇEK DB yoluyla mevcut tenant'ı bulmalıdır.
+// Not: `vi.mock("@wms/db")` ÇALIŞMADI (sayaç hiç artmadı); domain'in aldığı modülle aynı kimliği veren göreli yol kullanılır.
+const spy = vi.hoisted(() => ({ calls: 0, loseFirst: false, firstCall: 0 }));
 vi.mock("../../../packages/db/src/index.ts", async (orig) => {
   const m = await orig<typeof import("../../../packages/db/src/index.ts")>();
   return {
     ...m,
-    withNewTenant: ((...args: Parameters<typeof m.withNewTenant>) => {
-      spy.calls++;
-      return m.withNewTenant(...args);
+    withNewTenant: (async (...args: Parameters<typeof m.withNewTenant>) => {
+      const n = ++spy.calls;
+      const result = await m.withNewTenant(...args);
+      if (spy.loseFirst && n === spy.firstCall) {
+        spy.loseFirst = false;
+        throw new m.MembershipError("SLUG_TAKEN", "simulated race loser");
+      }
+      return result;
     }) as typeof m.withNewTenant,
   };
 });
@@ -138,21 +148,34 @@ describe("createWorkspace", () => {
     expect(await count("SELECT count(*) n FROM public.audit_logs WHERE tenant_id = $1 AND action = 'tenant.created'", [a.tenantId])).toBe(1);
   });
 
-  it("aynı requestId + AÇIK slug ile eşzamanlı çift istek → aynı sonuç, tek tenant; SLUG_TAKEN yeniden deneme dalı çalışır", async () => {
-    let retries = 0;
-    for (let i = 0; i < 40 && retries === 0; i++) {
-      const user = await newUser();
-      const requestId = randomUUID();
-      const slug = `r-${randomBytes(5).toString("hex")}`;
-      const name = uniqueName("Yarış");
-      const before = spy.calls;
-      const [a, b] = await Promise.all([create(user, { requestId, slug, name }), create(user, { requestId, slug, name })]);
-      retries += spy.calls - before - 2; // her istek en az 1 çağrı; fazlası = SLUG_TAKEN yeniden denemesi
-      expect(a.tenantId).toBe(b.tenantId);
-      expect([a.created, b.created].sort()).toEqual([false, true]);
-      expect(await count("SELECT count(*) n FROM public.tenants WHERE created_by_user_id = $1", [user])).toBe(1);
+  it("SLUG_TAKEN yarışı (kaybeden): yeniden deneme tam 1 kez, mevcut tenant aranır ve aynı sonuç döner (deterministik)", async () => {
+    const user = await newUser();
+    const requestId = randomUUID();
+    const slug = `r-${randomBytes(5).toString("hex")}`;
+    const name = uniqueName("Yarış");
+    const before = spy.calls;
+    spy.firstCall = before + 1;
+    spy.loseFirst = true;
+    let r: Awaited<ReturnType<typeof create>>;
+    try {
+      r = await create(user, { requestId, slug, name });
+    } finally {
+      spy.loseFirst = false;
     }
-    expect(retries).toBeGreaterThanOrEqual(1);
+    expect(spy.calls - before).toBe(2); // 1. çağrı (kazanan commit + SLUG_TAKEN) + tam 1 yeniden deneme
+    expect(r).toMatchObject({ slug, created: false });
+    expect(await count("SELECT count(*) n FROM public.tenants WHERE created_by_user_id = $1 AND slug = $2", [user, slug])).toBe(1);
+    expect(await count("SELECT count(*) n FROM public.tenants WHERE id = $1", [r.tenantId])).toBe(1);
+  });
+
+  it("SLUG_TAKEN gerçekten başka tenant'tan ise yeniden deneme de SLUG_TAKEN alır → VALIDATION_FAILED (tam 2 çağrı)", async () => {
+    const u1 = await newUser();
+    const u2 = await newUser();
+    const slug = `s-${randomBytes(5).toString("hex")}`;
+    await create(u1, { slug });
+    const before = spy.calls;
+    expect((await failure(create(u2, { slug }))).code).toBe("VALIDATION_FAILED");
+    expect(spy.calls - before).toBe(2);
   });
 
   it("tekrar aynı parametrelerle → created:false; ad ya da şablon değişince ret (ikinci tenant yok)", async () => {
