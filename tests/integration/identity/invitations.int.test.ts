@@ -22,6 +22,7 @@ import {
 import { createDeliverInvitationHandler } from "../../../apps/worker/src/jobs/deliver-invitation.ts";
 import { createActionGuard, type GuardDeps } from "../../../apps/web/lib/action-guard.ts";
 import { safeNext } from "../../../apps/web/lib/safe-redirect.ts";
+import { closeSenderQueue, getSenderQueue } from "../../../apps/web/lib/queue.ts";
 import { readAuthDatabaseUrl, readIntEnv, redactErrorChain } from "../harness/env.ts";
 
 const env = readIntEnv(process.env);
@@ -744,5 +745,78 @@ describe("safeNext (M10)", () => {
       `/${"a".repeat(3000)}`,
     ];
     for (const p of bad) expect(safeNext(p), String(p)).toBe("/");
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Web gönderen kuyruğu (apps/web/lib/queue.ts): wms_app + pgbouncer (transaction mode) üzerinden gerçek start() + enqueue
+// ---------------------------------------------------------------------------------------------
+describe("getSenderQueue (web)", () => {
+  const savedUrl = process.env.DATABASE_URL;
+  const restore = (): void => {
+    if (savedUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = savedUrl;
+  };
+  const queueConns = async (db?: string): Promise<number> =>
+    (await adm.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE application_name = 'wms-queue' AND ($1::text IS NULL OR datname = $1)", [db ?? null])).rows[0].n;
+
+  it("eşzamanlı istekler tek örneği paylaşır; gerçek start() + inviteMember aynı tx'te enqueue eder (EMAIL, tek iş, yalnızca invitationId)", async () => {
+    process.env.DATABASE_URL = env.databaseUrl;
+    try {
+      const [a, b] = await Promise.all([getSenderQueue(), getSenderQueue()]);
+      expect(a).toBeDefined();
+      expect(a).toBe(b);
+      expect(await getSenderQueue()).toBe(a);
+      const fx = await mkTenant();
+      const r = await inviteMember(
+        { db: app, principal: principalOf(fx.admin), tenantSlug: fx.slug, email: rndEmail(), roleKey: "PICKER" },
+        { mailConfig: mailOn, queue: a as NonNullable<typeof a> },
+      );
+      expect(r.delivery).toBe("EMAIL");
+      const jobs = await jobsFor(r.invitationId);
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0]?.data.payload).toEqual({ invitationId: r.invitationId });
+    } finally {
+      await closeSenderQueue();
+      restore();
+    }
+  });
+
+  it("start() başarısızsa (kuyruk şeması yok) undefined döner, havuz kapatılır (bağlantı sızıntısı yok), inviteMember SCREEN'e düşer; sonraki istek yeniden dener", async () => {
+    const dbName = `t117_noqueue_${randomBytes(4).toString("hex")}`;
+    await adm.query(`CREATE DATABASE ${dbName}`);
+    try {
+      // wms_app kimliği + doğrudan sunucu (pgbouncer yeni veritabanını bilmez): bağlantı KURULUR, şema yok → start() düşer.
+      const u = new URL(env.databaseUrlDirect);
+      const app_ = new URL(env.databaseUrl);
+      u.username = app_.username;
+      u.password = app_.password;
+      u.pathname = `/${dbName}`;
+      process.env.DATABASE_URL = u.toString();
+      const before = await queueConns(dbName);
+      expect(before).toBe(0);
+      const [q1, q2] = await Promise.all([getSenderQueue(), getSenderQueue()]);
+      expect(q1).toBeUndefined();
+      expect(q2).toBeUndefined();
+      // Havuz kapandı: bu veritabanında wms-queue bağlantısı kalmadı.
+      const deadline = Date.now() + 5000;
+      while ((await queueConns(dbName)) > before && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+      expect(await queueConns(dbName)).toBe(0);
+      // Çağıranın geri dönüşü: kuyruk yok → enqueue reddi → SCREEN + screenReason.
+      const fx = await mkTenant();
+      const r = await inviteMember(
+        { db: app, principal: principalOf(fx.admin), tenantSlug: fx.slug, email: rndEmail(), roleKey: "PICKER" },
+        { mailConfig: mailOn, queue: { enqueue: () => Promise.reject(new Error("job queue is not available")) } },
+      );
+      expect(r).toMatchObject({ delivery: "SCREEN", screenReason: "QUEUE_UNAVAILABLE" });
+      // Başarısızlık önbelleğe alınmadı: yapılandırma düzelince aynı süreç başlatır.
+      process.env.DATABASE_URL = env.databaseUrl;
+      const ok = await getSenderQueue();
+      expect(ok).toBeDefined();
+    } finally {
+      await closeSenderQueue();
+      restore();
+      await adm.query(`DROP DATABASE IF EXISTS ${dbName} WITH (FORCE)`).catch(() => undefined);
+    }
   });
 });
