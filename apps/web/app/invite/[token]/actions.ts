@@ -4,8 +4,9 @@
 import { z } from "zod";
 import { createInvitedAccount } from "@wms/auth";
 import { acceptInvitation } from "@wms/domain/identity/invitations";
+import { getAppDb } from "@wms/db";
 import { headers } from "next/headers";
-import { createProductionGuard, getAppDb } from "../../../lib/action-guard.ts";
+import { createProductionGuard } from "../../../lib/action-guard.ts";
 import { safeNext } from "../../../lib/safe-redirect.ts";
 
 const acceptSchema = z
