@@ -8,7 +8,7 @@
 // olarak `unknown` öğesinde korunur; aynı segmentte ondan sonra gelen AI'lar bu nedenle ayrıştırılamaz (GS ayracı
 // yoksa). GS1 AI uzunluk tablosu bilerek uydurulmaz (G-03); kapsam genişletme = yeni AI satırı eklemek.
 //
-// SKT yüzyılı: YY → 20YY (A-98 önerisi); DD=00 "ayın son günü" anlamına gelir ve o ayın son gününe çözülür.
+// SKT yüzyılı: YY → 20YY (A-109 önerisi); DD=00 "ayın son günü" anlamına gelir ve o ayın son gününe çözülür.
 
 export const GS = "\u001d";
 
@@ -17,7 +17,8 @@ export type Gs1FailureReason =
   | "NOT_GS1" // GS1 öğe dizgisi olarak başlamıyor (AI yok) ya da desteklenmeyen sembol tanımlayıcı
   | "MALFORMED" // sabit uzunluk/karakter kümesi/uzunluk ihlali, yinelenen AI
   | "INVALID_GTIN_CHECK_DIGIT"
-  | "INVALID_DATE";
+  | "INVALID_DATE"
+  | "INVALID_QUANTITY"; // (30)/(37) sıfır
 
 export type Gs1Element =
   | { readonly kind: "known"; readonly ai: "01" | "10" | "17" | "21" | "30" | "37"; readonly value: string }
@@ -25,6 +26,10 @@ export type Gs1Element =
 
 export interface Gs1Parsed {
   readonly ok: true;
+  /** `]C1`/`]d2` sembol tanımlayıcı öneki vardı. */
+  readonly symbologyPrefix: boolean;
+  /** Dizgide FNC1 ayracı (GS) vardı. Önek ya da GS yoksa GS1 yorumu zayıftır (düz barkod "01…" ile başlayabilir). */
+  readonly hasFnc1: boolean;
   /** Sıra korunur; tanınmayan segmentler `unknown` olarak yerinde durur. */
   readonly elements: readonly Gs1Element[];
   readonly gtin?: string;
@@ -99,6 +104,8 @@ function stripSymbology(raw: string): string | null {
 export function parseGs1(raw: string): Gs1Result {
   if (typeof raw !== "string" || raw.length === 0) return { ok: false, reason: "EMPTY" };
   if (raw.length > MAX_INPUT_LENGTH) return { ok: false, reason: "MALFORMED" };
+  // Yalnızca yazdırılabilir ASCII + GS: kontrol karakteri, boşluk ve Unicode reddedilir (unknown segmentler dahil).
+  if (!/^[\x21-\x7e\x1d]+$/.test(raw)) return { ok: false, reason: "MALFORMED" };
   const body = stripSymbology(raw);
   if (body === null || body.length === 0) return { ok: false, reason: body === null ? "NOT_GS1" : "EMPTY" };
 
@@ -136,6 +143,7 @@ export function parseGs1(raw: string): Gs1Result {
     if (spec.digits ? !DIGITS_RE.test(value) : !CSET82_RE.test(value)) return { ok: false, reason: "MALFORMED" };
     if (ai === "01" && !isValidGtin(value)) return { ok: false, reason: "INVALID_GTIN_CHECK_DIGIT" };
     if (ai === "17" && resolveExpiry(value) === null) return { ok: false, reason: "INVALID_DATE" };
+    if ((ai === "30" || ai === "37") && /^0+$/.test(value)) return { ok: false, reason: "INVALID_QUANTITY" };
     elements.push({ kind: "known", ai, value });
     pos = end;
   }
@@ -154,6 +162,8 @@ export function parseGs1(raw: string): Gs1Result {
   const expiryDate = expiryRaw === undefined ? undefined : (resolveExpiry(expiryRaw) ?? undefined);
   return {
     ok: true,
+    symbologyPrefix: body !== raw,
+    hasFnc1: body.includes(GS),
     elements,
     ...(gtin === undefined ? {} : { gtin }),
     ...(lot === undefined ? {} : { lot }),
@@ -166,11 +176,12 @@ export function parseGs1(raw: string): Gs1Result {
 
 /**
  * GTIN-14'ün depoda saklanmış olabilecek kısa biçimleri (başında sıfır doldurulmuş GTIN-13/12/8). Yalnızca baştaki
- * sıfırlar atılarak ve kontrol hanesi tutarlı kalarak türetilir (kontrol hanesi sağdadır, sıfır dolgusu değiştirmez).
+ * sıfırlar atılarak türetilir (kontrol hanesi sağdadır, sıfır dolgusu değiştirmez). GTIN-8 biçimi yalnızca
+ * `allowGtin8` (sembol tanımlayıcı öneki varken) eklenir: öneksiz "000000NNNNNNNN" dizgisi GTIN-8 sanılmaz.
  */
-export function gtinLookupForms(gtin14: string): string[] {
+export function gtinLookupForms(gtin14: string, allowGtin8 = false): string[] {
   const forms = [gtin14];
-  for (const len of [13, 12, 8]) {
+  for (const len of allowGtin8 ? [13, 12, 8] : [13, 12]) {
     const cut = gtin14.length - len;
     if (cut > 0 && /^0+$/.test(gtin14.slice(0, cut))) forms.push(gtin14.slice(cut));
   }

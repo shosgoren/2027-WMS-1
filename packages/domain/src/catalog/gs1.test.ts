@@ -72,6 +72,31 @@ describe("gtinLookupForms", () => {
     expect(gtinLookupForms("04006381333931")).toEqual(["04006381333931", "4006381333931"]);
     expect(gtinLookupForms("00036000291452")).toEqual(["00036000291452", "0036000291452", "036000291452"]);
     expect(gtinLookupForms(GTIN)).toEqual([GTIN, "9506000134352"]);
+    // GTIN-8 biçimi yalnızca sembol tanımlayıcı önekiyle (allowGtin8)
+    expect(gtinLookupForms("00000096385074")).toEqual(["00000096385074", "0000096385074", "000096385074"]);
+    expect(gtinLookupForms("00000096385074", true)).toEqual(["00000096385074", "0000096385074", "000096385074", "96385074"]);
     expect(gtinLookupForms("19506000134359")).toEqual(["19506000134359"]);
+  });
+  it("sembol/FNC1 sinyali raporlanır", () => {
+    expect(parseGs1(`]C101${GTIN}`)).toMatchObject({ ok: true, symbologyPrefix: true, hasFnc1: false });
+    expect(parseGs1(`01${GTIN}10A${GS}21B`)).toMatchObject({ ok: true, symbologyPrefix: false, hasFnc1: true });
+    expect(parseGs1(`01${GTIN}`)).toMatchObject({ ok: true, symbologyPrefix: false, hasFnc1: false });
+  });
+});
+
+describe("parseGs1 sert girdi sınırları", () => {
+  it("256 karakteri aşan girdi MALFORMED", () => {
+    expect(parseGs1(`01${GTIN}10${"A".repeat(300)}`)).toEqual({ ok: false, reason: "MALFORMED" });
+    expect(parseGs1("1".repeat(257))).toEqual({ ok: false, reason: "MALFORMED" });
+  });
+  it("kontrol karakteri (GS hariç), boşluk ve Unicode MALFORMED; tanınmayan segmentte de", () => {
+    for (const bad of [`01${GTIN}10A\u0000B`, `01${GTIN}10A\tB`, `01${GTIN}10A\nB`, `01${GTIN}10AİB`, `01${GTIN}10A\u00e9`, `01${GTIN}99X\u200bY`, `01${GTIN}\u007f`, ` 01${GTIN}`]) {
+      expect(parseGs1(bad)).toEqual({ ok: false, reason: "MALFORMED" });
+    }
+  });
+  it("(30)/(37) sıfır adet INVALID_QUANTITY", () => {
+    expect(parseGs1(`01${GTIN}3000000`)).toEqual({ ok: false, reason: "INVALID_QUANTITY" });
+    expect(parseGs1(`01${GTIN}3700000000`)).toEqual({ ok: false, reason: "INVALID_QUANTITY" });
+    expect(parseGs1(`01${GTIN}3000001`)).toMatchObject({ ok: true, quantity: "1" });
   });
 });

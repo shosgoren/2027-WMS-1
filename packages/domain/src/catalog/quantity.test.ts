@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { AppError } from "@wms/shared/errors";
-import { addDecimal, assertConversionFactor, assertQuantityScale, compareDecimal, mulDecimal, subDecimal, toBase } from "./quantity.ts";
+import { addDecimal, assertConversionFactor, assertPositive, assertQuantityScale, compareDecimal, mulDecimal, subDecimal, toBase } from "./quantity.ts";
 
 const detailOf = (fn: () => unknown): string | undefined => {
   try {
@@ -73,9 +73,31 @@ describe("toBase", () => {
     expect(toBase("1", "0.333333", 6)).toBe("0.333333");
     expect(detailOf(() => toBase("1.5", "0.333333", 6))).toBe("VALIDATION_FAILED/QUANTITY_SCALE");
   });
-  it("büyük değer", () => {
-    expect(toBase("99999999999999", "1000000", 0)).toBe("99999999999999000000");
-    expect(toBase("99999999999999", "999999.999999", 6)).toBe("99999999999899000000.000001");
-    expect(detailOf(() => toBase("99999999999999.1", "999999.999999", 6))).toBe("VALIDATION_FAILED/QUANTITY_SCALE");
+  it("büyük değer: 14 tam hane sınırı; aşım VALIDATION_FAILED (INTERNAL değil)", () => {
+    expect(toBase("99999999999999", "1", 0)).toBe("99999999999999");
+    expect(detailOf(() => toBase("99999999999999", "2", 0))).toBe("VALIDATION_FAILED/");
+    expect(detailOf(() => toBase("99999999999999", "999999.999999", 6))).toBe("VALIDATION_FAILED/");
+    expect(toBase("9999999.5", "1000000", 1)).toBe("9999999500000");
+  });
+});
+
+describe("işaret ve taşma denetimi", () => {
+  it("assertPositive: sıfır ve negatif reddi; 14 tam hane sınırı", () => {
+    expect(assertPositive("0.5")).toBe("0.5");
+    expect(assertPositive("99999999999999.999999")).toBe("99999999999999.999999");
+    for (const bad of ["0", "0.000", "-1", "-0.1", "100000000000000", "abc"]) {
+      expect(detailOf(() => assertPositive(bad))).toBe("VALIDATION_FAILED/");
+    }
+  });
+  it("assertQuantityScale işaret seçenekleri; negatif varsayılan 'any' ile geçer", () => {
+    expect(assertQuantityScale("-2", 0)).toBe("-2");
+    expect(detailOf(() => assertQuantityScale("-2", 0, "nonNegative"))).toBe("VALIDATION_FAILED/");
+    expect(assertQuantityScale("0", 0, "nonNegative")).toBe("0");
+    expect(detailOf(() => assertQuantityScale("0", 0, "positive"))).toBe("VALIDATION_FAILED/");
+    expect(detailOf(() => assertQuantityScale("-100000000000000", 0))).toBe("VALIDATION_FAILED/");
+  });
+  it("negatif miktar toBase'te işaretini korur; ölçek yine denetlenir", () => {
+    expect(toBase("-3", "12", 0)).toBe("-36");
+    expect(detailOf(() => toBase("-0.5", "5", 0))).toBe("VALIDATION_FAILED/QUANTITY_SCALE");
   });
 });
