@@ -49,7 +49,7 @@ export interface TenantWorld {
   /** T-211: tenant'a ait processed_events olay kimliği ve stock_consistency_runs satırı. */
   processedEventId: string;
   consistencyRunId: string;
-  /** T-211: platform (tenant_id NULL) processed_events satırının olay kimliği (tüketici PLATFORM_FIXTURE_CONSUMER); kalıcı, temizlikte silinir. */
+  /** T-211: platform (tenant_id NULL) processed_events satırının olay kimliği (tüketici PLATFORM_FIXTURE_CONSUMER); kalıcı; temizlik yalnızca kayıttaki kimlikleri siler. */
   platformEventId: string;
   /**
    * AC-04 DELETE kontrol satırları (tablo adı → id): FK ile KORUNMAYAN, wms_app'in gerçekten silebildiği satır. Yalnızca silme
@@ -343,7 +343,7 @@ export async function cleanupRegistry(c: pg.Client, reg: WorldRegistry): Promise
   const tenantIds = reg.worlds.map((w) => w.tenantId);
   const userIds = [...reg.worlds.flatMap((w) => [w.ownerUserId, w.memberUserId]), ...reg.extraUsers];
   if (tenantIds.length > 0) {
-    await cleanupReliability(c, tenantIds);
+    await cleanupReliability(c, tenantIds, reg.worlds.map((w) => w.platformEventId));
     await cleanupStock(c, tenantIds);
     await cleanupDocuments(c, tenantIds);
     // T-204 tabloları (FK sırası: taşıma birimi [lokasyona bağlı, T-202'den önce] → seri → lot → barkod/dönüşüm → sahip → ürün → birim).
@@ -369,8 +369,9 @@ export async function cleanupRegistry(c: pg.Client, reg: WorldRegistry): Promise
 }
 
 /** T-211 tenant satırları (migration rolü RLS'i aşar; wms_app silemez). stock_consistency_signals tenant'sızdır, burada yok. */
-export async function cleanupReliability(c: pg.Client, tenantIds: string[]): Promise<void> {
-  await c.query("DELETE FROM public.processed_events WHERE tenant_id IS NULL AND consumer = $1", [PLATFORM_FIXTURE_CONSUMER]);
+export async function cleanupReliability(c: pg.Client, tenantIds: string[], platformEventIds: string[]): Promise<void> {
+  // Platform satırları yalnızca BU kaydın tohumladığı olay kimlikleriyle silinir (başka dosyanın satırlarına dokunulmaz).
+  await c.query("DELETE FROM public.processed_events WHERE tenant_id IS NULL AND event_id = ANY($1::uuid[])", [platformEventIds]);
   for (const t of ["stock_consistency_runs", "processed_events"]) {
     await c.query(`DELETE FROM public.${t} WHERE tenant_id = ANY($1::uuid[])`, [tenantIds]);
   }
