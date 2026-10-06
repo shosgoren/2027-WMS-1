@@ -42,7 +42,7 @@ export function createResendMailer(options: ResendOptions): Mailer {
       }
       if (!response.ok) {
         // Yanıt gövdesi alıcı adresini yansıtabilir: okunmaz, yalnızca durum kodu taşınır. Yeniden deneme pg-boss'ta.
-        throw new MailError("MAIL_SEND_FAILED", `resend responded with status ${response.status}`);
+        throw new MailError("MAIL_SEND_FAILED", `resend responded with status ${response.status}`, { status: response.status });
       }
     },
   };
