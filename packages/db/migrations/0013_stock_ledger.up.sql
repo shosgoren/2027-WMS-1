@@ -1,0 +1,352 @@
+-- 0013_stock_ledger (T-232, ADR-017 §1-§7, §11, §12; I-04, I-05, I-09, I-15, I-16; G-01 İKİNCİ SAVUNMA):
+-- stock_dimensions, stock_balances, stock_ledger, reservations + mutlak defter–bakiye denetimi (ertelenmiş kısıt tetikleyicileri).
+--
+-- BİLİNÇLİ KARARLAR (inceleme için):
+-- * Tenant tabloları: tenant_id NOT NULL, ENABLE + FORCE RLS, tek PERMISSIVE USING + WITH CHECK tenant politikası (0010-0012 emsali),
+--   FK'ler NO ACTION ve hepsi (tenant_id, …) BİLEŞİK, açık sütun bazlı GRANT'lar, PUBLIC'e hiçbir şey.
+-- * wms_ops bu tablolarda HİÇBİR yetkiye sahip değildir (0010-0012 deseni; kart "SELECT" der, ops oturumu denetim-zorunluluğu
+--   (RESTRICTIVE) ayrı kart gerektirir) — rapora sapma olarak yazıldı.
+-- * stock_ledger değişmezliği: UPDATE/DELETE/TRUNCATE tetikleyicileri ve sunucu-alanları tetikleyicisi ENABLE ALWAYS
+--   (session_replication_role = replica altında da çalışır). Tablo sahibi ALTER TABLE … DISABLE TRIGGER yapabilir: bilinen sınır
+--   (0004 emsali); fikstür temizliği yalnızca bunu kullanır (süper kullanıcı/sahip; wms_app yapamaz).
+-- * Denetim (ADR-017 §6): stock_assert_dimension() boyutun commit anındaki güncel durumunu MUTLAK karşılaştırır
+--   (quantity = Σ defter; reserved_quantity = Σ ACTIVE rezervasyon; bakiye yoksa ikisi 0). Üç tabloda ertelenmiş FOR EACH ROW kısıt
+--   tetikleyicisi; tekilleştirme YOK; işlev hiçbir kullanıcı GUC'u okumaz (yalnızca app.current_tenant_id bağlamı, geçen tenant_id
+--   ile eşleşmek zorunda). Denetim tetikleyicileri de ENABLE ALWAYS (replica modunda atlanamaz).
+-- * Seri tekilliği (I-05, ADR-017 §3): stock_balances.serial_key = boyutun serial_id'si (yoksa sıfır UUID sentineli) — BEFORE INSERT
+--   tetikleyicisi doldurur, bileşik FK (tenant_id, stock_dimension_id, serial_key) → stock_dimensions boyutla eşleşmeyi KANITLAR
+--   (MATCH SIMPLE NULL deliğine karşı sentinel). CHECK: seri boyutunda quantity ∈ {0,1}; kısmi tekil indeks: aynı seri bir boyutta pozitif.
+-- * Sunucu alanları: stock_ledger.created_xid ve occurred_at BEFORE INSERT tetikleyicisiyle sunucu değerine zorlanır; wms_app INSERT
+--   yetkisi ikisini kapsamaz (kart yalnızca created_xid der; occurred_at 0012 document_status_history emsaliyle eklendi — sapma).
+-- * Rezervasyon: ACTIVE dışı (CONSUMED/RELEASED) satır sonlanmıştır, değiştirilemez (ADR-009; varsayım). INSERT yalnızca ACTIVE açar.
+-- * Miktarlar numeric(20,6); float yok (I-09).
+-- Koşturucu tek transaction içinde çalıştırır.
+
+DO $pre$
+BEGIN
+  IF pg_catalog.to_regclass('public.document_lines') IS NULL
+     OR pg_catalog.to_regclass('public.handling_units') IS NULL
+     OR pg_catalog.to_regclass('public.serials') IS NULL THEN
+    RAISE EXCEPTION '0013_stock_ledger: 0010/0011/0012 önkoşulu yok';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'wms_app') THEN
+    RAISE EXCEPTION '0013_stock_ledger: wms_app rolü yok (altyapı adımı)';
+  END IF;
+END
+$pre$;
+
+-- ---------------------------------------------------------------------------------------------
+-- 1. Tablolar
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE public.stock_dimensions (
+  tenant_id           uuid        NOT NULL,
+  id                  uuid        NOT NULL DEFAULT gen_random_uuid(),
+  item_id             uuid        NOT NULL,
+  location_id         uuid        NOT NULL,
+  lot_id              uuid,
+  serial_id           uuid,
+  stock_status        text        NOT NULL DEFAULT 'AVAILABLE',
+  inventory_owner_id  uuid,
+  handling_unit_id    uuid,
+  serial_key          uuid        GENERATED ALWAYS AS (COALESCE(serial_id, '00000000-0000-0000-0000-000000000000'::uuid)) STORED,
+  created_at          timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT stock_dimensions_pkey PRIMARY KEY (id),
+  CONSTRAINT stock_dimensions_tenant_id_id_key UNIQUE (tenant_id, id),
+  CONSTRAINT stock_dimensions_tenant_id_id_serial_key_key UNIQUE (tenant_id, id, serial_key),
+  CONSTRAINT stock_dimensions_natural_key UNIQUE NULLS NOT DISTINCT
+    (tenant_id, item_id, location_id, lot_id, serial_id, stock_status, inventory_owner_id, handling_unit_id),
+  CONSTRAINT stock_dimensions_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants (id),
+  CONSTRAINT stock_dimensions_item_fkey FOREIGN KEY (tenant_id, item_id) REFERENCES public.items (tenant_id, id),
+  CONSTRAINT stock_dimensions_location_fkey FOREIGN KEY (tenant_id, location_id) REFERENCES public.locations (tenant_id, id),
+  CONSTRAINT stock_dimensions_lot_fkey FOREIGN KEY (tenant_id, item_id, lot_id) REFERENCES public.lots (tenant_id, item_id, id),
+  CONSTRAINT stock_dimensions_serial_fkey FOREIGN KEY (tenant_id, item_id, serial_id) REFERENCES public.serials (tenant_id, item_id, id),
+  CONSTRAINT stock_dimensions_owner_fkey FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES public.inventory_owners (tenant_id, id),
+  CONSTRAINT stock_dimensions_handling_unit_fkey FOREIGN KEY (tenant_id, handling_unit_id) REFERENCES public.handling_units (tenant_id, id),
+  CONSTRAINT stock_dimensions_stock_status_chk CHECK (stock_status IN ('AVAILABLE', 'QUARANTINE', 'DAMAGED', 'BLOCKED'))
+);
+CREATE INDEX stock_dimensions_tenant_location_idx ON public.stock_dimensions (tenant_id, location_id);
+CREATE INDEX stock_dimensions_tenant_lot_idx ON public.stock_dimensions (tenant_id, lot_id);
+CREATE INDEX stock_dimensions_tenant_serial_idx ON public.stock_dimensions (tenant_id, serial_id);
+CREATE INDEX stock_dimensions_tenant_owner_idx ON public.stock_dimensions (tenant_id, inventory_owner_id);
+CREATE INDEX stock_dimensions_tenant_handling_unit_idx ON public.stock_dimensions (tenant_id, handling_unit_id);
+
+CREATE TABLE public.stock_balances (
+  tenant_id          uuid           NOT NULL,
+  stock_dimension_id uuid           NOT NULL,
+  quantity           numeric(20, 6) NOT NULL DEFAULT 0,
+  reserved_quantity  numeric(20, 6) NOT NULL DEFAULT 0,
+  version            bigint         NOT NULL DEFAULT 0,
+  serial_key         uuid           NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
+  CONSTRAINT stock_balances_pkey PRIMARY KEY (tenant_id, stock_dimension_id),
+  CONSTRAINT stock_balances_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants (id),
+  CONSTRAINT stock_balances_dimension_fkey FOREIGN KEY (tenant_id, stock_dimension_id, serial_key)
+    REFERENCES public.stock_dimensions (tenant_id, id, serial_key),
+  CONSTRAINT stock_balances_quantity_chk CHECK (quantity >= 0),
+  CONSTRAINT stock_balances_reserved_chk CHECK (reserved_quantity >= 0 AND reserved_quantity <= quantity),
+  CONSTRAINT stock_balances_version_chk CHECK (version >= 0),
+  CONSTRAINT stock_balances_serial_qty_chk CHECK (serial_key = '00000000-0000-0000-0000-000000000000' OR quantity IN (0, 1))
+);
+-- AC-09 DB savunması: aynı seri en çok bir boyutta pozitif (kısmi tekil indeks ertelenemez; ADR-017 §3 MINOR-5).
+CREATE UNIQUE INDEX stock_balances_serial_positive_key ON public.stock_balances (tenant_id, serial_key)
+  WHERE quantity > 0 AND serial_key <> '00000000-0000-0000-0000-000000000000';
+
+CREATE TABLE public.stock_ledger (
+  tenant_id          uuid           NOT NULL,
+  id                 uuid           NOT NULL DEFAULT gen_random_uuid(),
+  document_id        uuid           NOT NULL,
+  document_line_id   uuid           NOT NULL,
+  stock_dimension_id uuid           NOT NULL,
+  quantity           numeric(20, 6) NOT NULL,
+  reason             text           NOT NULL,
+  business_date      date           NOT NULL,
+  occurred_at        timestamptz    NOT NULL DEFAULT now(),
+  actor_user_id      uuid,
+  created_xid        xid8           NOT NULL DEFAULT pg_current_xact_id(),
+  CONSTRAINT stock_ledger_pkey PRIMARY KEY (id),
+  CONSTRAINT stock_ledger_tenant_id_id_key UNIQUE (tenant_id, id),
+  CONSTRAINT stock_ledger_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants (id),
+  CONSTRAINT stock_ledger_dimension_fkey FOREIGN KEY (tenant_id, stock_dimension_id) REFERENCES public.stock_dimensions (tenant_id, id),
+  CONSTRAINT stock_ledger_document_line_fkey FOREIGN KEY (tenant_id, document_id, document_line_id)
+    REFERENCES public.document_lines (tenant_id, document_id, id),
+  CONSTRAINT stock_ledger_quantity_chk CHECK (quantity <> 0),
+  CONSTRAINT stock_ledger_reason_chk CHECK (btrim(reason) <> '')
+);
+-- §6 toplam denetimi: index-only.
+CREATE INDEX stock_ledger_dimension_sum_idx ON public.stock_ledger (tenant_id, stock_dimension_id) INCLUDE (quantity);
+CREATE INDEX stock_ledger_document_line_idx ON public.stock_ledger (tenant_id, document_id, document_line_id);
+CREATE INDEX stock_ledger_tenant_xid_idx ON public.stock_ledger (tenant_id, created_xid);
+
+CREATE TABLE public.reservations (
+  tenant_id          uuid           NOT NULL,
+  id                 uuid           NOT NULL DEFAULT gen_random_uuid(),
+  stock_dimension_id uuid           NOT NULL,
+  document_line_id   uuid           NOT NULL,
+  quantity           numeric(20, 6) NOT NULL,
+  status             text           NOT NULL DEFAULT 'ACTIVE',
+  expires_at         timestamptz,
+  created_at         timestamptz    NOT NULL DEFAULT now(),
+  closed_at          timestamptz,
+  CONSTRAINT reservations_pkey PRIMARY KEY (id),
+  CONSTRAINT reservations_tenant_id_id_key UNIQUE (tenant_id, id),
+  CONSTRAINT reservations_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants (id),
+  CONSTRAINT reservations_dimension_fkey FOREIGN KEY (tenant_id, stock_dimension_id) REFERENCES public.stock_dimensions (tenant_id, id),
+  CONSTRAINT reservations_document_line_fkey FOREIGN KEY (tenant_id, document_line_id) REFERENCES public.document_lines (tenant_id, id),
+  CONSTRAINT reservations_quantity_chk CHECK (quantity > 0),
+  CONSTRAINT reservations_status_chk CHECK (status IN ('ACTIVE', 'CONSUMED', 'RELEASED')),
+  CONSTRAINT reservations_closed_chk CHECK ((status = 'ACTIVE') = (closed_at IS NULL))
+);
+CREATE INDEX reservations_active_sum_idx ON public.reservations (tenant_id, stock_dimension_id) INCLUDE (quantity) WHERE status = 'ACTIVE';
+CREATE INDEX reservations_dimension_idx ON public.reservations (tenant_id, stock_dimension_id);
+CREATE INDEX reservations_document_line_idx ON public.reservations (tenant_id, document_line_id);
+
+-- ---------------------------------------------------------------------------------------------
+-- 2. Tetikleyiciler (SECURITY INVOKER, search_path sabit, PUBLIC'ten EXECUTE geri alınır)
+-- ---------------------------------------------------------------------------------------------
+
+-- 2a. Ortak ret işlevi (boyut + defter).
+CREATE FUNCTION public.stock_reject_change() RETURNS trigger
+  LANGUAGE plpgsql
+  SET search_path = pg_catalog, pg_temp
+AS $fn$
+BEGIN
+  RAISE EXCEPTION '%: değişmezdir/append-only (I-04): % reddedildi', TG_TABLE_NAME, TG_OP USING ERRCODE = '42501';
+END
+$fn$;
+REVOKE ALL ON FUNCTION public.stock_reject_change() FROM PUBLIC;
+
+CREATE TRIGGER stock_dimensions_immutable BEFORE UPDATE OR DELETE ON public.stock_dimensions
+  FOR EACH ROW EXECUTE FUNCTION public.stock_reject_change();
+CREATE TRIGGER stock_dimensions_no_truncate BEFORE TRUNCATE ON public.stock_dimensions
+  FOR EACH STATEMENT EXECUTE FUNCTION public.stock_reject_change();
+
+CREATE TRIGGER stock_ledger_append_only BEFORE UPDATE OR DELETE ON public.stock_ledger
+  FOR EACH ROW EXECUTE FUNCTION public.stock_reject_change();
+CREATE TRIGGER stock_ledger_no_truncate BEFORE TRUNCATE ON public.stock_ledger
+  FOR EACH STATEMENT EXECUTE FUNCTION public.stock_reject_change();
+ALTER TABLE public.stock_ledger ENABLE ALWAYS TRIGGER stock_ledger_append_only;
+ALTER TABLE public.stock_ledger ENABLE ALWAYS TRIGGER stock_ledger_no_truncate;
+
+-- 2b. stock_ledger sunucu alanları (ADR-017 §5).
+CREATE FUNCTION public.stock_ledger_force_server_fields() RETURNS trigger
+  LANGUAGE plpgsql
+  SET search_path = pg_catalog, pg_temp
+AS $fn$
+BEGIN
+  NEW.created_xid := pg_catalog.pg_current_xact_id();
+  NEW.occurred_at := pg_catalog.now();
+  RETURN NEW;
+END
+$fn$;
+REVOKE ALL ON FUNCTION public.stock_ledger_force_server_fields() FROM PUBLIC;
+CREATE TRIGGER stock_ledger_server_fields BEFORE INSERT ON public.stock_ledger
+  FOR EACH ROW EXECUTE FUNCTION public.stock_ledger_force_server_fields();
+ALTER TABLE public.stock_ledger ENABLE ALWAYS TRIGGER stock_ledger_server_fields;
+
+-- 2c. stock_balances: serial_key boyuttan türetilir (istemci değeri yok sayılır); anahtar sütunlar değişmez.
+CREATE FUNCTION public.stock_balances_fill_serial_key() RETURNS trigger
+  LANGUAGE plpgsql
+  SET search_path = pg_catalog, pg_temp
+AS $fn$
+BEGIN
+  -- Boyut görünmüyorsa (yok / başka tenant) sentinel kalır: B anahtarlı satırı RLS WITH CHECK (42501), A anahtarlı ama olmayan
+  -- boyutu bileşik FK (23503) reddeder; burada ayrıca hata atılmaz (RLS hata sınıfı korunur).
+  SELECT d.serial_key INTO NEW.serial_key FROM public.stock_dimensions d
+   WHERE d.tenant_id = NEW.tenant_id AND d.id = NEW.stock_dimension_id;
+  IF NOT FOUND THEN
+    NEW.serial_key := '00000000-0000-0000-0000-000000000000';
+  END IF;
+  RETURN NEW;
+END
+$fn$;
+REVOKE ALL ON FUNCTION public.stock_balances_fill_serial_key() FROM PUBLIC;
+CREATE TRIGGER stock_balances_fill_serial_key BEFORE INSERT ON public.stock_balances
+  FOR EACH ROW EXECUTE FUNCTION public.stock_balances_fill_serial_key();
+ALTER TABLE public.stock_balances ENABLE ALWAYS TRIGGER stock_balances_fill_serial_key;
+
+CREATE FUNCTION public.stock_balances_guard_update() RETURNS trigger
+  LANGUAGE plpgsql
+  SET search_path = pg_catalog, pg_temp
+AS $fn$
+BEGIN
+  IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+     OR NEW.stock_dimension_id IS DISTINCT FROM OLD.stock_dimension_id
+     OR NEW.serial_key IS DISTINCT FROM OLD.serial_key THEN
+    RAISE EXCEPTION 'stock_balances: tenant_id/stock_dimension_id/serial_key değiştirilemez' USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END
+$fn$;
+REVOKE ALL ON FUNCTION public.stock_balances_guard_update() FROM PUBLIC;
+CREATE TRIGGER stock_balances_guard_update BEFORE UPDATE ON public.stock_balances
+  FOR EACH ROW EXECUTE FUNCTION public.stock_balances_guard_update();
+
+-- 2d. reservations: kimlik sütunları değişmez; sonlanmış rezervasyon değişmez.
+CREATE FUNCTION public.reservations_guard_update() RETURNS trigger
+  LANGUAGE plpgsql
+  SET search_path = pg_catalog, pg_temp
+AS $fn$
+BEGIN
+  IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+     OR NEW.id IS DISTINCT FROM OLD.id
+     OR NEW.document_line_id IS DISTINCT FROM OLD.document_line_id
+     OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+    RAISE EXCEPTION 'reservations: tenant_id/id/document_line_id/created_at değiştirilemez' USING ERRCODE = '23514';
+  END IF;
+  IF OLD.status <> 'ACTIVE' THEN
+    RAISE EXCEPTION 'reservations: sonlanmış rezervasyon (%) değiştirilemez', OLD.status USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END
+$fn$;
+REVOKE ALL ON FUNCTION public.reservations_guard_update() FROM PUBLIC;
+CREATE TRIGGER reservations_guard_update BEFORE UPDATE ON public.reservations
+  FOR EACH ROW EXECUTE FUNCTION public.reservations_guard_update();
+
+-- ---------------------------------------------------------------------------------------------
+-- 3. Mutlak defter–bakiye denetimi (ADR-017 §6, G-01 ikinci savunma)
+-- ---------------------------------------------------------------------------------------------
+CREATE FUNCTION public.stock_assert_dimension(p_tenant_id uuid, p_dimension_id uuid) RETURNS void
+  LANGUAGE plpgsql
+  SECURITY INVOKER
+  SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+  ctx uuid := NULLIF(pg_catalog.current_setting('app.current_tenant_id', true), '')::uuid;
+  b_found boolean;
+  b_qty numeric;
+  b_reserved numeric;
+  l_sum numeric;
+  r_sum numeric;
+BEGIN
+  IF ctx IS NULL OR p_tenant_id IS NULL OR ctx <> p_tenant_id THEN
+    RAISE EXCEPTION 'STOCK_TENANT_CONTEXT_MISMATCH: tenant bağlamı boş veya yazılan satırın tenant''ından farklı' USING ERRCODE = '23514';
+  END IF;
+
+  SELECT b.quantity, b.reserved_quantity INTO b_qty, b_reserved
+    FROM public.stock_balances b WHERE b.tenant_id = p_tenant_id AND b.stock_dimension_id = p_dimension_id;
+  b_found := FOUND;
+  IF NOT b_found THEN
+    b_qty := 0;
+    b_reserved := 0;
+  END IF;
+
+  SELECT COALESCE(pg_catalog.sum(l.quantity), 0) INTO l_sum
+    FROM public.stock_ledger l WHERE l.tenant_id = p_tenant_id AND l.stock_dimension_id = p_dimension_id;
+  SELECT COALESCE(pg_catalog.sum(r.quantity), 0) INTO r_sum
+    FROM public.reservations r WHERE r.tenant_id = p_tenant_id AND r.stock_dimension_id = p_dimension_id AND r.status = 'ACTIVE';
+
+  IF b_qty <> l_sum OR b_reserved <> r_sum THEN
+    RAISE EXCEPTION 'STOCK_BALANCE_LEDGER_MISMATCH: boyut % bakiye=%/% (miktar/rezerve) defter=% aktif rezervasyon=%',
+      p_dimension_id, b_qty, b_reserved, l_sum, r_sum USING ERRCODE = '23514';
+  END IF;
+END
+$fn$;
+REVOKE ALL ON FUNCTION public.stock_assert_dimension(uuid, uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.stock_assert_dimension(uuid, uuid) TO wms_app;
+
+CREATE FUNCTION public.stock_assert_trigger() RETURNS trigger
+  LANGUAGE plpgsql
+  SET search_path = pg_catalog, pg_temp
+AS $fn$
+BEGIN
+  PERFORM public.stock_assert_dimension(NEW.tenant_id, NEW.stock_dimension_id);
+  IF TG_OP = 'UPDATE'
+     AND (OLD.tenant_id, OLD.stock_dimension_id) IS DISTINCT FROM (NEW.tenant_id, NEW.stock_dimension_id) THEN
+    PERFORM public.stock_assert_dimension(OLD.tenant_id, OLD.stock_dimension_id);
+  END IF;
+  RETURN NULL;
+END
+$fn$;
+REVOKE ALL ON FUNCTION public.stock_assert_trigger() FROM PUBLIC;
+
+CREATE CONSTRAINT TRIGGER stock_balances_assert AFTER INSERT OR UPDATE ON public.stock_balances
+  DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.stock_assert_trigger();
+CREATE CONSTRAINT TRIGGER stock_ledger_assert AFTER INSERT ON public.stock_ledger
+  DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.stock_assert_trigger();
+CREATE CONSTRAINT TRIGGER reservations_assert AFTER INSERT OR UPDATE ON public.reservations
+  DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.stock_assert_trigger();
+ALTER TABLE public.stock_balances ENABLE ALWAYS TRIGGER stock_balances_assert;
+ALTER TABLE public.stock_ledger ENABLE ALWAYS TRIGGER stock_ledger_assert;
+ALTER TABLE public.reservations ENABLE ALWAYS TRIGGER reservations_assert;
+
+-- ---------------------------------------------------------------------------------------------
+-- 4. RLS (ADR-015 §5)
+-- ---------------------------------------------------------------------------------------------
+DO $rls$
+DECLARE
+  t text;
+BEGIN
+  FOREACH t IN ARRAY ARRAY['stock_dimensions', 'stock_balances', 'stock_ledger', 'reservations'] LOOP
+    EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t);
+    EXECUTE format('ALTER TABLE public.%I FORCE ROW LEVEL SECURITY', t);
+    EXECUTE format(
+      'CREATE POLICY %I ON public.%I
+         USING      (tenant_id = NULLIF(pg_catalog.current_setting(''app.current_tenant_id'', true), '''')::uuid)
+         WITH CHECK (tenant_id = NULLIF(pg_catalog.current_setting(''app.current_tenant_id'', true), '''')::uuid)',
+      t || '_isolation', t);
+    EXECUTE format('REVOKE ALL ON TABLE public.%I FROM PUBLIC', t);
+  END LOOP;
+END
+$rls$;
+
+-- ---------------------------------------------------------------------------------------------
+-- 5. GRANT'lar (yalnızca wms_app; DELETE hiçbir stok tablosunda yok; wms_ops için hiçbir şey)
+-- ---------------------------------------------------------------------------------------------
+GRANT SELECT ON public.stock_dimensions TO wms_app;
+GRANT INSERT (tenant_id, id, item_id, location_id, lot_id, serial_id, stock_status, inventory_owner_id, handling_unit_id)
+  ON public.stock_dimensions TO wms_app;
+
+-- serial_key INSERT listesinde YOK (tetikleyici boyuttan yazar).
+GRANT SELECT ON public.stock_balances TO wms_app;
+GRANT INSERT (tenant_id, stock_dimension_id, quantity, reserved_quantity, version) ON public.stock_balances TO wms_app;
+GRANT UPDATE (quantity, reserved_quantity, version) ON public.stock_balances TO wms_app;
+
+-- created_xid ve occurred_at INSERT listesinde YOK.
+GRANT SELECT ON public.stock_ledger TO wms_app;
+GRANT INSERT (tenant_id, id, document_id, document_line_id, stock_dimension_id, quantity, reason, business_date, actor_user_id)
+  ON public.stock_ledger TO wms_app;
+
+-- closed_at INSERT'te yok: yalnızca ACTIVE rezervasyon açılabilir.
+GRANT SELECT ON public.reservations TO wms_app;
+GRANT INSERT (tenant_id, id, stock_dimension_id, document_line_id, quantity, status, expires_at) ON public.reservations TO wms_app;
+GRANT UPDATE (stock_dimension_id, quantity, status, closed_at) ON public.reservations TO wms_app;

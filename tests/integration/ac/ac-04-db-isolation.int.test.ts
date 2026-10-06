@@ -21,7 +21,7 @@ import { sql } from "../../../packages/db/node_modules/drizzle-orm/index.js";
 import { createDbClient, type DbClient } from "../../../packages/db/src/client.ts";
 import { withUser } from "../../../packages/db/src/index.ts";
 import { APP_ROLE, AUTH_ROLE, PROBE_ROLE, readIntEnv, redactErrorChain } from "../harness/env.ts";
-import { cleanupDocuments, mkMembership, mkUser, newRegistry, seedWorld, type TenantWorld } from "../fixtures/tenants.ts";
+import { cleanupDocuments, cleanupStock, mkMembership, mkUser, newRegistry, seedWorld, type TenantWorld } from "../fixtures/tenants.ts";
 
 const env = readIntEnv(process.env);
 const urls = [env.databaseUrl, env.databaseUrlDirect];
@@ -185,6 +185,7 @@ async function cleanupExceptTenants(c: pg.Client, r: typeof reg): Promise<void> 
   const tenantIds = r.worlds.map((w) => w.tenantId);
   const userIds = [...r.worlds.flatMap((w) => [w.ownerUserId, w.memberUserId]), ...r.extraUsers];
   if (tenantIds.length > 0) {
+    await cleanupStock(c, tenantIds); // T-232 stok tabloları (defter append-only tetikleyicisi fikstürde geçici kapatılır)
     await cleanupDocuments(c, tenantIds); // T-206 tabloları (append-only tetikleyici replica ile atlanır)
     // T-204 + T-202 tabloları FK sırasıyla önce (taşıma birimi → seri → lot → barkod/dönüşüm → sahip → ürün → birim; kapsam → kilit → lokasyon → depo).
     for (const t of [
@@ -299,13 +300,28 @@ describe("AC-04 DB — A bağlamında B kimliğiyle erişim (tablo başına)", (
     expect(failures).toEqual([]);
   });
 
+  it("@AC-04 DELETE kontrol kaydı yalnızca gerçekten DELETE yetkisi olan tabloları içerir (kayıt yetkisiz tabloyu gizleyemez)", () => {
+    for (const name of Object.keys(A.deletableControl)) {
+      const t = tables.find((x) => x.name === name);
+      expect(t, `kayıttaki tablo katalogda yok: ${name}`).toBeDefined();
+      expect(t?.canDelete, `${name}: kayıtta ama wms_app DELETE yetkisi yok`).toBe(true);
+    }
+  });
+
   it("@AC-04 DELETE: B satırına 0 satır etkilenir (ya da yetki yok 42501); A'da silebilen tabloda kontrol ≥1", async () => {
     const failures: string[] = [];
     for (const t of tables) {
       const foreign = await attempt(appClient, [setTenant(A.tenantId)], `DELETE FROM public.${q(t.name)} WHERE ${q(t.key)} = $1`, [B.tenantId]);
       if (t.canDelete) {
         if (!foreign.ok || foreign.rowCount !== 0) failures.push(`${t.name}: B satırına DELETE 0 değil: ${fmt(foreign)}`);
-        const own = await attempt(appClient, [setTenant(A.tenantId)], `DELETE FROM public.${q(t.name)} WHERE ${q(t.key)} = $1`, [A.tenantId]);
+        // T-232: FK ile korunan satırı (ör. defter/rezervasyonun bağlandığı document_lines) silmek 23503 verir. Kontrol silmesi, fikstürün
+        // verdiği FK ile korunmayan kayıtlı satıra daraltılır (assertion gücü aynı: ≥1 satır silinmeli); kayıtta olmayan tablo eski genel
+        // `WHERE key = A` kontrolünü korur.
+        const controlId = A.deletableControl[t.name];
+        const own =
+          controlId === undefined
+            ? await attempt(appClient, [setTenant(A.tenantId)], `DELETE FROM public.${q(t.name)} WHERE ${q(t.key)} = $1`, [A.tenantId])
+            : await attempt(appClient, [setTenant(A.tenantId)], `DELETE FROM public.${q(t.name)} WHERE ${q(t.key)} = $1 AND id = $2`, [A.tenantId, controlId]);
         if (!own.ok || own.rowCount < 1) failures.push(`${t.name}: kontrol (A kendi satırı) DELETE ≥1 değil: ${fmt(own)}`);
       } else if (foreign.ok || foreign.code !== INSUFFICIENT_PRIVILEGE) {
         failures.push(`${t.name}: DELETE yetkisi yokken beklenen 42501, gelen ${fmt(foreign)}`);
