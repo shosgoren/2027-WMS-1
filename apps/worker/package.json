@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@wms/db": "workspace:*",
+    "@wms/domain": "workspace:*",
     "@wms/queue-adapter": "workspace:*",
     "@wms/shared": "workspace:*"
   },

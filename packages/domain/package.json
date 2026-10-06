@@ -5,7 +5,10 @@
   "type": "module",
   "exports": {
     "./identity/permissions": "./src/identity/permissions.ts",
-    "./identity/access": "./src/identity/access.ts"
+    "./identity/access": "./src/identity/access.ts",
+    "./identity/invitations": "./src/identity/invitations.ts",
+    "./onboarding/workspace": "./src/onboarding/workspace.ts",
+    "./onboarding/templates": "./src/onboarding/templates.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
