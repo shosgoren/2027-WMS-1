@@ -261,3 +261,100 @@ describe("check:assertions (CLI)", () => {
     expect(res.text).not.toContain("BASELINE_MOVED");
   });
 });
+
+// T-008j (bekciler-2 incelemesi MINOR): etkisiz assertion sayılmaz — erişilemeyen kod, yutulan
+// (`try { expect } catch {}`) ve await edilmemiş `.resolves/.rejects`/`expect.poll`.
+/** Saldırı: testteki tek assertion etkisiz → sayılmaz, NO_ASSERTION (gövde satır 4'ten başlar). */
+const INEFFECTIVE = /** @type {Array<[string, string]>} */ ([
+  ["if (false) { … }", "if (false) {\n  expect(r).toBe(1);\n}"],
+  ["if (0) tek deyim", "if (0) expect(r).toBe(1);"],
+  ["if (!true)", "if (!true) { expect(r).toBe(1); }"],
+  ["if (true) {} else { … }", "if (true) {} else { expect(r).toBe(1); }"],
+  ["while (false)", "while (false) { expect(r).toBe(1); }"],
+  ["for (;false;)", "for (; false; ) { expect(r).toBe(1); }"],
+  ["false && expect", "false && expect(r).toBe(1);"],
+  ["true || expect", "true || expect(r).toBe(1);"],
+  ["sabit koşullu ifade", "const x = 0 ? expect(r).toBe(1) : null;"],
+  ["return sonrası", "return;\nexpect(r).toBe(1);"],
+  ["throw sonrası", 'throw new Error("x");\nexpect(r).toBe(1);'],
+  ["iç blokta return sonrası", "{\n  return;\n  expect(r).toBe(1);\n}"],
+  ["ölü koldaki geri çağırım", "if (false) { [1].forEach(() => expect(r).toBe(1)); }"],
+  ["try { expect } catch {}", "try {\n  expect(r).toBe(1);\n} catch {}"],
+  ["try { expect } catch (e) { log }", "try {\n  expect(r).toBe(1);\n} catch (e) {\n  console.log(e);\n}"],
+  ["try { expect } catch { if (x) throw }", "try {\n  expect(r).toBe(1);\n} catch (e) {\n  if (r) throw e;\n}"],
+  ["try içinde geri çağırım", "try {\n  [1].forEach(() => expect(r).toBe(1));\n} catch {}"],
+  ["await edilmemiş .resolves", "expect(Promise.resolve(r)).resolves.toBe(1);"],
+  ["await edilmemiş .rejects.not", "expect(Promise.reject(r)).rejects.not.toBe(1);"],
+  ["await edilmemiş expect.poll", "expect.poll(() => r).toBe(1);"],
+  ["Promise.all içinde .resolves", "await Promise.all([expect(Promise.resolve(r)).resolves.toBe(1)]);"],
+  ["void ile atılan .rejects", "void expect(Promise.reject(r)).rejects.toThrow();"],
+]);
+
+/** Yanlış pozitif yok: aynı biçimlerin etkili karşılıkları sayılır. */
+const EFFECTIVE = /** @type {Array<[string, string]>} */ ([
+  ["if (true) { … }", "if (true) { expect(r).toBe(1); }"],
+  ["koşullu dal (sabit değil)", "if (r) { expect(r).toBe(1); } else { expect(r).toBe(2); }"],
+  ["koşullu return öncesi", "if (r) return;\nexpect(r).toBe(1);"],
+  ["iç blokta return, dışında assertion", "{\n  if (r) return;\n}\nexpect(r).toBe(1);"],
+  ["return'den sonra hoist edilen işlev", "return h();\nfunction h() {\n  expect(r).toBe(1);\n}"],
+  ["try … finally (catch yok)", "try {\n  expect(r).toBe(1);\n} finally {\n  r = 0;\n}"],
+  ["catch yeniden fırlatır", "try {\n  expect(r).toBe(1);\n} catch (e) {\n  console.log(e);\n  throw e;\n}"],
+  ["catch içindeki assertion", "let c;\ntry {\n  r();\n} catch (e) {\n  c = e;\n}\nexpect(c).toBeDefined();"],
+  ["catch bloğunda assertion", "try {\n  r();\n} catch (e) {\n  expect(e).toBeInstanceOf(Error);\n}"],
+  ["await .resolves", "await expect(Promise.resolve(r)).resolves.toBe(1);"],
+  ["await (parantezli) .rejects", "await (expect(Promise.reject(r)).rejects.toThrow());"],
+  ["return .rejects", "return expect(Promise.reject(r)).rejects.toThrow();"],
+  ["await expect.poll", "await expect.poll(() => r).toBe(1);"],
+  ["r && expect (sabit değil)", "r && expect(r).toBe(1);"],
+]);
+
+describe("check:assertions — etkisiz assertion (T-008j madde 4)", () => {
+  it.each(INEFFECTIVE)("saldırı: %s → sayılmaz, NO_ASSERTION", (_name, body) => {
+    const s = scanSource(`${HEAD}it("${T} a", async () => {\n  let r = 1;\n${body}\n});\n`, "x.test.ts");
+    expect(s.assertions).toBe(0);
+    expect(s.noAssertion.map((x) => x.line)).toEqual([3]);
+  });
+
+  it.each(EFFECTIVE)("yanlış pozitif yok: %s → sayılır", (_name, body) => {
+    const s = scanSource(`${HEAD}it("${T} a", async () => {\n  let r = 1;\n${body}\n});\n`, "x.test.ts");
+    expect(s.assertions).toBeGreaterThan(0);
+    expect(s.noAssertion).toEqual([]);
+  });
+
+  it("try/catch{} içinde çağrılan yerel yardımcı test için sayılmaz; doğrudan çağrı sayılır", () => {
+    const helper = `function h(v) {\n  expect(v).toBe(1);\n}\n`;
+    const swallowed = scanSource(`${HEAD}${helper}it("${T} a", () => {\n  try {\n    h(1);\n  } catch {}\n});\n`, "x.test.ts");
+    expect(swallowed.noAssertion.map((x) => x.line)).toEqual([6]);
+    const direct = scanSource(`${HEAD}${helper}it("${T} a", () => {\n  h(1);\n});\n`, "x.test.ts");
+    expect(direct.noAssertion).toEqual([]);
+  });
+
+  it("CLI: tek assertion `if (false)` içine alınır → NO_ASSERTION + ASSERTIONS_DECREASED", async () => {
+    const r = await setup({ "tests/a.test.ts": file(4, 1) });
+    r.write("tests/a.test.ts", file(4, 1).replace("  expect(r.v0).toBe(0);\n", "  if (false) {\n    expect(r.v0).toBe(0);\n  }\n")).commit("ölü kod");
+    const res = await check(r, "assertions");
+    expect(res.code).toBe(1);
+    expect(res.text).toContain("FAIL NO_ASSERTION tests/a.test.ts:3");
+    expect(res.text).toContain("FAIL ASSERTIONS_DECREASED tests/a.test.ts — assertion sayısı 1 → 0");
+  });
+
+  it("CLI: assertion try/catch{} içine alınıp yerine await edilmemiş .resolves eklenir → FAIL", async () => {
+    const r = await setup({ "tests/a.test.ts": file(4, 2) });
+    const evil = file(4, 2)
+      .replace("  expect(r.v0).toBe(0);\n", "  try {\n    expect(r.v0).toBe(0);\n  } catch {}\n")
+      .replace("  expect(r.v1).toBe(1);\n", "  expect(Promise.resolve(r.v1)).resolves.toBe(1);\n");
+    r.write("tests/a.test.ts", evil).commit("yut");
+    const res = await check(r, "assertions");
+    expect(res.code).toBe(1);
+    expect(res.text).toContain("FAIL NO_ASSERTION tests/a.test.ts:3");
+    expect(res.text).toContain("FAIL ASSERTIONS_DECREASED tests/a.test.ts — assertion sayısı 2 → 0");
+  });
+
+  it("CLI yanlış pozitif yok: assertion await'li .resolves'a çevrilir → OK", async () => {
+    const r = await setup({ "tests/a.test.ts": file(4, 1) });
+    const ok = file(4, 1).replace("() => {", "async () => {").replace("  expect(r.v0).toBe(0);\n", "  await expect(Promise.resolve(r.v0)).resolves.toBe(0);\n");
+    r.write("tests/a.test.ts", ok).commit("await");
+    const res = await check(r, "assertions");
+    expect(res.code).toBe(0);
+  });
+});
