@@ -8,7 +8,8 @@ export interface TaskCardProps {
   icon: ReactNode;
   title: string;
   description?: string;
-  href?: string;
+  /** Yalnızca uygulama içi yol (`/` ile başlar); geçersizse çalışma anında bağlantısız render edilir. */
+  href?: `/${string}`;
   /** Yetki yok: bağlantı değil, `aria-disabled`; gerekçe metni çağırandan (i18n). */
   locked?: { reason: string };
   /** Kapalı özellik bayrağı: kilitten ayrı görsel/metin; işlev yok (G-07). */
@@ -25,6 +26,19 @@ const TONE: Record<TaskCardTone, { ring: string; badge: string }> = {
 const BASE =
   "flex min-h-12 min-w-0 w-full flex-col gap-3 rounded-card border-2 p-4 text-left shadow-card";
 const FOCUS = "focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus";
+
+/**
+ * Uygulama içi yol: `/` ile başlar, `//` ile başlamaz; `\`, kontrol karakteri ve `.`/`..` yol
+ * parçası (kodlanmış `%2e` dahil) içermez — `/..//evil` tarayıcıda `//evil` yoluna çözülür ve
+ * ileride yolu `Location`'a yazan bir yönlendirmede açık yönlendirmeye dönüşebilir.
+ */
+export function isSafeInternalHref(href: string | undefined): href is `/${string}` {
+  if (typeof href !== "string") return false;
+  if (!href.startsWith("/") || href.startsWith("//")) return false;
+  if (/[\\\u0000-\u001f\u007f]/.test(href)) return false;
+  const path = href.split(/[?#]/, 1)[0] ?? "";
+  return !path.split("/").some((seg) => /^(?:\.|%2e){1,2}$/i.test(seg));
+}
 
 /** Görev kartı. Kilitli ve "yakında" durumları `data-state` ve farklı ikon/metinle ayrışır. */
 export function TaskCard({ icon, title, description, href, locked, soon, tone = "accent" }: TaskCardProps) {
@@ -89,7 +103,7 @@ export function TaskCard({ icon, title, description, href, locked, soon, tone = 
     </>
   );
   const cls = `${BASE} ${FOCUS} ${t.ring} bg-surface`;
-  return href ? (
+  return isSafeInternalHref(href) ? (
     <a href={href} data-state="active" className={cls}>
       {body}
     </a>

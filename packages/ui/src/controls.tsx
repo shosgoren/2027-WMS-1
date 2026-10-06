@@ -93,6 +93,17 @@ export interface ConfirmDialogProps {
   variant?: "primary" | "danger";
 }
 
+/** `cancel` (Esc): yükleniyorken engellenir ve `onCancel` çağrılmaz; değilse tarayıcı kapatması yerine üst bileşen karar verir. */
+export function handleDialogCancel(
+  event: { preventDefault: () => void },
+  loading: boolean,
+  onCancel: () => void,
+): void {
+  event.preventDefault();
+  if (loading) return;
+  onCancel();
+}
+
 /** Yerel `<dialog>` (showModal): odak tuzağı ve Esc tarayıcıdan. Kapalıyken içerik render edilmez. */
 export function ConfirmDialog({
   open,
@@ -122,10 +133,7 @@ export function ConfirmDialog({
       ref={ref}
       aria-labelledby={titleId}
       aria-describedby={descId}
-      onCancel={(e) => {
-        e.preventDefault();
-        onCancel();
-      }}
+      onCancel={(e) => handleDialogCancel(e, loading, onCancel)}
       className="m-auto w-[min(28rem,calc(100vw-2rem))] rounded-card border-0 bg-surface p-6 text-ink shadow-card backdrop:bg-ink/50"
     >
       <h2 id={titleId} className="mb-2 break-words text-xl font-bold">
