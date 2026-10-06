@@ -37,7 +37,7 @@ function fakeTx() {
 }
 
 describe("eylem listesi", () => {
-  it("kayıtlı 38 eylemi içerir", () => {
+  it("kayıtlı 39 eylemi içerir", () => {
     expect([...AUDIT_ACTIONS].sort()).toEqual(
       [
         "member.invited", "member.removed", "member.role_changed", "member.left", "ownership.transferred",
@@ -47,7 +47,7 @@ describe("eylem listesi", () => {
         "location.archived", "warehouse_scope.changed", "unit.created", "unit.updated", "item.created",
         "item.updated", "item.archived", "item_barcode.added", "item_barcode.removed", "unit_conversion.set",
         "lot.created", "serial.registered", "handling_unit.created", "handling_unit.changed",
-        "stock_document.created", "stock_document.approved", "stock_document.posted", "stock_document.cancelled",
+        "stock_document.created", "stock_document.updated", "stock_document.approved", "stock_document.posted", "stock_document.cancelled",
         "stock_document.reversed", "reservation.created", "reservation.released",
       ].sort(),
     );

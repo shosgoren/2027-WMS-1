@@ -294,3 +294,31 @@ describe("withUser / withSystemTenant / withNewTenant — set_config biçimi", (
     expect(queries[0]?.params).toEqual([TENANT]);
   });
 });
+
+describe("withMembership — timeouts seçeneği (T-213 kart eki 1)", () => {
+  it("timeouts verilirse tenant/üyelik FOR SHARE okumasından ÖNCE, yalnızca set_config(true) ile kurulur", async () => {
+    const client = newClient();
+    const { queries } = fakeTx(client, membershipResponder({ roles: ["PICKER"] }));
+    await withMembership({ client, userId: USER, tenantId: TENANT, timeouts: { lockTimeoutMs: 2000, statementTimeoutMs: 10_000 } }, async () => "ok");
+    const timeoutIdx = queries.findIndex((q) => q.sql.includes("'lock_timeout'"));
+    const tenantIdx = queries.findIndex((q) => q.sql.includes("FROM public.tenants"));
+    const memberIdx = queries.findIndex((q) => q.sql.includes("FROM public.tenant_memberships"));
+    expect(timeoutIdx).toBe(2); // tenant ve kullanıcı bağlamından hemen sonra
+    expect(timeoutIdx).toBeLessThan(tenantIdx);
+    expect(timeoutIdx).toBeLessThan(memberIdx);
+    expect(queries[timeoutIdx]?.sql).toContain("set_config('statement_timeout', $2, true)");
+    expect(queries[timeoutIdx]?.params).toEqual(["2000ms", "10000ms"]);
+  });
+  it("seçeneksiz çağrıda zaman aşımı sorgusu yok (davranış değişmez)", async () => {
+    const client = newClient();
+    const { queries } = fakeTx(client, membershipResponder({ roles: ["PICKER"] }));
+    await withMembership({ client, userId: USER, tenantId: TENANT }, async () => "ok");
+    expect(queries.some((q) => q.sql.includes("lock_timeout"))).toBe(false);
+  });
+  it("geçersiz timeouts sorgusuz RangeError", async () => {
+    const client = newClient();
+    const { queries } = fakeTx(client, membershipResponder({ roles: ["PICKER"] }));
+    await expect(withMembership({ client, userId: USER, tenantId: TENANT, timeouts: { lockTimeoutMs: 0, statementTimeoutMs: 1000 } }, async () => "x")).rejects.toBeInstanceOf(RangeError);
+    expect(queries).toHaveLength(0);
+  });
+});
