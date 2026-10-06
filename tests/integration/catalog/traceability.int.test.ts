@@ -307,21 +307,30 @@ describe("seri", () => {
       const sAdmin = () => ({ db: sApp, principal: { userId: C.ownerUserId, mfaVerified: true }, tenantSlug: C.slug });
       const sItem = async (): Promise<string> => (await createItem(sAdmin(), { code: `T${rnd()}`, name: "İzlenebilirlik", baseUnitId: C.unitId, trackingMode: "SERIAL" })).itemId;
       const sCount = async (no: string): Promise<number | null> => (await sAdm.query("SELECT 1 FROM public.serials WHERE tenant_id = $1 AND serial_no = $2", [C.tenantId, no])).rowCount;
+      // Kurulum/temizlik hataları yutulmaz ve URL/kimlik bilgisi sızdırmadan raporlanır (G-07, G-09; harness redactErrorChain).
+      const secrets = (): string[] => [env.databaseUrl, env.databaseUrlDirect];
       beforeAll(async () => {
-        await adm.query(`CREATE DATABASE ${scratch}`);
-        await migrateUp({ url: urlFor(env.databaseUrlDirect, scratch) });
-        sAdm = new pg.Client({ connectionString: urlFor(env.databaseUrlDirect, scratch) });
-        sAdm.on("error", () => undefined);
-        await sAdm.connect();
-        // wms_app doğrudan (pooler yalnızca ana veritabanını bilir); kimlik bilgisi app URL'sinden.
-        sApp = createDbClient({ url: urlFor(env.databaseUrlDirect, scratch, env.databaseUrl), poolMax: DB_CLIENT_SETTINGS.poolMax, prepare: DB_CLIENT_SETTINGS.prepare });
-        C = await seedWorld(sAdm, newRegistry(), "C");
-        await sAdm.query("CREATE UNIQUE INDEX serials_tenant_serial_no_t239 ON public.serials (tenant_id, serial_no)");
+        try {
+          await adm.query(`CREATE DATABASE ${scratch}`);
+          await migrateUp({ url: urlFor(env.databaseUrlDirect, scratch) });
+          sAdm = new pg.Client({ connectionString: urlFor(env.databaseUrlDirect, scratch) });
+          sAdm.on("error", () => undefined);
+          await sAdm.connect();
+          // wms_app doğrudan (pooler yalnızca ana veritabanını bilir); kimlik bilgisi app URL'sinden.
+          sApp = createDbClient({ url: urlFor(env.databaseUrlDirect, scratch, env.databaseUrl), poolMax: DB_CLIENT_SETTINGS.poolMax, prepare: DB_CLIENT_SETTINGS.prepare });
+          C = await seedWorld(sAdm, newRegistry(), "C");
+          await sAdm.query("CREATE UNIQUE INDEX serials_tenant_serial_no_t239 ON public.serials (tenant_id, serial_no)");
+        } catch (e) {
+          throw new Error(`geçici veritabanı (${scratch}) kurulumu başarısız: ${redactErrorChain(e, secrets())}`);
+        }
       }, 120_000);
       afterAll(async () => {
-        await sApp?.close().catch(() => undefined);
-        await sAdm?.end().catch(() => undefined);
-        await adm.query(`DROP DATABASE IF EXISTS ${scratch} WITH (FORCE)`).catch(() => undefined);
+        const failures: string[] = [];
+        if (sApp !== undefined) await sApp.close().catch((e: unknown) => failures.push(`app close: ${redactErrorChain(e, secrets())}`));
+        if (sAdm !== undefined) await sAdm.end().catch((e: unknown) => failures.push(`admin end: ${redactErrorChain(e, secrets())}`));
+        await adm.query(`DROP DATABASE IF EXISTS ${scratch} WITH (FORCE)`).catch((e: unknown) => failures.push(`DROP DATABASE ${scratch}: ${redactErrorChain(e, secrets())}`));
+        // Yetim geçici veritabanı sessizce kalmaz: temizlik hatası testi kırmızıya çevirir.
+        if (failures.length > 0) throw new Error(`geçici veritabanı temizliği başarısız: ${failures.join("; ")}`);
       }, 60_000);
 
       it("açıkken ardışık ürünler arası tekrar TRACKING_VIOLATION", async () => {
