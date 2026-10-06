@@ -263,6 +263,47 @@ CREATE TRIGGER stock_dimensions_check_tracking BEFORE INSERT ON public.stock_dim
   FOR EACH ROW EXECUTE FUNCTION public.stock_dimensions_check_tracking();
 ALTER TABLE public.stock_dimensions ENABLE ALWAYS TRIGGER stock_dimensions_check_tracking;
 
+-- 2b'''. Sahip yolu (MINOR-1): boyutu olan ürünün tracking_mode'u / boyutta kullanılan serinin lot_id'si değiştirilemez (wms_app zaten
+--      UPDATE yetkisine sahip değil; bu tetikleyiciler tablo sahibini/migration rolünü bağlar, ENABLE ALWAYS). Okuma RLS altında yapıldığından
+--      fail-closed: tenant bağlamı satırın tenant'ıyla eşleşmiyorsa (RLS satırları gizleyip denetimi sessizce geçirmesin) ret.
+CREATE FUNCTION public.stock_guard_item_tracking() RETURNS trigger
+  LANGUAGE plpgsql
+  SET search_path = pg_catalog, pg_temp
+AS $fn$
+BEGIN
+  IF NULLIF(pg_catalog.current_setting('app.current_tenant_id', true), '')::uuid IS DISTINCT FROM OLD.tenant_id THEN
+    RAISE EXCEPTION 'STOCK_TENANT_CONTEXT_MISMATCH: tracking_mode değişimi için tenant bağlamı satırın tenant''ı olmalı' USING ERRCODE = '23514';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.stock_dimensions d WHERE d.tenant_id = OLD.tenant_id AND d.item_id = OLD.id) THEN
+    RAISE EXCEPTION 'TRACKING_VIOLATION: ürünün stok boyutu var; tracking_mode değiştirilemez (A-87)' USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END
+$fn$;
+REVOKE ALL ON FUNCTION public.stock_guard_item_tracking() FROM PUBLIC;
+CREATE TRIGGER items_guard_tracking_mode BEFORE UPDATE OF tracking_mode ON public.items
+  FOR EACH ROW WHEN (OLD.tracking_mode IS DISTINCT FROM NEW.tracking_mode) EXECUTE FUNCTION public.stock_guard_item_tracking();
+ALTER TABLE public.items ENABLE ALWAYS TRIGGER items_guard_tracking_mode;
+
+CREATE FUNCTION public.stock_guard_serial_lot() RETURNS trigger
+  LANGUAGE plpgsql
+  SET search_path = pg_catalog, pg_temp
+AS $fn$
+BEGIN
+  IF NULLIF(pg_catalog.current_setting('app.current_tenant_id', true), '')::uuid IS DISTINCT FROM OLD.tenant_id THEN
+    RAISE EXCEPTION 'STOCK_TENANT_CONTEXT_MISMATCH: serinin lot_id değişimi için tenant bağlamı satırın tenant''ı olmalı' USING ERRCODE = '23514';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.stock_dimensions d WHERE d.tenant_id = OLD.tenant_id AND d.serial_id = OLD.id) THEN
+    RAISE EXCEPTION 'TRACKING_VIOLATION: seri bir stok boyutunda kullanılıyor; lot_id değiştirilemez' USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END
+$fn$;
+REVOKE ALL ON FUNCTION public.stock_guard_serial_lot() FROM PUBLIC;
+CREATE TRIGGER serials_guard_lot BEFORE UPDATE OF lot_id ON public.serials
+  FOR EACH ROW WHEN (OLD.lot_id IS DISTINCT FROM NEW.lot_id) EXECUTE FUNCTION public.stock_guard_serial_lot();
+ALTER TABLE public.serials ENABLE ALWAYS TRIGGER serials_guard_lot;
+
 -- 2c. stock_balances: serial_key boyuttan türetilir (istemci değeri yok sayılır); anahtar sütunlar değişmez.
 CREATE FUNCTION public.stock_balances_fill_serial_key() RETURNS trigger
   LANGUAGE plpgsql

@@ -772,6 +772,157 @@ describe("T-232 eşzamanlılık (MINOR-7)", () => {
   });
 });
 
+describe("T-232 sahip yolu: takip modu / seri lotu değişmezliği (MINOR-1)", () => {
+  it("boyutu olan ürünün tracking_mode'u reddedilir; boyutu olmayan ürünün modu değişebilir; bağlam yoksa fail-closed", async () => {
+    expectFail(await asAdmin(A.tenantId, (q) => q("UPDATE public.items SET tracking_mode = 'LOT' WHERE id = $1", [A.itemNoneId])), CHECK_VIOLATION, "boyutlu ürün", "TRACKING_VIOLATION");
+    expectFail(await asAdmin(A.tenantId, (q) => q("UPDATE public.items SET tracking_mode = 'NONE' WHERE id = $1", [A.itemId])), CHECK_VIOLATION, "seri boyutlu ürün", "TRACKING_VIOLATION");
+    expectOk(
+      await asAdmin(A.tenantId, async (q) => {
+        const item = await mkItem(q, A, "NONE");
+        await q("UPDATE public.items SET tracking_mode = 'LOT' WHERE id = $1", [item]);
+        return q("SELECT tracking_mode FROM public.items WHERE id = $1", [item]);
+      }),
+      "boyutsuz ürün",
+    );
+    // Aynı değere set edilmesi (no-op) engellenmez.
+    expectOk(await asAdmin(A.tenantId, (q) => q("UPDATE public.items SET tracking_mode = tracking_mode WHERE id = $1", [A.itemNoneId])), "no-op");
+    // Bağlam yok/başka tenant: RLS satırları gizleyebileceğinden denetim fail-closed reddeder.
+    expectFail(await asAdmin(B.tenantId, (q) => q("UPDATE public.items SET tracking_mode = 'LOT' WHERE id = $1", [A.itemNoneId])), CHECK_VIOLATION, "yanlış bağlam", CTX_MISMATCH);
+    // wms_app zaten yetkisiz.
+    expectFail(await asApp(A.tenantId, (q) => q("UPDATE public.items SET tracking_mode = 'LOT' WHERE id = $1", [A.itemNoneId])), INSUFFICIENT_PRIVILEGE, "wms_app");
+    // Replica modu da atlatmaz (ENABLE ALWAYS).
+    expectFail(
+      await asAdmin(A.tenantId, async (q) => {
+        await q("SET LOCAL session_replication_role = replica");
+        await q("UPDATE public.items SET tracking_mode = 'LOT' WHERE id = $1", [A.itemNoneId]);
+      }),
+      CHECK_VIOLATION,
+      "replica",
+      "TRACKING_VIOLATION",
+    );
+  });
+
+  it("boyutta kullanılan serinin lot_id'si değiştirilemez; kullanılmayan serininki değişebilir", async () => {
+    expectFail(await asAdmin(A.tenantId, (q) => q("UPDATE public.serials SET lot_id = NULL WHERE id = $1", [A.serialId])), CHECK_VIOLATION, "kullanılan seri", "TRACKING_VIOLATION");
+    expectOk(
+      await asAdmin(A.tenantId, async (q) => {
+        const item = await mkItem(q, A, "LOT_AND_SERIAL");
+        const lot = await mkLot(q, A, item);
+        const serial = await mkSerial(q, A, item, null);
+        await q("UPDATE public.serials SET lot_id = $2 WHERE id = $1", [serial, lot]);
+      }),
+      "kullanılmayan seri",
+    );
+    expectFail(await asAdmin(B.tenantId, (q) => q("UPDATE public.serials SET lot_id = NULL WHERE id = $1", [A.serialId])), CHECK_VIOLATION, "yanlış bağlam", CTX_MISMATCH);
+  });
+});
+
+describe("T-232 bölünmüş yazım ve kilitsiz güncelleme eşzamanlılığı (MINOR-3)", () => {
+  async function dimWithZeroBalance(status: string): Promise<string> {
+    const dim = randomUUID();
+    const r = await asApp(
+      A.tenantId,
+      async (q) => {
+        await q("INSERT INTO public.stock_dimensions (tenant_id, id, item_id, location_id, stock_status, inventory_owner_id, handling_unit_id) VALUES ($1, $2, $3, $4, $5, $6, $7)", [
+          A.tenantId,
+          dim,
+          A.itemNoneId,
+          A.childLocationId,
+          status,
+          A.ownerId,
+          A.handlingUnitId,
+        ]);
+        await q(insBal, [A.tenantId, dim, 0, 0]);
+      },
+      "commit",
+    );
+    expectOk(r, "boyut kurulumu");
+    return dim;
+  }
+  const begin = async (c: pg.Client, level: string): Promise<void> => {
+    await c.query(`BEGIN ISOLATION LEVEL ${level}`);
+    await c.query("SELECT set_config('app.current_tenant_id', $1, true)", [A.tenantId]);
+  };
+  const totals = async (dim: string): Promise<{ q: string; l: string | null }> => {
+    const r = await asApp(A.tenantId, (q) =>
+      q(
+        `SELECT b.quantity::text AS q, (SELECT sum(quantity)::text FROM public.stock_ledger WHERE stock_dimension_id = b.stock_dimension_id) AS l
+           FROM public.stock_balances b WHERE b.stock_dimension_id = $1`,
+        [dim],
+      ),
+    );
+    expectOk(r);
+    return r.ok ? (r.rows[0] as { q: string; l: string | null }) : { q: "?", l: "?" };
+  };
+  const settle = async (c: pg.Client): Promise<{ ok: boolean; code?: string; message?: string }> => {
+    try {
+      await c.query("COMMIT");
+      return { ok: true };
+    } catch (e) {
+      const err = e as { code?: string; message?: string };
+      await c.query("ROLLBACK").catch(() => undefined);
+      return { ok: false, code: err.code, message: err.message };
+    }
+  };
+
+  for (const level of ["READ COMMITTED", "REPEATABLE READ"]) {
+    it(`${level}: T1 yalnız defter, T2 yalnız bakiye, eşzamanlı commit → ikisi de denetimden düşer; sonuç değişmez`, async () => {
+      const dim = await dimWithZeroBalance(level === "READ COMMITTED" ? "AVAILABLE" : "QUARANTINE");
+      const c1 = await connect(env.databaseUrl);
+      const c2 = await connect(env.databaseUrl);
+      await begin(c1, level);
+      await begin(c2, level);
+      await c1.query(insLedger, [A.tenantId, A.documentId, A.documentLineNoneId, dim, 5]); // yalnız defter
+      await c2.query("UPDATE public.stock_balances SET quantity = quantity + 5 WHERE stock_dimension_id = $1", [dim]); // yalnız bakiye
+      const [r1, r2] = await Promise.all([settle(c1), settle(c2)]);
+      expect(r1.ok, `T1 (yalnız defter) kabul edildi: ${JSON.stringify(r1)}`).toBe(false);
+      expect(r2.ok, `T2 (yalnız bakiye) kabul edildi: ${JSON.stringify(r2)}`).toBe(false);
+      expect(r1.code).toBe(CHECK_VIOLATION);
+      expect(r2.code).toBe(CHECK_VIOLATION);
+      expect(r1.message).toContain(MISMATCH);
+      expect(r2.message).toContain(MISMATCH);
+      expect(await totals(dim)).toEqual({ q: "0.000000", l: null });
+    });
+  }
+
+  for (const level of ["READ COMMITTED", "REPEATABLE READ"]) {
+    it(`${level}: FOR UPDATE'siz quantity = quantity + n ile iki eşzamanlı +n: toplam doğru ya da biri reddedilir; bakiye = defter`, async () => {
+      const dim = await dimWithZeroBalance(level === "READ COMMITTED" ? "DAMAGED" : "BLOCKED");
+      const c1 = await connect(env.databaseUrl);
+      const c2 = await connect(env.databaseUrl);
+      await begin(c1, level);
+      await begin(c2, level);
+      const post = async (c: pg.Client, n: number): Promise<{ ok: boolean; code?: string }> => {
+        try {
+          await c.query(insLedger, [A.tenantId, A.documentId, A.documentLineNoneId, dim, n]);
+          await c.query("UPDATE public.stock_balances SET quantity = quantity + $2 WHERE stock_dimension_id = $1", [dim, n]);
+          return { ok: true };
+        } catch (e) {
+          await c.query("ROLLBACK").catch(() => undefined);
+          return { ok: false, code: (e as { code?: string }).code };
+        }
+      };
+      const w1 = await post(c1, 5);
+      const w2p = post(c2, 3); // aynı satır kilidinde c1'in commit'ini bekler
+      await new Promise((r) => setTimeout(r, 200));
+      const s1 = await settle(c1);
+      const w2 = await w2p;
+      const s2 = w2.ok ? await settle(c2) : { ok: false, code: w2.code };
+      expect(w1.ok && s1.ok, "T1 tutarlı, kabul edilmeliydi").toBe(true);
+      const t = await totals(dim);
+      expect(t.q, "bakiye = defter").toBe(t.l);
+      if (s2.ok) expect(t.q).toBe("8.000000");
+      else {
+        expect(t.q).toBe("5.000000");
+        // REPEATABLE READ'de bayat anlık görüntü: serileştirme hatası; READ COMMITTED'da denetim reddi.
+        expect(["40001", CHECK_VIOLATION]).toContain(s2.code);
+      }
+      if (level === "READ COMMITTED") expect(s2.ok, "READ COMMITTED'da kilitsiz +n doğru toplanmalı").toBe(true);
+      else expect(s2.ok, "REPEATABLE READ'de ikinci yazım 40001 almalı").toBe(false);
+    });
+  }
+});
+
 describe("T-232 (i) 100 satırlık belge eşdeğeri commit süresi (ölçüm)", () => {
   it("tek transaction: 100 boyut + 100 defter + 100 bakiye; commit süresi raporlanır", async () => {
     const C = await seedWorld(admin, reg, "C");
