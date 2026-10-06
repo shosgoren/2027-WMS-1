@@ -162,6 +162,68 @@ describe("T-202 ağaç bütünlüğü", () => {
     if (!r.ok) expect(r.code).toBe(FK_VIOLATION);
   });
 
+  it("tenant uyuşmazlığı (T-235): A bağlamında B anahtarlı INSERT ebeveyn denetimine girmeden RLS politikasıyla 42501 reddedilir", async () => {
+    // Var olmayan ebeveyn + tutarsız depth: tetikleyici uyuşmazlıkta erken döner; ebeveyn hatası (23503/23514) değil politika konuşur.
+    const r = await one(
+      A.tenantId,
+      "INSERT INTO public.locations (tenant_id, id, warehouse_id, parent_id, code, name, depth, kind) VALUES ($1, $2, $3, $4, 'M1', 'm', 9, 'STORAGE')",
+      [B.tenantId, randomUUID(), B.warehouseId, randomUUID()],
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.code).toBe(INSUFFICIENT_PRIVILEGE);
+      expect(r.message).toMatch(/new row violates row-level security policy/);
+    }
+    // Aynı tenant içinde ebeveyn fail-closed aynen sürer (T-202 MAJOR-1): uyuşmazlık değil, bu yüzden 23503.
+    const same = await one(
+      A.tenantId,
+      "INSERT INTO public.locations (tenant_id, id, warehouse_id, parent_id, code, name, depth, kind) VALUES ($1, $2, $3, $4, 'M2', 'm', 1, 'STORAGE')",
+      [A.tenantId, randomUUID(), A.warehouseId, randomUUID()],
+    );
+    expect(same.ok).toBe(false);
+    if (!same.ok) expect(same.code).toBe(FK_VIOLATION);
+  });
+
+  it("tenant uyuşmazlığı (T-235): ret kaynağı politikadır — tetikleyici kapalıyken de 42501; tetikleyici gövdesi 42501 üretmez", async () => {
+    const sql =
+      "INSERT INTO public.locations (tenant_id, id, warehouse_id, parent_id, code, name, depth, kind) VALUES ($1, $2, $3, NULL, $4, 'm', 0, 'STORAGE')";
+    await admin.query("BEGIN");
+    try {
+      await admin.query("ALTER TABLE public.locations DISABLE TRIGGER locations_check_depth");
+      await admin.query("SET LOCAL ROLE wms_app");
+      await admin.query("SELECT set_config('app.current_tenant_id', $1, true)", [A.tenantId]);
+      let err: { code?: string; message?: string } | undefined;
+      try {
+        await admin.query(sql, [B.tenantId, randomUUID(), B.warehouseId, `T-${randomBytes(3).toString("hex")}`]);
+      } catch (e) {
+        err = e as { code?: string; message?: string };
+      }
+      expect(err?.code, "tetikleyici kapalıyken B anahtarlı INSERT").toBe(INSUFFICIENT_PRIVILEGE);
+      expect(err?.message).toMatch(/new row violates row-level security policy/);
+    } finally {
+      await admin.query("ROLLBACK");
+    }
+    const def = await admin.query<{ d: string }>("SELECT pg_get_functiondef('public.locations_check_depth()'::regprocedure) AS d");
+    expect(def.rows[0]?.d).not.toMatch(/ERRCODE = '42501'/);
+    // Bağlamsız wms_app INSERT yine RLS ile reddedilir (tetikleyicinin bağlamsız dalı değişmedi).
+    const noCtx = await app.query("BEGIN").then(async () => {
+      try {
+        await app.query(sql, [A.tenantId, randomUUID(), A.warehouseId, `T-${randomBytes(3).toString("hex")}`]);
+        return undefined;
+      } catch (e) {
+        return e as { code?: string; message?: string };
+      } finally {
+        await app.query("ROLLBACK");
+      }
+    });
+    expect(noCtx?.code).toBe(INSUFFICIENT_PRIVILEGE);
+    expect(noCtx?.message).toMatch(/row-level security/);
+    // UPDATE: tenant_id sütun yetkisi wms_app'te yok → 42501; B satırı A bağlamında 0 etkilenir (USING).
+    const upd = await one(A.tenantId, "UPDATE public.locations SET tenant_id = $2 WHERE id = $1", [A.childLocationId, B.tenantId]);
+    expect(upd.ok).toBe(false);
+    if (!upd.ok) expect(upd.code).toBe(INSUFFICIENT_PRIVILEGE);
+  });
+
   it("parent_id / warehouse_id / tenant_id / depth güncellemesi reddedilir (tetikleyici)", async () => {
     for (const set of [
       "parent_id = NULL",

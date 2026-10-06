@@ -23,7 +23,7 @@ const FK_VIOLATION = "23503";
 const UNIQUE_VIOLATION = "23505";
 const CHECK_VIOLATION = "23514";
 const DEADLOCK = "40P01";
-const RLS_MESSAGE = /row-level security/i;
+const RLS_POLICY_MESSAGE = /new row violates row-level security policy/i;
 const rnd = (): string => randomBytes(4).toString("hex");
 
 /** 0010 + 0011 tabloları (0012 tabloları documents-qa'da). */
@@ -271,7 +271,7 @@ describe("Faz 2 şeması — tenant izolasyonu (wms_app, RLS)", () => {
         [B.tenantId, randomUUID(), `O${rnd()}`],
       ],
     ];
-    for (const [name, sql, p] of cases) expectRejected(await appOne(A.tenantId, sql, p), [INSUFFICIENT_PRIVILEGE], `${name} (A bağlamı, B anahtarı)`, RLS_MESSAGE);
+    for (const [name, sql, p] of cases) expectRejected(await appOne(A.tenantId, sql, p), [INSUFFICIENT_PRIVILEGE], `${name} (A bağlamı, B anahtarı)`, RLS_POLICY_MESSAGE);
   });
 
   it("@AC-04 A bağlamında B satırına UPDATE 0 satır etkiler (sahip: kontrol A satırı ≥1) — warehouses, locations, items, lots, handling_units", async () => {
