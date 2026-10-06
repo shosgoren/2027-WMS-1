@@ -237,4 +237,23 @@ jobs:
           flyctl status --app "$FLY_APP"
           flyctl status --app "$FLY_APP" --json > "$RUNNER_TEMP/fly-status.json"
       - name: Smoke
+        id: smoke
         run: node scripts/deploy-smoke.mjs --url "$HEALTH_URL" --status-file "$RUNNER_TEMP/fly-status.json"
+      # T-106c: Smoke kırmızıysa başlamamış worker makinelerinin son logları + olay özeti, satır bazında maskeli
+      # (betik: bilinen kalıplar + FLY_API_TOKEN değeri; çıktı `worker| ` önekli). Bu adım HİÇBİR ZAMAN işi yeşile çevirmez:
+      # Smoke zaten kırmızıdır; teşhis hatası yalnızca not düşer.
+      - name: Worker diagnostics (masked)
+        if: always() && steps.smoke.outcome == 'failure'
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          ids=$(node scripts/deploy-smoke.mjs worker-ids --status-file "$RUNNER_TEMP/fly-status.json" || true)
+          if [ -z "$ids" ]; then
+            echo "worker-diag: başlamamış worker makinesi bulunamadı (grup boş ya da durum dosyası okunamadı)"
+          fi
+          for id in $ids; do
+            echo "::group::worker logları $id (son 200 satır, maskeli)"
+            flyctl logs --app "$FLY_APP" --machine "$id" --no-tail 2>&1 | node scripts/deploy-smoke.mjs mask-logs --max-lines 200 || echo "worker-diag: log alınamadı"
+            echo "::endgroup::"
+          done
+          exit 0

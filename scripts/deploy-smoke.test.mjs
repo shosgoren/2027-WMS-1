@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { checkHealth, checkProcessGroup, evaluateHealth, parseArgs, summaryLine } from "./deploy-smoke.mjs";
+import { randomBytes } from "node:crypto";
+import { checkHealth, checkProcessGroup, describeStoppedMachines, evaluateHealth, maskLine, maskLogs, parseArgs, summaryLine } from "./deploy-smoke.mjs";
 
 const URL_OK = "https://etkin-wms-staging.fly.dev/api/health";
 
@@ -239,5 +240,81 @@ describe("parseArgs", () => {
 describe("summaryLine", () => {
   it("iki sonucu tek satırda özetler", () => {
     expect(summaryLine({ ok: true, reason: "" }, { ok: false, reason: "" })).toBe("deploy-smoke: web OK · worker FAIL");
+  });
+});
+
+describe("worker teşhisi (T-106c) — maskeleme", () => {
+  // Sahte değerler çalışma anında üretilir (literal sır yok).
+  const rnd = () => randomBytes(24).toString("hex");
+
+  it("bağlantı URI'si, sır atamaları, Bearer ve bilinen token maskelenir; öneki korunur", () => {
+    const pw = rnd();
+    const tok = `tok${rnd()}`;
+    const seal = rnd();
+    const lines = [
+      `{"msg":"queue start failed","url":"postgresql://wms_worker:${pw}@ep-x.eu-central-1.aws.neon.tech/db?sslmode=require"}`,
+      `QUEUE_SEAL_KEY=${seal} BETTER_AUTH_SECRET="${pw}"`,
+      `Authorization: Bearer ${tok}`,
+      `token leaked ${tok} here`,
+    ];
+    for (const l of lines) {
+      const out = maskLine(l, [tok]);
+      expect(out.startsWith("worker| ")).toBe(true);
+      for (const secret of [pw, tok, seal]) expect(out).not.toContain(secret);
+      expect(out).toContain("[MASKED]");
+    }
+  });
+
+  it("zararsız metin korunur; https bağlantısı (kimlik bilgisiz) maskelenmez", () => {
+    expect(maskLine('{"level":"error","msg":"invalid configuration","error":"DATABASE_URL_WORKER tanımlı değil"}')).toContain(
+      "DATABASE_URL_WORKER tanımlı değil",
+    );
+    expect(maskLine("see https://fly.io/docs/x")).toBe("worker| see https://fly.io/docs/x");
+  });
+
+  it("satır başındaki :: iş akışı komutu olamaz; ANSI/kontrol karakterleri temizlenir", () => {
+    const out = maskLine("::add-mask::x \u001b[31mred\u001b[0m\u0007");
+    expect(out.startsWith("worker| ::")).toBe(true);
+    expect(out).not.toMatch(/\u001b|\u0007/);
+  });
+
+  it("yalnızca son N satır yazılır; toplam sayı döner", () => {
+    const text = Array.from({ length: 250 }, (_, i) => `satır ${i}`).join("\n") + "\n";
+    const r = maskLogs(text, { maxLines: 200 });
+    expect(r.lines).toHaveLength(200);
+    expect(r.total).toBe(250);
+    expect(r.lines[0]).toBe("worker| satır 50");
+    expect(r.lines.at(-1)).toBe("worker| satır 249");
+  });
+
+  it("boş log → sıfır satır", () => {
+    expect(maskLogs("")).toEqual({ lines: [], total: 0 });
+  });
+});
+
+describe("describeStoppedMachines (T-106c)", () => {
+  const status = JSON.stringify({
+    Machines: [
+      { id: "80e32da6490958", state: "stopped", config: { metadata: { fly_process_group: "worker" }, guest: { memory_mb: 256 }, env: { X: "gizli" } },
+        events: [{ type: "exit", status: "stopped", request: { exit_event: { exit_code: 1, oom_killed: false, requested_stop: false } } }] },
+      { id: "148e1234abcdef", state: "stopped", config: { metadata: { fly_process_group: "web" } } },
+      { id: "aaaa1111bbbb22", state: "started", config: { metadata: { fly_process_group: "worker" } } },
+    ],
+  });
+
+  it("yalnızca başlamamış worker makineleri; olay özeti, env yok", () => {
+    const r = describeStoppedMachines(status);
+    expect(r.map((m) => m.id)).toEqual(["80e32da6490958"]);
+    const text = r[0]?.summary.join("\n") ?? "";
+    expect(text).toContain("exit_code=1");
+    expect(text).toContain("oom_killed=false");
+    expect(text).toContain("memory_mb=256");
+    expect(text).not.toContain("gizli");
+  });
+
+  it("bozuk JSON → boş; güvensiz kimlik atlanır", () => {
+    expect(describeStoppedMachines("{")).toEqual([]);
+    const bad = JSON.stringify({ Machines: [{ id: "x; rm -rf", state: "stopped", config: { metadata: { fly_process_group: "worker" } } }] });
+    expect(describeStoppedMachines(bad)).toEqual([]);
   });
 });
