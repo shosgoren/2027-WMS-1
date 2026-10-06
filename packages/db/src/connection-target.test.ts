@@ -13,13 +13,18 @@ describe("sameConnectionTarget", () => {
     expect(sameConnectionTarget(base, "postgresql://u:p@db.example:5432/x")).toBe(false);
   });
 
-  it("falls back to raw equality for unparsable URLs", () => {
+  it("fails closed (treated as the same target) for unparsable URLs", () => {
     expect(sameConnectionTarget("not a url", "not a url")).toBe(true);
-    expect(sameConnectionTarget("not a url", "other")).toBe(false);
+    expect(sameConnectionTarget("not a url", "other")).toBe(true);
   });
 
-  it("parseTarget decodes user/db and defaults the port", () => {
-    expect(parseTarget("postgresql://us%40er:p@Host/d%62")).toEqual({ host: "host", port: "5432", user: "us@er", db: "db" });
+  it("parseTarget decodes the user (as the driver does), defaults the port", () => {
+    expect(parseTarget("postgresql://us%40er:p@Host/d%62")).toEqual({
+      hosts: [{ host: "host", port: "5432" }],
+      user: "us@er",
+      db: "d%62", // sürücü veritabanı adını çözmez; sertleştirilmiş sürüm sürücüyle birebir
+      hasUnsafeQuery: false,
+    });
     expect(parseTarget("%%%")).toBeUndefined();
   });
 });

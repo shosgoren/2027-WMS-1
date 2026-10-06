@@ -15,7 +15,7 @@ import { parseTarget, sameConnectionTarget } from "./connection-target.ts";
 export type { ConnectionTarget } from "./connection-target.ts";
 
 // Geriye dönük uyum: yardımcı yan etkisiz `connection-target.ts` modülündedir (index.ts migrate.ts'i içe aktarmaz).
-export { sameConnectionTarget };
+export { parseTarget, sameConnectionTarget };
 
 export const MIGRATIONS_DIR = fileURLToPath(new URL("../migrations", import.meta.url));
 
