@@ -9,7 +9,8 @@
     "./identity/invitations": "./src/identity/invitations.ts",
     "./identity/memberships": "./src/identity/memberships.ts",
     "./onboarding/workspace": "./src/onboarding/workspace.ts",
-    "./onboarding/templates": "./src/onboarding/templates.ts"
+    "./onboarding/templates": "./src/onboarding/templates.ts",
+    "./demo/seed": "./src/demo/seed.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"

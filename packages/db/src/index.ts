@@ -54,3 +54,5 @@ export type { AppendedAudit, AuditAction, AuditEntry, JsonValue, SecurityEventIn
 export type { AuditLog, NewAuditLog, NewRequestRateLimit, RequestRateLimit } from "./schema/audit.ts";
 // Bağlantı hedefi karşılaştırması (connection-target.ts, yan etkisiz): kuyruk kurulum CLI'ı uygulama bağlantısını reddetmek için kullanır.
 export { sameConnectionTarget } from "./connection-target.ts";
+// Demo tenant kimliği (T-123): slug'tan türetilen sabit; worker ve domain aynı sabiti kullanır. `ensureDemoTenant` yalnızca migrate.ts'tedir.
+export { DEMO_TENANT_ID, DEMO_TENANT_NAME, DEMO_TENANT_NAMESPACE, DEMO_TENANT_SLUG, demoModeEnabled, uuidV5 } from "./demo-tenant.ts";
