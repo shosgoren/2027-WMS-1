@@ -425,11 +425,15 @@ CREATE FUNCTION public.documents_write_status_history() RETURNS trigger
   SET search_path = pg_catalog, pg_temp
 AS $fn$
 BEGIN
-  INSERT INTO public.document_status_history (tenant_id, document_id, from_status, to_status, actor_user_id)
+  INSERT INTO public.document_status_history (tenant_id, document_id, from_status, to_status, actor_user_id, reason)
   VALUES (NEW.tenant_id, NEW.id,
           CASE WHEN TG_OP = 'UPDATE' THEN OLD.status ELSE NULL END,
           NEW.status,
-          NULLIF(pg_catalog.current_setting('app.current_user_id', true), '')::uuid);
+          -- Kullanıcı bağlamı yoksa (worker/sistem geçişi) işletmeyi isteyen kullanıcı: posting_requested_by POSTED'da temizlenir,
+          -- OLD değeri denetim izinde korunur. Gerekçe geçiş anındaki belge gerekçesidir (satır değişmez, sonraki geçiş etkilemez).
+          COALESCE(NULLIF(pg_catalog.current_setting('app.current_user_id', true), '')::uuid,
+                   CASE WHEN TG_OP = 'UPDATE' THEN OLD.posting_requested_by ELSE NULL END),
+          NEW.reason);
   RETURN NULL;
 END
 $fn$;
@@ -547,7 +551,7 @@ GRANT UPDATE (line_no, item_id, unit_id, quantity, conversion_factor, base_quant
 -- Sütun düzeyi INSERT yalnızca documents tetikleyici yolu içindir (doğrudan INSERT AFTER tetikleyicisiyle 42501, MINOR-3); created_xid/
 -- occurred_at listede YOK. UPDATE/DELETE yetkisi yok.
 GRANT SELECT ON public.document_status_history TO wms_app;
-GRANT INSERT (tenant_id, id, document_id, from_status, to_status, actor_user_id) ON public.document_status_history TO wms_app;
+GRANT INSERT (tenant_id, id, document_id, from_status, to_status, actor_user_id, reason) ON public.document_status_history TO wms_app;
 
 GRANT SELECT ON public.idempotency_records TO wms_app;
 GRANT INSERT (tenant_id, id, command_type, client_key, actor_user_id, request_hash, status, result, error_code, http_status, completed_at)
