@@ -16,12 +16,14 @@ import { DB_CLIENT_SETTINGS, createTenantContext, type DbClient } from "../../..
 import {
   QUEUE_SCHEMA,
   consumeOnce,
+  deliverExternalOnce,
   createJobQueue,
   installQueueSchema,
+  workerPrincipal,
   type PgBossJobQueue,
   type TenantTx,
 } from "../../../packages/queue-adapter/src/index.ts";
-import { JOB_TYPES, QueueError, parseJob } from "../../../packages/shared/src/queue.ts";
+import { JOB_TYPES, PLATFORM_NO_USER_ID, QueueError, parseJob } from "../../../packages/shared/src/queue.ts";
 import { readIntEnv, readWorkerDatabaseUrl } from "../harness/env.ts";
 
 // `drizzle-orm` yalnızca paketlerin bağımlılığıdır; kökten çözülemez → packages/db çözümleyicisi.
@@ -32,7 +34,7 @@ const env = readIntEnv(process.env);
 const workerUrl = readWorkerDatabaseUrl(process.env);
 const CONSUMER = "t214.effect";
 const EFFECTS = "t214_effects";
-const NIL_USER = "00000000-0000-0000-0000-000000000000";
+const NIL_USER = PLATFORM_NO_USER_ID;
 
 let admin: pg.Client;
 let client: DbClient;
@@ -246,5 +248,60 @@ describe("Faz 2 iş türleri", () => {
     }
     expect(deferred).toContain('"stock.document.post"');
     expect(deferred).toContain('"stock.consistency.check"');
+  });
+});
+
+describe("platform işlemi actor kuralı (MINOR-8)", () => {
+  it("sıfır UUID kimlikli işlemde actor'suz enqueue reddedilir; açık geçerli actor geçer; sıfır UUID actor reddedilir", async () => {
+    const tenantId = await mkTenant();
+    const q = queueFor();
+    await q.start();
+    const actor = randomUUID();
+    const result = await withTenant(createTenantContext(client, tenantId), async (tx) => {
+      await tx.execute(sql`SELECT set_config('app.current_user_id', ${NIL_USER}, true)`);
+      const noActor = await q.enqueue(tx, { type: "demo.reseed", payload: {} }).catch((e: unknown) => e);
+      const nilActor = await q.enqueue(tx, { type: "demo.reseed", payload: {}, actorUserId: NIL_USER }).catch((e: unknown) => e);
+      const ok = await q.enqueue(tx, { type: "demo.reseed", payload: {}, actorUserId: actor });
+      return { noActor, nilActor, ok };
+    });
+    expect(result.noActor).toMatchObject({ code: "VALIDATION_FAILED" });
+    expect(result.nilActor).toMatchObject({ code: "VALIDATION_FAILED" });
+    expect(result.ok.jobId).not.toBeNull();
+    const row = await admin.query(`SELECT data FROM ${QUEUE_SCHEMA}.job WHERE id = $1`, [result.ok.jobId]);
+    expect(row.rows[0].data).toMatchObject({ actorUserId: actor });
+  });
+});
+
+describe("workerPrincipal sıfır UUID", () => {
+  it("sıfır UUID principal olamaz (VALIDATION_FAILED)", () => {
+    expect(() => workerPrincipal(NIL_USER)).toThrow(QueueError);
+  });
+});
+
+describe("e-posta: eşzamanlı çift teslim (MINOR-7; yalnızca e-posta, davet için garanti verilmez)", () => {
+  it("aynı iş iki eşzamanlı teslim → processed_events tek satır; sağlayıcıya her çağrı aynı anahtarla", async () => {
+    const jobId = randomUUID();
+    const keys: string[] = [];
+    const ctx = {
+      jobId,
+      hasTenant: false,
+      inTenant: () => Promise.reject(new Error("platform job")),
+      inPlatform: <R>(fn: (tx: unknown) => Promise<R>) => withUser(client, NIL_USER, (tx) => fn(tx)),
+    };
+    const call = async (key: string) => {
+      keys.push(key);
+      await new Promise((r) => setTimeout(r, 50));
+    };
+    try {
+      await Promise.all([deliverExternalOnce(ctx, "email.send", call), deliverExternalOnce(ctx, "email.send", call)]);
+      const rows = await admin.query("SELECT 1 FROM public.processed_events WHERE tenant_id IS NULL AND consumer = 'email.send' AND event_id = $1", [jobId]);
+      expect(rows.rows).toHaveLength(1);
+      expect(keys.length).toBeGreaterThanOrEqual(1);
+      expect(keys.every((k) => k === jobId)).toBe(true);
+      // Sonraki teslim çağrı yapmaz.
+      expect(await deliverExternalOnce(ctx, "email.send", call)).toBe(false);
+    } finally {
+      await admin.query("DELETE FROM public.processed_events WHERE tenant_id IS NULL AND event_id = $1", [jobId]);
+    }
   });
 });
