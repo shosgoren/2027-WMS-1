@@ -140,8 +140,8 @@ function checkPgbouncer() {
   if (!ul.ok) {
     return { name: "pgbouncer", ok: false, reason: `userlist okunamadı: ${ul.stderr}` };
   }
-  if (ul.stdout.trim() !== "3 0") {
-    return { name: "pgbouncer", ok: false, reason: `userlist beklenen "3 0" (satır, SCRAM olmayan), gelen "${ul.stdout.trim()}"` };
+  if (ul.stdout.trim() !== "4 0") {
+    return { name: "pgbouncer", ok: false, reason: `userlist beklenen "4 0" (satır, SCRAM olmayan), gelen "${ul.stdout.trim()}"` };
   }
   // 2) Yönetim konsolu: pool_mode = transaction.
   const c = execIn(
