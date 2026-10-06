@@ -83,3 +83,9 @@
 - T-129 (izleme): log maskeleme, request ID, derin sağlık, uptime.yml. İnceleme 1·2·7 — kimliksiz ReDoS (proxy her istekte maskeleme regex'i), sağlık yoklaması havuzu tüketebiliyor, gömülü key:value maskelenmiyor → düzeltiliyor; sığ /api/health/live Fly için.
 - Entegrasyon düzeltmeleri (dilim birleşiminde tekrar): T-117b×T-116b memberships.ts `tenantId: null`; T-115c×T-116c STACK.md; T-116c×T-127 actions.ts (kip denetimi önce, limitVerifiedTenant sonra) + actions.test.ts hız sınırı/tenant mock'ları.
 - Kayıtlar: A-62, A-63, A-64; T-123a, T-127b kartları; T-105 (Fly-Client-IP, DEMO_PASSWORD, prod migrate ortamı), T-106 (staging migrate/DEMO_*), T-131 notları.
+
+## 2026-10-06 06:45Z — Supervisor turu
+- E-03 sürüyor (06:41Z 3 s'de FAIL). Kullanıcı kararı bekleniyor (Actions bütçesi / public).
+- HAZIR: T-123a e002035 (Dockerfile korunan; son kontrol 0·0·1 → T-106 staging demo/argon2 doğrulaması), T-129 ce74c03 (ReDoS BLOCKER kapandı; maskeleme turları 1·2·7 → 0·0·6 → 0·0·3 → kapandı; uptime.yml son rapor sonrası değişmedi), T-122a eeb6c60 (A-65; now genel API'den çıktı).
+- T-122: landing, demo girişi (demo-config ortak karar, DEMO_EMAIL_DOMAIN fail-closed), sihirbaz (POST + httpOnly taslak çerezi, sabit requestId, guard), ana ekran + "Bugün yaptıkların" + ayarlar (47 IANA saat dilimi sabit listesi); inceleme turları 0·1·6 → 0·0·3 → 0·0·2; son tur sürüyor.
+- Yeni kartlar: T-122a. Kayıtlar: A-65; T-106, T-131 notları (layout next hedefi, demo giriş sayacı, maskeli members logu, saat dilimi tek kaynak, toplam karakter bütçesi, CSP oturumlu denetim, isProductionEnv tek kaynak).
