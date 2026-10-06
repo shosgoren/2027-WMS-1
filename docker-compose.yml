@@ -14,6 +14,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD .env içinde tanımlı olmalı}
       POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB .env içinde tanımlı olmalı}
       WMS_APP_PASSWORD: ${WMS_APP_PASSWORD:?WMS_APP_PASSWORD .env içinde tanımlı olmalı}
+      WMS_AUTH_PASSWORD: ${WMS_AUTH_PASSWORD:?WMS_AUTH_PASSWORD .env içinde tanımlı olmalı}
     ports:
       - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
@@ -30,19 +31,46 @@ services:
       retries: 20
       start_period: 10s
 
+  # T-101c: PgBouncer userlist'i açık metin parola YERİNE SCRAM-SHA-256 verifier içerir. Tek seferlik
+  # servis, postgres imajında (psql/perl var; PgBouncer imajında yok) verifier'ları hazırlayıp
+  # paylaşılan birime 0600 (sahibi pgbouncer imajının uid 70'i) yazar; yalnızca pgbouncer bu birimi
+  # salt okunur bağlar. Yalnızca yerel/CI: staging/prod Neon pooler'ını kullanır; PgBouncer compose
+  # dışına çıkarsa kart yeniden açılır (T-101c).
+  pgbouncer-userlist:
+    image: postgres:18.6-trixie
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "/scripts/make-verifier.sh"]
+    environment:
+      # wms_app/wms_auth verifier'ı sunucudaki pg_authid'den kopyalanır (PgBouncer SCRAM pass-through
+      # sunucuyla aynı tuzu ister); bu yüzden bu servis o rollerin parolasını bilmez. Bootstrap
+      # parolası libpq ortamıyla (PGPASSWORD) verilir, argv'ye girmez.
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD .env içinde tanımlı olmalı}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER .env içinde tanımlı olmalı}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB .env içinde tanımlı olmalı}
+      PGBOUNCER_ADMIN_PASSWORD: ${PGBOUNCER_ADMIN_PASSWORD:?PGBOUNCER_ADMIN_PASSWORD .env içinde tanımlı olmalı}
+    volumes:
+      - ./infra/pgbouncer/make-verifier.sh:/scripts/make-verifier.sh:ro
+      - pgbouncer-auth:/out
+
   pgbouncer:
     image: edoburu/pgbouncer:v1.26.0-p0
     depends_on:
       postgres:
         condition: service_healthy
+      pgbouncer-userlist:
+        condition: service_completed_successfully
     environment:
       POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB .env içinde tanımlı olmalı}
-      WMS_APP_PASSWORD: ${WMS_APP_PASSWORD:?WMS_APP_PASSWORD .env içinde tanımlı olmalı}
+      # Yalnızca healthcheck/duman testi yönetim konsoluna bağlanmak için; userlist'te SCRAM verifier'dır.
       PGBOUNCER_ADMIN_PASSWORD: ${PGBOUNCER_ADMIN_PASSWORD:?PGBOUNCER_ADMIN_PASSWORD .env içinde tanımlı olmalı}
       PGBOUNCER_DEFAULT_POOL_SIZE: ${PGBOUNCER_DEFAULT_POOL_SIZE:-20}
       PGBOUNCER_MAX_PREPARED_STATEMENTS: ${PGBOUNCER_MAX_PREPARED_STATEMENTS:-1000}
-    # İmajın kendi entrypoint'i yerine: şablon ini'yi doldur, userlist'i üret, pgbouncer'ı başlat.
-    # Üretilen dosyalar yalnızca konteyner içinde /tmp/pgbouncer altındadır (0600).
+    # İmajın kendi entrypoint'i yerine: şablon ini'yi doldur ve pgbouncer'ı başlat. Userlist
+    # /auth/userlist.txt (pgbouncer-userlist servisi, SCRAM verifier); wms_app/wms_auth parolası
+    # bu serviste hiç bulunmaz. İstemci SCRAM'ı sunucuya pass-through edilir (PgBouncer 1.26).
     entrypoint:
       - /bin/sh
       - -ec
@@ -50,21 +78,18 @@ services:
         case "$$PGBOUNCER_DEFAULT_POOL_SIZE" in ''|*[!0-9]*) echo "PGBOUNCER_DEFAULT_POOL_SIZE sayı olmalı" >&2; exit 1;; esac
         case "$$PGBOUNCER_MAX_PREPARED_STATEMENTS" in ''|*[!0-9]*) echo "PGBOUNCER_MAX_PREPARED_STATEMENTS sayı olmalı" >&2; exit 1;; esac
         case "$$POSTGRES_DB" in ''|*[!A-Za-z0-9_]*) echo "POSTGRES_DB yalnızca harf/rakam/_ içerebilir" >&2; exit 1;; esac
-        case "$$WMS_APP_PASSWORD$$PGBOUNCER_ADMIN_PASSWORD" in *'"'*) echo "parolalar çift tırnak içeremez" >&2; exit 1;; esac
         umask 077
         mkdir -p /tmp/pgbouncer
         sed -e "s/__POSTGRES_DB__/$$POSTGRES_DB/g" \
             -e "s/__DEFAULT_POOL_SIZE__/$$PGBOUNCER_DEFAULT_POOL_SIZE/g" \
             -e "s/__MAX_PREPARED_STATEMENTS__/$$PGBOUNCER_MAX_PREPARED_STATEMENTS/g" \
             /etc/pgbouncer-template/pgbouncer.ini > /tmp/pgbouncer/pgbouncer.ini
-        printf '"%s" "%s"\n' \
-          wms_app "$$WMS_APP_PASSWORD" \
-          pgbouncer_admin "$$PGBOUNCER_ADMIN_PASSWORD" > /tmp/pgbouncer/userlist.txt
         exec /usr/bin/pgbouncer /tmp/pgbouncer/pgbouncer.ini
     ports:
       - "127.0.0.1:${PGBOUNCER_HOST_PORT:-6432}:6432"
     volumes:
       - ./infra/pgbouncer/pgbouncer.ini:/etc/pgbouncer-template/pgbouncer.ini:ro
+      - pgbouncer-auth:/auth:ro
     healthcheck:
       test: ["CMD-SHELL", "PGPASSWORD=\"$$PGBOUNCER_ADMIN_PASSWORD\" psql -h 127.0.0.1 -p 6432 -U pgbouncer_admin -d pgbouncer -XAtqc 'SHOW VERSION' >/dev/null"]
       interval: 5s
@@ -109,3 +134,4 @@ services:
 volumes:
   postgres-data:
   minio-data:
+  pgbouncer-auth:

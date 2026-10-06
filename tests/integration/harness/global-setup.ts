@@ -8,13 +8,17 @@
 // URL'leri testlere ortam değişkeniyle verilir (çalışan süreçler globalSetup'tan sonra başlar ve
 // process.env'i devralır). Sonunda ortam volume'larıyla birlikte indirilir.
 //
-// neon hedefi: hiçbir şey kaldırılmaz; DATABASE_URL ve DATABASE_URL_DIRECT zorunludur, eksikse
+// neon hedefi: hiçbir şey kaldırılmaz; DATABASE_URL, DATABASE_URL_DIRECT ve AUTH_DATABASE_URL zorunludur, eksikse
 // koşu açık hatayla düşer (atlama yok). URL'ler loglanmaz; yalnızca maskeli host (G-09).
+//
+// Her iki hedefte testlerden önce `migrate up` (migration rolü, DATABASE_URL_DIRECT) uygulanır
+// (T-101, ADR-015 §8); hata varsa koşu testlerden önce düşer.
 import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DockerComposeEnvironment, Wait, type StartedDockerComposeEnvironment } from "testcontainers";
-import { APP_ROLE, PGBOUNCER_ADMIN_URL_VAR, maskHost, parsePoolSize, parsePrepare, parseTarget, readIntEnv } from "./env.ts";
+import { migrateUp } from "../../../packages/db/src/migrate.ts";
+import { APP_ROLE, AUTH_ROLE, PGBOUNCER_ADMIN_URL_VAR, maskHost, parsePoolSize, parsePrepare, parseTarget, readAuthDatabaseUrl, readIntEnv, redactErrorChain } from "./env.ts";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const SERVICES = ["postgres", "pgbouncer"];
@@ -37,7 +41,9 @@ export async function setup(): Promise<void> {
 
   if (target === "neon") {
     const env = readIntEnv(process.env);
-    console.log(`[test:int] target=neon app=${maskHost(env.databaseUrl)} direct=${maskHost(env.databaseUrlDirect)}`);
+    const authUrl = readAuthDatabaseUrl(process.env);
+    console.log(`[test:int] target=neon app=${maskHost(env.databaseUrl)} auth=${maskHost(authUrl)} direct=${maskHost(env.databaseUrlDirect)}`);
+    await applyMigrations(env.databaseUrlDirect);
     return;
   }
 
@@ -46,6 +52,7 @@ export async function setup(): Promise<void> {
   const db = "wms";
   const migratorPassword = secret();
   const appPassword = secret();
+  const authPassword = secret();
   const adminPassword = secret();
 
   environment = await new DockerComposeEnvironment(REPO_ROOT, "docker-compose.yml")
@@ -56,6 +63,7 @@ export async function setup(): Promise<void> {
       POSTGRES_PASSWORD: migratorPassword,
       POSTGRES_DB: db,
       WMS_APP_PASSWORD: appPassword,
+      WMS_AUTH_PASSWORD: authPassword,
       PGBOUNCER_ADMIN_PASSWORD: adminPassword,
       PGBOUNCER_DEFAULT_POOL_SIZE: String(poolSize),
       POSTGRES_HOST_PORT: "0",
@@ -66,24 +74,36 @@ export async function setup(): Promise<void> {
     .up(SERVICES);
 
   try {
-    exportUrls(environment, { migratorUser, migratorPassword, appPassword, adminPassword, db, poolSize });
+    exportUrls(environment, { migratorUser, migratorPassword, appPassword, authPassword, adminPassword, db, poolSize });
+    await applyMigrations(process.env.DATABASE_URL_DIRECT ?? "");
   } catch (e) {
     await teardown();
     throw e;
   }
 }
 
+async function applyMigrations(directUrl: string): Promise<void> {
+  let r;
+  try {
+    r = await migrateUp({ url: directUrl });
+  } catch (e) {
+    throw new Error(`[test:int] migrate up failed: ${redactErrorChain(e, [directUrl])}`);
+  }
+  console.log(`[test:int] migrate up: ${r.applied.length} uygulandı, toplam ${r.totalApplied}`);
+}
+
 interface Credentials {
   migratorUser: string;
   migratorPassword: string;
   appPassword: string;
+  authPassword: string;
   adminPassword: string;
   db: string;
   poolSize: number;
 }
 
 function exportUrls(started: StartedDockerComposeEnvironment, c: Credentials): void {
-  const { migratorUser, migratorPassword, appPassword, adminPassword, db, poolSize } = c;
+  const { migratorUser, migratorPassword, appPassword, authPassword, adminPassword, db, poolSize } = c;
   const postgres = started.getContainer("postgres-1");
   const pgbouncer = started.getContainer("pgbouncer-1");
   const pgHost = postgres.getHost();
@@ -93,12 +113,13 @@ function exportUrls(started: StartedDockerComposeEnvironment, c: Credentials): v
 
   process.env.WMS_INT_TARGET = "compose";
   process.env.DATABASE_URL = pgUrl(APP_ROLE, appPassword, pbHost, pbPort, db);
+  process.env.AUTH_DATABASE_URL = pgUrl(AUTH_ROLE, authPassword, pbHost, pbPort, db);
   process.env.DATABASE_URL_DIRECT = pgUrl(migratorUser, migratorPassword, pgHost, pgPort, db);
   process.env[PGBOUNCER_ADMIN_URL_VAR] = pgUrl("pgbouncer_admin", adminPassword, pbHost, pbPort, "pgbouncer");
   process.env.INT_PGBOUNCER_POOL_SIZE = String(poolSize);
 
   console.log(
-    `[test:int] target=compose services=${SERVICES.join("+")} pgbouncer=${maskHost(process.env.DATABASE_URL)} ` +
+    `[test:int] target=compose services=${SERVICES.join("+")} pgbouncer=${maskHost(process.env.DATABASE_URL)} auth=${maskHost(process.env.AUTH_DATABASE_URL)} ` +
       `postgres=${maskHost(process.env.DATABASE_URL_DIRECT)} default_pool_size=${poolSize}`,
   );
 }
