@@ -155,3 +155,52 @@ export function buildPostingPlan(kind: PostingKind, lines: readonly PostingLine[
   const serialIds = [...new Set(dimensions.flatMap((d) => (d.serialId === null ? [] : [d.serialId])))].sort(cmp);
   return { entries, dimensions, locationIds, serialIds, outTotals, net };
 }
+
+// --- rezervasyon bölüştürme (T-221; saf) ----------------------------------------------------------------------------------
+/** Bir rezervasyon dilimi: kimlik + aktif miktar (1e-6 ölçekli). */
+export interface ReservationSlice {
+  readonly id: string;
+  readonly quantity: bigint;
+}
+/** Bir rezervasyondan alınan pay. `rest` = alındıktan sonra aktif kalan (0 ⇒ tamamı kapanır). */
+export interface ReservationTake {
+  readonly id: string;
+  readonly take: bigint;
+  readonly rest: bigint;
+}
+
+/**
+ * `amount` miktarını dilimlere KİMLİĞE GÖRE ARTAN sırayla dağıtır (deterministik; kilit sırasıyla aynı). Her dilimden en çok kendi miktarı alınır;
+ * pay 0 olan dilim listeye girmez. Toplam yetmezse ya da `amount ≤ 0` ise `VALIDATION_FAILED` (sessiz kısaltma yok).
+ */
+export function allocateAcross(slices: readonly ReservationSlice[], amount: bigint): ReservationTake[] {
+  if (amount <= 0n) throw invalid();
+  const out: ReservationTake[] = [];
+  let left = amount;
+  for (const s of [...slices].sort((a, b) => cmp(a.id, b.id))) {
+    if (left === 0n) break;
+    if (s.quantity <= 0n) continue;
+    const take = s.quantity < left ? s.quantity : left;
+    out.push({ id: s.id, take, rest: s.quantity - take });
+    left -= take;
+  }
+  if (left !== 0n) throw invalid();
+  return out;
+}
+
+/** Satır başına rezervasyon üst sınırı (05 §Rezervasyon: toplam ≤ satır miktarı): kalan tahsis edilebilir miktar (negatif olamaz). */
+export function remainingToReserve(lineBaseQuantity: bigint, activeReserved: bigint): bigint {
+  const r = lineBaseQuantity - activeReserved;
+  return r < 0n ? 0n : r;
+}
+
+/**
+ * Yeterlilik görünümü için rezerve düzeltmesi (16 kural 5 + T-221 madde 4): işlenen satırın KENDİ rezervasyonu o boyutun
+ * `reserved`'ından düşülür, böylece `quantity − (reserved − kendi rezervasyonu) ≥ çıkış`. Negatife inemez.
+ */
+export function reservedExcluding(reserved: bigint, own: bigint): bigint {
+  if (own < 0n) throw invalid();
+  // Satırın kendi rezervasyonu boyutun rezerve toplamından büyük olamaz (DB denetimi Σ ACTIVE = reserved): bütünlük ihlali, sessiz kırpma yok.
+  if (own > reserved) throw new AppError("INTERNAL");
+  return reserved - own;
+}

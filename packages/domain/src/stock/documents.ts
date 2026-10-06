@@ -24,6 +24,7 @@ import { pgUuidArray } from "../warehouse/scope.ts";
 import { EMPTY_LOCK_PLAN, executeStockCommand, type StockCommandOutcome, type StockCommandParams } from "./command.ts";
 import type { StockCommandResult, StockResultLine } from "./idempotency.ts";
 import { yearOfBusinessDate } from "./numbering.ts";
+import { readCancellationLockSet, releaseForCancellation } from "./reservations.ts";
 
 /** Çağıran bağlamı: izin komuta bağlıdır; `clientKey` her komutta zorunludur (A-73). */
 export type StockDocCallParams = Omit<TenantAccessParams, "permission" | "recentAuth"> & {
@@ -567,7 +568,15 @@ export async function cancelDocument(
       commandType: "stock.document.cancel",
       permission: "document.create",
       input: hashInput,
-      plan: (tx, _i, m) => planFor(tx, m.tenantId, documentId, [], expectedVersion),
+      plan: async (tx, _i, m) => {
+        const base = await planFor(tx, m.tenantId, documentId, [], expectedVersion);
+        // T-221: açık rezervasyonlar iptalle aynı transaction'da bırakılır; kilit planı (boyutlar + rezervasyonlar) ÖNCEDEN tam bildirilir (I-15).
+        const open = await readCancellationLockSet(tx, m.tenantId, documentId);
+        return {
+          warehouseIds: [...base.warehouseIds, ...open.warehouseIds],
+          locks: { ...base.locks, dimensions: open.dimensions, reservationIds: open.reservationIds },
+        };
+      },
       apply: async (tx, locked, ctx) => {
         if (locked.document === undefined) throw new AppError("INTERNAL");
         const header = await readDocumentHeader(tx, ctx.tenantId, documentId);
@@ -576,19 +585,21 @@ export async function cancelDocument(
         // A-146 (Supervisor): DRAFT → CANCELLED `document.create` (komut izni); APPROVED → CANCELLED ayrıca `document.approve` ister.
         // Durum ancak kilitli okumadan sonra bilindiğinden ikinci izin burada, güncel üyelik rollerinden denetlenir.
         if (header.status === "APPROVED" && !hasPermission(ctx.membership.roles, "document.approve")) throw new AppError("FORBIDDEN");
+        // Stok tablosuna yazım `reservations.ts`'tedir (M-4); documents.ts yalnızca çağırır.
+        const released = await releaseForCancellation(tx, ctx.tenantId, locked, documentId);
         await tx.execute(
           sql`UPDATE public.documents SET status = 'CANCELLED', reason = ${reason ?? header.reason}
                WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${documentId}::uuid`,
         );
         return {
-          result: { documentId, status: "CANCELLED" },
+          result: { documentId, status: "CANCELLED", ...(released.length === 0 ? {} : { reservationIds: released }) },
           audit: {
             action: "stock_document.cancelled",
             entityType: "stock_document",
             entityId: documentId,
             reason,
             requestId: input.requestId ?? null,
-            changeSummary: { fromStatus: header.status, toStatus: "CANCELLED" },
+            changeSummary: { fromStatus: header.status, toStatus: "CANCELLED", releasedReservations: released.length },
           },
         };
       },
