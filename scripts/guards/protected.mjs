@@ -41,6 +41,7 @@ import {
   parseNameStatusZ,
   refExists,
   repoRoot,
+  treeEntries,
 } from "./lib/git.mjs";
 import { contextFromEnv, createGitHubClient, GitHubError } from "./lib/github.mjs";
 import { evaluateApproval, REASONS } from "./lib/approval.mjs";
@@ -133,7 +134,12 @@ function defaultTarget(root) {
  * @returns {string | null}
  */
 function revParse(root, rev) {
-  return refExists(root, rev) ? git(root, ["rev-parse", "--verify", `${rev}^{commit}`]).trim() : null;
+  try {
+    return git(root, ["rev-parse", "--verify", "--quiet", `${rev}^{commit}`]).trim();
+  } catch (e) {
+    if (!(e instanceof GitError)) throw e;
+    return null;
+  }
 }
 
 /**
@@ -156,26 +162,6 @@ function hasCommit(root, sha) {
 function protectedBetween(root, from, to) {
   const out = git(root, ["diff", "--name-status", "-z", "-M", "--no-relative", "--no-ext-diff", "--no-textconv", from, to, "--"]);
   return classifyChanges(parseNameStatusZ(out), { before: (f) => fileAtRef(root, from, f), after: (f) => fileAtRef(root, to, f) });
-}
-
-/**
- * `rev` ağacındaki `file` girdisi: `"<mod> <blob id>"`; yol yoksa `""` (silinme/yeni dosya = girdi
- * yokluğu). Metin farkına bakmaz: satır/blok taşıma, ikili dosya, `.gitattributes -diff`, kip
- * değişikliği (chmod +x) hepsi (mod, blob) çiftinde görünür (T-008k güvenlik MINOR/BLOCKER-1).
- * @param {string} root
- * @param {string} rev
- * @param {string} file
- * @returns {string}
- */
-function treeEntry(root, rev, file) {
-  const out = git(root, ["--literal-pathspecs", "ls-tree", "-z", rev, "--", file]);
-  for (const rec of out.split("\0")) {
-    const tab = rec.indexOf("\t");
-    if (tab < 0 || rec.slice(tab + 1) !== file) continue;
-    const [mode, type, id] = rec.slice(0, tab).split(" ");
-    return `${mode} ${type} ${id}`;
-  }
-  return "";
 }
 
 /**
@@ -219,16 +205,21 @@ export function securityFreshness(root, head, target) {
       const ownAtSha = protectedBetween(root, mbSha, sha).map((h) => h.path);
       const ownAtHead = protectedBetween(root, mbHead, head).map((h) => h.path);
       const between = protectedBetween(root, sha, head).map((h) => h.path);
-      const changed = [...new Set([...ownAtSha, ...ownAtHead, ...between])].filter((f) => {
-        const h = treeEntry(root, head, f);
-        const r = treeEntry(root, sha, f);
-        const b = treeEntry(root, target, f);
+      const candidates = [...new Set([...ownAtSha, ...ownAtHead, ...between])];
+      const headTree = treeEntries(root, head, candidates);
+      const reportTree = treeEntries(root, sha, candidates);
+      const baseTree = treeEntries(root, target, candidates);
+      const mbTree = treeEntries(root, mbSha, candidates);
+      const changed = candidates.filter((f) => {
+        const h = headTree.get(f) ?? "";
+        const r = reportTree.get(f) ?? "";
+        const b = baseTree.get(f) ?? "";
         // Fail-closed: aday yol (bir uçta değiştiği biliniyor) hiçbir uçta okunamadıysa doğrulanamadı = bayat.
         if (h === "" && r === "" && b === "") return true;
         if (h === r) return false;
         // head == taban yalnızca rapor anında PR bu yolu DEĞİŞTİRMEDİYSE (rapor == merge-base) taze;
         // PR'ın incelenen değişikliği sonradan tabana geri döndürüldüyse bayat (MINOR-1).
-        if (h === b) return r !== treeEntry(root, mbSha, f);
+        if (h === b) return r !== (mbTree.get(f) ?? "");
         return true;
       });
       if (changed.length > 0) return `rapordan sonra korunan değişiklik: ${changed.join(", ")}`;

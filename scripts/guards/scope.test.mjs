@@ -8,6 +8,7 @@ import { main } from "./cli.mjs";
 import {
   backtickSegmentsOutsideParens,
   cardIdFromBranch,
+  cardIdsFromTipSubjects,
   cardIntTarget,
   CardError,
   mergedWorkBranches,
@@ -320,6 +321,142 @@ describe("cli.mjs", () => {
     const lines = [];
     expect(await main(["scope", "--bilinmeyen"], { root: tmp(), log: (l) => lines.push(l) })).toBe(2);
     expect(lines[0]).toBe('check:scope HATA: bilinmeyen argüman "--bilinmeyen"');
+  });
+});
+
+describe("T-008l madde 2: hedeften birleşen içerik bu dalın değişikliği sayılmaz", () => {
+  /** T-104 (hedef int/dilim); main, int/dilim'den SONRA ilerler (README.md + docs/x.md); dal int/dilim'den açılır. */
+  function foreignFixture() {
+    const r = fixture();
+    r.write("docs/tasks/T-104.md", card("T-104", "`src/e.mjs`", "int/dilim")).commit("kart").publish("main");
+    r.branch("int/dilim").publish("int/dilim");
+    r.checkout("main").write("README.md", "main'de ilerledi\n").write("docs/x.md", "x\n").commit("main ilerler").publish("main");
+    r.checkout("int/dilim").branch("feat/T-104-z").write("src/e.mjs", "e\n").commit("iş");
+    return r;
+  }
+  const mergeMain = (/** @type {ReturnType<typeof foreignFixture>} */ r) =>
+    r.merge("origin/main", "Merge remote-tracking branch 'origin/main' into feat/T-104-z");
+
+  it("main'i birleştiren dal: main'den gelen dosyalar OUT_OF_SCOPE değildir", async () => {
+    const r = foreignFixture();
+    mergeMain(r);
+    const res = await check(r.dir);
+    expect(res.text).not.toContain("OUT_OF_SCOPE");
+    expect(res.code).toBe(0);
+  });
+
+  it("negatif: dalda yazılan kart dışı dosya birleştirmeden sonra da FAIL (foreign dosya sayılmaz)", async () => {
+    const r = foreignFixture();
+    r.write("src/c.mjs", "dalda yazıldı\n").commit("kart dışı");
+    mergeMain(r);
+    const res = await check(r.dir);
+    expect(res.code).toBe(1);
+    expect(res.text).toContain("FAIL OUT_OF_SCOPE src/c.mjs");
+    expect(res.text).not.toContain("OUT_OF_SCOPE README.md");
+    expect(res.text).not.toContain("OUT_OF_SCOPE docs/x.md");
+  });
+
+  it("negatif: birleşen dosyayı sonradan değiştirmek (içerik main'dekinden farklı) FAIL", async () => {
+    const r = foreignFixture();
+    mergeMain(r);
+    r.write("docs/x.md", "dalda değiştirildi\n").commit("sonradan");
+    const res = await check(r.dir);
+    expect(res.code).toBe(1);
+    expect(res.text).toContain("FAIL OUT_OF_SCOPE docs/x.md");
+    expect(res.text).not.toContain("OUT_OF_SCOPE README.md");
+  });
+
+  it("negatif: birleşen dosyanın commit'siz yerel düzenlemesi FAIL", async () => {
+    const r = foreignFixture();
+    mergeMain(r);
+    r.write("README.md", "yerel düzenleme\n");
+    const res = await check(r.dir);
+    expect(res.code).toBe(1);
+    expect(res.text).toContain("FAIL OUT_OF_SCOPE README.md");
+  });
+
+  it("negatif: kart dışı dosyayı SİLMEK (hedefte var) birleştirmeden sonra da FAIL", async () => {
+    const r = foreignFixture();
+    r.remove("src/c.mjs").commit("sil");
+    mergeMain(r);
+    const res = await check(r.dir);
+    expect(res.code).toBe(1);
+    expect(res.text).toContain("FAIL OUT_OF_SCOPE src/c.mjs");
+  });
+
+  it("negatif: dalda yazılan ve main'deki sürümden farklı kart dışı dosya (çakışmada dal sürümü seçildi) FAIL", async () => {
+    const r = foreignFixture();
+    r.write("docs/y.md", "dal-y\n").commit("y");
+    r.checkout("main").write("docs/y.md", "main-y\n").commit("main y").publish("main");
+    r.checkout("feat/T-104-z");
+    r.git("merge", "--quiet", "--no-ff", "-X", "ours", "-m", "Merge remote-tracking branch 'origin/main' into feat/T-104-z", "origin/main");
+    const res = await check(r.dir);
+    expect(res.code).toBe(1);
+    expect(res.text).toContain("FAIL OUT_OF_SCOPE docs/y.md");
+  });
+});
+
+describe("T-008l madde 3: kart keşfi", () => {
+  it("cardIdsFromTipSubjects: yalnızca tür(T-xxx): ve T-xxx: önekleri", () => {
+    expect(
+      cardIdsFromTipSubjects([
+        "fix(T-017): muafiyet",
+        "feat(T-008l)!: kırıcı",
+        "T-005a: başlık",
+        "docs(tasks): T-008l bekçi takipleri",
+        "Merge pull request #3 from x/feat/T-009-y",
+        "ek olarak T-050 anıldı",
+        "fix(T-017): ikinci",
+      ]),
+    ).toEqual(["T-017", "T-008l", "T-005a"]);
+  });
+
+  it("kartın ek satırlarındaki dosyalar listeye girmez (yalnızca Dokunulacak dosyalar satırı)", () => {
+    const text = "**Dokunulacak dosyalar (≤10):** `a.mjs`\n**Ek dosyalar (Supervisor):** `b.mjs`\n- `c.mjs` ek\n";
+    expect(parseCardFiles(text, "k.md")).toEqual(["a.mjs"]);
+  });
+
+  it("dolaylı gelen kart (birleşen int dalının içindeki çalışma dalı) bulunur; kart dışı dosya hâlâ FAIL", async () => {
+    const r = fixture();
+    r.branch("int/a");
+    r.branch("feat/T-100-x").write("src/a.mjs", "a2\n").commit("100").checkout("int/a");
+    r.merge("feat/T-100-x", "Merge remote-tracking branch 'origin/feat/T-100-x' into int/a");
+    r.checkout("main").branch("int/dilim");
+    r.merge("int/a", "Merge pull request #1 from x/int/a");
+    const ok = await check(r.dir);
+    expect(ok.code).toBe(0);
+
+    r.checkout("int/a").write("README.md", "kart dışı\n").commit("izinsiz");
+    r.checkout("int/dilim").merge("int/a", "Merge pull request #2 from x/int/a");
+    const bad = await check(r.dir);
+    expect(bad.code).toBe(1);
+    expect(bad.text).toContain("FAIL OUT_OF_SCOPE README.md");
+  });
+
+  it("dal ucu commit'inin T-xxx öneki kartı getirir; kartı olmayan önek ek izin vermez (kart dışı dosya FAIL)", async () => {
+    const r = fixture();
+    r.branch("int/b").write("src/b.mjs", "b2\n").commit("fix(T-101): b işi");
+    r.checkout("main").branch("int/dilim");
+    r.merge("int/b", "Merge pull request #1 from x/int/b");
+    const ok = await check(r.dir);
+    expect(ok.code).toBe(0);
+
+    r.checkout("main").branch("int/c").write("src/c.mjs", "c2\n").commit("fix(T-999): kartı yok");
+    r.checkout("int/dilim").merge("int/c", "Merge pull request #2 from x/int/c");
+    const bad = await check(r.dir);
+    expect(bad.code).toBe(1);
+    expect(bad.text).toContain("FAIL OUT_OF_SCOPE src/c.mjs");
+    expect(bad.text).not.toContain("CARD_NOT_FOUND");
+  });
+
+  it("önek kartı var ama dosya o kartın listesinde değil → FAIL", async () => {
+    const r = fixture();
+    r.branch("int/b").write("src/c.mjs", "c2\n").commit("fix(T-101): yanlış dosya");
+    r.checkout("main").branch("int/dilim");
+    r.merge("int/b", "Merge pull request #1 from x/int/b");
+    const res = await check(r.dir);
+    expect(res.code).toBe(1);
+    expect(res.text).toContain("FAIL OUT_OF_SCOPE src/c.mjs");
   });
 });
 
