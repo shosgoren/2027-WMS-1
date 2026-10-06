@@ -206,6 +206,8 @@ export interface AuditExportOptions {
   readonly revalidate?: () => Promise<void>;
   /** Akış ortası hata (maskeli günlük için); hata yine akışa iletilir, yutulmaz. */
   readonly onError?: (e: unknown) => void;
+  /** YALNIZCA TEST: ilk parça tx'inde üyelik kilidi (xid atanır) sonrası, snapshot alınmadan ÖNCE çağrılır (yarışı deterministik kurar). */
+  readonly testBeforeSnapshot?: () => Promise<void>;
 }
 
 export interface AuditExport {
@@ -226,6 +228,7 @@ export async function openAuditExport(params: Omit<TenantAccessParams, "permissi
   void _recentAuth;
 
   const first = await runTenantQuery({ ...params, permission: "audit.view" }, async (tx, m) => {
+    await options.testBeforeSnapshot?.();
     const snap = (await tx.execute<{ s: string }>(sql`SELECT pg_current_snapshot()::text AS s`))[0]?.s;
     if (snap === undefined || !SNAPSHOT_RE.test(snap)) throw new AppError("INTERNAL");
     const tz = await tenantTimeZone(tx, m.tenantId);
@@ -236,7 +239,8 @@ export async function openAuditExport(params: Omit<TenantAccessParams, "permissi
       requestId: options.requestId ?? null,
       changeSummary: { format: "csv", ...(filters.from === undefined ? {} : { from: filters.from }), ...(filters.to === undefined ? {} : { to: filters.to }), ...(filters.action === undefined ? {} : { action: filters.action }) },
     });
-    // Kesit: aynı transaction'ın yazdığı export olayı da kesitin DIŞINDADIR (xid, snapshot.xmax'tan sonra atanır).
+    // Kesit kendi `audit.exported` olayını DIŞLAR: tx xid'i üyelik `FOR SHARE` kilidinde snapshot'tan ÖNCE atanır, yani snapshot.xmax'tan küçük
+    // olabilir ve `pg_visible_in_snapshot` onu görünür sayardı; bu yüzden `createdXid` açıkça süzülür.
     const rows = await selectRows(tx, m.tenantId, tz, filters, undefined, snap, size, true, ev.createdXid);
     return { snap, tz, rows, ownXid: ev.createdXid };
   });

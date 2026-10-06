@@ -3,12 +3,34 @@
 // ifade ayrı `now()` alır (keyset sıralaması birden çok zaman damgası + eşitlik kırıcı `id` ile sınanır).
 import { randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createDbClient } from "../../../packages/db/src/index.ts";
 import { DB_CLIENT_SETTINGS, type DbClient } from "../../../packages/db/src/client.ts";
 import { AppError } from "../../../packages/shared/src/errors.ts";
 import { listAudit, openAuditExport } from "../../../packages/domain/src/audit/audit-query.ts";
 import { readIntEnv, redactErrorChain } from "../harness/env.ts";
+
+// Route testi için bağımlılık taklitleri: yalnızca kimlik/oturum ve IP bekçisi; veritabanı, yetki, sayaç ve akış GERÇEK.
+const h = vi.hoisted(() => ({ db: undefined as unknown, principal: null as { userId: string; mfaVerified: boolean } | null, sessionValid: true }));
+vi.mock("../../../packages/db/src/index.ts", async (orig) => ({ ...(await orig<Record<string, unknown>>()), getAppDb: () => h.db }));
+vi.mock("../../../packages/auth/src/index.ts", () => ({
+  ensureRecentAuth: () => Promise.resolve(),
+  getAuthService: () => ({ getPrincipal: () => Promise.resolve(h.sessionValid ? h.principal : null) }),
+}));
+vi.mock("../../../apps/web/lib/action-guard.ts", () => ({
+  createProductionRouteGuard:
+    () =>
+    (_o: unknown, handler: (r: Request, c: { principal: unknown; requestId: string }) => Promise<Response>) =>
+    async (req: Request): Promise<Response> => {
+      try {
+        return await handler(req, { principal: h.principal, requestId: "req-t126" });
+      } catch (e) {
+        const code = (e as { code?: string }).code ?? "INTERNAL";
+        return new Response(JSON.stringify({ code }), { status: ({ FORBIDDEN: 403, RATE_LIMITED: 429, UNAUTHENTICATED: 401 } as Record<string, number>)[code] ?? 500 });
+      }
+    },
+}));
+import { GET } from "../../../apps/web/app/api/t/[slug]/audit/export/route.ts";
 
 const env = readIntEnv(process.env);
 const A_ROWS = 2500;
@@ -96,6 +118,8 @@ beforeAll(async () => {
   } catch (e) {
     throw new Error(`connect failed: ${redactErrorChain(e, [env.databaseUrl, env.databaseUrlDirect])}`);
   }
+  h.db = app;
+  process.env.BETTER_AUTH_SECRET = "t126-int-secret-0123456789abcdef0123456789";
   A = await mkTenant("A", A_ROWS);
   B = await mkTenant("B", B_ROWS);
 }, 300_000);
@@ -190,22 +214,27 @@ describe("openAuditExport", () => {
     expect(csv).not.toContain("LATE-ROW");
   }, 120_000);
 
-  it("kesit kendi audit.exported olayını eşzamanlı commit altında da dışlar (createdXid açıkça süzülür)", async () => {
-    const filters = { action: "audit.exported" };
-    const prior = Number((await adm.query<{ n: string }>("SELECT count(*) AS n FROM public.audit_logs WHERE tenant_id = $1 AND action = 'audit.exported'", [A.tenant])).rows[0]?.n);
-    const N = 6;
-    const [csvs] = await Promise.all([
-      Promise.all(Array.from({ length: N }, async () => dataLines(await readAll((await openAuditExport({ ...access(A, A.admin.userId), recentAuth: fresh }, { filters, chunkSize: 2 })).stream)))),
-      seedRows(A.tenant, B.admin.userId, "CONC", 300),
-    ]);
-    // Her export yalnızca önceden commit edilmiş olayları ve en çok diğer N-1 export'un olayını görebilir; kendi olayı asla.
-    for (const lines of csvs) {
-      expect(lines.length).toBeGreaterThanOrEqual(prior);
-      expect(lines.length).toBeLessThanOrEqual(prior + N - 1);
-    }
-    const total = Number((await adm.query<{ n: string }>("SELECT count(*) AS n FROM public.audit_logs WHERE tenant_id = $1 AND action = 'audit.exported'", [A.tenant])).rows[0]?.n);
-    expect(total).toBe(prior + N);
-  }, 120_000);
+  it("kesit kendi audit.exported olayını dışlar: xid snapshot'tan önce atanmış, araya başka işlem commit etmiş (deterministik yarış)", async () => {
+    let racer = 0;
+    const csv = await readAll(
+      (
+        await openAuditExport(
+          { ...access(A, A.admin.userId), recentAuth: fresh },
+          {
+            filters: { action: "audit.exported" },
+            testBeforeSnapshot: async () => {
+              racer += 1;
+              await seedRows(A.tenant, A.admin.userId, "RACE", 3); // başka bağlantıda commit (xid > bizimki)
+            },
+          },
+        )
+      ).stream,
+    );
+    expect(racer).toBe(1);
+    const priorEvents = Number((await adm.query<{ n: string }>("SELECT count(*) AS n FROM public.audit_logs WHERE tenant_id = $1 AND action = 'audit.exported'", [A.tenant])).rows[0]?.n);
+    // Tüm export olayları (kendisi dahil) = priorEvents; dosya kendisini içermemeli.
+    expect(dataLines(csv)).toHaveLength(priorEvents - 1);
+  }, 60_000);
 
   it("filtreli export yalnızca eşleşenleri yazar; filtre audit.exported özetine girer", async () => {
     const csv = await readAll((await openAuditExport({ ...access(B, B.admin.userId), recentAuth: fresh }, { filters: { action: "member.invited" } })).stream);
@@ -249,5 +278,51 @@ describe("openAuditExport", () => {
       await adm.query("DELETE FROM public.membership_roles WHERE tenant_id = $1 AND membership_id IN (SELECT id FROM public.tenant_memberships WHERE user_id = $2)", [fx.tenant, u.userId]);
     });
     await expect(reader.read()).rejects.toBeInstanceOf(AppError);
+  }, 60_000);
+});
+
+describe("export route (GET)", () => {
+  const call = (fx: Fx, userId: string, site: string | null): Promise<Response> => {
+    h.principal = { userId, mfaVerified: true };
+    h.sessionValid = true;
+    const headers = new Headers();
+    if (site !== null) headers.set("sec-fetch-site", site);
+    return GET(new Request(`https://app.example.test/api/t/${fx.slug}/audit/export`, { headers }), { params: Promise.resolve({ slug: fx.slug }) });
+  };
+
+  it("Sec-Fetch-Site same-origin/none dışı → 403 ve sayaç tüketmez (sonra 2 export 200, 3. 429)", async () => {
+    for (const site of ["cross-site", "same-site", null]) expect((await call(A, A.manager.userId, site)).status).toBe(403);
+    for (const site of ["same-origin", "none"]) {
+      const r = await call(A, A.manager.userId, site);
+      expect(r.status).toBe(200);
+      await r.body?.cancel();
+    }
+    expect((await call(A, A.manager.userId, "same-origin")).status).toBe(429);
+  }, 60_000);
+
+  it("akış ortasında oturum düşerse akış hata ile biter; günlük maskeli (yalnızca ad/kod)", async () => {
+    const logged: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((m: unknown) => void logged.push(String(m)));
+    try {
+      const res = await call(A, A.admin.userId, "same-origin");
+      expect(res.status).toBe(200);
+      h.sessionValid = false; // ilk parçadan sonra: çıkış/iptal
+      const reader = (res.body as ReadableStream<Uint8Array>).getReader();
+      let failure: unknown = null;
+      try {
+        for (;;) if ((await reader.read()).done) break;
+      } catch (e) {
+        failure = e;
+      }
+      expect(failure).toBeInstanceOf(AppError);
+      expect((failure as AppError).code).toBe("UNAUTHENTICATED");
+    } finally {
+      spy.mockRestore();
+    }
+    expect(logged).toHaveLength(1);
+    const entry = JSON.parse(logged[0] as string) as Record<string, unknown>;
+    expect(Object.keys(entry).sort()).toEqual(["code", "error", "level", "msg", "requestId"]);
+    expect(entry).toMatchObject({ error: "AppError", code: "UNAUTHENTICATED", requestId: "req-t126" });
+    expect(logged[0]).not.toContain(A.slug);
   }, 60_000);
 });
