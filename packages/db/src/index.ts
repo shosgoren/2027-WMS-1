@@ -77,3 +77,6 @@ export type { ConsumeRateLimitParams, ConsumeRateLimitResult } from "./rate-limi
 export { sameConnectionTarget } from "./connection-target.ts";
 // Demo tenant kimliği (T-123): slug'tan türetilen sabit; worker ve domain aynı sabiti kullanır. `ensureDemoTenant` yalnızca migrate.ts'tedir.
 export { DEMO_TENANT_ID, DEMO_TENANT_NAME, DEMO_TENANT_NAMESPACE, DEMO_TENANT_SLUG, demoModeEnabled, uuidV5 } from "./demo-tenant.ts";
+// Sağlık yoklamaları (T-129): `/api/health` DB ve kuyruk şeması erişimi (satır okumaz).
+export { createHealthProbe, getHealthProbe } from "./health.ts";
+export type { HealthProbe, HealthProbeOptions, HealthSnapshot, ProbeResult } from "./health.ts";

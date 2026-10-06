@@ -3,9 +3,12 @@
 // (`migrate: false`; `start()` yalnızca şemanın kurulu olduğunu doğrular). Tüketim `apps/worker`'dadır.
 // `enqueue` işi çağıranın tenant transaction'ında yazar; istemci transaction DIŞINDA önceden başlatılmalıdır.
 import { createJobQueue, type PgBossJobQueue } from "@wms/queue-adapter";
+import { createConsoleLogger } from "@wms/shared/log";
 
+// Yapılandırılmış, maskeli JSON log (T-129): `ts, level, msg, service` + alanlar.
+const logger = createConsoleLogger("web");
 const logError = (msg: string, fields?: Record<string, unknown>): void => {
-  console.error(JSON.stringify({ level: "error", msg, ...fields }));
+  logger.error(msg, fields);
 };
 
 /** Süreç başına tek başlatma sözü: eşzamanlı istekler aynı örneği/aynı başlatmayı paylaşır. Başarısızlık önbelleğe alınmaz. */

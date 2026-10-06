@@ -45,11 +45,13 @@ kill_timeout = "15s"
   auto_start_machines = true
   min_machines_running = 0
 
+  # Makine sağlık denetimi SIĞ uca bakar (DB'ye dokunmaz): derin /api/health DB kesintisinde Fly'ın web makinesini
+  # yeniden başlatmasına/servisten çıkarmasına yol açardı. Derin uç yalnızca uptime.yml ve deploy-smoke içindir (T-129).
   [[http_service.checks]]
     grace_period = "10s"
     interval = "30s"
     method = "GET"
-    path = "/api/health"
+    path = "/api/health/live"
     timeout = "5s"
 
 # En küçük makineler (ADR-013); ölçekleme yok.

@@ -9,6 +9,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { runTenantQuery, type TenantAccessParams } from "@wms/domain/identity/access";
 import { AppError, type AppErrorBody } from "@wms/shared/errors";
+import { createJsonLogger, requestIdFrom } from "@wms/shared/log";
 import { RateLimitedError, clientIp, createProductionLimiter, type RateLimiter } from "./rate-limit.ts";
 
 /** Sarmalayıcının ihtiyaç duyduğu principal şekli (`@wms/auth` `Principal` atanabilir). */
@@ -119,9 +120,11 @@ export function createActionGuard(deps: GuardDeps) {
     handler: (input: z.infer<S>, ctx: ActionContext) => Promise<R>,
   ): (raw: unknown) => Promise<ActionResult<R>> {
     return async (raw) => {
-      const requestId = deps.newRequestId();
+      let requestId = deps.newRequestId();
       try {
         const headers = await deps.getHeaders();
+        // T-129: `proxy.ts` yalnızca UUID biçimli kimliği iletir; yanıttaki istek kimliği günlük/yanıt başlığıyla aynıdır.
+        requestId = requestIdFrom(headers) ?? requestId;
         const origin = assertOrigin(deps, headers);
         await limit(deps, "ip", ipOf(deps, headers));
         const principal = await deps.resolvePrincipal(headers);
@@ -176,7 +179,7 @@ export function createRouteGuard(deps: GuardDeps) {
     handler: (request: Request, ctx: RouteContext) => Promise<Response>,
   ): (request: Request) => Promise<Response> {
     return async (request) => {
-      const requestId = deps.newRequestId();
+      const requestId = requestIdFrom(request.headers) ?? deps.newRequestId();
       try {
         const headers = request.headers;
         if (!["GET", "HEAD", "OPTIONS"].includes(request.method.toUpperCase())) assertOrigin(deps, headers);
@@ -202,6 +205,15 @@ export function createRouteGuard(deps: GuardDeps) {
 // Bu modül Next'e bağımlı değildir: kök typecheck/entegrasyon testleri `createActionGuard`'ı doğrudan kullanır.
 // ---------------------------------------------------------------------------------------------
 
+// Eylem/route hataları stderr'e (`console.error`; mevcut davranış) maskeli JSON satırı olarak yazılır.
+const logger = createJsonLogger(
+  (line) => {
+    console.error(line);
+  },
+  undefined,
+  { service: "web" },
+);
+
 export function createProductionGuard(getHeaders: GuardDeps["getHeaders"], limiter: RateLimiter = createProductionLimiter()) {
   return createActionGuard({
     getHeaders,
@@ -215,7 +227,9 @@ export function createProductionGuard(getHeaders: GuardDeps["getHeaders"], limit
       return process.env.BETTER_AUTH_URL; // her istekte okunur (derleme anında değil)
     },
     log: (entry) => {
-      console.error(JSON.stringify(entry));
+      // Maskeli yapılandırılmış log (T-129). `code` alanı `errorCode` olarak yazılır (`code` anahtarı doğrulama kodu sayılıp maskelenir).
+      const { msg, code, ...rest } = entry; // `level` rest içinde kalır; logger'da ayrılmış alan olduğundan ezilemez.
+      logger.error(typeof msg === "string" ? msg : "guard log", code === undefined ? rest : { ...rest, errorCode: code });
     },
     newRequestId: randomUUID,
   });

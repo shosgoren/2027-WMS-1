@@ -9,7 +9,8 @@
     "./mailer": "./src/mailer.ts",
     "./seal": "./src/seal.ts",
     "./storage": "./src/storage.ts",
-    "./cache-key": "./src/cache-key.ts"
+    "./cache-key": "./src/cache-key.ts",
+    "./log": "./src/log.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
