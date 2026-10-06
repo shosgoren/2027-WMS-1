@@ -1,4 +1,4 @@
-// katman: DB (komut katmanı T-220) — AC-09 yalnızca DB katmanı: seri tekilliği CHECK + kısmi tekil indeks. TRACKING_VIOLATION
+// katman: DB — komut katmanı T-220; AC-09 yalnızca DB katmanı: seri tekilliği CHECK + kısmi tekil indeks. TRACKING_VIOLATION
 // hata kodu ve komut davranışı T-220'de kanıtlanır; bu dosya kısmi kapıdır (değerlendirme T-132/T-220).
 //
 // AC-09: "Seri takipli ürün iki lokasyona → TRACKING_VIOLATION". Bağımsız doğrulama (T-233, qa-verifier); uygulayıcı testine
@@ -111,11 +111,19 @@ afterAll(async () => {
 }, 60_000);
 
 describe("AC-09 (DB katmanı): seri miktarı", () => {
-  it("@AC-09 seri boyutunda bakiye miktarı 2 → CHECK reddi (INSERT ve UPDATE); 1 ve 0 kabul", async () => {
+  it("@AC-09 seri boyutunda bakiye INSERT'i miktar 2 → CHECK reddi", async () => {
     expectFail(await asApp(A.tenantId, async (q) => { await ledger(q, targetDim, 2); await insBal(q, targetDim, 2); }), CHECK_VIOLATION, SERIAL_QTY_CHK, "INSERT 2");
+  });
+
+  it("@AC-09 seri boyutunda bakiye UPDATE'i 1→2 → CHECK reddi", async () => {
     expectFail(await asApp(A.tenantId, async (q) => { await setQty(q, A.serialDimensionId, 2); }), CHECK_VIOLATION, SERIAL_QTY_CHK, "UPDATE 1→2");
+  });
+
+  it("@AC-09 seri boyutunda kesirli miktar (1.5) → CHECK reddi", async () => {
     expectFail(await asApp(A.tenantId, async (q) => { await setQty(q, A.serialDimensionId, 1.5); }), CHECK_VIOLATION, SERIAL_QTY_CHK, "UPDATE 1→1.5");
-    // Kontroller: miktar 0 ve 1 CHECK'i geçer (mevcut seri bakiyesi 1; sıfırlama kabul).
+  });
+
+  it("kontrol: seri boyutu miktarı 1→0 CHECK'i geçer", async () => {
     const ok0 = await asApp(A.tenantId, async (q) => { await ledger(q, A.serialDimensionId, -1); await setQty(q, A.serialDimensionId, 0); await q("SET CONSTRAINTS ALL IMMEDIATE"); });
     expect(ok0.ok, JSON.stringify(ok0)).toBe(true);
   });
@@ -187,7 +195,7 @@ describe("AC-09 (DB katmanı): aynı seri iki yerde pozitif olamaz", () => {
     expect(await positiveCount()).toBe(1);
   });
 
-  it("@AC-09 taşıma tutarsız (kaynak azaltılıp hedef artırılmadan commit) → defter-bakiye denetimi yine de tutar; seri yok olmaz", async () => {
+  it("taşıma tutarsız (kaynak azaltılıp hedef artırılmadan commit) → defter-bakiye denetimi yine de tutar; seri yok olmaz", async () => {
     // Kaynak sıfırlanır ve hedef artırılmazsa bakiye ile defter tutarlı, seri hiçbir yerde pozitif değildir: şema bunu reddetmez
     // (stok kaybı komut katmanı kuralıdır); burada yalnızca tekil indeksin yanlış-pozitif üretmediği doğrulanır.
     const r = await asApp(A.tenantId, async (q) => { await ledger(q, A.serialDimensionId, -1); await setQty(q, A.serialDimensionId, 0); await q("SET CONSTRAINTS ALL IMMEDIATE"); });
@@ -195,11 +203,18 @@ describe("AC-09 (DB katmanı): aynı seri iki yerde pozitif olamaz", () => {
     expect(await positiveCount()).toBe(1);
   });
 
-  it("@AC-09 B tenant'ının aynı biçimli serisi A'nın pozitif seri kısıtını etkilemez; B bağlamından A serisi boyutu kurulamaz", async () => {
-    // B kendi serisini (farklı kimlik) pozitif tutar (fikstür); A tarafındaki sayı değişmez.
+  it("kontrol: B'nin kendi pozitif seri bakiyesi A'nın seri sayısını değiştirmez", async () => {
     const bSeen = await asApp(B.tenantId, async (q) => q("SELECT count(*)::int AS n FROM public.stock_balances WHERE quantity > 0 AND stock_dimension_id = $1", [B.serialDimensionId]));
     expect(bSeen.ok && bSeen.rows[0]).toEqual({ n: 1 });
+    expect(await positiveCount()).toBe(1);
+  });
+
+  it("@AC-04 B bağlamından A tenant'ının seri boyutu kurulamaz (42501, row-level security)", async () => {
     const cross = await asApp(B.tenantId, async (q) => { await insSerialDim(q, A.rootLocationId, "AVAILABLE"); });
     expect(cross.ok).toBe(false);
+    if (!cross.ok) {
+      expect(cross.code).toBe("42501");
+      expect(cross.message).toMatch(/row-level security/i);
+    }
   });
 });

@@ -784,7 +784,7 @@ describe("T-233 özellik tabanlı: defter toplamı == bakiye (ve rezerve == Σ A
 });
 
 // ---------------------------------------------------------------------------------------------
-// Supervisor bulguları (0013, T-232 dalında düzeltilecek). Bu bloktaki testler düzeltme gelene kadar KIRMIZI kalır (G-11: gevşetme/skip yok).
+// Ürün/izlenebilirlik/belge tutarlılığı (0013; ilk turda bulgu olarak raporlandı, T-232 düzeltmesiyle kapandı). Ret kodu ve ad düzeyinde sınanır.
 // Her biri kendi kurulumunu tutarlı yapar: doğru ürün, tracking_mode'a uygun lot/seri; yalnızca denenen kural ihlal edilir.
 // ---------------------------------------------------------------------------------------------
 describe("T-233 bulgular: ürün/izlenebilirlik/belge tutarlılığı (MAJOR-1, MAJOR-2, MINOR)", () => {
@@ -824,7 +824,8 @@ describe("T-233 bulgular: ürün/izlenebilirlik/belge tutarlılığı (MAJOR-1, 
       await q(SQL_LEDGER, [A.tenantId, doc.documentId, doc.lineId, d, 1]);
       await q(SQL_BAL, [A.tenantId, d, 1, 0]);
     }, "commit");
-    expect(r.ok, "ürün uyuşmazlığı kabul edildi (MAJOR-1)").toBe(false);
+    expectFail(r, FK_VIOLATION, "defter ürün uyuşmazlığı (MAJOR-1)");
+    if (!r.ok) expect(r.constraint).toBe("stock_ledger_line_item_fkey");
   });
 
   it("MAJOR-1: rezervasyonun belge satırı ürünü, boyutun ürününden farklıysa ret", async () => {
@@ -835,24 +836,53 @@ describe("T-233 bulgular: ürün/izlenebilirlik/belge tutarlılığı (MAJOR-1, 
       const d = await dimOf(q, itemNone, null, null);
       await q(SQL_RES, [A.tenantId, randomUUID(), d, doc.lineId, 1]);
     });
-    expect(r.ok, "rezervasyon ürün uyuşmazlığı kabul edildi (MAJOR-1)").toBe(false);
+    expectFail(r, FK_VIOLATION, "rezervasyon ürün uyuşmazlığı (MAJOR-1)");
+    if (!r.ok) expect(r.constraint).toBe("reservations_line_item_fkey");
   });
 
   it("MAJOR-2: izlenebilirlik uyumsuz boyut reddedilir (SERIAL ürüne serisiz, LOT ürüne lotsuz, NONE ürüne lotlu)", async () => {
     const itemSerial = await mkItem("SERIAL");
     const itemLot = await mkItem("LOT");
     const itemNone = await mkItem("NONE");
-    const r1 = await asApp(A.tenantId, async (q) => { await dimOf(q, itemSerial, null, null); });
-    expect(r1.ok, "SERIAL ürüne serisiz boyut kabul edildi (MAJOR-2)").toBe(false);
-    const r2 = await asApp(A.tenantId, async (q) => { await dimOf(q, itemLot, null, null); });
-    expect(r2.ok, "LOT ürüne lotsuz boyut kabul edildi (MAJOR-2)").toBe(false);
-    const r3 = await asApp(A.tenantId, async (q) => { await dimOf(q, itemNone, A.lotId, null); });
-    expect(r3.ok, "NONE ürüne lot (başka ürünün lotu zaten FK) — NONE ürüne kendi lotu").toBe(false);
+    // NONE ürünün KENDİ lotu (FK geçer): ret yalnızca izlenebilirlik tetikleyicisinden gelmeli.
+    const noneLot = randomUUID();
+    await admin.query("INSERT INTO public.lots (tenant_id, id, item_id, lot_code) VALUES ($1, $2, $3, 'N1')", [A.tenantId, noneLot, itemNone]);
+    {
+      const t = await asApp(A.tenantId, async (q) => { await dimOf(q, itemSerial, null, null); });
+      expect(t.ok, "SERIAL ürüne serisiz (MAJOR-2): kabul edildi").toBe(false);
+      expect(t.ok ? "" : t.code, "SERIAL ürüne serisiz (MAJOR-2)").toBe(CHECK_VIOLATION);
+      expect(t.ok ? "" : t.message, "SERIAL ürüne serisiz (MAJOR-2)").toContain("TRACKING_VIOLATION");
+    }
+    {
+      const t = await asApp(A.tenantId, async (q) => { await dimOf(q, itemLot, null, null); });
+      expect(t.ok, "LOT ürüne lotsuz (MAJOR-2): kabul edildi").toBe(false);
+      expect(t.ok ? "" : t.code, "LOT ürüne lotsuz (MAJOR-2)").toBe(CHECK_VIOLATION);
+      expect(t.ok ? "" : t.message, "LOT ürüne lotsuz (MAJOR-2)").toContain("TRACKING_VIOLATION");
+    }
+    {
+      const t = await asApp(A.tenantId, async (q) => { await dimOf(q, itemNone, noneLot, null); });
+      expect(t.ok, "NONE ürüne kendi lotu (MAJOR-2): kabul edildi").toBe(false);
+      expect(t.ok ? "" : t.code, "NONE ürüne kendi lotu (MAJOR-2)").toBe(CHECK_VIOLATION);
+      expect(t.ok ? "" : t.message, "NONE ürüne kendi lotu (MAJOR-2)").toContain("TRACKING_VIOLATION");
+    }
   });
 
   it("MINOR: seri ile lot tutarlı olmalı (serinin lot_id'si lotId iken boyut lotsuz / başka lotla)", async () => {
-    const r = await asApp(A.tenantId, async (q) => { await dimOf(q, A.itemId, null, A.serialId); });
-    expect(r.ok, "serinin lotuyla çelişen boyut kabul edildi").toBe(false);
+    // Seri A.serialId'nin lot_id'si lotId; boyut lotsuz (LOT_AND_SERIAL alan uyumsuzluğu) ve başka lotlu (seri-lot uyuşmazlığı) iki yol.
+    {
+      const t = await asApp(A.tenantId, async (q) => { await dimOf(q, A.itemId, null, A.serialId); });
+      expect(t.ok, "seri + lotsuz: kabul edildi").toBe(false);
+      expect(t.ok ? "" : t.code, "seri + lotsuz").toBe(CHECK_VIOLATION);
+      expect(t.ok ? "" : t.message, "seri + lotsuz").toContain("TRACKING_VIOLATION");
+    }
+    const lot2 = randomUUID();
+    await admin.query("INSERT INTO public.lots (tenant_id, id, item_id, lot_code) VALUES ($1, $2, $3, 'L-QA2')", [A.tenantId, lot2, A.itemId]);
+    {
+      const t = await asApp(A.tenantId, async (q) => { await dimOf(q, A.itemId, lot2, A.serialId); });
+      expect(t.ok, "seri + başka lot: kabul edildi").toBe(false);
+      expect(t.ok ? "" : t.code, "seri + başka lot").toBe(CHECK_VIOLATION);
+      expect(t.ok ? "" : t.message, "seri + başka lot").toContain("TRACKING_VIOLATION");
+    }
   });
 
   it("MINOR: wms_app closed_at yazamaz (42501); terminal geçişte değeri tetikleyici sunucu zamanıyla yazar", async () => {
