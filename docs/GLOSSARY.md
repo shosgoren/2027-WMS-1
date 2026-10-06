@@ -6,6 +6,8 @@
 - **Kullanılabilir stok:** Σ fiziksel (durum `AVAILABLE`, lokasyon türü `STORAGE` veya `STAGING`, toplama dışı olmayan lokasyon) − Σ aktif rezervasyon. Kabul alanındaki, karantinadaki, transit ve sayım görevi bekleyen lokasyondaki stok fizikseldir ama kullanılabilir değildir.
 - **Transit:** Transfer çıkışı yapılmış, hedefte kabul edilmemiş stok.
 - **Tenant terminolojisi:** Kullanıcıya gösterilen etiket (örn. "Göz Kodu"); teknik alan kimliğini değiştirmez.
+- **Hata kodu / ayrıntı:** API'nin istemciye döndürdüğü makine kodu (`AppError.code`, örn. `FORBIDDEN`) ve kodu değiştirmeden istemciyi yönlendiren ek bilgi (`AppError.detail`, örn. `MFA_REQUIRED`). Liste, HTTP durumu ve i18n anahtarı: `docs/spec/15-engineering.md` §API sözleşmesi.
+- **İç hata kodu:** Alt katman hatasının kodu (örn. `MembershipError` `SLUG_TAKEN`, `MailError` `MAIL_SEND_FAILED`); istemci gövdesine doğrudan girmez; `AppError`'a eşlenmeden `mapAccessError`'dan geçerse `INTERNAL` olur.
 ## Adlandırma kuralı (ADR-002 — önerilen varsayılan)
 Kod, tip, DB şeması, API ve ajan istemleri **İngilizce**; arayüz metinleri **Türkçe** (next-intl anahtarları üzerinden); iş terimi ↔ teknik ad eşlemesi yalnızca bu tabloda tutulur. Gerekçe: İngilizce tanımlayıcılar daha az token'a bölünür, kütüphane kalıplarıyla tutarlıdır ve ajan hata oranını düşürür. ADR-002 Türkçe yönünde karar verirse tablo yine geçerlidir, yalnızca sütunlar yer değiştirir. v1.3'teki Türkçe 106 tabloluk katalog bu tabloya göre çevrilir (ayrı görev kartı).
 
