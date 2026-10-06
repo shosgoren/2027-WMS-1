@@ -17,7 +17,7 @@ import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { loadAcceptance } from "./acceptance.mjs";
 import { evaluateCondition, loadConditions } from "./conditions.mjs";
-import { acTagsOf, evaluateSite, gateAcIds, loadQuarantine, quarantineTags } from "../guards/lib/quarantine.mjs";
+import { acTagsOf, evaluateSite, gateAcIdsFor, loadQuarantine, quarantineTags } from "../guards/lib/quarantine.mjs";
 
 /**
  * @typedef {import("./acceptance.mjs").AcceptanceCriterion} AcceptanceCriterion
@@ -352,7 +352,7 @@ export function execute(entries, tagsById, opts) {
 
 /**
  * Karantina geçerlilik yargıcı (tembel: kayıt, `main` ve kapı fazı ilk karantinalı testte okunur).
- * Kapı fazı: `--phase P` → P ve `currentGatePhase`; diğer modlarda `currentGatePhase`.
+ * Kapı AC kümesi: `currentGatePhase` ∪ `passedGates` (+ `--phase P` ise P).
  * @param {string} root
  * @param {Mode} mode
  * @returns {QuarantineJudge}
@@ -368,8 +368,7 @@ export function quarantineJudge(root, mode) {
       let gateError = null;
       try {
         const acs = loadAcceptance(root);
-        const current = loadConditions(root, acs).currentGatePhase;
-        gateAcs = gateAcIds(acs, mode.type === "phase" ? [mode.phase, current] : [current]);
+        gateAcs = gateAcIdsFor(acs, loadConditions(root, acs), mode.type === "phase" ? [mode.phase] : []);
       } catch (e) {
         gateError = e instanceof Error ? e.message : String(e);
       }
