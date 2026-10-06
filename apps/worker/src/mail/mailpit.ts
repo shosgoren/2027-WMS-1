@@ -42,7 +42,7 @@ export function createMailpitMailer(options: MailpitOptions): Mailer {
         throw new MailError("MAIL_SEND_FAILED", `mailpit request failed: ${err instanceof Error ? err.name : "unknown"}`);
       }
       if (!response.ok) {
-        throw new MailError("MAIL_SEND_FAILED", `mailpit responded with status ${response.status}`);
+        throw new MailError("MAIL_SEND_FAILED", `mailpit responded with status ${response.status}`, { status: response.status });
       }
     },
   };

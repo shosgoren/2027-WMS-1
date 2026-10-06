@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import {
   EMAIL_SEND_JOB_TYPE,
+  MailConfigError,
   MailError,
   MailPayloadError,
   assertMailModeAllowed,
@@ -224,9 +225,9 @@ describe("hata sınıflaması (kalıcı / geçici)", () => {
         () => Promise.reject(new Error("hata bekleniyordu")),
         (e: unknown) => e as MailError,
       );
-  it("Resend 4xx (408, 425, 429 hariç) kalıcı; 408, 425, 429 ve 5xx geçici", async () => {
+  it("Resend 4xx (408, 409, 425, 429 hariç) kalıcı; 408, 409, 425, 429 ve 5xx geçici", async () => {
     for (const status of [400, 401, 403, 404, 410, 422]) expect((await resend(status)).permanent, String(status)).toBe(true);
-    for (const status of [408, 425, 429, 500, 502, 503]) expect((await resend(status)).permanent, String(status)).toBe(false);
+    for (const status of [408, 409, 425, 429, 500, 502, 503]) expect((await resend(status)).permanent, String(status)).toBe(false);
   });
   it("ağ hatası geçici", async () => {
     const f = vi.fn<typeof fetch>().mockRejectedValue(new TypeError("fetch failed"));
@@ -245,6 +246,19 @@ describe("hata sınıflaması (kalıcı / geçici)", () => {
     expect(new MailError("MAIL_SEND_FAILED", "request failed").permanent).toBe(false);
     expect(new MailError("MAIL_SEND_FAILED", "x", { status: 404 }).permanent).toBe(true);
   });
+  it("MailError durumu yalnızca seçenekten gelir; mesajdaki 'status NNN' metni sınıflamayı etkilemez", () => {
+    const e = new MailError("MAIL_SEND_FAILED", "provider said status 422 somewhere");
+    expect(e.status).toBeUndefined();
+    expect(e.permanent).toBe(false);
+    expect(new MailError("MAIL_SEND_FAILED", "x", { status: 422 }).status).toBe(422);
+  });
+  it("sağlayıcılar gerçek HTTP durumunu seçenekle taşır", async () => {
+    expect((await resend(422)).status).toBe(422);
+    const mp = await createMailpitMailer({ baseUrl: "http://x", from: "n@e.local", fetch: vi.fn<typeof fetch>().mockResolvedValue(new Response("{}", { status: 503 })) })
+      .send({ to: RECIPIENT, subject: "S", text: "T", html: "H", idempotencyKey: "k" })
+      .then(() => Promise.reject(new Error("hata bekleniyordu")), (e: unknown) => e as MailError);
+    expect(mp.status).toBe(503);
+  });
 });
 
 describe("alıcı adresi (yerel kısım)", () => {
@@ -262,6 +276,10 @@ describe("mailpit kipi ortam kısıtı", () => {
     const mailpit = config({ MAIL_MODE: "mailpit", MAILPIT_URL: "http://localhost:8025", MAIL_FROM: "a@b.c" });
     for (const ok of ["local", "ci"]) expect(() => assertMailModeAllowed(mailpit, ok)).not.toThrow();
     for (const bad of [undefined, "", "staging", "production", "prod", "LOCAL"]) expect(() => assertMailModeAllowed(mailpit, bad)).toThrow(/WMS_ENV/);
+    const err = (() => { try { assertMailModeAllowed(mailpit, "production"); } catch (e) { return e; } return undefined; })();
+    expect(err).toBeInstanceOf(MailConfigError);
+    expect((err as MailConfigError).name).toBe("MailConfigError");
+    expect((err as MailConfigError).code).toBe("MAIL_MODE_NOT_ALLOWED");
   });
   it("diğer kiplere kısıt uygulanmaz", () => {
     for (const mode of ["disabled", "resend"]) expect(() => assertMailModeAllowed({ mode } as MailConfig, "production")).not.toThrow();
