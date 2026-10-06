@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const hdrs = vi.hoisted(() => ({ value: new Headers() }));
 const getPrincipal = vi.hoisted(() => vi.fn());
 const updateTenantSettings = vi.hoisted(() => vi.fn());
+const runTenantQuery = vi.hoisted(() => vi.fn());
+const limiterCheck = vi.hoisted(() => vi.fn());
 
 vi.mock("next/headers", () => ({ headers: () => Promise.resolve(hdrs.value) }));
 vi.mock("next/navigation", () => ({
@@ -14,12 +16,13 @@ vi.mock("next/navigation", () => ({
 vi.mock("@wms/auth", () => ({ getAuthService: () => ({ getPrincipal }) }));
 vi.mock("@wms/db", () => ({ getAppDb: () => ({}) }));
 vi.mock("@wms/domain/onboarding/workspace", () => ({ updateTenantSettings }));
-vi.mock("@wms/domain/identity/access", () => ({ runTenantQuery: () => Promise.resolve("t1") }));
+vi.mock("@wms/domain/identity/access", () => ({ runTenantQuery }));
 vi.mock("../../../../lib/rate-limit.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../../lib/rate-limit.ts")>()),
-  createProductionLimiter: () => ({ check: () => Promise.resolve() }),
+  createProductionLimiter: () => ({ check: limiterCheck }),
 }));
 
+import { AppError } from "@wms/shared/errors";
 import { saveSettingsAction } from "./actions.ts";
 
 const ORIGIN = "https://app.example.test";
@@ -46,6 +49,11 @@ beforeEach(() => {
   hdrs.value = new Headers({ origin: ORIGIN, "fly-client-ip": "203.0.113.7" });
   getPrincipal.mockResolvedValue({ userId: "u1", mfaVerified: true });
   updateTenantSettings.mockResolvedValue({ changed: true });
+  limiterCheck.mockResolvedValue(undefined);
+  // Gerçek davranış: yalnızca `settings.manage` izni olan üyelik çözülür; aksi FORBIDDEN.
+  runTenantQuery.mockImplementation((params: { permission: string }) =>
+    params.permission === "settings.manage" ? Promise.resolve("t1") : Promise.reject(new AppError("FORBIDDEN")),
+  );
 });
 afterEach(() => {
   if (saved === undefined) delete process.env.BETTER_AUTH_URL;
@@ -62,6 +70,17 @@ describe("saveSettingsAction saat dilimi listesi", () => {
     for (const tz of ["Mars/Olympus", "America/Argentina/ComodRivadavia", "EST5EDT", "europe/istanbul", ""]) {
       expect(await redirectOf(saveSettingsAction(form(tz)))).toBe("/t/acme/settings?error=VALIDATION_FAILED");
     }
+    expect(updateTenantSettings).not.toHaveBeenCalled();
+  });
+  it("izin çözümü settings.manage ister; doğrulanmış tenant sayacı bu kimlikle tüketilir", async () => {
+    await redirectOf(saveSettingsAction(form("UTC")));
+    expect(runTenantQuery).toHaveBeenCalledWith(expect.objectContaining({ permission: "settings.manage", tenantSlug: "acme" }), expect.any(Function));
+    expect(limiterCheck).toHaveBeenCalledWith("tenant", "t1");
+  });
+  it("yetkisiz çağıran: FORBIDDEN; tenant sayacı tüketilmez, domain çağrılmaz", async () => {
+    runTenantQuery.mockRejectedValue(new AppError("FORBIDDEN"));
+    expect(await redirectOf(saveSettingsAction(form("UTC")))).toBe("/t/acme/settings?error=FORBIDDEN");
+    expect(limiterCheck).not.toHaveBeenCalledWith("tenant", expect.anything());
     expect(updateTenantSettings).not.toHaveBeenCalled();
   });
   it("Origin reddi: FORBIDDEN; domain çağrılmaz", async () => {

@@ -1,8 +1,9 @@
 import type { Metadata } from "next";
 import { headers } from "next/headers";
-import { redirect } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { getFormatter, getTranslations } from "next-intl/server";
-import { ActivityList } from "@wms/ui";
+import { ActivityList, Banner } from "@wms/ui";
+import { AppError } from "@wms/shared/errors";
 import { listMyActionsToday } from "@wms/domain/audit/today";
 import { getAppDb } from "@wms/db";
 import { getMembershipSummary } from "@wms/domain/identity/member-queries";
@@ -29,8 +30,24 @@ export default async function TenantHomePage({ params }: { params: Promise<{ slu
   if (current === undefined) return null;
   const t = await getTranslations();
   const format = await getFormatter();
-  // `now` ASLA verilmez (sunucu saati); yalnızca çağıranın kendi satırları, en çok 5.
-  const today = await listMyActionsToday({ db: getAppDb(), principal, tenantSlug: slug }, { limit: 5 });
+  // `now` ASLA verilmez (sunucu saati); yalnızca çağıranın kendi satırları, en çok 5. Bölüm düzeyinde yakalanır: bu liste
+  // hata verirse ana ekran (görev kartları) düşmez; yalnızca kod anahtarlı nötr satır gösterilir.
+  let today: Awaited<ReturnType<typeof listMyActionsToday>> | null = null;
+  let todayError: string | null = null;
+  try {
+    today = await listMyActionsToday({ db: getAppDb(), principal, tenantSlug: slug }, { limit: 5 });
+  } catch (e) {
+    if (e instanceof AppError) {
+      if (e.code === "NOT_FOUND") notFound();
+      if (e.code === "UNAUTHENTICATED") redirect(`/login?next=${encodeURIComponent(`/t/${slug}`)}`);
+      if (e.code === "FORBIDDEN" && e.detail === "MFA_REQUIRED") redirect(`/mfa?next=${encodeURIComponent(`/t/${slug}`)}`);
+    }
+    // Maskeli günlük: yalnızca sınıf adı ve kod (mesaj/SQL/parametre yok, G-09).
+    console.error(JSON.stringify({ level: "error", msg: "home today list failed", error: e instanceof Error ? e.name : typeof e, code: e instanceof AppError ? e.code : undefined }));
+    todayError = e instanceof AppError ? e.code : "INTERNAL";
+  }
+  const errKey = ["FORBIDDEN", "RATE_LIMITED", "TENANT_SUSPENDED", "TENANT_CLOSING", "VALIDATION_FAILED"].includes(todayError ?? "") ? (todayError as string).toLowerCase() : "internal";
+  const ts = await getTranslations("serverErrors");
   const firstName = summary.userName.trim().split(/\s+/)[0] ?? summary.userName;
 
   return (
@@ -48,16 +65,30 @@ export default async function TenantHomePage({ params }: { params: Promise<{ slu
           auditView: hasPermission(current.roles, "audit.view"),
         }}
       />
-      <ActivityList
-        title={t("home.today.title")}
-        emptyText={t("home.today.empty")}
-        items={today.items.map((it, i) => ({
-          id: `${it.occurredAt.toISOString()}-${i}`,
-          time: format.dateTime(it.occurredAt, { hour: "2-digit", minute: "2-digit", timeZone: today.timeZone }),
-          dateTime: it.occurredAt.toISOString(),
-          text: t(it.summaryKey),
-        }))}
-      />
+      {today === null ? (
+        <section aria-labelledby="today-title" className="flex flex-col gap-2 rounded-card bg-surface p-4 shadow-card">
+          <h2 id="today-title" className="text-lg font-bold text-ink">
+            {t("home.today.title")}
+          </h2>
+          <Banner kind="warning">
+            <p>
+              {ts(errKey)} {ts(`${errKey}Action`)}
+            </p>
+            <p className="mt-1 text-sm">{ts("code", { code: todayError ?? "INTERNAL" })}</p>
+          </Banner>
+        </section>
+      ) : (
+        <ActivityList
+          title={t("home.today.title")}
+          emptyText={t("home.today.empty")}
+          items={today.items.map((it, i) => ({
+            id: `${it.occurredAt.toISOString()}-${i}`,
+            time: format.dateTime(it.occurredAt, { hour: "2-digit", minute: "2-digit", timeZone: today.timeZone }),
+            dateTime: it.occurredAt.toISOString(),
+            text: t(it.summaryKey),
+          }))}
+        />
+      )}
     </main>
   );
 }
