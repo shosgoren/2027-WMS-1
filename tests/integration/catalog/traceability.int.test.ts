@@ -215,68 +215,110 @@ describe("seri", () => {
     expect((await adm.query("SELECT 1 FROM public.serials WHERE item_id = $1", [item])).rowCount).toBe(0);
   });
 
-  describe("tenant geneli kapsam bayrağı (SERIAL_SCOPE_TENANT_ENABLED, yalnızca sunucu env; Q-39)", () => {
-    const prev = process.env["SERIAL_SCOPE_TENANT_ENABLED"];
-    afterAll(() => {
-      if (prev === undefined) delete process.env["SERIAL_SCOPE_TENANT_ENABLED"];
-      else process.env["SERIAL_SCOPE_TENANT_ENABLED"] = prev;
+  describe("tenant geneli kapsam bayrağı (sunucu yapılandırmasından enjekte; Q-39, Q-59)", () => {
+    const ON = { env: { SERIAL_SCOPE_TENANT_ENABLED: "true" } } as const;
+    const idx = `serials_t239_${rnd()}`;
+    const dropIdx = (): Promise<unknown> => adm.query(`DROP INDEX IF EXISTS public.${idx}`);
+    const countByNo = async (no: string, w: TenantWorld = A): Promise<number | null> => (await adm.query("SELECT 1 FROM public.serials WHERE tenant_id = $1 AND serial_no = $2", [w.tenantId, no])).rowCount;
+
+    it("indeks yokken bayrak açık: VALIDATION_FAILED, seri oluşmaz (fail-closed)", async () => {
+      await dropIdx();
+      const s1 = await mkItem(A, "SERIAL");
+      const no = `S${rnd()}`;
+      await expectFail(registerSerial(admin(A), { itemId: s1, serialNo: no }, ON), "VALIDATION_FAILED");
+      expect(await countByNo(no)).toBe(0);
     });
 
-    it("kapalıyken ürünler arası aynı seri serbest; 'false'/'1' da kapalı", async () => {
+    it("yalnızca tenant_id+serial_no sütunlu, geçerli tekil indeks kabul edilir; yanlış sütun/tekil olmayan indeks yetmez", async () => {
+      const s1 = await mkItem(A, "SERIAL");
+      const wrong = `serials_t239w_${rnd()}`;
+      await adm.query(`CREATE UNIQUE INDEX ${wrong} ON public.serials (tenant_id, lot_id, serial_no)`);
+      const plain = `serials_t239p_${rnd()}`;
+      await adm.query(`CREATE INDEX ${plain} ON public.serials (tenant_id, serial_no)`);
+      try {
+        await expectFail(registerSerial(admin(A), { itemId: s1, serialNo: `S${rnd()}` }, ON), "VALIDATION_FAILED");
+      } finally {
+        await adm.query(`DROP INDEX IF EXISTS public.${wrong}`);
+        await adm.query(`DROP INDEX IF EXISTS public.${plain}`);
+      }
+    });
+
+    it("bayrak istemci girdisinden açılamaz: girdide fazladan alan VALIDATION_FAILED; config yoksa kapalı", async () => {
       const s1 = await mkItem(A, "SERIAL");
       const s2 = await mkItem(A, "SERIAL");
       const no = `S${rnd()}`;
-      process.env["SERIAL_SCOPE_TENANT_ENABLED"] = "1";
+      const forged = { itemId: s1, serialNo: `S${rnd()}`, SERIAL_SCOPE_TENANT_ENABLED: "true", env: { SERIAL_SCOPE_TENANT_ENABLED: "true" } } as unknown as Parameters<typeof registerSerial>[1];
+      await expectFail(registerSerial(admin(A), forged), "VALIDATION_FAILED");
       await registerSerial(admin(A), { itemId: s1, serialNo: no });
-      await registerSerial(admin(A), { itemId: s2, serialNo: no });
+      await registerSerial(admin(A), { itemId: s2, serialNo: no }, {});
+      expect(await countByNo(no)).toBe(2);
     });
 
-    it("açıkken ardışık ürünler arası tekrar TRACKING_VIOLATION", async () => {
-      const s1 = await mkItem(A, "SERIAL");
-      const s2 = await mkItem(A, "SERIAL");
-      const no = `S${rnd()}`;
-      process.env["SERIAL_SCOPE_TENANT_ENABLED"] = "true";
-      await registerSerial(admin(A), { itemId: s1, serialNo: no });
-      await expectFail(registerSerial(admin(A), { itemId: s2, serialNo: no }), "TRACKING_VIOLATION");
-    });
-
-    it("açıkken iki farklı ürün için aynı serialNo eşzamanlı: yalnızca biri başarılı", async () => {
-      process.env["SERIAL_SCOPE_TENANT_ENABLED"] = "true";
-      for (let i = 0; i < 8; i++) {
+    it("kapalıyken ürünler arası aynı seri serbest; 'false'/'1'/'TRUE' da kapalı", async () => {
+      for (const v of ["1", "false", "TRUE", ""]) {
         const s1 = await mkItem(A, "SERIAL");
         const s2 = await mkItem(A, "SERIAL");
         const no = `S${rnd()}`;
-        const res = await Promise.allSettled([registerSerial(admin(A), { itemId: s1, serialNo: no }), registerSerial(admin(A), { itemId: s2, serialNo: no })]);
-        expect(res.filter((r) => r.status === "fulfilled")).toHaveLength(1);
-        const rej = res.find((r) => r.status === "rejected") as PromiseRejectedResult;
-        expect((rej.reason as AppError).code).toBe("TRACKING_VIOLATION");
+        await registerSerial(admin(A), { itemId: s1, serialNo: no }, { env: { SERIAL_SCOPE_TENANT_ENABLED: v } });
+        await registerSerial(admin(A), { itemId: s2, serialNo: no }, { env: { SERIAL_SCOPE_TENANT_ENABLED: v } });
+        expect(await countByNo(no)).toBe(2);
       }
     });
 
-    it("kapılı: advisory kilit tutulurken registerSerial bekler (kilit kaldırılırsa kırmızı)", async () => {
-      process.env["SERIAL_SCOPE_TENANT_ENABLED"] = "true";
-      const item = await mkItem(A, "SERIAL");
-      const no = `S${rnd()}`;
-      await adm.query("BEGIN");
-      try {
-        await adm.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`serial:${A.tenantId}:${no}`]);
-        let settled = false;
-        const p = registerSerial(admin(A), { itemId: item, serialNo: no }).then(
-          () => {
-            settled = true;
-          },
-          () => {
-            settled = true;
-          },
-        );
-        await delay(500);
-        expect(settled).toBe(false);
-        await adm.query("COMMIT");
-        await p;
-      } catch (e) {
-        await adm.query("ROLLBACK");
-        throw e;
-      }
+    describe("indeks varken", () => {
+      let C: TenantWorld;
+      beforeAll(async () => {
+        // Önceki testler A'da ürünler arası kopya bıraktığından tekil indeks temiz bir tenant'ta kurulur.
+        C = await seedWorld(adm, reg, "C");
+        await adm.query(`CREATE UNIQUE INDEX ${idx} ON public.serials (tenant_id, serial_no) WHERE tenant_id = '${C.tenantId}'`);
+      });
+      afterAll(dropIdx);
+
+      it("açıkken ardışık ürünler arası tekrar TRACKING_VIOLATION", async () => {
+        const s1 = await mkItem(C, "SERIAL");
+        const s2 = await mkItem(C, "SERIAL");
+        const no = `S${rnd()}`;
+        await registerSerial(admin(C), { itemId: s1, serialNo: no }, ON);
+        await expectFail(registerSerial(admin(C), { itemId: s2, serialNo: no }, ON), "TRACKING_VIOLATION");
+        expect(await countByNo(no, C)).toBe(1);
+      });
+
+      it("açıkken iki farklı ürün için aynı serialNo eşzamanlı: yalnızca biri başarılı", async () => {
+        for (let i = 0; i < 8; i++) {
+          const s1 = await mkItem(C, "SERIAL");
+          const s2 = await mkItem(C, "SERIAL");
+          const no = `S${rnd()}`;
+          const res = await Promise.allSettled([registerSerial(admin(C), { itemId: s1, serialNo: no }, ON), registerSerial(admin(C), { itemId: s2, serialNo: no }, ON)]);
+          expect(res.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+          const rej = res.find((r) => r.status === "rejected") as PromiseRejectedResult;
+          expect((rej.reason as AppError).code).toBe("TRACKING_VIOLATION");
+        }
+      });
+
+      it("kapılı: advisory kilit tutulurken registerSerial bekler (kilit kaldırılırsa kırmızı)", async () => {
+        const item = await mkItem(C, "SERIAL");
+        const no = `S${rnd()}`;
+        await adm.query("BEGIN");
+        try {
+          await adm.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`serial:${C.tenantId}:${no}`]);
+          let settled = false;
+          const p = registerSerial(admin(C), { itemId: item, serialNo: no }, ON).then(
+            () => {
+              settled = true;
+            },
+            () => {
+              settled = true;
+            },
+          );
+          await delay(500);
+          expect(settled).toBe(false);
+          await adm.query("COMMIT");
+          await p;
+        } catch (e) {
+          await adm.query("ROLLBACK");
+          throw e;
+        }
+      });
     });
   });
 });
