@@ -14,6 +14,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD .env içinde tanımlı olmalı}
       POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB .env içinde tanımlı olmalı}
       WMS_APP_PASSWORD: ${WMS_APP_PASSWORD:?WMS_APP_PASSWORD .env içinde tanımlı olmalı}
+      WMS_AUTH_PASSWORD: ${WMS_AUTH_PASSWORD:?WMS_AUTH_PASSWORD .env içinde tanımlı olmalı}
     ports:
       - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
@@ -38,11 +39,19 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB .env içinde tanımlı olmalı}
       WMS_APP_PASSWORD: ${WMS_APP_PASSWORD:?WMS_APP_PASSWORD .env içinde tanımlı olmalı}
+      WMS_AUTH_PASSWORD: ${WMS_AUTH_PASSWORD:?WMS_AUTH_PASSWORD .env içinde tanımlı olmalı}
       PGBOUNCER_ADMIN_PASSWORD: ${PGBOUNCER_ADMIN_PASSWORD:?PGBOUNCER_ADMIN_PASSWORD .env içinde tanımlı olmalı}
       PGBOUNCER_DEFAULT_POOL_SIZE: ${PGBOUNCER_DEFAULT_POOL_SIZE:-20}
       PGBOUNCER_MAX_PREPARED_STATEMENTS: ${PGBOUNCER_MAX_PREPARED_STATEMENTS:-1000}
     # İmajın kendi entrypoint'i yerine: şablon ini'yi doldur, userlist'i üret, pgbouncer'ı başlat.
     # Üretilen dosyalar yalnızca konteyner içinde /tmp/pgbouncer altındadır (0600).
+    # Bilinen sınırlama (güvenlik incelemesi MAJOR-2, Supervisor ADR notu bekliyor): userlist'te
+    # wms_app/wms_auth parolası açık metindir. PgBouncer 1.26 userlist'te SCRAM verifier'ı
+    # (SCRAM-SHA-256$iter:salt$StoredKey:ServerKey) kabul eder ve istemci SCRAM'ından sunucuya
+    # pass-through yapar (deneyle doğrulandı), ancak imajda (openssl/python/perl yok) verifier
+    # üretecek araç yoktur; pg_authid'den okumak pgbouncer'a süper kullanıcı bağlantısı gerektirir
+    # (reddedildi). Risk sınırı: yalnızca yerel/CI geliştirme ortamı; parolalar .env/CI sırrından (test düzeneğinde her koşuda rastgele),
+    # veri üretim verisi değildir; dosya yalnızca konteyner içinde 0600, repoya/imaja girmez.
     entrypoint:
       - /bin/sh
       - -ec
@@ -50,7 +59,7 @@ services:
         case "$$PGBOUNCER_DEFAULT_POOL_SIZE" in ''|*[!0-9]*) echo "PGBOUNCER_DEFAULT_POOL_SIZE sayı olmalı" >&2; exit 1;; esac
         case "$$PGBOUNCER_MAX_PREPARED_STATEMENTS" in ''|*[!0-9]*) echo "PGBOUNCER_MAX_PREPARED_STATEMENTS sayı olmalı" >&2; exit 1;; esac
         case "$$POSTGRES_DB" in ''|*[!A-Za-z0-9_]*) echo "POSTGRES_DB yalnızca harf/rakam/_ içerebilir" >&2; exit 1;; esac
-        case "$$WMS_APP_PASSWORD$$PGBOUNCER_ADMIN_PASSWORD" in *'"'*) echo "parolalar çift tırnak içeremez" >&2; exit 1;; esac
+        case "$$WMS_APP_PASSWORD$$WMS_AUTH_PASSWORD$$PGBOUNCER_ADMIN_PASSWORD" in *'"'*) echo "parolalar çift tırnak içeremez" >&2; exit 1;; esac
         umask 077
         mkdir -p /tmp/pgbouncer
         sed -e "s/__POSTGRES_DB__/$$POSTGRES_DB/g" \
@@ -59,6 +68,7 @@ services:
             /etc/pgbouncer-template/pgbouncer.ini > /tmp/pgbouncer/pgbouncer.ini
         printf '"%s" "%s"\n' \
           wms_app "$$WMS_APP_PASSWORD" \
+          wms_auth "$$WMS_AUTH_PASSWORD" \
           pgbouncer_admin "$$PGBOUNCER_ADMIN_PASSWORD" > /tmp/pgbouncer/userlist.txt
         exec /usr/bin/pgbouncer /tmp/pgbouncer/pgbouncer.ini
     ports:
