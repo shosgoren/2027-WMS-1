@@ -8,8 +8,9 @@
 # environment + dal kuralı (sırrı yalnızca main'e açma) özel repoda ücretsiz planda yok; repoya yazma
 # yetkisi olan herkes (main'i değiştirebilen) güvenilen taraftır.
 #
-# Sır kapsamı (G-09): FLY_API_TOKEN YALNIZCA "Deploy" adımının env'indedir. Checkout kimlik bilgisi
-# saklamaz; diğer adımlar (kurulum, smoke) sırrı görmez. Smoke, deploy adımının yazdığı
+# Sır kapsamı (G-09): FLY_API_TOKEN YALNIZCA "Deploy" ve (Smoke kırmızıysa) "Worker diagnostics"
+# adımlarının env'indedir; ikincisinde yalnız `flyctl logs` süreci token'ı görür, node alt süreçleri görmez. Checkout kimlik
+# bilgisi saklamaz; diğer adımlar (kurulum, smoke) sırrı görmez. Smoke, deploy adımının yazdığı
 # `flyctl status --json` dosyasını okur.
 # Token türü: uygulama mevcutsa iş akışı org düzeyinde HİÇBİR komut (orgs list / apps create) koşmaz;
 # uygulama düzeyinde deploy token'ı (`fly tokens create deploy -a etkin-wms-staging`) yeterlidir.
@@ -239,21 +240,25 @@ jobs:
       - name: Smoke
         id: smoke
         run: node scripts/deploy-smoke.mjs --url "$HEALTH_URL" --status-file "$RUNNER_TEMP/fly-status.json"
-      # T-106c: Smoke kırmızıysa başlamamış worker makinelerinin son logları + olay özeti, satır bazında maskeli
-      # (betik: bilinen kalıplar + FLY_API_TOKEN değeri; çıktı `worker| ` önekli). Bu adım HİÇBİR ZAMAN işi yeşile çevirmez:
-      # Smoke zaten kırmızıdır; teşhis hatası yalnızca not düşer.
-      - name: Worker diagnostics (masked)
+      # T-106c: Smoke kırmızıysa başlamamış worker makinelerinin olay özeti + son loglar. Ham log YAZILMAZ: betik izin
+      # listesi uygular (JSON: time/level/msg/code/hata sınıfı; Fly sistem satırları: sabit ifadeler); kalanı sayılır.
+      # Kart sapması: `exit 0` — teşhis adımı işi yeşile çevirmez (iş Smoke adımı yüzünden kırmızı kalır); teşhis hatası
+      # yalnızca not düşer. Token yalnız `flyctl logs` ortamında (FLY_TOKEN_DIAG node alt süreçlerinden kaldırılır).
+      - name: Worker diagnostics (allowlist)
         if: always() && steps.smoke.outcome == 'failure'
+        shell: bash
         env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_TOKEN_DIAG: ${{ secrets.FLY_API_TOKEN }}
         run: |
-          ids=$(node scripts/deploy-smoke.mjs worker-ids --status-file "$RUNNER_TEMP/fly-status.json" || true)
+          set -o pipefail
+          ids=$(env -u FLY_TOKEN_DIAG node scripts/deploy-smoke.mjs worker-ids --status-file "$RUNNER_TEMP/fly-status.json" || true)
           if [ -z "$ids" ]; then
             echo "worker-diag: başlamamış worker makinesi bulunamadı (grup boş ya da durum dosyası okunamadı)"
           fi
           for id in $ids; do
-            echo "::group::worker logları $id (son 200 satır, maskeli)"
-            flyctl logs --app "$FLY_APP" --machine "$id" --no-tail 2>&1 | node scripts/deploy-smoke.mjs mask-logs --max-lines 200 || echo "worker-diag: log alınamadı"
-            echo "::endgroup::"
+            echo "worker-diag: makine $id son loglar (izin listeli)"
+            FLY_API_TOKEN="$FLY_TOKEN_DIAG" flyctl logs --app "$FLY_APP" --machine "$id" --no-tail 2>&1 \
+              | env -u FLY_TOKEN_DIAG node scripts/deploy-smoke.mjs mask-logs --max-lines 200 \
+              || echo "worker-diag: log alınamadı"
           done
           exit 0

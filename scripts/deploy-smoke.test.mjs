@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { randomBytes } from "node:crypto";
-import { checkHealth, checkProcessGroup, describeStoppedMachines, evaluateHealth, maskLine, maskLogs, parseArgs, summaryLine } from "./deploy-smoke.mjs";
+import { checkHealth, checkProcessGroup, allowLine, describeStoppedMachines, evaluateHealth, maskLogs, parseArgs, summaryLine } from "./deploy-smoke.mjs";
 
 const URL_OK = "https://etkin-wms-staging.fly.dev/api/health";
 
@@ -243,52 +243,76 @@ describe("summaryLine", () => {
   });
 });
 
-describe("worker teşhisi (T-106c) — maskeleme", () => {
+describe("worker teşhisi (T-106c) — izin listesi", () => {
   // Sahte değerler çalışma anında üretilir (literal sır yok).
-  const rnd = () => randomBytes(24).toString("hex");
+  const rnd = (/** @type {number} */ n = 12) => randomBytes(n).toString("hex");
+  const run = (/** @type {string[]} */ lines) => maskLogs(lines.join("\n"));
 
-  it("bağlantı URI'si, sır atamaları, Bearer ve bilinen token maskelenir; öneki korunur", () => {
-    const pw = rnd();
-    const tok = `tok${rnd()}`;
-    const seal = rnd();
+  it("incelemedeki kaçak örnekleri çıktıda görünmez", () => {
+    const pw = rnd(4); // kısa (<32) düz parola
+    const long = rnd(20);
+    const spaced = `${rnd(3)} ${rnd(3)}`;
+    const enc = encodeURIComponent(`p@ss/${rnd(3)}`);
     const lines = [
-      `{"msg":"queue start failed","url":"postgresql://wms_worker:${pw}@ep-x.eu-central-1.aws.neon.tech/db?sslmode=require"}`,
-      `QUEUE_SEAL_KEY=${seal} BETTER_AUTH_SECRET="${pw}"`,
-      `Authorization: Bearer ${tok}`,
-      `token leaked ${tok} here`,
+      JSON.stringify({ msg: "queue start failed", detail: JSON.stringify({ password: pw }) }), // kaçışlı JSON içinde parola
+      `{"msg":"boom \\"x","password":"${pw}\\" ${long}"}`, // \" erken bitiş
+      `PASSWORD=${spaced} trailing`, // boşluklu değer
+      `auth=${pw}`, // liste dışı anahtar
+      `postgresql://u:${enc}@h/d`, // URL-encode
+      `connect failed ${pw}`, // kısa düz parola
+      `##[add-mask]${pw}`,
+      `::add-mask::${pw}`,
+      `# ${long}`,
     ];
-    for (const l of lines) {
-      const out = maskLine(l, [tok]);
-      expect(out.startsWith("worker| ")).toBe(true);
-      for (const secret of [pw, tok, seal]) expect(out).not.toContain(secret);
-      expect(out).toContain("[MASKED]");
-    }
+    const r = run(lines);
+    const out = r.lines.join("\n");
+    for (const secret of [pw, long, spaced, enc, ...spaced.split(" ")]) expect(out).not.toContain(secret);
+    for (const l of r.lines) expect(l.startsWith("worker| ")).toBe(true);
+    expect(r.lines.some((l) => /^worker\| [#:]/.test(l))).toBe(false);
+    expect(r.hidden).toBeGreaterThanOrEqual(7);
   });
 
-  it("zararsız metin korunur; https bağlantısı (kimlik bilgisiz) maskelenmez", () => {
-    expect(maskLine('{"level":"error","msg":"invalid configuration","error":"DATABASE_URL_WORKER tanımlı değil"}')).toContain(
-      "DATABASE_URL_WORKER tanımlı değil",
+  it("JSON satırı: yalnızca izinli alanlar; fazlalık ve uygunsuz msg elenir", () => {
+    const secret = rnd();
+    const out = allowLine(
+      JSON.stringify({ ts: "2026-10-06T11:32:00.000Z", level: "error", msg: "invalid configuration", service: "worker", requestId: secret, code: "E_X1", error: "TypeError", url: secret }),
     );
-    expect(maskLine("see https://fly.io/docs/x")).toBe("worker| see https://fly.io/docs/x");
+    expect(out).not.toBeNull();
+    expect(JSON.parse(out ?? "{}")).toEqual({ time: "2026-10-06T11:32:00.000Z", level: "error", msg: "invalid configuration", code: "E_X1", error: "TypeError" });
+    expect(out).not.toContain(secret);
+    expect(JSON.parse(allowLine(JSON.stringify({ level: "info", msg: `Bearer ${secret}` })) ?? "{}").msg).toBe("[msg gizlendi]");
+    expect(JSON.parse(allowLine(JSON.stringify({ msg: "x", err: { name: "PostgresError", code: "42501", message: secret } })) ?? "{}")).toMatchObject({ error: "PostgresError" });
+    expect(JSON.parse(allowLine(JSON.stringify({ msg: "x", error: "not a class name with spaces" })) ?? "{}").error).toBeUndefined();
   });
 
-  it("satır başındaki :: iş akışı komutu olamaz; ANSI/kontrol karakterleri temizlenir", () => {
-    const out = maskLine("::add-mask::x \u001b[31mred\u001b[0m\u0007");
-    expect(out.startsWith("worker| ::")).toBe(true);
-    expect(out).not.toMatch(/\u001b|\u0007/);
+  it("eksik ortam değişkeni adı (değer içermez) görünür", () => {
+    const o = JSON.parse(allowLine('{"level":"error","msg":"invalid configuration","error":"DATABASE_URL_WORKER tanımlı değil"}') ?? "{}");
+    expect(o.error).toBe("DATABASE_URL_WORKER tanımlı değil");
   });
 
-  it("yalnızca son N satır yazılır; toplam sayı döner", () => {
-    const text = Array.from({ length: 250 }, (_, i) => `satır ${i}`).join("\n") + "\n";
+  it("JSON olmayan: hata sınıfı + kod; Fly sistem satırları yalnız sabit kısım + sayı", () => {
+    const secret = rnd();
+    expect(allowLine(`QueueInstallError [QUEUE_SCHEMA_MISSING]: ${secret}`)).toBe("QueueInstallError [QUEUE_SCHEMA_MISSING]");
+    expect(allowLine(`TypeError: ${secret}`)).toBe("TypeError");
+    expect(allowLine(`2026-10-06T11:00:00Z app[80e32da6490958] fra [info] Main child exited normally with code: 1 ${secret}`)).toBe(
+      "Main child exited normally with code: 1",
+    );
+    expect(allowLine("Process appears to have been OOM killed!")).toBe("Process appears to have been OOM killed");
+    expect(allowLine("Out of memory: Killed process 513 (node)")).toBe("Out of memory");
+    expect(allowLine("Starting init (commit: abc)")).toBe("Starting init");
+    expect(allowLine(`rastgele satır ${secret}`)).toBeNull();
+  });
+
+  it("yalnızca son N satır işlenir; özet sayıları doğru", () => {
+    const text = Array.from({ length: 250 }, (_, i) => (i % 2 === 0 ? `rastgele ${i}` : `{"level":"info","msg":"satir ${i}"}`)).join("\n") + "\n";
     const r = maskLogs(text, { maxLines: 200 });
-    expect(r.lines).toHaveLength(200);
     expect(r.total).toBe(250);
-    expect(r.lines[0]).toBe("worker| satır 50");
-    expect(r.lines.at(-1)).toBe("worker| satır 249");
+    expect(r.lines.length + r.hidden).toBe(200);
+    expect(r.lines.at(-1)).toBe('worker| {"level":"info","msg":"satir 249"}');
   });
 
   it("boş log → sıfır satır", () => {
-    expect(maskLogs("")).toEqual({ lines: [], total: 0 });
+    expect(maskLogs("")).toEqual({ lines: [], total: 0, hidden: 0 });
   });
 });
 

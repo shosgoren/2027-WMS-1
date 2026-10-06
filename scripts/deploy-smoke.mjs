@@ -9,9 +9,9 @@
 //    (eski ad `process_group`; fly-go v0.11.2 `MachineConfig.ProcessGroup`).
 // Bu betik FLY_API_TOKEN görmez: status dosyasını dağıtım adımı yazar.
 // Teşhis (T-106c): worker FAIL olursa iş akışı AYRI adımda (FLY_API_TOKEN'lı) makine loglarını bu betiğe borulayarak
-// satır bazında maskeleyip yazar: `node scripts/deploy-smoke.mjs worker-ids --status-file F` (başlamamış worker
-// makine kimlikleri + olay özeti) ve `... mask-logs [--max-lines 200]` (stdin → maskeli stdout). Bu adımlar yalnızca
-// kendi ortamlarındaki FLY_API_TOKEN değerini maskeleme için okur; ağ erişimi yoktur.
+// izin listesiyle (ham log yok) yazar: `node scripts/deploy-smoke.mjs worker-ids --status-file F` (başlamamış worker
+// makine kimlikleri + olay özeti) ve `... mask-logs [--max-lines 200]` (stdin → izin listeli stdout). Bu alt komutlar
+// FLY_API_TOKEN GÖRMEZ (yalnız flyctl çağrısının ortamında); ham log yazılmaz, izin listesi uygulanır.
 // Çıktı: başarısız kontrolün nedeni + tek özet satırı. Herhangi bir FAIL → çıkış kodu 1.
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -158,42 +158,97 @@ export function checkProcessGroup(statusJson, group = DEFAULTS.group) {
 
 // ---- T-106c: worker makine teşhisi (maskeli) -------------------------------------------------------------------
 export const DIAG_MAX_LINES = 200;
-const MASK = "[MASKED]";
-/** Sır adı içeren `ad=değer` / `"ad":"değer"` kalıpları (ad kökü: SECRET/KEY/TOKEN/PASSWORD/PASS/PWD/CREDENTIAL). */
-const SECRET_ASSIGN = /([A-Za-z0-9_.-]*(?:SECRET|KEY|TOKEN|PASSWORD|PASSWD|PASS|PWD|CREDENTIAL)[A-Za-z0-9_.-]*["']?\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s,;}&]+)/gi;
+const HIDDEN_MSG = "[msg gizlendi]";
+// İZİN LİSTESİ (allowlist) — kalıp tabanlı maskeleme tamamlanamaz (kaçışlı JSON, boşluklu/kısa/URL-kodlu değerler,
+// runner'da bulunmayan Fly uygulama sırları). Bu yüzden ham log ASLA yazılmaz; yalnızca aşağıdaki alanlar/sabit
+// ifadeler yeniden üretilir, kalan her satır sayılır ve yazılmaz.
+const RE_TS = /^[0-9T:.+\-Z]{10,40}$/;
+const RE_LEVEL = /^[a-z]{3,10}$/;
+const RE_MSG = /^[a-z0-9 ._:-]{1,80}$/;
+const RE_CODE = /^[A-Z0-9_]{1,64}$/;
+const RE_ERRCLASS = /^[A-Za-z]{1,40}(?:Error|Exception)$/;
+// Worker açılış hatası: yalnızca ortam DEĞİŞKENİ ADI + sabit ifade (değer içermez; main.ts requireEnv).
+const RE_MISSING_ENV = /^[A-Z][A-Z0-9_]{2,60} tanımlı değil$/;
+const RE_ERR_LINE = /^(\w{1,40}(?:Error|Exception))(?:\s\[([A-Z0-9_]{1,40})\])?/;
+/** Fly/sistem satırları: [desen, yazılacak sabit metin (grup 1 = sayısal kod ise eklenir)]. */
+const SYSTEM_PATTERNS = /** @type {const} */ ([
+  [/Main child exited normally with code: (\d{1,3})\b/, "Main child exited normally with code: "],
+  [/Main child exited with signal \(with signal '(SIG[A-Z0-9]{2,10})'/, "Main child exited with signal "],
+  [/\bexited with code (\d{1,3})\b/, "exited with code "],
+  [/Process appears to have been OOM killed/, "Process appears to have been OOM killed"],
+  [/Out of memory/, "Out of memory"],
+  [/\boom\b/i, "oom"],
+  [/Starting init/, "Starting init"],
+  [/Preparing to run/, "Preparing to run"],
+  [/Virtual machine exited abruptly/, "Virtual machine exited abruptly"],
+]);
+
 /**
- * Tek log satırını maskeler (G-09): bağlantı URI'leri, sır adlı atamalar, Bearer/Fly/Resend belirteçleri, uzun
- * rastgele dizgiler ve (verilirse) bilinen sır değerleri. Her satır `worker| ` önekiyle yazılır → satır başındaki
- * `::` iş akışı komutu olarak yorumlanamaz.
- * @param {string} line
- * @param {readonly string[]} [knownSecrets]
- * @returns {string}
+ * Tek log satırını izin listesiyle işler. Dönüş: yazılacak güvenli metin ya da `null` (gizlenecek).
+ * @param {string} rawLine
+ * @returns {string | null}
  */
-export function maskLine(line, knownSecrets = []) {
-  let out = line.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "").replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "");
-  for (const k of knownSecrets) {
-    if (typeof k === "string" && k.length >= 8) out = out.split(k).join(MASK);
+export function allowLine(rawLine) {
+  const line = rawLine.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "").trim();
+  if (line === "") return null;
+  if (line.startsWith("{")) {
+    /** @type {unknown} */
+    let o;
+    try {
+      o = JSON.parse(line);
+    } catch {
+      return null;
+    }
+    if (typeof o !== "object" || o === null || Array.isArray(o)) return null;
+    const r = /** @type {Record<string, unknown>} */ (o);
+    /** @type {Record<string, string>} */
+    const out = {};
+    const str = (/** @type {unknown} */ v, /** @type {RegExp} */ re) => (typeof v === "string" && re.test(v) ? v : undefined);
+    const ts = str(r["time"], RE_TS) ?? str(r["ts"], RE_TS);
+    if (ts !== undefined) out["time"] = ts;
+    const level = str(r["level"], RE_LEVEL);
+    if (level !== undefined) out["level"] = level;
+    out["msg"] = str(r["msg"], RE_MSG) ?? HIDDEN_MSG;
+    const err = typeof r["err"] === "object" && r["err"] !== null ? /** @type {Record<string, unknown>} */ (r["err"]) : {};
+    const code = str(r["code"], RE_CODE) ?? str(r["errorCode"], RE_CODE) ?? str(err["code"], RE_CODE);
+    if (code !== undefined) out["code"] = code;
+    const errName = str(err["name"], RE_ERRCLASS) ?? str(r["error"], RE_ERRCLASS);
+    if (errName !== undefined) out["error"] = errName;
+    else {
+      const missing = str(r["error"], RE_MISSING_ENV);
+      if (missing !== undefined) out["error"] = missing;
+    }
+    return JSON.stringify(out);
   }
-  out = out
-    .replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]*/gi, (m) => (/^https?:\/\/[^@\s]*$/i.test(m) ? m : MASK))
-    .replace(/\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/gi, `Bearer ${MASK}`)
-    .replace(/\b(?:FlyV1|fm1[ar]?_|fm2_|re_)[A-Za-z0-9._~+/=,-]{8,}/g, MASK)
-    .replace(SECRET_ASSIGN, (_m, pre) => `${pre}${MASK}`)
-    .replace(/[A-Za-z0-9+/_-]{32,}={0,2}/g, MASK);
-  return `worker| ${out}`;
+  const m = RE_ERR_LINE.exec(line);
+  if (m !== null) return m[2] !== undefined ? `${m[1]} [${m[2]}]` : `${m[1]}`;
+  for (const [re, fixed] of SYSTEM_PATTERNS) {
+    const x = re.exec(line);
+    if (x !== null) return x[1] !== undefined ? `${fixed}${x[1]}` : fixed;
+  }
+  return null;
 }
 
 /**
- * Log metnini son `maxLines` satırla sınırlar ve maskeler; yazılan satır sayısı son satırda.
+ * Log metnini son `maxLines` satırla sınırlar; izinli satırlar `worker| ` önekiyle döner, kalanlar yalnızca sayılır.
+ * Çıktı `worker| ` ile başlar → `::`/`##[`/`#` ile başlayan satır oluşamaz.
  * @param {string} text
- * @param {{ maxLines?: number, knownSecrets?: readonly string[] }} [opts]
- * @returns {{ lines: string[], total: number }}
+ * @param {{ maxLines?: number }} [opts]
+ * @returns {{ lines: string[], total: number, hidden: number }}
  */
 export function maskLogs(text, opts = {}) {
   const max = opts.maxLines ?? DIAG_MAX_LINES;
-  const all = text.split(/\r?\n/).filter((l) => l !== "");
+  const all = text.split(/\r?\n/).filter((l) => l.trim() !== "");
   const tail = all.slice(-max);
-  return { lines: tail.map((l) => maskLine(l, opts.knownSecrets ?? [])), total: all.length };
+  /** @type {string[]} */
+  const lines = [];
+  let hidden = 0;
+  for (const l of tail) {
+    const a = allowLine(l);
+    if (a === null) hidden++;
+    else lines.push(`worker| ${a}`);
+  }
+  return { lines, total: all.length, hidden };
 }
 
 /**
@@ -288,7 +343,7 @@ async function diagCommand(/** @type {string[]} */ argv) {
       return 2;
     }
     for (const m of describeStoppedMachines(readFileSync(file, "utf8"))) {
-      for (const l of m.summary) console.error(maskLine(`${m.id} ${l}`));
+      for (const l of m.summary) console.error(`worker| ${m.id} ${l}`);
       console.log(m.id);
     }
     return 0;
@@ -302,10 +357,9 @@ async function diagCommand(/** @type {string[]} */ argv) {
     }
     const chunks = [];
     for await (const c of process.stdin) chunks.push(c);
-    const token = process.env["FLY_API_TOKEN"];
-    const { lines, total } = maskLogs(Buffer.concat(chunks).toString("utf8"), { maxLines: max, knownSecrets: token ? [token] : [] });
+    const { lines, total, hidden } = maskLogs(Buffer.concat(chunks).toString("utf8"), { maxLines: max });
     for (const l of lines) console.log(l);
-    console.log(`worker-diag: ${lines.length} satır yazıldı (toplam ${total}; maskeli)`);
+    console.log(`worker-diag: ${lines.length} satır yazıldı (toplam ${total}; gizlenen satır: ${hidden}; izin listesi)`);
     return 0;
   }
   console.error(`deploy-smoke: bilinmeyen alt komut "${cmd}"`);
