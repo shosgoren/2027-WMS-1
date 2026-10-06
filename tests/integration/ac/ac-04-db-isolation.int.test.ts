@@ -20,8 +20,8 @@ import pg from "pg";
 import { sql } from "../../../packages/db/node_modules/drizzle-orm/index.js";
 import { createDbClient, type DbClient } from "../../../packages/db/src/client.ts";
 import { withUser } from "../../../packages/db/src/index.ts";
-import { APP_ROLE, AUTH_ROLE, PROBE_ROLE, readIntEnv, redactErrorChain } from "../harness/env.ts";
-import { cleanupDocuments, cleanupStock, mkMembership, mkUser, newRegistry, seedWorld, type TenantWorld } from "../fixtures/tenants.ts";
+import { APP_ROLE, AUTH_ROLE, PROBE_ROLE, WORKER_ROLE, readIntEnv, redactErrorChain } from "../harness/env.ts";
+import { cleanupDocuments, cleanupReliability, cleanupStock, mkMembership, mkUser, newRegistry, seedWorld, type TenantWorld } from "../fixtures/tenants.ts";
 
 const env = readIntEnv(process.env);
 const urls = [env.databaseUrl, env.databaseUrlDirect];
@@ -50,6 +50,12 @@ type Attempt =
 
 type Pre = readonly [text: string, params: unknown[]];
 const setTenant = (id: string): Pre => ["SELECT set_config('app.current_tenant_id', $1, true)", [id]];
+/**
+ * T-211: yazma politikası `app.system_reason` gerekçesini de arayan tablolar (tablo adı → gerekçe). Yalnızca INSERT taramasında,
+ * yalnızca bu tabloların hem B anahtarlı (RLS reddi beklenir; tenant koşulu hâlâ sınanır) hem A anahtarlı kontrol denemesine eklenir.
+ */
+const SYSTEM_REASON_WRITE: Readonly<Record<string, string>> = { stock_consistency_runs: "queue.stock.consistency.check" };
+const setSystemReason = (reason: string): Pre => ["SELECT set_config('app.system_reason', $1, true)", [reason]];
 const setUser = (id: string): Pre => ["SELECT set_config('app.current_user_id', $1, true)", [id]];
 
 /** `pre` ifadeleri + `stmt` tek transaction'da; daima ROLLBACK (kalıcı değişiklik yok). */
@@ -185,6 +191,7 @@ async function cleanupExceptTenants(c: pg.Client, r: typeof reg): Promise<void> 
   const tenantIds = r.worlds.map((w) => w.tenantId);
   const userIds = [...r.worlds.flatMap((w) => [w.ownerUserId, w.memberUserId]), ...r.extraUsers];
   if (tenantIds.length > 0) {
+    await cleanupReliability(c, tenantIds); // T-211 tenant satırları
     await cleanupStock(c, tenantIds); // T-232 stok tabloları (defter append-only tetikleyicisi fikstürde geçici kapatılır)
     await cleanupDocuments(c, tenantIds); // T-206 tabloları (append-only tetikleyici replica ile atlanır)
     // T-204 + T-202 tabloları FK sırasıyla önce (taşıma birimi → seri → lot → barkod/dönüşüm → sahip → ürün → birim; kapsam → kilit → lokasyon → depo).
@@ -366,11 +373,13 @@ describe("AC-04 DB — A bağlamında B kimliğiyle erişim (tablo başına)", (
            SELECT (jsonb_populate_record(NULL::public.${q(t.name)}, to_jsonb(a) || jsonb_build_object('${t.key}', $2::text))).*
              FROM public.${q(t.name)} a WHERE a.${q(t.key)} = $1 LIMIT 1
          ) r`;
-      const foreign = await attempt(appClient, [setTenant(A.tenantId)], copy(), [A.tenantId, B.tenantId]);
+      const reason = SYSTEM_REASON_WRITE[t.name];
+      const insertCtx: Pre[] = reason === undefined ? [setTenant(A.tenantId)] : [setTenant(A.tenantId), setSystemReason(reason)];
+      const foreign = await attempt(appClient, insertCtx, copy(), [A.tenantId, B.tenantId]);
       if (foreign.ok || foreign.code !== INSUFFICIENT_PRIVILEGE || !RLS_MESSAGE.test(foreign.message)) {
         failures.push(`${t.name}: B anahtarlı INSERT için RLS hatası beklenir, gelen ${fmt(foreign)}`);
       }
-      const control = await attempt(appClient, [setTenant(A.tenantId)], copy(), [A.tenantId, A.tenantId]);
+      const control = await attempt(appClient, insertCtx, copy(), [A.tenantId, A.tenantId]);
       if (!control.ok && control.code !== UNIQUE_VIOLATION) {
         failures.push(`${t.name}: kontrol (A anahtarlı kopya) RLS'i geçmeli (başarı ya da 23505), gelen ${fmt(control)}`);
       }
@@ -607,6 +616,7 @@ describe("AC-04 DB — SECURITY DEFINER katalog taraması", () => {
   });
 
   const ALLOWED_SECDEF = [
+    "wms_probe.active_tenant_ids", // T-211 migration 0014: yalnızca ACTIVE tenant kimlikleri, yalnızca wms_worker EXECUTE (ADR-019 §1)
     "wms_probe.admin_reset_cleanup_on_membership", // T-103 üyelik tetikleyici işlevi (ADR-016 Sonuçlar)
     "wms_probe.consume_admin_reset_grant",
     "wms_probe.identity_exclusive_to_tenant",
@@ -645,6 +655,7 @@ describe("AC-04 DB — SECURITY DEFINER katalog taraması", () => {
 
   it("@AC-04 EXECUTE alıcıları (sahip hariç): yoklama işlevleri yalnızca beklenen uygulama rolü; migration rolü girdisi yok; tetikleyici işlevi yalnızca migration rolü", () => {
     const expected: Record<string, string[]> = {
+      "wms_probe.active_tenant_ids": [WORKER_ROLE],
       "wms_probe.identity_exclusive_to_tenant": [APP_ROLE],
       "wms_probe.consume_admin_reset_grant": [AUTH_ROLE],
       "wms_probe.invitation_for_account_creation": [AUTH_ROLE],
@@ -659,7 +670,7 @@ describe("AC-04 DB — SECURITY DEFINER katalog taraması", () => {
       const others = (f as Fn).grantees.filter((g) => g !== PROBE_ROLE).sort();
       expect(others, `${k} EXECUTE alıcıları`).toEqual([...grantees].sort());
     }
-    for (const k of ["wms_probe.identity_exclusive_to_tenant", "wms_probe.consume_admin_reset_grant", "wms_probe.invitation_for_account_creation", "wms_probe.invitation_tenant_for_token"]) {
+    for (const k of ["wms_probe.identity_exclusive_to_tenant", "wms_probe.consume_admin_reset_grant", "wms_probe.invitation_for_account_creation", "wms_probe.invitation_tenant_for_token", "wms_probe.active_tenant_ids"]) {
       expect((fns.find((x) => key(x) === k) as Fn).grantees, `${k} proacl'inde migration rolü`).not.toContain(migrator);
     }
     const trig = fns.find((x) => key(x) === "wms_probe.admin_reset_cleanup_on_membership") as Fn;
