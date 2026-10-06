@@ -27,7 +27,7 @@ export const APP_ROLE_NAME = "wms_app";
  * Bilinen uygulama rolleri (ad listesi): koşturucu bunlardan biriyle bağlanmayı reddeder (I-03).
  * Yeni bir uygulama rolü eklendiğinde bu liste güncellenir.
  */
-export const APP_ROLE_NAMES: readonly string[] = [APP_ROLE_NAME, "wms_auth", "wms_identity_probe"];
+export const APP_ROLE_NAMES: readonly string[] = [APP_ROLE_NAME, "wms_auth", "wms_ops", "wms_identity_probe"];
 
 /**
  * Rol-bağımsız (veritabanı/küme düzeyi) `ALTER DATABASE ... SET` ayarlarından izinli olanlar. Boş: her yeni
@@ -37,7 +37,7 @@ export const APP_ROLE_NAMES: readonly string[] = [APP_ROLE_NAME, "wms_auth", "wm
 export const ALLOWED_DB_LEVEL_SETTINGS: readonly string[] = [];
 
 /** Sahiplik denetimi kapsamı: probe rolü (ADR-016) meşru işlev sahibidir, bu yüzden dışarıda. */
-export const OWNERSHIP_ROLE_NAMES: readonly string[] = [APP_ROLE_NAME, "wms_auth"];
+export const OWNERSHIP_ROLE_NAMES: readonly string[] = [APP_ROLE_NAME, "wms_auth", "wms_ops"];
 
 /** Migration oturumunda boş kalması gereken bilinen `app.*` ayarları (G-02: tenant bağlamı). */
 export const KNOWN_APP_SETTINGS: readonly string[] = ["app.current_tenant_id", "app.current_user_id", "app.system_reason"];

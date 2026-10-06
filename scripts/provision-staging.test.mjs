@@ -8,9 +8,13 @@ import {
   APP_ROLES,
   appRoleDeviations,
   ensureAppRoles,
+  ensureOpsRole,
   ensureProbe,
   evaluateProbe,
   main,
+  OPS_ROLE,
+  opsRoleCheckSql,
+  opsRoleDeviations,
   parseAppRoles,
   parseArgs,
   parseFlySecretNames,
@@ -289,6 +293,35 @@ describe("planlar", () => {
   });
 });
 
+describe("ensureOpsRole / opsRoleDeviations (A-80)", () => {
+  const ok = (/** @type {string} */ stdout) => ({ ok: true, stdout, sqlstate: null, error: null });
+  it("APP_ROLES'a girmez (Fly URL/sır listesinde asla yok)", () => {
+    expect(APP_ROLES.map((r) => r.role)).not.toContain(OPS_ROLE);
+    expect(APP_ROLES.map((r) => r.secret).join(",")).not.toMatch(/OPS/);
+    expect(opsRoleCheckSql()).toContain("rolname = 'wms_ops'");
+  });
+  it("sapmalar: LOGIN, bypassrls, üyelik, sahip olunan nesne, yok", () => {
+    const row = (/** @type {Partial<Record<string, string>>} */ o) => /** @type {any} */ (parseAppRoles(roleRow("wms_ops", { login: "f", ...o }))[0]);
+    expect(opsRoleDeviations(row({}))).toEqual([]);
+    expect(opsRoleDeviations(row({ login: "t" }))).toEqual(["login"]);
+    expect(opsRoleDeviations(row({ bypass: "t", members: "1", owned: "2", createrole: "t" }))).toEqual(["bypassrls", "createrole", "member-of-role", "owns-objects"]);
+    expect(opsRoleDeviations(undefined)).toEqual(["missing"]);
+  });
+  it("yaratılan rol sapıyorsa silinir ve BLOCKED döner", () => {
+    /** @type {string[]} */
+    const calls = [];
+    let reads = 0;
+    const psql = (/** @type {string} */ q) => {
+      calls.push(q);
+      if (q.includes("'role'")) return ok(reads++ === 0 ? "" : roleRow("wms_ops", { login: "f", bypass: "t" }));
+      return ok("");
+    };
+    const r = ensureOpsRole({ psql });
+    expect(r.status).toBe("BLOCKED");
+    expect(calls.some((c) => c.startsWith("DROP ROLE"))).toBe(true);
+  });
+});
+
 describe("ensureAppRoles", () => {
   const flags = { rotate: false, rotateAuthSecret: false, rotateSealKey: false, rolePath: /** @type {"api" | "sql"} */ ("api"), sqlDecision: null };
   const cleanRows = APP_ROLES.map((r) => roleRow(r.role)).join("\n");
@@ -424,7 +457,7 @@ describe("main (sahte Neon/psql/flyctl)", () => {
     for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
   });
 
-  /** @param {{ rolesExist?: boolean, ownerCreaterole?: string, existingFly?: string[], rolesBlocked?: boolean, probeBlocked?: boolean, importFails?: boolean, flyAfterMissing?: boolean }} [o] */
+  /** @param {{ rolesExist?: boolean, ownerCreaterole?: string, existingFly?: string[], rolesBlocked?: boolean, probeBlocked?: boolean, importFails?: boolean, flyAfterMissing?: boolean, opsExists?: "nologin" | "login" }} [o] */
   function harness(o = {}) {
     const outDir = mkdtempSync(path.join(tmpdir(), "t105-"));
     dirs.push(outDir);
@@ -437,9 +470,18 @@ describe("main (sahte Neon/psql/flyctl)", () => {
     const redactor = createRedactor();
     const implicit = `${OWNER}|t|f|f|cloud_admin`;
     let roleReads = 0;
+    /** @type {string[]} */
+    const opsSql = [];
+    let opsCreated = false;
     const psql = (/** @type {any} */ _t, /** @type {string} */ sql) => {
       const ok = (/** @type {string} */ stdout) => ({ ok: true, stdout, sqlstate: null, error: null });
       if (sql.includes("'attr'")) return ok(o.probeBlocked ? probeOut([OK_MEMBER, implicit], "t", true, o.ownerCreaterole ?? "f") : probeOut([OK_MEMBER]));
+      if (sql.includes("rolname = 'wms_ops'") || sql.includes("ROLE \"wms_ops\"")) {
+        opsSql.push(sql);
+        if (sql.includes("CREATE ROLE")) opsCreated = true;
+        if (sql.includes("'role'")) return ok(o.opsExists || opsCreated ? roleRow("wms_ops", { login: o.opsExists === "login" ? "t" : "f" }) : "");
+        return ok("");
+      }
       if (sql.includes("'role'")) {
         roleReads++;
         if (roleReads === 1 && !o.rolesExist) return ok("");
@@ -487,7 +529,7 @@ describe("main (sahte Neon/psql/flyctl)", () => {
     const env = { NEON_API_KEY: NEON_KEY, NEON_PROJECT_ID: "dry-heart-13671059", FLY_API_TOKEN: FLY_TOKEN, RESEND_API_KEY: RESEND };
     const run = (/** @type {string[]} */ argv = ["--role-path", "api"], /** @type {Record<string, string>} */ extraEnv = {}) =>
       main({ env: { ...env, ...extraEnv }, argv, say: (s) => void said.push(s), rand: makeRand(), redactor, api, fly, psql, outDir , readFile: () => DECISION_FIXTURE });
-    return { run, said, imports, roleCalls, outDir, redactor };
+    return { run, said, imports, roleCalls, outDir, redactor, opsSql };
   }
   const allText = (/** @type {ReturnType<typeof harness>} */ h) =>
     [...h.said, ...readdirSync(h.outDir).map((f) => readFileSync(path.join(h.outDir, f), "utf8"))].join("\n");
@@ -517,6 +559,31 @@ describe("main (sahte Neon/psql/flyctl)", () => {
     expect(imported).not.toContain("DIRECT");
     expect(imported).toContain(`RESEND_API_KEY=${RESEND}`);
     expect(h.redactor.leaks(allText(h))).toEqual([]);
+  });
+
+  it("wms_ops (A-80): yoksa NOLOGIN parolasız yaratılır; Fly sır listesine/URL'sine hiçbir şey girmez", async () => {
+    const h = harness();
+    expect(await h.run()).toBe(0);
+    const create = h.opsSql.find((q) => q.includes("CREATE ROLE"));
+    expect(create).toContain('CREATE ROLE "wms_ops" NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION');
+    expect(create).not.toMatch(/PASSWORD|\bLOGIN\b(?<!NOLOGIN)/);
+    expect(allText(h)).toContain("wms_ops: OK (nologin, nosuperuser, nobypassrls, parolasız, bu koşuda yaratıldı)");
+    const imported = h.imports.join("");
+    expect(imported).not.toMatch(/wms_ops|OPS/i);
+  });
+
+  it("wms_ops LOGIN ise BLOCKED: hiçbir şey değiştirilmez, Fly'a yazım yok", async () => {
+    const h = harness({ opsExists: "login" });
+    expect(await h.run()).toBe(2);
+    expect(h.imports).toEqual([]);
+    expect(h.opsSql.some((q) => q.includes("CREATE ROLE") || q.includes("ALTER ROLE") || q.includes("DROP ROLE"))).toBe(false);
+    expect(allText(h)).toContain("wms_ops: BLOCKED (mevcut rol sapması: login");
+  });
+
+  it("wms_ops NOLOGIN mevcutsa yeniden yaratılmaz", async () => {
+    const h = harness({ opsExists: "nologin" });
+    expect(await h.run()).toBe(0);
+    expect(h.opsSql.some((q) => q.includes("CREATE ROLE"))).toBe(false);
   });
 
   it("ikinci koşu (roller + sırlar var): rol parolaları ve sırlar yeniden üretilmez", async () => {
