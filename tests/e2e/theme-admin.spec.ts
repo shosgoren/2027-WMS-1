@@ -145,12 +145,12 @@ test("yönetim ekranları: Akış/Kokpit x 375/1280 px", async ({ page }) => {
           const openTree = page.getByRole("link", { name: "Lokasyonları aç" }).first();
           if (await openTree.count()) {
             await openTree.click();
-            await expect(page.getByRole("button", { name: "Lokasyon ekle" })).toBeVisible();
+            await expect(page.getByRole("button", { name: "Lokasyon ekle", exact: true })).toBeVisible();
             const toggle = page.getByRole("button", { name: /altını (aç|kapat)/ }).first();
             if (await toggle.count()) await expectBorderStrong(page, toggle, "lokasyon ağacı: aç/kapat düğmesi");
             await expectNoHorizontalOverflow(page, "lokasyon ağacı");
             await shot("location-tree");
-            await page.getByRole("button", { name: "Lokasyon ekle" }).click();
+            await page.getByRole("button", { name: "Lokasyon ekle", exact: true }).click();
             const locDialog = page.getByRole("dialog");
             await expectBorderStrong(page, locDialog.locator("#create-kind"), "lokasyon oluştur: tür");
             await expectNoHorizontalOverflow(page, "lokasyon oluştur penceresi");
