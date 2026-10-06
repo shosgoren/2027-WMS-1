@@ -156,14 +156,20 @@ describe("kilit ve RLS", () => {
     }
   });
 
-  it("RLS: uygulama WHERE'i olmadan tenant_memberships başka tenant satırını göstermez", async () => {
+  it("RLS: uygulama WHERE'i olmadan tenant_memberships başka tenant satırını göstermez (çağıranın B'de de üyeliği olsa bile)", async () => {
     const a = await mkTenant();
     const b = await mkTenant();
-    await mkMember(b.tenant, "PICKER");
-    const seen = await runTenantQuery({ ...acc(a, a.owner), permission: "stock.view" }, (tx) =>
-      tx.execute<{ tenant_id: string }>(sql`SELECT DISTINCT tenant_id FROM public.tenant_memberships`),
+    const bMember = await mkMember(b.tenant, "PICKER");
+    const dual = await mkMember(a.tenant, "TENANT_ADMIN");
+    const dualInB = await mkMember(b.tenant, "READ_ONLY", { userId: dual.userId });
+    const seen = await runTenantQuery({ ...acc(a, dual), permission: "stock.view" }, (tx) =>
+      tx.execute<{ id: string; tenant_id: string }>(sql`SELECT id, tenant_id FROM public.tenant_memberships`),
     );
-    expect(seen.map((r) => r.tenant_id)).toEqual([a.tenant]);
+    expect(new Set(seen.map((r) => r.tenant_id))).toEqual(new Set([a.tenant]));
+    const ids = seen.map((r) => r.id);
+    expect(ids).not.toContain(dualInB.membershipId);
+    expect(ids).not.toContain(bMember.membershipId);
+    expect(ids).toContain(dual.membershipId);
   });
 });
 

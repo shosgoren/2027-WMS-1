@@ -55,18 +55,18 @@ export interface MembershipSummary {
 }
 
 /**
- * Yetkisiz okuyucu için: yerel kısım <4 karakterse `***`, aksi halde ilk 2 + `***`; alan adının ilk etiketi ilk harf + `***`,
- * kalan (TLD vb.) açık. `@` yoksa/boşsa tamamen `***`.
+ * Yetkisiz okuyucu için (kesme kod noktasına göredir): yerel kısım <4 kod noktasıysa `***`, aksi halde ilk 2 + `***`;
+ * alan adında ilk etiketin ilk harfi + `***`, aradaki tüm etiketler bu tek gruba çöker, yalnızca SON etiket (TLD) açık
+ * (`abcd@mail.acme.com.tr` → `ab***@m***.tr`). Noktasız alan adı: ilk harf + `***`. `@` yoksa/boşsa `***`.
  */
 export function maskEmail(email: string): string {
   const at = email.lastIndexOf("@");
   if (at <= 0 || at === email.length - 1) return "***";
-  const local = email.slice(0, at);
-  const domain = email.slice(at + 1);
-  const dot = domain.indexOf(".");
-  const first = dot === -1 ? domain : domain.slice(0, dot);
-  const rest = dot === -1 ? "" : domain.slice(dot);
-  return `${local.length < 4 ? "***" : `${local.slice(0, 2)}***`}@${first.slice(0, 1)}***${rest}`;
+  const local = Array.from(email.slice(0, at));
+  const labels = email.slice(at + 1).split(".");
+  const first = Array.from(labels[0] ?? "")[0] ?? "";
+  const tld = labels.length > 1 ? `.${labels[labels.length - 1] ?? ""}` : "";
+  return `${local.length < 4 ? "***" : `${local.slice(0, 2).join("")}***`}@${first}***${tld}`;
 }
 
 export interface ResetLinkInput {
