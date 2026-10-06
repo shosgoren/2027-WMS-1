@@ -58,6 +58,8 @@ export interface DocumentLineInput {
   readonly lotId?: string | null;
   readonly serialId?: string | null;
   readonly stockStatus?: "AVAILABLE" | "QUARANTINE" | "DAMAGED" | "BLOCKED";
+  /** Yalnız `STOCK_MOVE` (T-248): hedef durum; verilmezse/NULL ise kaynak durumla aynı (durum değişimi yok). Diğer türlerde `VALIDATION_FAILED`. */
+  readonly targetStockStatus?: "AVAILABLE" | "QUARANTINE" | "DAMAGED" | "BLOCKED" | null;
   readonly inventoryOwnerId?: string | null;
   readonly handlingUnitId?: string | null;
 }
@@ -75,6 +77,7 @@ interface NormalizedLine {
   readonly lot_id: string | null;
   readonly serial_id: string | null;
   readonly stock_status: string;
+  readonly target_stock_status: string | null;
   readonly inventory_owner_id: string | null;
   readonly handling_unit_id: string | null;
 }
@@ -117,6 +120,8 @@ function normalizeLines(raw: unknown): NormalizedLine[] {
     const x = l as Record<string, unknown>;
     const status = x.stockStatus === undefined ? "AVAILABLE" : x.stockStatus;
     if (typeof status !== "string" || !LINE_STOCK_STATUSES.has(status)) throw new AppError("VALIDATION_FAILED");
+    const target = x.targetStockStatus === undefined || x.targetStockStatus === null ? null : x.targetStockStatus;
+    if (target !== null && (typeof target !== "string" || !LINE_STOCK_STATUSES.has(target))) throw new AppError("VALIDATION_FAILED");
     return {
       id: randomUUID(),
       line_no: i + 1,
@@ -130,6 +135,7 @@ function normalizeLines(raw: unknown): NormalizedLine[] {
       lot_id: uuidOrNull(x.lotId),
       serial_id: uuidOrNull(x.serialId),
       stock_status: status,
+      target_stock_status: target,
       inventory_owner_id: uuidOrNull(x.inventoryOwnerId),
       handling_unit_id: uuidOrNull(x.handlingUnitId),
     };
@@ -139,7 +145,12 @@ function normalizeLines(raw: unknown): NormalizedLine[] {
 function recordset(lines: readonly NormalizedLine[]) {
   const json = JSON.stringify(lines);
   return sql`jsonb_to_recordset(${json}::jsonb) AS w(id uuid, line_no int, item_id uuid, unit_id uuid, quantity numeric, conversion_factor numeric, base_quantity numeric,
-     source_location_id uuid, target_location_id uuid, lot_id uuid, serial_id uuid, stock_status text, inventory_owner_id uuid, handling_unit_id uuid)`;
+     source_location_id uuid, target_location_id uuid, lot_id uuid, serial_id uuid, stock_status text, target_stock_status text, inventory_owner_id uuid, handling_unit_id uuid)`;
+}
+
+/** T-248: hedef durum yalnız `STOCK_MOVE` satırında kabul edilir (16 kural 3: durum değişimi bir −/+ çiftidir; IN/OUT tek uçludur). */
+function assertTargetStatusAllowed(kind: string, lines: readonly NormalizedLine[]): void {
+  if (kind !== "STOCK_MOVE" && lines.some((l) => l.target_stock_status !== null)) throw new AppError("VALIDATION_FAILED");
 }
 
 /** Açık sütun listeli, tek ifadelik satır yazımı (sunucu türetimli sütun yok). Başlık ÖNCEDEN kilitli olmalıdır. */
@@ -152,9 +163,9 @@ async function insertLines(tx: AccessTx, tenantId: string, documentId: string, l
   await tx.execute(
     sql`INSERT INTO public.document_lines
           (tenant_id, id, document_id, line_no, item_id, unit_id, quantity, conversion_factor, base_quantity,
-           source_location_id, target_location_id, lot_id, serial_id, stock_status, inventory_owner_id, handling_unit_id)
+           source_location_id, target_location_id, lot_id, serial_id, stock_status, target_stock_status, inventory_owner_id, handling_unit_id)
         SELECT ${tenantId}::uuid, w.id, ${documentId}::uuid, w.line_no, w.item_id, w.unit_id, w.quantity, w.conversion_factor, w.base_quantity,
-               w.source_location_id, w.target_location_id, w.lot_id, w.serial_id, w.stock_status, w.inventory_owner_id, w.handling_unit_id
+               w.source_location_id, w.target_location_id, w.lot_id, w.serial_id, w.stock_status, w.target_stock_status, w.inventory_owner_id, w.handling_unit_id
           FROM ${recordset(lines)}
          ORDER BY w.line_no`,
   );
@@ -389,6 +400,7 @@ export async function createStockDocument(
   const businessDate = businessDateOf(input.businessDate);
   const reason = reasonOf(input.reason);
   const lines = normalizeLines(input.lines ?? []);
+  assertTargetStatusAllowed(kind, lines);
   // İstek özeti yalnızca düz girdidir (satır kimlikleri sunucuda üretilir → özete girmez).
   const hashInput = { kind, warehouseId, businessDate, reason, lines: (input.lines ?? []) as unknown };
   return completed(
@@ -465,6 +477,7 @@ export async function updateDraft(
         const header = await readDocumentHeader(tx, ctx.tenantId, documentId); // kilit altında
         assertNotProcessing(header);
         if (header.status !== "DRAFT") throw documentState();
+        if (lines !== undefined) assertTargetStatusAllowed(header.kind, lines);
         if (warehouseId !== undefined && warehouseId !== header.warehouseId) await assertWarehouseActive(tx, ctx.tenantId, warehouseId);
         const date = await assertBusinessDateNotFuture(tx, ctx.tenantId, businessDate ?? header.businessDate);
         if (lines !== undefined) await assertItemsActive(tx, ctx.tenantId, lines.map((l) => l.item_id));

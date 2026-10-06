@@ -224,3 +224,5 @@ A-150 | İade satırında `returned` için üst sınır CHECK'i yok (sınır kom
 A-151 | Sipariş ve iade miktarları ürünün temel biriminde; kabul satırı birim + katsayı taşır | I-09 | T-301
 A-152 | Belge kaynak bağlantısı polimorfik (FK yok); DB tür beyaz listesi ve 'ikisi birlikte dolu/boş' kuralını zorlar, kaynağın varlığı komutun işi | ADR-021 | T-301
 A-153 | İade durum kümesi kabul belgesiyle aynı (DRAFT, OPEN, CLOSED, CANCELLED) | Q-75 | T-301
+A-154 | (kodda A-248-1) Durum geçişi fail-closed beyaz liste: yalnız QUARANTINE→AVAILABLE ve AVAILABLE→QUARANTINE; DAMAGED/BLOCKED'a/dan geçiş matris netleşene dek VALIDATION_FAILED. Hedef durum yalnız STOCK_MOVE'da (NULL = kaynakla aynı). A-147/A-217-1 kaldırıldı | Q-49, 16 kural 3 | T-248
+A-155 | (kodda A-248-2) Rezerve kısım durum değiştirmez: yeterlilik quantity − reserved kuralıyla INSUFFICIENT_STOCK; rezervasyon taşıması AVAILABLE olmayan hedefe gidemez | 16 kural 5, ADR-009 | T-248

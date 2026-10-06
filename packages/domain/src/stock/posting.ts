@@ -14,7 +14,11 @@
 // ile verilen rezervasyonları malla birlikte hedef boyuta taşır. Rezervasyon satırı ve `reserved_quantity` yazımları `reservations.ts`'tedir;
 // bakiye yazımı TEK ifadede (miktar + rezerve) yapılır: ÖNCE miktarı azalan boyutlar, SONRA diğerleri (CHECK 0 ≤ reserved ≤ quantity satır başına).
 //
-// A-xx: A-217-1 hedef durum sütunu yok (bkz. plan.ts); A-217-2 yeterlilik girişleri saymaz; A-217-3 defter nedeni belge türünden gelir
+// T-248 durum değişimi ve rezervasyon (A-248-2, fail-closed): rezerve kısım durum DEĞİŞTİRMEZ. Rezervasyonsuz STOCK_MOVE'da kaynak boyutun
+// `quantity − reserved` yeterliliği (assertSufficient) rezerveli kısmı korur → `INSUFFICIENT_STOCK`; `reservationMoves` ile taşınan rezervasyonun hedefi
+// AVAILABLE olmak zorundadır (assertReservableDimensions) → AVAILABLE→QUARANTINE'e taşıma `INSUFFICIENT_STOCK`.
+//
+// A-xx: A-248-1 durum geçişi fail-closed beyaz liste (bkz. plan.ts; A-217-1/A-147 kaldırıldı); rezerveli kısım durum değiştirmez (aşağıda); A-217-2 yeterlilik girişleri saymaz; A-217-3 defter nedeni belge türünden gelir
 // (STOCK_IN→RECEIPT, STOCK_OUT→SHIPMENT, STOCK_MOVE→MOVE; diğer nedenler 3A belge türlerinde); A-145 satır lokasyonları belge deposunda;
 // A-07 senkron üst sınırı 200 satır (üstü T-222; o zamana dek `VALIDATION_FAILED`/`DOCUMENT_STATE`, sahte başarı yok).
 import { sql } from "drizzle-orm";
@@ -80,6 +84,7 @@ type LineRow = {
   lot_id: string | null;
   serial_id: string | null;
   stock_status: PostingStatus;
+  target_stock_status: PostingStatus | null;
   inventory_owner_id: string | null;
   handling_unit_id: string | null;
 };
@@ -87,7 +92,7 @@ type LineRow = {
 async function loadLines(tx: AccessTx, tenantId: string, documentId: string): Promise<PostingLine[]> {
   const rows = await tx.execute<LineRow>(
     sql`SELECT id, line_no, item_id, quantity::text AS quantity, conversion_factor::text AS conversion_factor, base_quantity::text AS base_quantity,
-               source_location_id, target_location_id, lot_id, serial_id, stock_status, inventory_owner_id, handling_unit_id
+               source_location_id, target_location_id, lot_id, serial_id, stock_status, target_stock_status, inventory_owner_id, handling_unit_id
           FROM public.document_lines WHERE tenant_id = ${tenantId}::uuid AND document_id = ${documentId}::uuid ORDER BY line_no`,
   );
   return rows.map((r) => ({
@@ -101,9 +106,9 @@ async function loadLines(tx: AccessTx, tenantId: string, documentId: string): Pr
     targetLocationId: r.target_location_id,
     lotId: r.lot_id,
     serialId: r.serial_id,
-    // A-217-1: tek durum sütunu; kaynak ve hedef durumu aynıdır.
+    // T-248: hedef durum NULL ise kaynakla aynı (durum değişimi yok).
     sourceStatus: r.stock_status,
-    targetStatus: r.stock_status,
+    targetStatus: r.target_stock_status ?? r.stock_status,
     inventoryOwnerId: r.inventory_owner_id,
     handlingUnitId: r.handling_unit_id,
   }));
