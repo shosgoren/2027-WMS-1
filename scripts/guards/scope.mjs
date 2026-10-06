@@ -5,8 +5,24 @@
 //   --branch <ad>    dal adı (varsayılan: geçerli dal; CI'da ayrık HEAD için)
 // Kart listesi dalda değiştiyse `WARN SCOPE_CARD_CHANGED` (Supervisor §2 adım 4'te okur).
 import path from "node:path";
-import { CardError, parseCardFiles, resolveCards } from "./lib/cards.mjs";
-import { changedFiles, currentBranch, DEFAULT_TARGET, fileAtRef, GitError, mergeBase, mergeSubjects, repoRoot } from "./lib/git.mjs";
+import { CardError, mergedWorkBranches, parseCardFiles, resolveCards } from "./lib/cards.mjs";
+import {
+  branchPointsAt,
+  changedFiles,
+  currentBranch,
+  DEFAULT_TARGET,
+  fileAtRef,
+  GitError,
+  isAncestor,
+  mergeBase,
+  mergeHeads,
+  mergeMsgSubject,
+  mergeSubjects,
+  repoRoot,
+  touchedPaths,
+  treeEntries,
+  worktreeEntries,
+} from "./lib/git.mjs";
 import { NO_FILE, UsageError } from "./lib/output.mjs";
 
 /**
@@ -30,6 +46,64 @@ export const SUPERVISOR_PATHS = Object.freeze([
   "docs/tasks/**",
   "docs/MAP.md",
 ]);
+
+/**
+ * Süren çakışmalı birleştirmenin (MERGE_HEAD) hedef taraftan getirdiği yollar (T-242).
+ * Yalnızca şu koşullarda bir MERGE_HEAD `M` sayılır: geçerli commit, hedefin atası (ya da
+ * kendisi) ve `base` onun atası. Bu durumda bir yol muaf olur ancak şu ikisi birlikte doğruysa:
+ *   (1) yol `base`'den `HEAD`'e değişmemiş (dalın kendi işi değil; dalın değiştirdiği yol
+ *       her zaman kart listesine tabi kalır) ve
+ *   (2) çalışma ağacındaki içeriği (mod + blob) `M`'dekiyle aynı (ya da ikisinde de yok).
+ * Birleşmeden gelen ama sonradan elle değiştirilen (kart dışı ek değişiklik) yol muaf olmaz.
+ * Sahte/ilgisiz MERGE_HEAD (hedefin atası değil, `base`'in soyundan değil) = hiçbir yol muaf değil.
+ * @param {string} root
+ * @param {string} target
+ * @param {string} base
+ * @param {import("./lib/git.mjs").Change[]} changes
+ * @returns {Set<import("./lib/git.mjs").Change>}
+ */
+export function mergeBroughtChanges(root, target, base, changes) {
+  /** @type {Set<import("./lib/git.mjs").Change>} */
+  const exempt = new Set();
+  const heads = mergeHeads(root).filter((m) => isAncestor(root, m, target) && isAncestor(root, base, m) && !isAncestor(root, m, "HEAD"));
+  if (heads.length === 0 || changes.length === 0) return exempt;
+  const paths = touchedPaths(changes);
+  const baseE = new Map();
+  const headE = new Map();
+  const wtE = worktreeEntries(root, paths);
+  /** @type {Map<string, string>[]} */
+  const mergeE = heads.map(() => new Map());
+  for (let i = 0; i < paths.length; i += 400) {
+    const chunk = paths.slice(i, i + 400);
+    for (const [k, v] of treeEntries(root, base, chunk)) baseE.set(k, v);
+    for (const [k, v] of treeEntries(root, "HEAD", chunk)) headE.set(k, v);
+    heads.forEach((m, j) => {
+      for (const [k, v] of treeEntries(root, m, chunk)) mergeE[j]?.set(k, v);
+    });
+  }
+  /** @param {string} p */
+  const broughtByMerge = (p) =>
+    baseE.get(p) === headE.get(p) && mergeE.some((e) => e.get(p) === wtE.get(p) && wtE.get(p) !== "?");
+  for (const c of changes) {
+    if (broughtByMerge(c.path) && (c.oldPath === undefined || broughtByMerge(c.oldPath))) exempt.add(c);
+  }
+  return exempt;
+}
+
+/**
+ * Süren birleştirmede, birleştirilen ucu gösteren çalışma dalları için sentetik birleştirme konuları
+ * (MERGE_MSG'den dal adı; dal ref'i gerçekten MERGE_HEAD'e işaret etmeli — elle yazılmış MERGE_MSG
+ * tek başına kart açmaz).
+ * @param {string} root
+ * @returns {string[]}
+ */
+function pendingMergeSubjects(root) {
+  const heads = mergeHeads(root);
+  if (heads.length === 0) return [];
+  return mergedWorkBranches([mergeMsgSubject(root)])
+    .filter((b) => heads.some((h) => branchPointsAt(root, b, h)))
+    .map((b) => `Merge branch '${b}'`);
+}
 
 /**
  * @param {string[]} argv
@@ -114,7 +188,7 @@ export function run(ctx) {
     /** @type {{ kind: "work" | "int", cards: Card[] }} */
     let scope;
     try {
-      scope = resolveCards(root, branch, () => mergeSubjects(root, mergeBase(root, args.base ?? DEFAULT_TARGET)));
+      scope = resolveCards(root, branch, () => [...mergeSubjects(root, mergeBase(root, args.base ?? DEFAULT_TARGET)), ...pendingMergeSubjects(root)]);
     } catch (e) {
       if (!(e instanceof CardError)) throw e;
       out.fail(e.code, e.file, e.message);
@@ -134,10 +208,13 @@ export function run(ctx) {
     const ids = scope.cards.map((c) => c.id).join(", ") || "birleştirilmiş kart yok";
     const changes = changedFiles(root, base);
     out.detail("changes", changes);
+    const fromMerge = mergeBroughtChanges(root, target, base, changes);
+    if (fromMerge.size > 0) out.detail("mergeBrought", [...fromMerge].map((c) => c.path));
 
     /** @type {Set<string>} */
     const reported = new Set();
     for (const c of changes) {
+      if (fromMerge.has(c)) continue;
       for (const p of c.oldPath === undefined ? [c.path] : [c.oldPath, c.path]) {
         if (cardPaths.includes(p) || matchesAny(p, globs) || reported.has(p)) continue;
         reported.add(p);
