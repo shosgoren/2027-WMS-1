@@ -116,6 +116,27 @@ describe(`identity schema drift (target=${env.target})`, () => {
     }
   });
 
+  it("T-232 INCLUDE indeksleri katalogdan dogrulanir (Drizzle 0.45.3 include sunmaz): 2 anahtar + 1 INCLUDE sutunu, dogru sutunlar", async () => {
+    const client = new pg.Client({ connectionString: env.databaseUrlDirect });
+    try {
+      await client.connect();
+      const r = await client.query<{ relname: string; indnkeyatts: number; indnatts: number; cols: string[]; pred: string | null }>(
+        `SELECT c.relname, i.indnkeyatts::int AS indnkeyatts, i.indnatts::int AS indnatts,
+                ARRAY(SELECT a.attname::text FROM unnest(i.indkey::int2[]) WITH ORDINALITY k(attnum, ord)
+                        JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum ORDER BY k.ord) AS cols,
+                pg_get_expr(i.indpred, i.indrelid) AS pred
+           FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+          WHERE c.relname IN ('stock_ledger_dimension_sum_idx', 'reservations_active_sum_idx') ORDER BY 1`,
+      );
+      expect(r.rows).toEqual([
+        { relname: "reservations_active_sum_idx", indnkeyatts: 2, indnatts: 3, cols: ["tenant_id", "stock_dimension_id", "quantity"], pred: "(status = 'ACTIVE'::text)" },
+        { relname: "stock_ledger_dimension_sum_idx", indnkeyatts: 2, indnatts: 3, cols: ["tenant_id", "stock_dimension_id", "quantity"], pred: null },
+      ]);
+    } finally {
+      await client.end();
+    }
+  });
+
   it("Better Auth alanlari + yalnizca bilincli ekler: baska sutun yok (mfa_verified_at, invitation_claim_id istisnasi)", () => {
     const byName = new Map(allTables().map((t) => [pgCore.getTableConfig(t).name, pgCore.getTableConfig(t)]));
     for (const [table, fields] of Object.entries(BETTER_AUTH_FIELDS)) {

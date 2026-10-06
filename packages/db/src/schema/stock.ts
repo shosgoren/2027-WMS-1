@@ -7,6 +7,7 @@
 //   (şemada aynı adlı, INCLUDE'suz karşılık). SAPMA (drift testi): migration `numeric(20,6)` kullanır; Drizzle tanımı duyarlılıksız `numeric`tir (miktar string, float yok — I-09).
 // - SÜTUN DÜZEYİ INSERT: `stock_ledger.created_xid` / `occurred_at` ve `stock_balances.serial_key` wms_app INSERT listesinde YOKTUR
 //   (tetikleyici yazar); Drizzle `insert` bu sütunları GÖNDERMEMELİDİR. `stock_dimensions.serial_key` üretilmiş sütundur.
+// - closed_at sunucu değeridir (wms_app ne INSERT ne UPDATE yazabilir; terminal geçişte tetikleyici now() yazar).
 // - Bakiyeye yalnızca stok komutları yazar (G-01); bu tabloları doğrudan yazan kod lint/denetimle yasaktır.
 // - Tablo nesneleri yalnızca `@wms/db/internal/schema` alt yolundan açılır, genel yüzeye yalnızca tipler çıkar.
 import { sql } from "drizzle-orm";
@@ -46,6 +47,7 @@ export const stockDimensions = pgTable(
   (t) => [
     unique("stock_dimensions_tenant_id_id_key").on(t.tenantId, t.id),
     unique("stock_dimensions_tenant_id_id_serial_key_key").on(t.tenantId, t.id, t.serialKey),
+    unique("stock_dimensions_tenant_id_id_item_key").on(t.tenantId, t.id, t.itemId),
     unique("stock_dimensions_natural_key")
       .on(t.tenantId, t.itemId, t.locationId, t.lotId, t.serialId, t.stockStatus, t.inventoryOwnerId, t.handlingUnitId)
       .nullsNotDistinct(),
@@ -84,6 +86,8 @@ export const stockLedger = pgTable(
     documentId: uuid("document_id").notNull(),
     documentLineId: uuid("document_line_id").notNull(),
     stockDimensionId: uuid("stock_dimension_id").notNull(),
+    // Boyutun item_id'sinden tetikleyici türetir (istemci veremez; wms_app INSERT listesinde yok) → insert tipinde isteğe bağlı.
+    itemId: uuid("item_id").notNull().default(sql`NULL`),
     quantity: numeric("quantity").notNull(),
     reason: text("reason").notNull(),
     businessDate: date("business_date", { mode: "string" }).notNull(),
@@ -108,6 +112,8 @@ export const reservations = pgTable(
     id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
     stockDimensionId: uuid("stock_dimension_id").notNull(),
     documentLineId: uuid("document_line_id").notNull(),
+    // Boyutun item_id'sinden tetikleyici türetir (INSERT/UPDATE; istemci veremez) → insert tipinde isteğe bağlı.
+    itemId: uuid("item_id").notNull().default(sql`NULL`),
     quantity: numeric("quantity").notNull(),
     status: text("status").$type<ReservationStatus>().notNull().default("ACTIVE"),
     expiresAt: timestamptz("expires_at"),

@@ -90,13 +90,28 @@ const insLedger = `INSERT INTO public.stock_ledger (tenant_id, id, document_id, 
 const insBal = "INSERT INTO public.stock_balances (tenant_id, stock_dimension_id, quantity, reserved_quantity) VALUES ($1, $2, $3, $4)";
 const insRes = "INSERT INTO public.reservations (tenant_id, id, stock_dimension_id, document_line_id, quantity) VALUES ($1, gen_random_uuid(), $2, $3, $4)";
 
-/** Yeni (itemTwo, kök lokasyon) boyutu; durum ile benzersizleştirilir. */
+/** Yeni (takipsiz ürün, çocuk lokasyon) boyutu; durum ile benzersizleştirilir. */
 async function newDim(q: Q, w: TenantWorld, status = "AVAILABLE"): Promise<string> {
   const id = randomUUID();
-  await q(insDim, [w.tenantId, id, w.itemTwoId, w.rootLocationId, null, null, status]);
+  await q(insDim, [w.tenantId, id, w.itemNoneId, w.childLocationId, null, null, status]);
   return id;
 }
-const ledger = (q: Q, w: TenantWorld, dim: string, qty: number): Promise<pg.QueryResult> => q(insLedger, [w.tenantId, w.documentId, w.documentLineId, dim, qty]);
+async function mkItem(q: Q, w: TenantWorld, mode: string): Promise<string> {
+  const id = randomUUID();
+  await q("INSERT INTO public.items (tenant_id, id, code, name, base_unit_id, tracking_mode) VALUES ($1, $2, $3, 't232', $4, $5)", [w.tenantId, id, `X${rnd()}`, w.unitId, mode]);
+  return id;
+}
+async function mkLot(q: Q, w: TenantWorld, item: string): Promise<string> {
+  const id = randomUUID();
+  await q("INSERT INTO public.lots (tenant_id, id, item_id, lot_code) VALUES ($1, $2, $3, $4)", [w.tenantId, id, item, `L${rnd()}`]);
+  return id;
+}
+async function mkSerial(q: Q, w: TenantWorld, item: string, lot: string | null): Promise<string> {
+  const id = randomUUID();
+  await q("INSERT INTO public.serials (tenant_id, id, item_id, serial_no, lot_id) VALUES ($1, $2, $3, $4, $5)", [w.tenantId, id, item, `S${rnd()}`, lot]);
+  return id;
+}
+const ledger = (q: Q, w: TenantWorld, dim: string, qty: number): Promise<pg.QueryResult> => q(insLedger, [w.tenantId, w.documentId, w.documentLineNoneId, dim, qty]);
 
 beforeAll(async () => {
   admin = await connect(env.databaseUrlDirect);
@@ -161,9 +176,11 @@ describe("T-232 RLS, yetkiler, sütun bazlı INSERT", () => {
     expect(await col("stock_balances", "tenant_id", "UPDATE")).toBe(false);
     expect(await col("stock_balances", "serial_key", "UPDATE")).toBe(false);
     expect(await col("stock_balances", "serial_key", "INSERT")).toBe(false);
-    for (const c of ["stock_dimension_id", "quantity", "status", "closed_at"]) expect(await col("reservations", c, "UPDATE"), c).toBe(true);
-    for (const c of ["tenant_id", "id", "document_line_id", "created_at", "expires_at"]) expect(await col("reservations", c, "UPDATE"), c).toBe(false);
+    for (const c of ["stock_dimension_id", "quantity", "status"]) expect(await col("reservations", c, "UPDATE"), c).toBe(true);
+    for (const c of ["tenant_id", "id", "document_line_id", "created_at", "expires_at", "closed_at", "item_id"]) expect(await col("reservations", c, "UPDATE"), c).toBe(false);
     expect(await col("reservations", "closed_at", "INSERT")).toBe(false);
+    expect(await col("reservations", "item_id", "INSERT")).toBe(false);
+    expect(await col("stock_ledger", "item_id", "INSERT")).toBe(false);
     expect(await col("stock_ledger", "created_xid", "INSERT")).toBe(false);
     expect(await col("stock_ledger", "occurred_at", "INSERT")).toBe(false);
     expect(await col("stock_ledger", "quantity", "INSERT")).toBe(true);
@@ -183,7 +200,7 @@ describe("T-232 RLS, yetkiler, sütun bazlı INSERT", () => {
 describe("T-232 şema kısıtları", () => {
   it("boyut: doğal anahtar NULLS NOT DISTINCT; durum CHECK; UPDATE/DELETE ret (sahip dahil)", async () => {
     const dupe = await asApp(A.tenantId, async (q) => {
-      await q(insDim, [A.tenantId, randomUUID(), A.itemId, A.rootLocationId, null, null, "AVAILABLE"]);
+      await q(insDim, [A.tenantId, randomUUID(), A.itemNoneId, A.rootLocationId, null, null, "AVAILABLE"]);
     });
     expectFail(dupe, UNIQUE_VIOLATION, "NULL'lu boyut kopyası");
     expectFail(await asApp(A.tenantId, (q) => newDim(q, A, "FOO")), CHECK_VIOLATION, "durum");
@@ -193,13 +210,95 @@ describe("T-232 şema kısıtları", () => {
     expectFail(await asAdmin(A.tenantId, (q) => q("DELETE FROM public.stock_dimensions WHERE tenant_id = $1", [A.tenantId])), INSUFFICIENT_PRIVILEGE, "sahip DELETE");
   });
 
-  it("M-3: başka ürünün lotu/serisiyle boyut → FK reddi; B'nin ürünü/lokasyonuyla A boyutu → FK reddi", async () => {
-    // lotId A.itemId'nin lotu; boyut itemTwo ile → (tenant_id, item_id, lot_id) FK'si.
-    expectFail(await asApp(A.tenantId, (q) => q(insDim, [A.tenantId, randomUUID(), A.itemTwoId, A.rootLocationId, A.lotId, null, "AVAILABLE"])), FK_VIOLATION, "başka ürünün lotu");
-    expectFail(await asApp(A.tenantId, (q) => q(insDim, [A.tenantId, randomUUID(), A.itemTwoId, A.rootLocationId, null, A.serialId, "AVAILABLE"])), FK_VIOLATION, "başka ürünün serisi");
-    expectFail(await asApp(A.tenantId, (q) => q(insDim, [A.tenantId, randomUUID(), B.itemId, A.rootLocationId, null, null, "AVAILABLE"])), FK_VIOLATION, "B ürünü");
-    expectFail(await asApp(A.tenantId, (q) => q(insDim, [A.tenantId, randomUUID(), A.itemTwoId, B.rootLocationId, null, null, "AVAILABLE"])), FK_VIOLATION, "B lokasyonu");
-    expectFail(await asApp(A.tenantId, (q) => q(insDim, [A.tenantId, randomUUID(), A.itemTwoId, A.rootLocationId, null, null, "AVAILABLE"]).then(() => q("UPDATE public.stock_dimensions SET handling_unit_id = $1", [B.handlingUnitId]))), INSUFFICIENT_PRIVILEGE, "UPDATE yok");
+  it("M-3: başka ürünün lotu/serisiyle boyut → FK reddi; B'nin ürünü/lokasyonuyla A boyutu → FK reddi; boyut UPDATE yok", async () => {
+    // lotId/serialId A.itemId'nin; boyut başka (uygun takip modlu) ürünle → (tenant_id, item_id, lot_id|serial_id) FK'leri.
+    expectFail(
+      await asApp(A.tenantId, async (q) => q(insDim, [A.tenantId, randomUUID(), await mkItem(q, A, "LOT"), A.rootLocationId, A.lotId, null, "AVAILABLE"])),
+      FK_VIOLATION,
+      "başka ürünün lotu",
+    );
+    expectFail(
+      await asApp(A.tenantId, async (q) => q(insDim, [A.tenantId, randomUUID(), await mkItem(q, A, "SERIAL"), A.rootLocationId, null, A.serialId, "AVAILABLE"])),
+      FK_VIOLATION,
+      "başka ürünün serisi",
+    );
+    expectFail(await asApp(A.tenantId, (q) => q(insDim, [A.tenantId, randomUUID(), B.itemNoneId, A.rootLocationId, null, null, "AVAILABLE"])), FK_VIOLATION, "B ürünü");
+    expectFail(await asApp(A.tenantId, (q) => q(insDim, [A.tenantId, randomUUID(), A.itemNoneId, B.rootLocationId, null, null, "AVAILABLE"])), FK_VIOLATION, "B lokasyonu");
+    expectFail(await asApp(A.tenantId, (q) => newDim(q, A).then(() => q("UPDATE public.stock_dimensions SET handling_unit_id = $1", [B.handlingUnitId]))), INSUFFICIENT_PRIVILEGE, "UPDATE yok");
+  });
+
+  it("MAJOR-2/MINOR-6: boyut takip moduyla tutarlı olmalı (NONE/LOT/SERIAL/LOT_AND_SERIAL); serinin lotu boyutun lotuyla eşit", async () => {
+    type Case = { mode: string; lot: boolean; serial: boolean; ok: boolean };
+    const cases: Case[] = [
+      { mode: "NONE", lot: false, serial: false, ok: true },
+      { mode: "NONE", lot: true, serial: false, ok: false },
+      { mode: "NONE", lot: false, serial: true, ok: false },
+      { mode: "LOT", lot: true, serial: false, ok: true },
+      { mode: "LOT", lot: false, serial: false, ok: false },
+      { mode: "LOT", lot: true, serial: true, ok: false },
+      { mode: "SERIAL", lot: false, serial: true, ok: true },
+      { mode: "SERIAL", lot: false, serial: false, ok: false },
+      { mode: "SERIAL", lot: true, serial: true, ok: false },
+      { mode: "LOT_AND_SERIAL", lot: true, serial: true, ok: true },
+      { mode: "LOT_AND_SERIAL", lot: true, serial: false, ok: false },
+      { mode: "LOT_AND_SERIAL", lot: false, serial: true, ok: false },
+      { mode: "LOT_AND_SERIAL", lot: false, serial: false, ok: false },
+    ];
+    for (const c of cases) {
+      const r = await asApp(A.tenantId, async (q) => {
+        const item = await mkItem(q, A, c.mode);
+        const lot = c.lot ? await mkLot(q, A, item) : null;
+        // SERIAL ürünün serisi lotsuzdur; LOT_AND_SERIAL serisi boyutun lotunu taşır.
+        const serial = c.serial ? await mkSerial(q, A, item, c.mode === "LOT_AND_SERIAL" ? lot : null) : null;
+        await q(insDim, [A.tenantId, randomUUID(), item, A.rootLocationId, lot, serial, "AVAILABLE"]);
+      });
+      const label = `${c.mode} lot=${c.lot} serial=${c.serial}`;
+      if (c.ok) expectOk(r, label);
+      else expectFail(r, CHECK_VIOLATION, label, "TRACKING_VIOLATION");
+    }
+    // MINOR-6: serinin lotu ≠ boyutun lotu → ret (LOT_AND_SERIAL, iki farklı lot).
+    expectFail(
+      await asApp(A.tenantId, async (q) => {
+        const item = await mkItem(q, A, "LOT_AND_SERIAL");
+        const lot1 = await mkLot(q, A, item);
+        const lot2 = await mkLot(q, A, item);
+        const serial = await mkSerial(q, A, item, lot1);
+        await q(insDim, [A.tenantId, randomUUID(), item, A.rootLocationId, lot2, serial, "AVAILABLE"]);
+      }),
+      CHECK_VIOLATION,
+      "seri lotu ≠ boyut lotu",
+      "TRACKING_VIOLATION",
+    );
+  });
+
+  it("MAJOR-1: belge satırının ürünü boyutun ürünüyle eşit olmalı (defter INSERT, rezervasyon INSERT ve boyut taşıma)", async () => {
+    // X ürünlü (itemId) satır + NONE ürünlü boyut → defter reddi; sunucu item_id'yi boyuttan türetir, istemci veremez.
+    expectFail(await asApp(A.tenantId, (q) => q(insLedger, [A.tenantId, A.documentId, A.documentLineId, A.dimensionId, 1])), FK_VIOLATION, "defter: satır ürünü ≠ boyut ürünü");
+    expectFail(await asApp(A.tenantId, (q) => q(insRes, [A.tenantId, A.dimensionId, A.documentLineId, 1])), FK_VIOLATION, "rezervasyon: satır ürünü ≠ boyut ürünü");
+    // Rezervasyonun boyutunu başka ürüne taşımak: UPDATE'te item_id yeniden türetilir, satır FK'si reddeder.
+    expectFail(
+      await asApp(A.tenantId, (q) => q("UPDATE public.reservations SET stock_dimension_id = $2 WHERE id = $1", [A.reservationId, A.serialDimensionId])),
+      FK_VIOLATION,
+      "rezervasyon başka ürüne taşındı",
+    );
+    // Aynı ürünün başka boyutuna taşıma serbest (denetim bakiyelerde): onay.
+    expectOk(
+      await asApp(
+        A.tenantId,
+        async (q) => {
+          const d2 = await newDim(q, A, "DAMAGED");
+          await q("UPDATE public.reservations SET stock_dimension_id = $2 WHERE id = $1", [A.reservationId, d2]);
+        },
+        "rollback",
+      ),
+      "aynı ürün, başka boyut",
+    );
+    // Kayıt, sunucunun türettiği item_id'yi taşır.
+    const r = await asApp(A.tenantId, (q) => q("SELECT item_id FROM public.stock_ledger WHERE id = $1", [A.ledgerId]));
+    expectOk(r);
+    if (r.ok) expect((r.rows[0] as { item_id: string }).item_id).toBe(A.itemNoneId);
+    // Bağlı satırın ürünü değiştirilemez (FK; DRAFT satır UPDATE'i de reddedilir).
+    expectFail(await asAdmin(A.tenantId, (q) => q("UPDATE public.document_lines SET item_id = $2 WHERE id = $1", [A.documentLineNoneId, A.itemId])), FK_VIOLATION, "bağlı satırın ürünü");
   });
 
   it("(f) A'nın bakiye/defter/rezervasyonu B'nin boyut kimliğine → FK reddi; B'nin belge satırına → FK reddi", async () => {
@@ -209,7 +308,7 @@ describe("T-232 şema kısıtları", () => {
     expectFail(await asApp(A.tenantId, (q) => q(insLedger, [A.tenantId, B.documentId, B.documentLineId, A.dimensionId, 1])), FK_VIOLATION, "B belge satırı (defter)");
     expectFail(await asApp(A.tenantId, (q) => q(insRes, [A.tenantId, A.dimensionId, B.documentLineId, 1])), FK_VIOLATION, "B belge satırı (rezervasyon)");
     // Satır kendi tenant'ında olsa bile başka belgenin satırıyla eşleşmeyen document_id → bileşik FK.
-    expectFail(await asApp(A.tenantId, (q) => q(insLedger, [A.tenantId, randomUUID(), A.documentLineId, A.dimensionId, 1])), FK_VIOLATION, "yanlış document_id");
+    expectFail(await asApp(A.tenantId, (q) => q(insLedger, [A.tenantId, randomUUID(), A.documentLineNoneId, A.dimensionId, 1])), FK_VIOLATION, "yanlış document_id");
     // RLS WITH CHECK: A bağlamında B tenant_id'li satır.
     expectFail(await asApp(A.tenantId, (q) => q(insLedger, [B.tenantId, B.documentId, B.documentLineId, B.dimensionId, 1])), INSUFFICIENT_PRIVILEGE, "WITH CHECK");
   });
@@ -220,7 +319,7 @@ describe("T-232 şema kısıtları", () => {
     expectFail(await asApp(A.tenantId, async (q) => ledger(q, A, await newDim(q, A), 0)), CHECK_VIOLATION, "sıfır defter");
     expectFail(await asApp(A.tenantId, (q) => q("UPDATE public.stock_balances SET quantity = quantity - 11 WHERE stock_dimension_id = $1", [A.dimensionId])), CHECK_VIOLATION, "bakiye eksiye");
     expectFail(
-      await asApp(A.tenantId, (q) => q(insLedger.replace("'t232'", "'  '"), [A.tenantId, A.documentId, A.documentLineId, A.dimensionId, 1])),
+      await asApp(A.tenantId, (q) => q(insLedger.replace("'t232'", "'  '"), [A.tenantId, A.documentId, A.documentLineNoneId, A.dimensionId, 1])),
       CHECK_VIOLATION,
       "boş gerekçe",
     );
@@ -277,6 +376,7 @@ describe("T-232 defter değişmezliği (I-04)", () => {
       { tgname: "stock_ledger_assert", tgenabled: "A" },
       { tgname: "stock_ledger_no_truncate", tgenabled: "A" },
       { tgname: "stock_ledger_server_fields", tgenabled: "A" },
+      { tgname: "stock_ledger_set_item_id", tgenabled: "A" },
     ]);
   });
 
@@ -310,7 +410,7 @@ describe("T-232 defter değişmezliği (I-04)", () => {
         q(
           `INSERT INTO public.stock_ledger (tenant_id, id, document_id, document_line_id, stock_dimension_id, quantity, reason, business_date, created_xid)
            VALUES ($1, gen_random_uuid(), $2, $3, $4, 1, 'x', '2026-02-01', '1'::xid8)`,
-          [A.tenantId, A.documentId, A.documentLineId, A.dimensionId],
+          [A.tenantId, A.documentId, A.documentLineNoneId, A.dimensionId],
         ),
       ),
       INSUFFICIENT_PRIVILEGE,
@@ -321,7 +421,7 @@ describe("T-232 defter değişmezliği (I-04)", () => {
         q(
           `INSERT INTO public.stock_ledger (tenant_id, id, document_id, document_line_id, stock_dimension_id, quantity, reason, business_date, occurred_at)
            VALUES ($1, gen_random_uuid(), $2, $3, $4, 1, 'x', '2026-02-01', '2000-01-01')`,
-          [A.tenantId, A.documentId, A.documentLineId, A.dimensionId],
+          [A.tenantId, A.documentId, A.documentLineNoneId, A.dimensionId],
         ),
       ),
       INSUFFICIENT_PRIVILEGE,
@@ -336,7 +436,7 @@ describe("T-232 defter değişmezliği (I-04)", () => {
         return q(
           `INSERT INTO public.stock_ledger (tenant_id, id, document_id, document_line_id, stock_dimension_id, quantity, reason, business_date, created_xid, occurred_at)
            VALUES ($1, gen_random_uuid(), $2, $3, $4, 3, 'x', '2026-02-01', '1'::xid8, '2000-01-01') RETURNING (created_xid = pg_current_xact_id()) AS xid_ok, (occurred_at > '2020-01-01') AS ts_ok`,
-          [A.tenantId, A.documentId, A.documentLineId, dim],
+          [A.tenantId, A.documentId, A.documentLineNoneId, dim],
         );
       },
       "check",
@@ -395,12 +495,12 @@ describe("T-232 mutlak defter–bakiye denetimi (ADR-017 §6)", () => {
   });
 
   it("(d) yalnız ACTIVE rezervasyon INSERT (reserved_quantity güncellenmeden) → ret (M-2); rezerve güncellenirse kabul", async () => {
-    expectFail(await asApp(A.tenantId, (q) => q(insRes, [A.tenantId, A.dimensionId, A.documentLineId, 2]), "commit"), CHECK_VIOLATION, "yalnız rezervasyon", MISMATCH);
+    expectFail(await asApp(A.tenantId, (q) => q(insRes, [A.tenantId, A.dimensionId, A.documentLineNoneId, 2]), "commit"), CHECK_VIOLATION, "yalnız rezervasyon", MISMATCH);
     expectOk(
       await asApp(
         A.tenantId,
         async (q) => {
-          await q(insRes, [A.tenantId, A.dimensionId, A.documentLineId, 2]);
+          await q(insRes, [A.tenantId, A.dimensionId, A.documentLineNoneId, 2]);
           await q("UPDATE public.stock_balances SET reserved_quantity = reserved_quantity + 2 WHERE stock_dimension_id = $1", [A.dimensionId]);
         },
         "check",
@@ -430,7 +530,7 @@ describe("T-232 mutlak defter–bakiye denetimi (ADR-017 §6)", () => {
       await asApp(
         A.tenantId,
         async (q) => {
-          await q("UPDATE public.reservations SET status = 'CONSUMED', closed_at = now() WHERE id = $1", [A.reservationId]);
+          await q("UPDATE public.reservations SET status = 'CONSUMED' WHERE id = $1", [A.reservationId]);
           await q("UPDATE public.stock_balances SET reserved_quantity = 0 WHERE stock_dimension_id = $1", [A.dimensionId]);
         },
         "check",
@@ -439,14 +539,14 @@ describe("T-232 mutlak defter–bakiye denetimi (ADR-017 §6)", () => {
     );
     expectFail(
       await asApp(A.tenantId, async (q) => {
-        await q("UPDATE public.reservations SET status = 'RELEASED', closed_at = now() WHERE id = $1", [A.reservationId]);
+        await q("UPDATE public.reservations SET status = 'RELEASED' WHERE id = $1", [A.reservationId]);
         await q("UPDATE public.reservations SET quantity = 1 WHERE id = $1", [A.reservationId]);
       }),
       CHECK_VIOLATION,
       "sonlanmış rezervasyon",
     );
     expectFail(await asApp(A.tenantId, (q) => q("UPDATE public.reservations SET document_line_id = $2 WHERE id = $1", [A.reservationId, A.documentLineId])), INSUFFICIENT_PRIVILEGE, "document_line_id UPDATE");
-    expectFail(await asApp(A.tenantId, (q) => q("INSERT INTO public.reservations (tenant_id, id, stock_dimension_id, document_line_id, quantity, status) VALUES ($1, gen_random_uuid(), $2, $3, 1, 'CONSUMED')", [A.tenantId, A.dimensionId, A.documentLineId])), CHECK_VIOLATION, "CONSUMED INSERT");
+    expectFail(await asApp(A.tenantId, (q) => q("INSERT INTO public.reservations (tenant_id, id, stock_dimension_id, document_line_id, quantity, status) VALUES ($1, gen_random_uuid(), $2, $3, 1, 'CONSUMED')", [A.tenantId, A.dimensionId, A.documentLineNoneId])), CHECK_VIOLATION, "CONSUMED INSERT");
   });
 
   it("(e) uyumlu defter + bakiye + rezervasyon → gerçek COMMIT ile kabul; sonradan bozmak reddedilir", async () => {
@@ -457,7 +557,7 @@ describe("T-232 mutlak defter–bakiye denetimi (ADR-017 §6)", () => {
         dim = await newDim(q, A, "BLOCKED");
         await ledger(q, A, dim, 7);
         await q(insBal, [A.tenantId, dim, 7, 2]);
-        await q(insRes, [A.tenantId, dim, A.documentLineId, 2]);
+        await q(insRes, [A.tenantId, dim, A.documentLineNoneId, 2]);
       },
       "commit",
     );
@@ -549,14 +649,145 @@ describe("T-232 mutlak defter–bakiye denetimi (ADR-017 §6)", () => {
   });
 });
 
+describe("T-232 rezervasyon sunucu alanları (MINOR-4)", () => {
+  it("closed_at istemciden gelmez: UPDATE yetkisi yok; terminal geçişte sunucu now() yazar; expires_at > created_at", async () => {
+    expectFail(await asApp(A.tenantId, (q) => q("UPDATE public.reservations SET closed_at = '2000-01-01' WHERE id = $1", [A.reservationId])), INSUFFICIENT_PRIVILEGE, "closed_at UPDATE");
+    expectFail(
+      await asApp(A.tenantId, (q) => q("INSERT INTO public.reservations (tenant_id, id, stock_dimension_id, document_line_id, quantity, closed_at) VALUES ($1, gen_random_uuid(), $2, $3, 1, now())", [A.tenantId, A.dimensionId, A.documentLineNoneId])),
+      INSUFFICIENT_PRIVILEGE,
+      "closed_at INSERT",
+    );
+    // Sahip istemci değeri verse bile tetikleyici ezer (terminal geçiş → now()).
+    const r = await asAdmin(
+      A.tenantId,
+      async (q) => {
+        await q("UPDATE public.reservations SET status = 'CONSUMED', closed_at = '2000-01-01' WHERE id = $1", [A.reservationId]);
+        await q("UPDATE public.stock_balances SET reserved_quantity = 0 WHERE stock_dimension_id = $1", [A.dimensionId]);
+        return q("SELECT (closed_at = now()) AS server_now, status FROM public.reservations WHERE id = $1", [A.reservationId]);
+      },
+      "check",
+    );
+    expectOk(r);
+    if (r.ok) expect(r.rows[0]).toEqual({ server_now: true, status: "CONSUMED" });
+    const bad = (expr: string) =>
+      asApp(A.tenantId, async (q) => {
+        const d = await newDim(q, A, "QUARANTINE");
+        await q(`INSERT INTO public.reservations (tenant_id, id, stock_dimension_id, document_line_id, quantity, expires_at) VALUES ($1, gen_random_uuid(), $2, $3, 1, ${expr})`, [A.tenantId, d, A.documentLineNoneId]);
+      });
+    expectFail(await bad("now() - interval '1 hour'"), CHECK_VIOLATION, "geçmiş expires_at");
+    expectFail(await bad("now()"), CHECK_VIOLATION, "expires_at = created_at");
+    expectOk(await bad("now() + interval '1 hour'"), "gelecek expires_at");
+  });
+});
+
+describe("T-232 eşzamanlılık (MINOR-7)", () => {
+  async function committedDim(status: string): Promise<string> {
+    const dim = randomUUID();
+    // (takipsiz ürün, kök lokasyon, durum, sahip) kombinasyonu bu test kümesine ayrılmıştır (diğer testler sahipsiz boyut kullanır).
+    const r = await asApp(
+      A.tenantId,
+      async (q) => {
+        await q("INSERT INTO public.stock_dimensions (tenant_id, id, item_id, location_id, stock_status, inventory_owner_id) VALUES ($1, $2, $3, $4, $5, $6)", [
+          A.tenantId,
+          dim,
+          A.itemNoneId,
+          A.rootLocationId,
+          status,
+          A.ownerId,
+        ]);
+        await q(insBal, [A.tenantId, dim, 0, 0]);
+      },
+      "commit",
+    );
+    expectOk(r, "boyut kurulumu");
+    return dim;
+  }
+  const begin = async (c: pg.Client, level = "READ COMMITTED"): Promise<void> => {
+    await c.query(`BEGIN ISOLATION LEVEL ${level}`);
+    await c.query("SELECT set_config('app.current_tenant_id', $1, true)", [A.tenantId]);
+  };
+  const total = async (dim: string): Promise<{ q: string; l: string }> => {
+    const r = await asApp(A.tenantId, (q) =>
+      q(
+        `SELECT b.quantity::text AS q, (SELECT sum(quantity)::text FROM public.stock_ledger WHERE stock_dimension_id = b.stock_dimension_id) AS l
+           FROM public.stock_balances b WHERE b.stock_dimension_id = $1`,
+        [dim],
+      ),
+    );
+    expectOk(r);
+    return r.ok ? (r.rows[0] as { q: string; l: string }) : { q: "?", l: "?" };
+  };
+
+  it("iki istemci aynı boyuta eşzamanlı +5/+3 (FOR UPDATE ile serileşir): bakiye = defter = 8", async () => {
+    const dim = await committedDim("AVAILABLE");
+    const c1 = await connect(env.databaseUrl);
+    const c2 = await connect(env.databaseUrl);
+    const post = async (c: pg.Client, n: number): Promise<void> => {
+      await c.query("SELECT quantity FROM public.stock_balances WHERE stock_dimension_id = $1 FOR UPDATE", [dim]);
+      await c.query(insLedger, [A.tenantId, A.documentId, A.documentLineNoneId, dim, n]);
+      await c.query("UPDATE public.stock_balances SET quantity = quantity + $2, version = version + 1 WHERE stock_dimension_id = $1", [dim, n]);
+    };
+    await begin(c1);
+    await begin(c2);
+    await post(c1, 5);
+    const second = post(c2, 3); // c1 commit'e kadar kilitte bekler
+    await new Promise((r) => setTimeout(r, 200));
+    await c1.query("COMMIT");
+    await second;
+    await c2.query("COMMIT");
+    expect(await total(dim)).toEqual({ q: "8.000000", l: "8.000000" });
+  });
+
+  it("bayat değerle SET quantity = <sabit> yapan kayıp güncelleme commit'te reddedilir", async () => {
+    const dim = await committedDim("QUARANTINE");
+    const c1 = await connect(env.databaseUrl);
+    const c2 = await connect(env.databaseUrl);
+    await begin(c1);
+    await begin(c2);
+    const stale1 = Number(((await c1.query("SELECT quantity::text AS q FROM public.stock_balances WHERE stock_dimension_id = $1", [dim])).rows[0] as { q: string }).q);
+    const stale2 = Number(((await c2.query("SELECT quantity::text AS q FROM public.stock_balances WHERE stock_dimension_id = $1", [dim])).rows[0] as { q: string }).q);
+    await c1.query(insLedger, [A.tenantId, A.documentId, A.documentLineNoneId, dim, 5]);
+    await c1.query("UPDATE public.stock_balances SET quantity = $2 WHERE stock_dimension_id = $1", [dim, stale1 + 5]);
+    await c1.query("COMMIT");
+    await c2.query(insLedger, [A.tenantId, A.documentId, A.documentLineNoneId, dim, 3]);
+    await c2.query("UPDATE public.stock_balances SET quantity = $2 WHERE stock_dimension_id = $1", [dim, stale2 + 3]); // 3 (bayat) ≠ 5 + 3
+    await expect(c2.query("COMMIT")).rejects.toMatchObject({ code: CHECK_VIOLATION, message: expect.stringContaining(MISMATCH) });
+    await c2.query("ROLLBACK").catch(() => undefined);
+    expect(await total(dim)).toEqual({ q: "5.000000", l: "5.000000" });
+  });
+
+  it("REPEATABLE READ: anlık görüntüden sonra başkası commit ettiyse aynı satırı güncellemek serileştirme hatası verir (40001)", async () => {
+    const dim = await committedDim("DAMAGED");
+    const c1 = await connect(env.databaseUrl);
+    const c2 = await connect(env.databaseUrl);
+    await begin(c1, "REPEATABLE READ");
+    await c1.query("SELECT quantity FROM public.stock_balances WHERE stock_dimension_id = $1", [dim]); // anlık görüntü sabitlenir
+    await begin(c2);
+    await c2.query(insLedger, [A.tenantId, A.documentId, A.documentLineNoneId, dim, 5]);
+    await c2.query("UPDATE public.stock_balances SET quantity = quantity + 5 WHERE stock_dimension_id = $1", [dim]);
+    await c2.query("COMMIT");
+    await expect(c1.query("UPDATE public.stock_balances SET quantity = quantity + 3 WHERE stock_dimension_id = $1", [dim])).rejects.toMatchObject({ code: "40001" });
+    await c1.query("ROLLBACK").catch(() => undefined);
+    expect(await total(dim)).toEqual({ q: "5.000000", l: "5.000000" });
+  });
+});
+
 describe("T-232 (i) 100 satırlık belge eşdeğeri commit süresi (ölçüm)", () => {
   it("tek transaction: 100 boyut + 100 defter + 100 bakiye; commit süresi raporlanır", async () => {
     const C = await seedWorld(admin, reg, "C");
     const tag = rnd();
-    // 100 benzersiz lot (itemTwo) migration rolüyle kurulur (fikstür); ölçüm wms_app ile.
+    // LOT takipli ürün + 100 benzersiz lot + belge satırı migration rolüyle kurulur (fikstür); ölçüm wms_app ile.
+    const perfItem = randomUUID();
+    const perfLine = randomUUID();
+    await admin.query("INSERT INTO public.items (tenant_id, id, code, name, base_unit_id, tracking_mode) VALUES ($1, $2, 'UPERF', 'perf', $3, 'LOT')", [C.tenantId, perfItem, C.unitId]);
     await admin.query(
       "INSERT INTO public.lots (tenant_id, id, item_id, lot_code) SELECT $1, gen_random_uuid(), $2, $3 || '-' || g FROM generate_series(1, 100) g",
-      [C.tenantId, C.itemTwoId, tag],
+      [C.tenantId, perfItem, tag],
+    );
+    await admin.query(
+      `INSERT INTO public.document_lines (tenant_id, id, document_id, line_no, item_id, unit_id, quantity, conversion_factor, base_quantity, target_location_id)
+       VALUES ($1, $2, $3, 9, $4, $5, 1, 1, 1, $6)`,
+      [C.tenantId, perfLine, C.documentId, perfItem, C.unitId, C.rootLocationId],
     );
     const r = await asApp(
       C.tenantId,
@@ -564,23 +795,23 @@ describe("T-232 (i) 100 satırlık belge eşdeğeri commit süresi (ölçüm)", 
         await q(
           `INSERT INTO public.stock_dimensions (tenant_id, id, item_id, location_id, lot_id)
            SELECT $1, gen_random_uuid(), $2, $3, l.id FROM public.lots l WHERE l.tenant_id = $1 AND l.item_id = $2 AND l.lot_code LIKE $4`,
-          [C.tenantId, C.itemTwoId, C.rootLocationId, `${tag}-%`],
+          [C.tenantId, perfItem, C.rootLocationId, `${tag}-%`],
         );
         await q(
           `INSERT INTO public.stock_ledger (tenant_id, id, document_id, document_line_id, stock_dimension_id, quantity, reason, business_date)
            SELECT $1, gen_random_uuid(), $2, $3, d.id, 10, 't232', '2026-02-01' FROM public.stock_dimensions d WHERE d.tenant_id = $1 AND d.item_id = $4 AND d.lot_id IS NOT NULL`,
-          [C.tenantId, C.documentId, C.documentLineId, C.itemTwoId],
+          [C.tenantId, C.documentId, perfLine, perfItem],
         );
         await q(
           `INSERT INTO public.stock_balances (tenant_id, stock_dimension_id, quantity, reserved_quantity)
            SELECT $1, d.id, 10, 0 FROM public.stock_dimensions d WHERE d.tenant_id = $1 AND d.item_id = $2 AND d.lot_id IS NOT NULL`,
-          [C.tenantId, C.itemTwoId],
+          [C.tenantId, perfItem],
         );
       },
       "commit",
     );
     expectOk(r, "100 satır commit");
-    const n = await asApp(C.tenantId, (q) => q("SELECT count(*)::int AS n FROM public.stock_ledger l JOIN public.stock_dimensions d ON d.tenant_id = l.tenant_id AND d.id = l.stock_dimension_id WHERE l.tenant_id = $1 AND d.item_id = $2", [C.tenantId, C.itemTwoId]));
+    const n = await asApp(C.tenantId, (q) => q("SELECT count(*)::int AS n FROM public.stock_ledger l JOIN public.stock_dimensions d ON d.tenant_id = l.tenant_id AND d.id = l.stock_dimension_id WHERE l.tenant_id = $1 AND d.item_id = $2", [C.tenantId, perfItem]));
     if (n.ok) expect((n.rows[0] as { n: number }).n).toBe(100);
     if (r.ok) {
       console.info(`T232_COMMIT_100_LINES_MS=${r.ms.toFixed(1)}`);

@@ -40,6 +40,9 @@ export interface TenantWorld {
   ledgerId: string;
   serialLedgerId: string;
   reservationId: string;
+  /** T-232: takip modu NONE olan ürün ve onun belge satırı (dimensionId/rezervasyon bu ürüne aittir; ürün tutarlılığı FK'si). */
+  itemNoneId: string;
+  documentLineNoneId: string;
   /**
    * AC-04 DELETE kontrol satırları (tablo adı → id): FK ile KORUNMAYAN, wms_app'in gerçekten silebildiği satır. Yalnızca silme
    * kontrolü için zorunlu tablolar: document_lines (defter/rezervasyonun bağlandığı satır silinemez; bu satır başka bir DRAFT
@@ -216,6 +219,8 @@ export async function seedWorld(
   await c.query("INSERT INTO public.number_sequences (tenant_id, document_kind, period) VALUES ($1, 'STOCK_IN', '2026')", [tenantId]);
   // T-232: stok çekirdeği. Defter + bakiye + rezervasyon AYNI transaction'da ve o tenant'ın bağlamıyla yazılır (ertelenmiş mutlak
   // denetim migration rolünde de bağlam ister; tenant başına ayrı transaction).
+  const itemNoneId = randomUUID();
+  const documentLineNoneId = randomUUID();
   const dimensionId = randomUUID();
   const serialDimensionId = randomUUID();
   const ledgerId = randomUUID();
@@ -224,15 +229,27 @@ export async function seedWorld(
   await c.query("BEGIN");
   try {
     await c.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+    await c.query("INSERT INTO public.items (tenant_id, id, code, name, base_unit_id, tracking_mode) VALUES ($1, $2, 'U3', 'Urun 3 (takipsiz)', $3, 'NONE')", [
+      tenantId,
+      itemNoneId,
+      unitId,
+    ]);
+    // DRAFT ana belgeye ikinci satır (line_no 2): NONE ürün.
+    await c.query(
+      `INSERT INTO public.document_lines
+         (tenant_id, id, document_id, line_no, item_id, unit_id, quantity, conversion_factor, base_quantity, target_location_id)
+       VALUES ($1, $2, $3, 2, $4, $5, 1, 1, 1, $6)`,
+      [tenantId, documentLineNoneId, documentId, itemNoneId, unitId, rootLocationId],
+    );
     await c.query(
       `INSERT INTO public.stock_dimensions (tenant_id, id, item_id, location_id, lot_id, serial_id)
-       VALUES ($1, $2, $4, $5, NULL, NULL), ($1, $3, $4, $6, $7, $8)`,
-      [tenantId, dimensionId, serialDimensionId, itemId, rootLocationId, childLocationId, lotId, serialId],
+       VALUES ($1, $2, $4, $5, NULL, NULL), ($1, $3, $9, $6, $7, $8)`,
+      [tenantId, dimensionId, serialDimensionId, itemNoneId, rootLocationId, childLocationId, lotId, serialId, itemId],
     );
     await c.query(
       `INSERT INTO public.stock_ledger (tenant_id, id, document_id, document_line_id, stock_dimension_id, quantity, reason, business_date, actor_user_id)
-       VALUES ($1, $2, $4, $5, $6, 10, 'T232 fikstur', '2026-01-15', $8), ($1, $3, $4, $5, $7, 1, 'T232 fikstur', '2026-01-15', $8)`,
-      [tenantId, ledgerId, serialLedgerId, documentId, documentLineId, dimensionId, serialDimensionId, ownerUserId],
+       VALUES ($1, $2, $4, $9, $6, 10, 'T232 fikstur', '2026-01-15', $8), ($1, $3, $4, $5, $7, 1, 'T232 fikstur', '2026-01-15', $8)`,
+      [tenantId, ledgerId, serialLedgerId, documentId, documentLineId, dimensionId, serialDimensionId, ownerUserId, documentLineNoneId],
     );
     await c.query(
       `INSERT INTO public.stock_balances (tenant_id, stock_dimension_id, quantity, reserved_quantity)
@@ -241,7 +258,7 @@ export async function seedWorld(
     );
     await c.query(
       "INSERT INTO public.reservations (tenant_id, id, stock_dimension_id, document_line_id, quantity) VALUES ($1, $2, $3, $4, 4)",
-      [tenantId, reservationId, dimensionId, documentLineId],
+      [tenantId, reservationId, dimensionId, documentLineNoneId],
     );
     await c.query("COMMIT");
   } catch (e) {
@@ -291,6 +308,8 @@ export async function seedWorld(
     ledgerId,
     serialLedgerId,
     reservationId,
+    itemNoneId,
+    documentLineNoneId,
     deletableControl: { document_lines: deletableLineId },
   };
   reg.worlds.push(world);
@@ -351,6 +370,10 @@ export async function cleanupDocuments(c: pg.Client, tenantIds: string[]): Promi
  * (hata olursa ROLLBACK ikisini de geri alır). Diğer değişmezlik tetikleyicileri replica modu ile atlanır (wms_app bunu yapamaz;
  * stock-ledger-schema testi kanıtlar). Ledger tablo kilidi ilk iş alınır (diğer test dosyalarıyla kilit sırası çakışmasın).
  */
+// SÜPER KULLANICI/SAHİP VARSAYIMI (MINOR-9): bu temizlik yalnızca fikstür bağlantısı (DATABASE_URL_DIRECT, tablo sahibi + süper kullanıcı;
+// Neon'da BYPASSRLS'li sahip) ile çalışır: ALTER TABLE ... DISABLE TRIGGER sahiplik, SET LOCAL session_replication_role süper kullanıcı
+// ister ve RLS'i aşar. Uygulama rolü (wms_app) bunların hiçbirini yapamaz (stock-ledger-schema testi kanıtlar). Süper kullanıcı olmayan
+// bir sahiple (kısıtlı yönetilen DB) bu fonksiyon çalışmaz; böyle bir hedefte tenant temizliği yerine tek kullanımlık veritabanı atılır.
 export async function cleanupStock(c: pg.Client, tenantIds: string[]): Promise<void> {
   await c.query("BEGIN");
   try {
