@@ -57,11 +57,7 @@ export class DbClientConfigError extends Error {
   override name = "DbClientConfigError";
 }
 
-// Next paket (route/sayfa) bundle'ları bu modülü ÇOĞALTABİLİR; `getAppDb` tutamacı globalThis'te paylaşıldığından
-// tutamaç→ham istemci eşlemesi de süreç genelinde paylaşılmalıdır (aksi halde `rawDb` başka bundle'ın tutamacını tanımaz; T-126).
-const RAW_BY_CLIENT_KEY = Symbol.for("@wms/db/raw-by-client");
-const rawGlobal = globalThis as { [RAW_BY_CLIENT_KEY]?: WeakMap<DbClient, DrizzleDb> };
-const rawByClient: WeakMap<DbClient, DrizzleDb> = (rawGlobal[RAW_BY_CLIENT_KEY] ??= new WeakMap<DbClient, DrizzleDb>());
+const rawByClient = new WeakMap<DbClient, DrizzleDb>();
 
 function createDrizzle(sql: postgres.Sql) {
   return drizzle({ client: sql });

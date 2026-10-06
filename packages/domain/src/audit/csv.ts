@@ -6,17 +6,24 @@ export const CSV_BOM = "﻿";
 
 export const AUDIT_CSV_HEADERS = ["Tarih (UTC)", "Kişi", "İşlem", "Kayıt türü", "Kayıt no", "Gerekçe", "Özet (JSON)"] as const;
 
-/** Hücre başında formül olarak yorumlanabilen karakterler: `=`, `+`, `-`, `@`, sekme, CR. */
-const FORMULA_START = /^[=+\-@\t\r]/;
+/** NFKC sonrası baştaki boşluk/kontrol karakterleri atlanır; ardından formül başlangıcı mı. */
+const FORMULA_AFTER_TRIM = /^[\s\u0000-\u001f\u007f]*[=+\-@]/u;
+
+/** Sekme/CR ile başlayan hücre (boşluk kırpmasında kaybolmasın diye ayrıca denetlenir). */
+function startsDangerous(value: string): boolean {
+  if (value.startsWith("\t") || value.startsWith("\r")) return true;
+  return FORMULA_AFTER_TRIM.test(value.normalize("NFKC"));
+}
 
 /**
- * Tek hücre: `null`/`undefined` → boş. Formül başlangıcı `'` ile öne ekle (metin olarak gösterilir), sonra RFC 4180:
- * `"`, `,`, CR veya LF içeren hücre çift tırnağa alınır, içteki `"` ikilenir.
+ * Tek hücre: `null`/`undefined` → boş tırnaklı hücre. Formül başlangıcı (NFKC normalize + baştaki boşluk kırpılmış değerde
+ * `=`, `+`, `-`, `@`; ham değerde sekme/CR; tam genişlik ＝＋－＠ dahil) `'` ile öne eklenir. TÜM hücreler çift tırnağa alınır,
+ * içteki `"` ikilenir (RFC 4180; TR Excel'in `;` ayırıcısıyla bölünmesi formül çalıştıramaz).
  */
 export function csvCell(value: string | null | undefined): string {
-  if (value === null || value === undefined) return "";
-  const safe = FORMULA_START.test(value) ? `'${value}` : value;
-  return /[",\r\n]/.test(safe) ? `"${safe.replaceAll('"', '""')}"` : safe;
+  if (value === null || value === undefined) return '""';
+  const safe = startsDangerous(value) ? `'${value}` : value;
+  return `"${safe.replaceAll('"', '""')}"`;
 }
 
 /** Bir satır (CRLF ile biter, RFC 4180). */

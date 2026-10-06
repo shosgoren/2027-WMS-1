@@ -90,6 +90,10 @@ function validDate(s: string): boolean {
   return dt.getUTCFullYear() === y && dt.getUTCMonth() === mo - 1 && dt.getUTCDate() === d;
 }
 
+export function validateAuditFilters(f: AuditFilters | undefined): AuditFilters {
+  return checkFilters(f);
+}
+
 function checkFilters(f: AuditFilters | undefined): AuditFilters {
   if (f === undefined) return {};
   if (typeof f !== "object" || f === null) throw new AppError("VALIDATION_FAILED");
@@ -131,6 +135,7 @@ async function selectRows(
   snapshot: string | undefined,
   limit: number,
   withSummary: boolean,
+  excludeXid?: string,
 ): Promise<RawRow[]> {
   const from = filters.from === undefined ? sql`` : sql`AND a.occurred_at >= ((${filters.from}::date)::timestamp AT TIME ZONE ${tz})`;
   const to = filters.to === undefined ? sql`` : sql`AND a.occurred_at < (((${filters.to}::date + 1))::timestamp AT TIME ZONE ${tz})`;
@@ -140,6 +145,8 @@ async function selectRows(
       ? sql``
       : sql`AND (a.occurred_at < ${cursor.ts}::timestamptz OR (a.occurred_at = ${cursor.ts}::timestamptz AND a.id > ${cursor.id}::uuid))`;
   const snap = snapshot === undefined ? sql`` : sql`AND pg_visible_in_snapshot(a.created_xid, ${snapshot}::pg_snapshot)`;
+  // Kesit kendi `audit.exported` olayını DIŞLAMALI: o xid snapshot'tan önce atanmışsa (xmax'tan küçük, xip'te yok) görünür olurdu.
+  const own = excludeXid === undefined ? sql`` : sql`AND a.created_xid <> ${excludeXid}::xid8`;
   const summary = withSummary ? sql`a.change_summary::text` : sql`'{}'::text`;
   return [
     ...(await tx.execute<RawRow>(
@@ -147,11 +154,17 @@ async function selectRows(
                  ${summary} AS summary
             FROM public.audit_logs a
             LEFT JOIN public.users u ON u.id = a.actor_user_id
-           WHERE a.tenant_id = ${tenantId}::uuid ${from} ${to} ${act} ${after} ${snap}
+           WHERE a.tenant_id = ${tenantId}::uuid ${from} ${to} ${act} ${after} ${snap} ${own}
            ORDER BY a.occurred_at DESC, a.id ASC
            LIMIT ${limit}`,
     )),
   ];
+}
+
+/** G-09: `change_summary` içindeki e-posta biçimli değerler dışa aktarılmaz. */
+const EMAIL_RE = /[^\s"'<>@\\,;]{1,128}@[^\s"'<>@\\,;]{1,255}\.[^\s"'<>@\\,;]{1,63}/g;
+export function maskEmails(text: string): string {
+  return text.replace(EMAIL_RE, "[EMAIL]");
 }
 
 const toDate = (v: Date | string): Date => (v instanceof Date ? v : new Date(v));
@@ -189,6 +202,10 @@ export interface AuditExportOptions {
   readonly requestId?: string | null;
   /** Test için parça boyutu (varsayılan 1000). */
   readonly chunkSize?: number;
+  /** Her SONRAKİ parçadan önce çağrılır (oturum hâlâ geçerli mi); reddederse akış hata ile biter. */
+  readonly revalidate?: () => Promise<void>;
+  /** Akış ortası hata (maskeli günlük için); hata yine akışa iletilir, yutulmaz. */
+  readonly onError?: (e: unknown) => void;
 }
 
 export interface AuditExport {
@@ -212,7 +229,7 @@ export async function openAuditExport(params: Omit<TenantAccessParams, "permissi
     const snap = (await tx.execute<{ s: string }>(sql`SELECT pg_current_snapshot()::text AS s`))[0]?.s;
     if (snap === undefined || !SNAPSHOT_RE.test(snap)) throw new AppError("INTERNAL");
     const tz = await tenantTimeZone(tx, m.tenantId);
-    await appendAudit(tx, {
+    const ev = await appendAudit(tx, {
       action: "audit.exported",
       actorUserId: m.userId,
       entityType: "audit_log",
@@ -220,8 +237,8 @@ export async function openAuditExport(params: Omit<TenantAccessParams, "permissi
       changeSummary: { format: "csv", ...(filters.from === undefined ? {} : { from: filters.from }), ...(filters.to === undefined ? {} : { to: filters.to }), ...(filters.action === undefined ? {} : { action: filters.action }) },
     });
     // Kesit: aynı transaction'ın yazdığı export olayı da kesitin DIŞINDADIR (xid, snapshot.xmax'tan sonra atanır).
-    const rows = await selectRows(tx, m.tenantId, tz, filters, undefined, snap, size, true);
-    return { snap, tz, rows };
+    const rows = await selectRows(tx, m.tenantId, tz, filters, undefined, snap, size, true, ev.createdXid);
+    return { snap, tz, rows, ownXid: ev.createdXid };
   });
 
   const enc = new TextEncoder();
@@ -236,7 +253,7 @@ export async function openAuditExport(params: Omit<TenantAccessParams, "permissi
             entityType: r.entity_type,
             entityId: r.entity_id,
             reason: r.reason,
-            changeSummary: r.summary,
+            changeSummary: maskEmails(r.summary),
           }),
         )
         .join(""),
@@ -248,6 +265,16 @@ export async function openAuditExport(params: Omit<TenantAccessParams, "permissi
   let lastCursor: Cursor | undefined = firstLast === undefined ? undefined : { ts: firstLast.ts, id: firstLast.id };
   const stream = new ReadableStream<Uint8Array>({
     async pull(controller) {
+      try {
+        await pullChunk(controller);
+      } catch (e) {
+        options.onError?.(e);
+        throw e;
+      }
+    },
+  });
+  async function pullChunk(controller: ReadableStreamDefaultController<Uint8Array>): Promise<void> {
+    {
       if (head) {
         head = false;
         controller.enqueue(enc.encode(CSV_BOM + auditCsvHeader()));
@@ -255,9 +282,10 @@ export async function openAuditExport(params: Omit<TenantAccessParams, "permissi
       let rows = pending;
       pending = null;
       if (rows === null) {
-        // Sonraki parça: ayrı kısa transaction; üyelik/izin yeniden doğrulanır (recentAuth yalnızca ilk parçada).
+        // Sonraki parça: oturum + ayrı kısa transaction; üyelik/izin yeniden doğrulanır (recentAuth yalnızca ilk parçada).
+        if (options.revalidate !== undefined) await options.revalidate();
         const cur = lastCursor;
-        rows = await runTenantQuery({ ...later, permission: "audit.view" }, (tx, m) => selectRows(tx, m.tenantId, first.tz, filters, cur, first.snap, size, true));
+        rows = await runTenantQuery({ ...later, permission: "audit.view" }, (tx, m) => selectRows(tx, m.tenantId, first.tz, filters, cur, first.snap, size, true, first.ownXid));
       }
       const last = rows[rows.length - 1];
       if (last !== undefined) {
@@ -267,7 +295,7 @@ export async function openAuditExport(params: Omit<TenantAccessParams, "permissi
       if (rows.length < size) {
         controller.close();
       }
-    },
-  });
+    }
+  }
   return { stream };
 }

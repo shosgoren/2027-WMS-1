@@ -5,21 +5,26 @@ export { createDbClient } from "./client.ts";
 export type { DbClient, TenantContext } from "./client.ts";
 
 const APP_DB_KEY = Symbol.for("@wms/db/app-db");
+let appDb: DbClient | undefined;
 
 /**
  * Web sürecinin veritabanına eriştiği TEK nokta (T-117 / T-127a): `DATABASE_URL` (yalnızca uygulama rolü `wms_app`,
- * pooler) ile süreç başına tek havuz. Tekil `globalThis` üzerinde tutulur (dev hot-reload modülü yeniden yükleyince yeni
- * havuz açılmaz). Ayarlar `DB_CLIENT_SETTINGS`. `DATABASE_URL` yoksa hata (URL değeri mesaja girmez, G-09).
+ * pooler) ile MODÜL KOPYASI başına tek havuz. Tutamaç→ham istemci eşlemesi (`client.ts`) modül yereldir ve bilerek
+ * `globalThis`'e konmaz (uygulama kodu ham Drizzle'a ulaşıp oturum düzeyi `set_config` ile RLS'i atlatamamalı, G-02).
+ * Next/Turbopack route ve sayfa paketlerinde bu modülü ayrı kopyalar olarak yükler; tutamacı kopyalar arasında
+ * paylaşmak `rawDb`'nin başka kopyanın tutamacını tanımamasına yol açar (T-126). Bu yüzden her kopya kendi havuzunu açar
+ * (üretimde en çok birkaç kopya; PgBouncer arkasında). Ayarlar `DB_CLIENT_SETTINGS`. `DATABASE_URL` yoksa hata (G-09).
  */
 export function getAppDb(): DbClient {
   const g = globalThis as { [APP_DB_KEY]?: DbClient };
-  const existing = g[APP_DB_KEY];
-  if (existing !== undefined) return existing;
+  // Genel yuva yalnızca yaşam döngüsü içindir (test kapatma/sıfırlama, dev hot-reload): yalnızca tutamaç (close) görünür,
+  // ham istemci eşlemesi değil. Kopya kendi tutamacını kullanır; yuva boşaltılmışsa (silindiyse) yeniden oluşturur.
+  if (appDb !== undefined && g[APP_DB_KEY] !== undefined) return appDb;
   const url = process.env.DATABASE_URL;
   if (url === undefined || url.trim() === "") throw new Error("getAppDb: DATABASE_URL is not configured");
-  const client = createDbClient({ url, ...DB_CLIENT_SETTINGS });
-  g[APP_DB_KEY] = client;
-  return client;
+  appDb = createDbClient({ url, ...DB_CLIENT_SETTINGS });
+  g[APP_DB_KEY] = appDb;
+  return appDb;
 }
 export { currentTenantId, currentUserId, withTenant } from "./with-tenant.ts";
 export { MembershipError, lockOwners, withMembership, withInvitationTenant, withNewTenant, withSystemTenant, withUser } from "./with-membership.ts";

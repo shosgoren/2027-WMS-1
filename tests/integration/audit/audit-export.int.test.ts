@@ -158,7 +158,7 @@ describe("openAuditExport", () => {
     const before = Number((await adm.query<{ n: string }>("SELECT count(*) AS n FROM public.audit_logs WHERE tenant_id = $1", [A.tenant])).rows[0]?.n);
     const { stream } = await openAuditExport({ ...access(A, A.admin.userId), recentAuth: fresh });
     const csv = await readAll(stream);
-    expect(csv.startsWith("﻿Tarih (UTC),Kişi,İşlem,Kayıt türü,Kayıt no,Gerekçe,Özet (JSON)\r\n")).toBe(true);
+    expect(csv.startsWith(`﻿${["Tarih (UTC)", "Kişi", "İşlem", "Kayıt türü", "Kayıt no", "Gerekçe", "Özet (JSON)"].map((h) => `"${h}"`).join(",")}\r\n`)).toBe(true);
     const lines = dataLines(csv);
     expect(lines).toHaveLength(before);
     expect(csv).not.toContain("B-ROW");
@@ -190,12 +190,41 @@ describe("openAuditExport", () => {
     expect(csv).not.toContain("LATE-ROW");
   }, 120_000);
 
+  it("kesit kendi audit.exported olayını eşzamanlı commit altında da dışlar (createdXid açıkça süzülür)", async () => {
+    const filters = { action: "audit.exported" };
+    const prior = Number((await adm.query<{ n: string }>("SELECT count(*) AS n FROM public.audit_logs WHERE tenant_id = $1 AND action = 'audit.exported'", [A.tenant])).rows[0]?.n);
+    const N = 6;
+    const [csvs] = await Promise.all([
+      Promise.all(Array.from({ length: N }, async () => dataLines(await readAll((await openAuditExport({ ...access(A, A.admin.userId), recentAuth: fresh }, { filters, chunkSize: 2 })).stream)))),
+      seedRows(A.tenant, B.admin.userId, "CONC", 300),
+    ]);
+    // Her export yalnızca önceden commit edilmiş olayları ve en çok diğer N-1 export'un olayını görebilir; kendi olayı asla.
+    for (const lines of csvs) {
+      expect(lines.length).toBeGreaterThanOrEqual(prior);
+      expect(lines.length).toBeLessThanOrEqual(prior + N - 1);
+    }
+    const total = Number((await adm.query<{ n: string }>("SELECT count(*) AS n FROM public.audit_logs WHERE tenant_id = $1 AND action = 'audit.exported'", [A.tenant])).rows[0]?.n);
+    expect(total).toBe(prior + N);
+  }, 120_000);
+
   it("filtreli export yalnızca eşleşenleri yazar; filtre audit.exported özetine girer", async () => {
     const csv = await readAll((await openAuditExport({ ...access(B, B.admin.userId), recentAuth: fresh }, { filters: { action: "member.invited" } })).stream);
     expect(dataLines(csv)).toHaveLength(B_ROWS);
     expect(csv).not.toContain("A-ROW");
     const ev = await adm.query<{ s: { format: string; action: string } }>("SELECT change_summary AS s FROM public.audit_logs WHERE tenant_id = $1 AND action = 'audit.exported'", [B.tenant]);
     expect(ev.rows[0]?.s).toMatchObject({ format: "csv", action: "member.invited" });
+  }, 60_000);
+
+  it("change_summary içindeki e-posta dışa aktarılmaz (maskelenir); özet diğer alanları korunur", async () => {
+    await adm.query(
+      "INSERT INTO public.audit_logs (tenant_id, actor_user_id, action, reason, change_summary) VALUES ($1, $2, 'member.invited', 'MASK-ROW', $3::jsonb)",
+      [B.tenant, B.admin.userId, JSON.stringify({ contact: "kisi@mask-probe.example", role_key: "PICKER" })],
+    );
+    const csv = await readAll((await openAuditExport({ ...access(B, B.admin.userId), recentAuth: fresh }, { filters: { action: "member.invited" } })).stream);
+    expect(csv).toContain("MASK-ROW");
+    expect(csv).not.toContain("mask-probe");
+    expect(csv).toContain("[EMAIL]");
+    expect(csv).toContain("PICKER");
   }, 60_000);
 
   it("yetkisiz rol FORBIDDEN (olay yazılmaz); yeniden doğrulama dolmuş/yok → RECENT_AUTH_REQUIRED", async () => {
