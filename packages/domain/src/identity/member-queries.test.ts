@@ -4,13 +4,19 @@ import { maskEmail, resetLinkPrechecks } from "./member-queries.ts";
 const ok = { callerCanManage: true, tenantIsDemo: false, isSelf: false, isDemoTarget: false, isOwner: false };
 
 describe("maskEmail", () => {
-  it("yerel kısmı kısaltır, alan adını korur", () => {
-    expect(maskEmail("alice@example.test")).toBe("al***@example.test");
-    expect(maskEmail("a@example.test")).toBe("a***@example.test");
+  it("yerel kısım >=4: ilk 2 + ***; alan adı ilk harf + ***, TLD açık", () => {
+    expect(maskEmail("alice@example.test")).toBe("al***@e***.test");
+    expect(maskEmail("abcd@mail.example.test")).toBe("ab***@m***.example.test");
   });
-  it("geçersiz adres tamamen maskelenir", () => {
+  it("yerel kısım <4: ***", () => {
+    expect(maskEmail("abc@example.test")).toBe("***@e***.test");
+    expect(maskEmail("a@example.test")).toBe("***@e***.test");
+  });
+  it("noktasız alan adı ve geçersiz adres", () => {
+    expect(maskEmail("alice@localhost")).toBe("al***@l***");
     expect(maskEmail("nodomain")).toBe("***");
     expect(maskEmail("@x.test")).toBe("***");
+    expect(maskEmail("a@")).toBe("***");
   });
 });
 
