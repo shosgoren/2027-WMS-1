@@ -412,3 +412,15 @@ Sonraki: Faz 2 — int/faz2-sema ve int/faz2-stok-sema PR'ları, ardından T-205
 - 22:27–22:31Z #79 (T-223 zengin demo; scope için int/faz2-ekran main'e ileri sarıldı) → main a82b003; #80 (T-220 qa) → main 6deee05. Deploy #53/#54 yeşil; demo reseed worker açılışında çalışır (+ günlük 03:00 UTC).
 - 22:33Z T-251 bitti (48c1a19; 0018 code_history + GRANT UPDATE(code) yalnız 3 sütun, CODE_TAKEN yarışı, eski kodla arama renamedFrom, int 11/11, mutasyon) → güvenlik a539754. Bulgu: UI'da kod düzenleme alanı yok (actions/item-detail/warehouse görünümleri kartta değil) → T-257 UI kartı yazılacak.
 - 22:35–23:20Z KOTA KESİNTİSİ (429, sıfırlanma 23:20Z): T-250, T-254, T-248 ve T-251 incelemesi yarıda kaldı. 23:22Z kullanıcı "devam" → hepsi SendMessage ile sürdürüldü; e2e-staging ardışık sayım baştan (1/3 dispatch 23:23Z); T-252 dış referans tablosu başladı (T-251 tabanı, 0019). Ders: kota kesintisinde sıfırlanma saatine send_later kurulmalıydı — bu kez kullanıcı mesajı uyandırdı; kural yeniden STATE'e.
+
+- 23:30Z T-251 int/faz3a'ya birleşti (57595a2). T-254 kapsam eki 8f983ed (3 e2e dosyası, yalnız telefonda menü yolu).
+- 23:35Z T-250 bitti (7c281f6) → security-reviewer; T-248 bitti (cb1bba9) → security-reviewer. T-252 T-251 tabanıyla sürüyor; T-254 test düzeltmeleriyle sürüyor; T-304 başladı.
+- 23:35Z Kullanıcı isteği: acemi kullanıcı (ilk kez cihaz kullanan) için eğitimsiz, hata önleyici rehberli UX — araştırma ajanı UX_NOVICE.md taslağı + kart önerileri hazırlıyor; sürekli gelişim döngüsü faz kapılarına eklenecek.
+- Bekleyen: T-254 Bulgu 4 (Görevlerim "Yakında", Tara→/field) OQ kaydı; T-250 A-250-1..5 OQ'ya; T-248 A-154/155 numara çakışma kontrolü.
+- 23:36Z T-248 security 0·0·2 @cb1bba9 → int/faz3a (931c1e3); MINOR'lar T-258 kartı. 
+- 23:38Z T-250 security 0·0·7 @7c281f6 → int/faz3a (56542e7); MINOR'lar T-259 kartı.
+- 23:40Z T-304 kapsam eki (audit eylemleri + tasks-view.tsx) 4057620; T-304 sürüyor.
+- 23:41Z T-260 kartı + UX_NOVICE.md (feat/T-260-ux-novice → int/faz3a e849dcb). Mimar T-261…T-268 (acemi kapısı, geri al, tarama hata önleme, hata kataloğu, ? ipuçları, sihirbaz, tur, piktogram) yazıyor.
+- 23:42Z T-257 başladı. Etkin uygulama: T-252, T-254, T-304, T-257 (4/4).
+- e2e-staging 1/3 yeşil (run 9), 2/3 dispatch 23:32Z.
+- Süreç notu: int dalında kartsız docs/ux dosyası scope FAIL → feat dalı üzerinden birleştirildi (doğru yol).
