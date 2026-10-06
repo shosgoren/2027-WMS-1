@@ -2,6 +2,7 @@
 export * from "./barcodes.ts";
 export * from "./gs1.ts";
 export * from "./items.ts";
+export * from "./reads.ts";
 export * from "./quantity.ts";
 export * from "./units.ts";
 export * from "./handling-units.ts";
