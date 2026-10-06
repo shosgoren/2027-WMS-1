@@ -1,0 +1,43 @@
+// Depo ve lokasyon alanı (T-205): kart komutları, ağaç okuyucuları, depo kapsamı denetimi.
+export {
+  archiveWarehouse,
+  createWarehouse,
+  listWarehouses,
+  normalizeCode,
+  normalizeName,
+  renameWarehouse,
+  type ArchiveWarehouseInput,
+  type CreateWarehouseInput,
+  type ListWarehousesInput,
+  type ListWarehousesResult,
+  type RenameWarehouseInput,
+  type WarehouseCallParams,
+  type WarehouseRow,
+} from "./warehouses.ts";
+export {
+  MAX_LOCATION_DEPTH,
+  archiveLocation,
+  childDepth,
+  createLocation,
+  findLocationByCode,
+  getLocationTree,
+  renameLocation,
+  setLocationKind,
+  type ArchiveLocationInput,
+  type CreateLocationInput,
+  type GetLocationTreeInput,
+  type LocationKindValue,
+  type LocationRow,
+  type LocationTreeCursor,
+  type LocationTreePage,
+  type RenameLocationInput,
+  type SetLocationKindInput,
+} from "./locations.ts";
+export {
+  WAREHOUSE_SCOPE_FLAG,
+  assertWarehouseInScope,
+  isWarehouseScopeEnabled,
+  resolveWarehouseScope,
+  setMembershipWarehouseScopes,
+  type SetScopesInput,
+} from "./scope.ts";
