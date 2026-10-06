@@ -1,0 +1,21 @@
+{
+  "shell": {
+    "productName": "Etkin WMS",
+    "easyMode": "Kolay mod",
+    "skipToContent": "İçeriğe geç",
+    "viewSwitch": {
+      "label": "Görünüm",
+      "flow": "Akış",
+      "cockpit": "Kokpit"
+    },
+    "userChip": {
+      "label": "Kullanıcı",
+      "placeholderName": "Oturum yok",
+      "placeholderInitials": "?"
+    },
+    "help": {
+      "full": "Yardım çağır",
+      "short": "Yardım"
+    }
+  }
+}

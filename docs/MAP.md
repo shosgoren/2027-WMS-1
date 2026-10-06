@@ -10,7 +10,7 @@ Durum: `var` = yol repoda mevcut; `planlı: <kart>` = henüz yok, ilgili kart a�
 | packages/auth/ | var | Better Auth sarmalayıcısı, dar yüzey (`getPrincipal`, `requireRecentAuth`), parola/oturum ilkeleri; `wms_auth` istemcisi |
 | packages/shared/ | var | Zod şemaları, hata kodları (`errors.ts`), tipler, i18n anahtar tipleri, `JobQueue` arayüzü (şimdilik yalnızca `queue.ts`) |
 | packages/queue-adapter/ | var | Kuyruk sağlayıcı kütüphanesinin tek import noktası |
-| packages/ui/ | planlı: ilk kullanan kart | Shadcn tabanlı ortak bileşenler, dynamic-form, scanner, virtualized |
+| packages/ui/ | var | Ortak bileşenler (T-110): TaskCard, Button, TextField, ConfirmDialog, Banner, EmptyState, ActivityList; dynamic-form, scanner, virtualized ilk kullanan kartta |
 | tests/integration/ | var | Testcontainers PostgreSQL entegrasyon testleri (`pnpm test:int`) |
 | tests/e2e/ | planlı: ilk kullanan kart | Playwright uçtan uca testler |
 | tests/load/ | planlı: ilk kullanan kart | k6 yük testleri |

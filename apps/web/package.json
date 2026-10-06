@@ -10,10 +10,13 @@
     "typecheck": "next typegen && tsc --noEmit --pretty false"
   },
   "dependencies": {
+    "@tailwindcss/postcss": "4.3.3",
     "@wms/auth": "workspace:*",
     "next": "16.3.8",
+    "next-intl": "4.14.9",
     "react": "19.3.0",
-    "react-dom": "19.3.0"
+    "react-dom": "19.3.0",
+    "tailwindcss": "4.3.3"
   },
   "devDependencies": {
     "@next/eslint-plugin-next": "16.3.8",
