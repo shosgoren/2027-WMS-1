@@ -23,3 +23,18 @@
 - T-115: T-115b incelemesi BLOCKER (index.ts→migrate.ts worker bundle'ında; açılışta migrate main) → kök T-115'te düzeltildi (connection-target.ts + gerileme testi + Dockerfile bundle kontrolü). Son: T-115 0·0·1, T-115b 0·0·0.
 - T-112b: A-41 e-posta kilidi T-112 IP testinin öncülünü bozdu → kart eki (farklı e-postalar, assertion sayısı korunur) → test:int 245/245. reauth.succeeded T-112c'ye devredildi.
 - T-116 kapsam eki (shared exports, MAIL_FROM, platform işi). T-113, T-112c başlatıldı.
+
+## 2026-10-06 00:20Z — FAZ 0 KAPI RAPORU (Supervisor, ADR-012 rev. §3)
+- `main` c6103a7 (#36 int/faz0-neon + #37 int/faz0-kapanis birleşik).
+- `pnpm test:ac -- --phase 0` → 5 AC · PASS 5 · FAIL 0 · NO_TEST 0 · SKIPPED 0 (AC-05 4 test, AC-28 105, AC-37 78, AC-43 12, AC-44 11); ayrıntı `.artifacts/test-ac/0.json` (yerel).
+- `pnpm check:pilot` OK · `pnpm verify` lint OK · typecheck OK · unit OK (904 test) · `check:all` CI'da #36/#37'de yeşil (yerelde main ayrık HEAD → scope GIT_ERROR; kart yok).
+- Neon gerçek pooler: koşu 3 PASS (https://github.com/shosgoren/2027-WMS-1/actions/runs/37388724069); ADR-004 teknik alanları dolduruldu (Q-01…Q-06; Q-02 PgBouncer sürümü gözlenemedi).
+- **Bilinen risk (ADR-012):** onay değişikliği yapan sistemden bağımsız değil; mekanik bekçiler + bağımsız security-reviewer ile azaltıldı.
+- Açık takipler: T-008j (bekçi MINOR'ları + taban birleştirmesinde scope/protected yanlış pozitifleri + protected.test.mjs yük altında 5 s zaman aşımı), A-56 düz parola (yalnızca spike), Q-31/Q-32.
+- Faz 1'e geçildi.
+
+## 2026-10-06 00:25Z — Supervisor turu (gece)
+- Birleşenler: #35 T-005f, #36, #37 (main), #34 T-110b, #33 T-005e, #28 T-110. Açık: #38 T-110c.
+- T-115/T-115b: BLOCKER (migrate.ts worker bundle'ında) kökten düzeltildi → 0·0·1 / 0·0·0. T-116: 0·0·7 → 3 MINOR düzeltildi → 0·0·6 (kalanlar T-105/T-117 eklerinde).
+- T-112b: 0·2·7 (e-posta kilidi TOCTOU, sosyal örtük kayıt) → düzeltildi → 0·0·3 (T-114). T-113: 0·0·5 → 0·0·2. T-112c: T-112b ile birleşti (262/262), inceleme sürüyor. T-110c 0·0·3 (T-131).
+- Yeni kartlar: T-105c (operasyon rolü), T-110c, T-112c, T-133 (hata kodları); ekler: T-105, T-112b, T-113, T-114, T-115, T-115b, T-115c, T-116, T-117.
