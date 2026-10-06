@@ -309,9 +309,10 @@ describe("ensureOpsRole / opsRoleDeviations (A-80)", () => {
     expect(opsRoleDeviations(undefined)).toEqual(["missing"]);
   });
   it("örtük ADMIN (Neon CREATEROLE sahibi): yalnızca-ADMIN satırı kabul + raporlanır; SET/INHERIT satırı BLOCKED; yaratma createrole_self_grant boş", () => {
-    const adminRow = "opsmember|neondb_owner|t|f|f";
-    const setRow = "opsmember|neondb_owner|t|t|t";
-    expect(parseOpsMembers(`${roleRow("wms_ops", { login: "f" })}\n${adminRow}`)).toEqual([{ member: "neondb_owner", admin: true, inherit: false, set: false }]);
+    const adminRow = "opsmember|neondb_owner|t|f|f|t|t|f|t";
+    const setRow = "opsmember|neondb_owner|t|t|t|t|t|f|t";
+    const appAdminRow = "opsmember|wms_app|t|f|f|f|f|f|f";
+    expect(parseOpsMembers(`${roleRow("wms_ops", { login: "f" })}\n${adminRow}`)).toEqual([{ member: "neondb_owner", admin: true, inherit: false, set: false, bypassrls: true, createrole: true, super: false, me: true }]);
     /** @param {string} memberRow */
     const run = (memberRow) => {
       /** @type {string[]} */
@@ -334,6 +335,11 @@ describe("ensureOpsRole / opsRoleDeviations (A-80)", () => {
     expect(bad.r.status).toBe("BLOCKED");
     expect(bad.r.lines.join("\n")).toContain("granted-to:neondb_owner");
     expect(bad.calls.some((c) => c.startsWith("DROP ROLE"))).toBe(true);
+    // MINOR-1: uygulama rolüne ADMIN → BLOCKED (kendine SET verip SET ROLE wms_ops yapabilir)
+    const app = run(appAdminRow);
+    expect(app.r.status).toBe("BLOCKED");
+    expect(app.r.lines.join("\n")).toContain("admin-to:wms_app");
+    expect(opsRoleDeviations(parseAppRoles(roleRow("wms_ops", { login: "f" }))[0], parseOpsMembers(appAdminRow))).toEqual(["admin-to:wms_app"]);
   });
   it("yaratılan rol sapıyorsa silinir ve BLOCKED döner", () => {
     /** @type {string[]} */
