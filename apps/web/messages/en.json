@@ -94,7 +94,9 @@
       "setupFinish": "Finish setup",
       "setupDone": "Two-step verification is enabled. Next time you sign in you will be asked for the app code.",
       "demoDisabled": "Two-step verification cannot be set up in the demo environment.",
-      "demoDisabledAction": "Sign in with your real account to set it up."
+      "demoDisabledAction": "Sign in with your real account to set it up.",
+      "alreadyEnabled": "Two-step verification is already enabled.",
+      "alreadyEnabledAction": "If you need to change it, contact your administrator."
     },
     "signOut": {
       "label": "Sign out",

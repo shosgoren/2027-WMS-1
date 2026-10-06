@@ -94,7 +94,9 @@
       "setupFinish": "Kurulumu tamamla",
       "setupDone": "İki adımlı doğrulama etkinleştirildi. Sonraki girişlerinde uygulamadaki kod istenecek.",
       "demoDisabled": "Demo ortamında iki adımlı doğrulama kurulamaz.",
-      "demoDisabledAction": "Gerçek hesabınla giriş yapıp kur."
+      "demoDisabledAction": "Gerçek hesabınla giriş yapıp kur.",
+      "alreadyEnabled": "İki adımlı doğrulama zaten etkin.",
+      "alreadyEnabledAction": "Değiştirmen gerekiyorsa yöneticine başvur."
     },
     "signOut": {
       "label": "Çıkış yap",

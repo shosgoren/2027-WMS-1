@@ -7,7 +7,7 @@ import { useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { Banner, Button, TextField } from "@wms/ui";
 import { acceptInvitationAction } from "./invite/[token]/actions.ts";
-import { authClient, authPost } from "../lib/auth-client.ts";
+import { authPost } from "../lib/auth-client.ts";
 import type { AuthCallError } from "../lib/auth-client.ts";
 
 type Translator = ReturnType<typeof useTranslations>;
@@ -364,27 +364,26 @@ function secretOf(uri: string): string {
   }
 }
 
-export function MfaSetupForm({ next, demoEmailDomain }: { next: string; demoEmailDomain: string | null }) {
+/** Kurulum formu yerine durum bildirimi (sunucu karar verir: demo kullanıcı M9, 2FA zaten etkin). */
+export function MfaNotice({ kind, next }: { kind: "demo" | "enabled"; next: string }) {
   const t = useTranslations("auth");
-  const session = authClient.useSession();
+  return (
+    <Card title={t("mfa.setupTitle")}>
+      <Banner kind="info">{kind === "demo" ? t("mfa.demoDisabled") : t("mfa.alreadyEnabled")}</Banner>
+      <Link href={next} className={LINK}>
+        {t("common.continue")}
+      </Link>
+    </Card>
+  );
+}
+
+export function MfaSetupForm({ next }: { next: string }) {
+  const t = useTranslations("auth");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ShownError | null>(null);
   const [enable, setEnable] = useState<EnableData | null>(null);
   const [saved, setSaved] = useState(false);
   const [finished, setFinished] = useState(false);
-
-  // M9: demo kullanıcısı için 2FA ekranı render edilmez (sunucu ayrıca reddeder: DEMO_FORBIDDEN).
-  const email = session.data?.user.email ?? "";
-  if (demoEmailDomain !== null && email.toLowerCase().endsWith(`@${demoEmailDomain}`)) {
-    return (
-      <Card title={t("mfa.setupTitle")}>
-        <Banner kind="info">{t("mfa.demoDisabled")}</Banner>
-        <Link href={next} className={LINK}>
-          {t("common.continue")}
-        </Link>
-      </Card>
-    );
-  }
 
   if (finished) {
     return (
@@ -496,6 +495,7 @@ export function MfaSetupForm({ next, demoEmailDomain }: { next: string; demoEmai
 function setupError(t: Translator, e: AuthCallError): ShownError {
   const common = commonError(t, e);
   if (common !== null) return common;
+  if (e.code === "TOTP_ALREADY_ENABLED") return { reason: t("mfa.alreadyEnabled"), action: t("mfa.alreadyEnabledAction"), code: e.code };
   if (e.code === "DEMO_FORBIDDEN") return { reason: t("mfa.demoDisabled"), action: t("mfa.demoDisabledAction"), code: e.code };
   if (e.code === "INVALID_PASSWORD") return { reason: t("mfa.passwordWrong"), action: t("mfa.passwordWrongAction"), code: e.code };
   return { reason: t("common.serverError"), action: t("common.serverErrorAction"), code: e.code };
