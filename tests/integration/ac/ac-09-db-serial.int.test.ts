@@ -70,7 +70,9 @@ function expectFail(r: Attempt, code: string, constraint: string, label: string)
 
 const SQL_LEDGER = `INSERT INTO public.stock_ledger (tenant_id, id, document_id, document_line_id, stock_dimension_id, quantity, reason, business_date)
    VALUES ($1, gen_random_uuid(), $2, $3, $4, $5, 't233', '2026-02-01')`;
-const ledger = (q: Q, dim: string, qty: number): Promise<pg.QueryResult> => q(SQL_LEDGER, [A.tenantId, A.documentId, A.documentLineId, dim, qty]);
+/** Belge satırı boyutun ürünüyle aynı olmalı: seri boyutları LOT_AND_SERIAL ürünün satırı, A.dimensionId NONE ürünün satırı. */
+const ledger = (q: Q, dim: string, qty: number): Promise<pg.QueryResult> =>
+  q(SQL_LEDGER, [A.tenantId, A.documentId, dim === A.dimensionId ? A.documentLineNoneId : A.documentLineId, dim, qty]);
 const setQty = (q: Q, dim: string, qty: number): Promise<pg.QueryResult> =>
   q("UPDATE public.stock_balances SET quantity = $3 WHERE tenant_id = $1 AND stock_dimension_id = $2", [A.tenantId, dim, qty]);
 const insBal = (q: Q, dim: string, qty: number): Promise<pg.QueryResult> =>
