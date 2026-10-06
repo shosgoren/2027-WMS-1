@@ -271,7 +271,7 @@ function allowBody(line) {
  * Çıktı `worker| ` ile başlar → `::`/`##[`/`#` ile başlayan satır oluşamaz.
  * @param {string} text
  * @param {{ maxLines?: number }} [opts]
- * @returns {{ lines: string[], total: number, hidden: number }}
+ * @returns {{ lines: string[], total: number, hidden: number, categories: Record<string, number> }}
  */
 export function maskLogs(text, opts = {}) {
   const max = opts.maxLines ?? DIAG_MAX_LINES;
@@ -280,12 +280,43 @@ export function maskLogs(text, opts = {}) {
   /** @type {string[]} */
   const lines = [];
   let hidden = 0;
+  /** @type {Record<string, number>} */
+  const categories = {};
   for (const l of tail) {
     const a = allowLine(l);
-    if (a === null) hidden++;
-    else lines.push(`worker| ${a}`);
+    if (a === null) {
+      hidden++;
+      const c = classifyHidden(l);
+      categories[c] = (categories[c] ?? 0) + 1;
+    } else lines.push(`worker| ${a}`);
   }
-  return { lines, total: all.length, hidden };
+  return { lines, total: all.length, hidden, categories };
+}
+
+/**
+ * Gizlenen satırın TÜRÜ (içerik yazılmaz): `empty` (önek sonrası gövde boş), `fly-system` (Fly öneki var, sağlayıcı
+ * `app` değil), `app-json` (gövde geçerli JSON nesnesi ama izin listesinden geçmedi — bu durumda ise izinli alanları
+ * olmayan satır), `json-invalid` (`{` ile başlar, JSON değil), `app-text` (Fly öneki, sağlayıcı `app`, düz metin),
+ * `unparsed` (Fly öneki yok, JSON değil).
+ * @param {string} rawLine
+ * @returns {"empty" | "fly-system" | "app-json" | "json-invalid" | "app-text" | "unparsed"}
+ */
+export function classifyHidden(rawLine) {
+  const line = rawLine.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "");
+  const pm = RE_FLY_PREFIX.exec(line);
+  const body = (pm === null ? line : (pm[6] ?? "")).trim();
+  if (body === "") return "empty";
+  if (body.startsWith("{")) {
+    try {
+      const o = JSON.parse(body);
+      if (typeof o === "object" && o !== null && !Array.isArray(o)) return "app-json";
+    } catch {
+      /* geçersiz JSON */
+    }
+    return "json-invalid";
+  }
+  if (pm === null) return "unparsed";
+  return pm[2] === "app" ? "app-text" : "fly-system";
 }
 
 /**
@@ -293,9 +324,10 @@ export function maskLogs(text, opts = {}) {
  * ASLA yazılmaz). Olay alanları (`events[].request.exit_event`) Fly Machines API şemasındandır; yoksa atlanır.
  * @param {string} statusJson
  * @param {string} [group]
+ * @param {readonly string[]} [onlyStates] verilirse yalnızca bu durumdaki makineler (ör. ["stopped"])
  * @returns {{ id: string, summary: string[] }[]}
  */
-export function describeStoppedMachines(statusJson, group = DEFAULTS.group) {
+export function describeStoppedMachines(statusJson, group = DEFAULTS.group, onlyStates) {
   /** @type {unknown} */
   let parsed;
   try {
@@ -311,6 +343,7 @@ export function describeStoppedMachines(statusJson, group = DEFAULTS.group) {
     if (processGroupOf(m) !== group) continue;
     const mm = /** @type {Record<string, any>} */ (m);
     if (mm["state"] === "started") continue;
+    if (onlyStates !== undefined && !onlyStates.includes(mm["state"])) continue;
     const id = typeof mm["id"] === "string" ? mm["id"] : "";
     if (!/^[a-z0-9]{8,20}$/.test(id)) continue;
     const word = (/** @type {unknown} */ v) => (typeof v === "string" && RE_STATE_WORD.test(v) ? v : "?");
@@ -386,6 +419,17 @@ async function diagCommand(/** @type {string[]} */ argv) {
     }
     return 0;
   }
+  if (cmd === "worker-stopped-ids") {
+    // `flyctl machine start` için: YALNIZCA `stopped` worker makineleri; kimlik deseni describeStoppedMachines'te doğrulanır.
+    const i = rest.indexOf("--status-file");
+    const file = i >= 0 ? rest[i + 1] : undefined;
+    if (file === undefined) {
+      console.error("kullanım: deploy-smoke.mjs worker-stopped-ids --status-file <json>");
+      return 2;
+    }
+    for (const m of describeStoppedMachines(readFileSync(file, "utf8"), DEFAULTS.group, ["stopped"])) console.log(m.id);
+    return 0;
+  }
   if (cmd === "mask-logs") {
     const i = rest.indexOf("--max-lines");
     const max = i >= 0 ? Number(rest[i + 1]) : DIAG_MAX_LINES;
@@ -395,9 +439,9 @@ async function diagCommand(/** @type {string[]} */ argv) {
     }
     const chunks = [];
     for await (const c of process.stdin) chunks.push(c);
-    const { lines, total, hidden } = maskLogs(Buffer.concat(chunks).toString("utf8"), { maxLines: max });
+    const { lines, total, hidden, categories } = maskLogs(Buffer.concat(chunks).toString("utf8"), { maxLines: max });
     for (const l of lines) console.log(l);
-    console.log(`worker-diag: ${lines.length} satır yazıldı (toplam ${total}; gizlenen satır: ${hidden}; izin listesi)`);
+    console.log(`worker-diag: ${lines.length} satır yazıldı (toplam ${total}; gizlenen satır: ${hidden}${hidden > 0 ? ` [${Object.entries(categories).sort().map(([k, v]) => `${k}=${v}`).join(", ")}]` : ""}; izin listesi)`);
     return 0;
   }
   console.error(`deploy-smoke: bilinmeyen alt komut "${cmd}"`);
@@ -406,7 +450,7 @@ async function diagCommand(/** @type {string[]} */ argv) {
 
 async function main() {
   const first = process.argv[2];
-  if (first === "worker-ids" || first === "mask-logs") return diagCommand(process.argv.slice(2));
+  if (first === "worker-ids" || first === "worker-stopped-ids" || first === "mask-logs") return diagCommand(process.argv.slice(2));
   let args;
   try {
     args = parseArgs(process.argv.slice(2));

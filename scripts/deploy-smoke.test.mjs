@@ -5,7 +5,7 @@ import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ALLOWED_MSGS, checkHealth, checkProcessGroup, allowLine, describeStoppedMachines, evaluateHealth, maskLogs, parseArgs, summaryLine } from "./deploy-smoke.mjs";
+import { ALLOWED_MSGS, classifyHidden, checkHealth, checkProcessGroup, allowLine, describeStoppedMachines, evaluateHealth, maskLogs, parseArgs, summaryLine } from "./deploy-smoke.mjs";
 
 const URL_OK = "https://etkin-wms-staging.fly.dev/api/health";
 
@@ -403,7 +403,7 @@ describe("worker teşhisi (T-106c) — izin listesi", () => {
   });
 
   it("boş log → sıfır satır", () => {
-    expect(maskLogs("")).toEqual({ lines: [], total: 0, hidden: 0 });
+    expect(maskLogs("")).toEqual({ lines: [], total: 0, hidden: 0, categories: {} });
   });
 });
 
@@ -473,7 +473,7 @@ describe("diagCommand CLI (T-106c)", () => {
     expect(r.status).toBe(0);
     expect(r.stdout).not.toContain(secret);
     expect(r.stdout).toContain('worker| {"level":"info","msg":"queue started"}');
-    expect(r.stdout).toContain("worker-diag: 1 satır yazıldı (toplam 2; gizlenen satır: 1; izin listesi)");
+    expect(r.stdout).toContain("worker-diag: 1 satır yazıldı (toplam 2; gizlenen satır: 1 [unparsed=1]; izin listesi)");
     for (const bad of ["0", "abc", "-1", "1.5"]) expect(node(["mask-logs", "--max-lines", bad], input).status).toBe(2);
     expect(node(["bilinmeyen"]).status).not.toBe(0);
   });
@@ -520,5 +520,54 @@ describe("ALLOWED_MSGS kaynak senkron bekçisi (T-106c)", () => {
     const bad = allowLine(JSON.stringify({ msg: "unhandled rejection", error: { name: `x ${secret}`, value: secret } })) ?? "";
     expect(bad).not.toContain(secret);
     expect(JSON.parse(bad).error).toBeUndefined();
+  });
+});
+
+describe("gizlenen satır kategorileri (T-106c faz 2)", () => {
+  const secret = randomBytes(12).toString("hex");
+  const pre = (/** @type {string} */ provider) => `2026-10-06T11:32:00Z ${provider}[80e32da6490958] fra [info] `;
+
+  it("her tür doğru sınıflanır (içerik kullanılmaz)", () => {
+    expect(classifyHidden(`${pre("app")}   `)).toBe("empty");
+    expect(classifyHidden(`${pre("runner")}Pulling container image ${secret}`)).toBe("fly-system");
+    expect(classifyHidden(`${pre("app")}{"msg":"${secret}"}`)).toBe("app-json");
+    expect(classifyHidden(`${pre("app")}{"msg":`)).toBe("json-invalid");
+    expect(classifyHidden(`${pre("app")}plain text ${secret}`)).toBe("app-text");
+    expect(classifyHidden(`plain text ${secret}`)).toBe("unparsed");
+    expect(classifyHidden(`{"msg":"${secret}"}`)).toBe("app-json");
+  });
+
+  it("maskLogs sayıları ve özet satırı; çıktıda içerik yok", () => {
+    const text = [
+      `${pre("runner")}a ${secret}`,
+      `${pre("runner")}b ${secret}`,
+      `${pre("app")}{"msg":"${secret}"}`,
+      `${pre("app")}text ${secret}`,
+      `raw ${secret}`,
+      `${pre("app")}{"msg":"started"}`,
+    ].join("\n");
+    const r = maskLogs(text);
+    // JSON nesnesi satırları izin listesiyle (msg gizlenerek) yazılır → gizli sayılmaz.
+    expect(r.hidden).toBe(4);
+    expect(r.categories).toEqual({ "fly-system": 2, "app-text": 1, unparsed: 1 });
+    expect(r.lines).toHaveLength(2);
+    const cli = spawnSync(process.execPath, [fileURLToPath(new URL("./deploy-smoke.mjs", import.meta.url)), "mask-logs"], { input: text, encoding: "utf8", env: { PATH: process.env["PATH"] ?? "" } });
+    expect(cli.stdout).toContain("gizlenen satır: 4 [app-text=1, fly-system=2, unparsed=1]; izin listesi)");
+    expect(cli.stdout).not.toContain(secret);
+  });
+});
+
+describe("worker-stopped-ids (T-106c faz 2)", () => {
+  it("yalnızca stopped worker makineleri; created/started/web ve geçersiz kimlik yok", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "smoke-"));
+    const file = path.join(dir, "s.json");
+    const m = (/** @type {string} */ id, /** @type {string} */ state, /** @type {string} */ group) => ({ id, state, config: { metadata: { fly_process_group: group } } });
+    writeFileSync(file, JSON.stringify({ Machines: [
+      m("8d96110c222578", "stopped", "worker"), m("aaaa1111bbbb22", "started", "worker"), m("bbbb1111cccc22", "created", "worker"),
+      m("cccc1111dddd22", "stopped", "web"), m("x; rm -rf", "stopped", "worker"),
+    ] }));
+    const r = spawnSync(process.execPath, [fileURLToPath(new URL("./deploy-smoke.mjs", import.meta.url)), "worker-stopped-ids", "--status-file", file], { encoding: "utf8", env: { PATH: process.env["PATH"] ?? "" } });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe("8d96110c222578\n");
   });
 });
