@@ -501,12 +501,14 @@
     "warehouse": {
       "created": "Bir depo oluşturdun.",
       "updated": "Bir depoyu güncelledin.",
-      "archived": "Bir depoyu arşivledin."
+      "archived": "Bir depoyu arşivledin.",
+      "code_changed": "Bir deponun kodunu değiştirdin."
     },
     "location": {
       "created": "Bir lokasyon oluşturdun.",
       "updated": "Bir lokasyonu güncelledin.",
-      "archived": "Bir lokasyonu arşivledin."
+      "archived": "Bir lokasyonu arşivledin.",
+      "code_changed": "Bir lokasyonun kodunu değiştirdin."
     },
     "warehouse_scope": {
       "changed": "Bir üyenin depo kapsamını değiştirdin."
@@ -518,7 +520,8 @@
     "item": {
       "created": "Bir ürün oluşturdun.",
       "updated": "Bir ürünü güncelledin.",
-      "archived": "Bir ürünü arşivledin."
+      "archived": "Bir ürünü arşivledin.",
+      "code_changed": "Bir ürünün kodunu değiştirdin."
     },
     "item_barcode": {
       "added": "Bir ürüne barkod ekledin.",
@@ -665,7 +668,7 @@
     "form": {
       "createTitle": "Yeni ürün",
       "code": "Ürün kodu",
-      "codeHint": "Sonradan değiştirilemez; sunucu biçimi düzeltir.",
+      "codeHint": "Sunucu biçimi düzeltir. Kod sonradan değiştirilebilir; eski kodla arama yeni karta yönlenir.",
       "name": "Ürün adı",
       "baseUnit": "Temel birim",
       "baseUnitHint": "Stok bu birimle sayılır; sonradan değiştirilemez.",
@@ -808,7 +811,7 @@
     },
     "form": {
       "code": "Kod",
-      "codeHint": "Harfler otomatik büyütülür; sonradan değiştirilemez.",
+      "codeHint": "Harfler otomatik büyütülür. Kod sonradan değiştirilebilir.",
       "name": "Ad",
       "kind": "Tür",
       "submit": "Kaydet",
