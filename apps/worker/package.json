@@ -4,8 +4,17 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && esbuild src/main.ts --bundle --platform=node --format=esm --target=node24 --outfile=dist/main.js --log-level=warning --banner:js=\"import { createRequire as __wmsCreateRequire } from 'node:module'; const require = __wmsCreateRequire(import.meta.url);\"",
     "start": "node dist/main.js",
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
+  },
+  "dependencies": {
+    "@wms/db": "workspace:*",
+    "@wms/domain": "workspace:*",
+    "@wms/queue-adapter": "workspace:*",
+    "@wms/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
   }
 }

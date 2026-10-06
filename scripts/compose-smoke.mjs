@@ -84,6 +84,19 @@ function checkPostgres() {
       reason: `wms_app için rolsuper|rolbypassrls beklenen "f|f", gelen "${row || "(rol yok)"}"`,
     };
   }
+  // T-101b bulgu 1: wms_auth (kimlik rolü) ve wms_identity_probe (NOLOGIN işlev sahibi) kapsamı.
+  const roles = execIn(
+    "postgres",
+    `psql -X -A -t -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT rolname, rolcanlogin, rolsuper, rolbypassrls, rolcreatedb, rolcreaterole, rolreplication FROM pg_roles WHERE rolname IN ('wms_auth', 'wms_identity_probe') ORDER BY rolname"`,
+  );
+  if (!roles.ok) {
+    return { name: "pg", ok: false, reason: `rol sorgusu başarısız: ${roles.stderr}` };
+  }
+  const got = roles.stdout.trim();
+  const want = "wms_auth|t|f|f|f|f|f\nwms_identity_probe|f|f|f|f|f|f";
+  if (got !== want) {
+    return { name: "pg", ok: false, reason: `wms_auth/wms_identity_probe öznitelikleri beklenenden farklı: "${got.replaceAll("\n", " ; ") || "(rol yok)"}"` };
+  }
   return { name: "pg", ok: true };
 }
 
@@ -99,6 +112,36 @@ function checkPgbouncer() {
   }
   if (q.stdout.trim() !== "1|wms_app") {
     return { name: "pgbouncer", ok: false, reason: `SELECT 1 beklenmeyen sonuç: "${q.stdout.trim()}"` };
+  }
+  // 1b) Kimlik yolu: PgBouncer üzerinden wms_auth ile SELECT current_user.
+  const a = execIn(
+    "postgres",
+    `PGPASSWORD="$WMS_AUTH_PASSWORD" psql -X -A -t -v ON_ERROR_STOP=1 -h pgbouncer -p 6432 -U wms_auth -d "$POSTGRES_DB" -c "SELECT 1, current_user"`,
+  );
+  if (!a.ok) {
+    return { name: "pgbouncer", ok: false, reason: `wms_auth ile SELECT 1 başarısız: ${a.stderr}` };
+  }
+  if (a.stdout.trim() !== "1|wms_auth") {
+    return { name: "pgbouncer", ok: false, reason: `wms_auth SELECT 1 beklenmeyen sonuç: "${a.stdout.trim()}"` };
+  }
+  // 1c) Yanlış parola reddedilir (parola yalnızca konteyner ortamında; sonek eklenerek bozulur).
+  const bad = execIn(
+    "postgres",
+    `PGPASSWORD="$WMS_APP_PASSWORD-wrong" psql -X -A -t -h pgbouncer -p 6432 -U wms_app -d "$POSTGRES_DB" -c "SELECT 1"`,
+  );
+  if (bad.ok) {
+    return { name: "pgbouncer", ok: false, reason: "yanlış parolayla wms_app bağlantısı REDDEDİLMEDİ" };
+  }
+  // 1d) T-101c: userlist'te açık metin yok; yalnızca SCRAM-SHA-256 verifier satırları (içerik basılmaz).
+  const ul = execIn(
+    "pgbouncer",
+    `total=$(grep -c . /auth/userlist.txt); bad=$(grep -vc '^"[a-z_]*" "SCRAM-SHA-256\\$[0-9]*:' /auth/userlist.txt); echo "$total $bad"`,
+  );
+  if (!ul.ok) {
+    return { name: "pgbouncer", ok: false, reason: `userlist okunamadı: ${ul.stderr}` };
+  }
+  if (ul.stdout.trim() !== "4 0") {
+    return { name: "pgbouncer", ok: false, reason: `userlist beklenen "4 0" (satır, SCRAM olmayan), gelen "${ul.stdout.trim()}"` };
   }
   // 2) Yönetim konsolu: pool_mode = transaction.
   const c = execIn(

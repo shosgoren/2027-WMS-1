@@ -4,7 +4,8 @@
 //   compose (varsayılan) — global-setup repodaki docker-compose.yml'den postgres + pgbouncer'ı
 //                          (transaction mode) kaldırır ve bağlantı URL'lerini ortama yazar.
 //   neon                 — URL'ler dışarıdan verilir; DATABASE_URL (uygulama rolü, pooler) ve
-//                          DATABASE_URL_DIRECT (migration rolü, doğrudan) ZORUNLU. Eksikse açık
+//                          DATABASE_URL_DIRECT (migration rolü, doğrudan) ve AUTH_DATABASE_URL
+//                          (kimlik rolü wms_auth, pooler) ZORUNLU. Eksikse açık
 //                          hatayla düşülür; hiçbir test atlanmaz.
 //
 // Güvenlik (G-09): URL'ler, kullanıcı/parola log'a veya hata mesajına yazılmaz; yalnızca
@@ -17,6 +18,15 @@ export type IntTarget = (typeof INT_TARGETS)[number];
 
 /** Uygulama rolü adı (I-03; .env.example ve infra/postgres/init/01-roles.sh ile aynı). */
 export const APP_ROLE = "wms_app";
+
+/** Kuyruk tüketicisi rolü adı (T-115c; .env.example ve 01-roles.sh ile aynı). */
+export const WORKER_ROLE = "wms_worker";
+
+/** Kimlik rolü adı (ADR-014 §10; .env.example ve infra/postgres/init/01-roles.sh ile aynı). */
+export const AUTH_ROLE = "wms_auth";
+
+/** Kimlik yoklama işlevlerinin NOLOGIN sahibi rolü (ADR-015 §4). */
+export const PROBE_ROLE = "wms_identity_probe";
 
 /** Testte PgBouncer `default_pool_size` varsayılanı (AC-05: bağlantı yeniden kullanımını zorlar). */
 export const DEFAULT_INT_PGBOUNCER_POOL_SIZE = 2;
@@ -115,6 +125,38 @@ export function readIntEnv(env: Env): IntEnv {
   assertPostgresUrl("DATABASE_URL", databaseUrl);
   assertPostgresUrl("DATABASE_URL_DIRECT", databaseUrlDirect);
   return { target, databaseUrl, databaseUrlDirect, prepare };
+}
+
+/**
+ * Kimlik rolü (wms_auth, pooler) URL'si: AUTH_DATABASE_URL. Her iki hedefte zorunlu (compose'ta
+ * global-setup yazar); yoksa/geçersizse açık hata — atlama yok (G-11). Değer hata metnine yazılmaz.
+ * `readIntEnv` sözleşmesi (T-005a testleri) değişmesin diye ayrı işlevdir.
+ */
+export function readAuthDatabaseUrl(env: Env): string {
+  const url = nonEmpty(env, "AUTH_DATABASE_URL");
+  if (url === undefined) {
+    const hint =
+      parseTarget(env) === "neon"
+        ? "WMS_INT_TARGET=neon requires AUTH_DATABASE_URL (auth role wms_auth, pooler)"
+        : "compose target: written by tests/integration/harness/global-setup.ts — run via `pnpm test:int`";
+    throw new IntEnvError(`missing AUTH_DATABASE_URL (${hint})`);
+  }
+  assertPostgresUrl("AUTH_DATABASE_URL", url);
+  return url;
+}
+
+/** Worker rolü (wms_worker, pooler) URL'si: DATABASE_URL_WORKER (T-115c). Her iki hedefte zorunlu; değer hata metnine yazılmaz. */
+export function readWorkerDatabaseUrl(env: Env): string {
+  const url = nonEmpty(env, "DATABASE_URL_WORKER");
+  if (url === undefined) {
+    const hint =
+      parseTarget(env) === "neon"
+        ? "WMS_INT_TARGET=neon requires DATABASE_URL_WORKER (worker role wms_worker, pooler)"
+        : "compose target: written by tests/integration/harness/global-setup.ts — run via `pnpm test:int`";
+    throw new IntEnvError(`missing DATABASE_URL_WORKER (${hint})`);
+  }
+  assertPostgresUrl("DATABASE_URL_WORKER", url);
+  return url;
 }
 
 /**

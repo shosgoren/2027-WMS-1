@@ -5,9 +5,12 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./internal": "./src/client.ts"
+    "./internal": "./src/client.ts",
+    "./internal/schema": "./src/schema/index.ts"
   },
   "scripts": {
+    "db:migrate": "node --env-file-if-exists=../../.env src/migrate.ts up && node --env-file-if-exists=../../.env ../queue-adapter/src/install-cli.ts",
+    "db:rollback": "node --env-file-if-exists=../../.env src/migrate.ts down",
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {
