@@ -4,9 +4,10 @@
 // STOCK_IN hedef `+`; STOCK_OUT kaynak `−`; STOCK_MOVE kaynak `−` + hedef `+` (kural 3: toplam fiziksel değişmez).
 // Plan SIRALIDIR ve satır sırasından bağımsızdır (ters sıralı satırlar → aynı plan); tekrarlı boyut birleşir.
 //
-// A-217-1 (kart eki gerekli): `document_lines` tek `stock_status` taşır; hedef durum ayrı sütunu yoktur. Bu yüzden satırdan kaynak ve
-// hedef durumu AYNIDIR (yükleyici `sourceStatus = targetStatus = stock_status` doldurur). Bu katman ikisini ayrı alır; durum değişimi
-// (KAR→KUL) yalnızca satıra hedef durum sütunu eklendiğinde yükleyicide açılır.
+// A-217-1: `document_lines` tek `stock_status` taşır; hedef durum ayrı sütunu yoktur. Bu yüzden satırdan kaynak ve
+// hedef durumu AYNIDIR (yükleyici `sourceStatus = targetStatus = stock_status` doldurur). Bu katman ikisini ayrı alır. Hedef durum sütunu
+// `document_lines.target_stock_status` T-301'deki 0016 migration'ındadır; belge/`DocumentLineInput`/yükleyici güncellemesi T-248'dedir
+// (durum değişimi KAR→KUL, AVAILABLE→QUARANTINE orada açılır).
 import { AppError } from "@wms/shared/errors";
 import type { StockDimensionKey } from "@wms/db";
 

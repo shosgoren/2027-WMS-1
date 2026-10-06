@@ -18,7 +18,7 @@ import { AppError } from "@wms/shared/errors";
 import type { AccessTx } from "../identity/access.ts";
 import { pgUuidArray } from "../warehouse/scope.ts";
 import { EMPTY_LOCK_PLAN, executeStockCommand, type StockCommandPlan } from "./command.ts";
-import { assertLocationsInWarehouse, assertNotProcessing, readDocumentHeader, type StockDocCallParams } from "./documents.ts";
+import { assertItemsActive, assertLocationsActiveInWarehouse, assertNotProcessing, readDocumentHeader, type StockDocCallParams } from "./documents.ts";
 import type { StockCommandResult } from "./idempotency.ts";
 import { buildPostingPlan, dimensionIdentity, fromMicro, toMicro, type PostingKind, type PostingLine, type PostingPlan, type PostingStatus } from "./plan.ts";
 import {
@@ -27,17 +27,9 @@ import {
   assertSufficient,
   type BalanceView,
   type ItemInfo,
-  type LocationInfo,
   type SerialInfo,
 } from "./rules.ts";
 import type { TrackingMode } from "./tracking.ts";
-
-/**
- * `locations`/`items` satır kilidi parçası. Bunlar STOK tablosu değildir (I-15 kapsamı dışı); eslint `stock-sql-guard`'ın dosya düzeyi
- * sezgisi (dosya stok tablosu adı içeriyor + ifadeli şablonda FOR SHARE) bu okumaları yanlış işaretlediği için kilit tümceciği ayrı
- * parça olarak verilir. Stok tablosu kilidi burada YOKTUR (yalnızca `acquireStockLocks`). Rapor Bulgusu: koruma sezgisi daraltılmalı.
- */
-const SHARE_LOCK = sql`FOR SHARE`;
 
 /** A-07: senkron işleme üst sınırı. */
 export const SYNC_POST_MAX_LINES = 200;
@@ -93,23 +85,12 @@ async function loadLines(tx: AccessTx, tenantId: string, documentId: string): Pr
   }));
 }
 
-/** Kilitli lokasyon satırları: `FOR SHARE` (arşivin `FOR NO KEY UPDATE`'iyle çakışır), kimliğe göre sıralı; ACTIVE denetimi rules'tadır. */
-async function readLocationsShared(tx: AccessTx, tenantId: string, ids: readonly string[]): Promise<Map<string, LocationInfo>> {
-  if (ids.length === 0) return new Map();
-  const rows = await tx.execute<{ id: string; warehouse_id: string; status: string }>(
-    sql`SELECT id, warehouse_id, status FROM public.locations
-         WHERE tenant_id = ${tenantId}::uuid AND id = ANY(${pgUuidArray(ids)}::uuid[]) ORDER BY id ${SHARE_LOCK}`,
+/** Ürün takip bilgisi (düz okuma): satırlar `assertItemsActive` ile `FOR SHARE` kilitlidir (ürün takip modu/ölçeği değişmez; A-87). */
+async function readItemInfo(tx: AccessTx, tenantId: string, ids: readonly string[]): Promise<Map<string, ItemInfo>> {
+  const rows = await tx.execute<{ id: string; tracking_mode: TrackingMode; quantity_scale: number }>(
+    sql`SELECT id, tracking_mode, quantity_scale FROM public.items WHERE tenant_id = ${tenantId}::uuid AND id = ANY(${pgUuidArray(ids)}::uuid[])`,
   );
-  return new Map(rows.map((r) => [r.id.toLowerCase(), { id: r.id, warehouseId: r.warehouse_id, status: r.status }]));
-}
-
-async function readItemsShared(tx: AccessTx, tenantId: string, ids: readonly string[]): Promise<Map<string, ItemInfo>> {
-  if (ids.length === 0) return new Map();
-  const rows = await tx.execute<{ id: string; status: string; tracking_mode: TrackingMode; quantity_scale: number }>(
-    sql`SELECT id, status, tracking_mode, quantity_scale FROM public.items
-         WHERE tenant_id = ${tenantId}::uuid AND id = ANY(${pgUuidArray(ids)}::uuid[]) ORDER BY id ${SHARE_LOCK}`,
-  );
-  return new Map(rows.map((r) => [r.id.toLowerCase(), { id: r.id, status: r.status, trackingMode: r.tracking_mode, quantityScale: Number(r.quantity_scale) }]));
+  return new Map(rows.map((r) => [r.id.toLowerCase(), { id: r.id, trackingMode: r.tracking_mode, quantityScale: Number(r.quantity_scale) }]));
 }
 
 /** Yalnızca plan için: belge dışı lokasyonların depoları (değişmez sütun; kilitsiz okuma güvenli). */
@@ -196,11 +177,13 @@ export async function postDocument(
       assertCovered(built, locked);
 
       // Kilitten SONRA: lokasyon ve ürün FOR SHARE + ACTIVE (T-243 MAJOR; arşivle çakışır).
-      await assertLocationsInWarehouse(tx, ctx.tenantId, built.locationIds, locked.document.warehouseId); // A-145 (T-213 yardımcısı)
-      const locations = await readLocationsShared(tx, ctx.tenantId, built.locationIds);
-      const items = await readItemsShared(tx, ctx.tenantId, [...new Set(lines.map((l) => l.itemId.toLowerCase()))].sort());
+      // Sıra: lokasyon (FOR SHARE, ACTIVE, depo eşitliği A-145) → ürün (FOR SHARE, ACTIVE); ikisi de documents.ts yardımcıları.
+      await assertLocationsActiveInWarehouse(tx, ctx.tenantId, built.locationIds, locked.document.warehouseId);
+      const itemIds = [...new Set(lines.map((l) => l.itemId.toLowerCase()))].sort();
+      await assertItemsActive(tx, ctx.tenantId, itemIds, { archivedDetail: "IN_USE" });
+      const items = await readItemInfo(tx, ctx.tenantId, itemIds);
       const serials = new Map<string, SerialInfo>(locked.serials.map((s) => [s.id.toLowerCase(), { id: s.id, itemId: s.itemId, lotId: s.lotId }]));
-      assertLineRules(lines, locked.document.warehouseId, items, locations, serials);
+      assertLineRules(lines, items, serials);
 
       const dimIdByIdentity = new Map(locked.dimensions.map((d) => [dimensionIdentity(d.key), d.id]));
       const balanceByDim = new Map(locked.balances.map((b) => [b.stockDimensionId, b]));

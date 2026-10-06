@@ -47,6 +47,7 @@ export {
   MAX_DOCUMENT_LINES,
   approveDocument,
   assertItemsActive,
+  assertLocationsActiveInWarehouse,
   assertNotProcessing,
   cancelDocument,
   createStockDocument,
@@ -83,6 +84,6 @@ export {
   type PostingPlan,
   type PostingStatus,
 } from "./plan.ts";
-export { assertLineRules, assertSerialUnique, assertSufficient, type BalanceView, type ItemInfo, type LocationInfo, type SerialInfo } from "./rules.ts";
+export { assertLineRules, assertSerialUnique, assertSufficient, type BalanceView, type ItemInfo, type SerialInfo } from "./rules.ts";
 export { assertTracking, type TrackedLine, type TrackingMode } from "./tracking.ts";
 export { readAvailability, type AvailabilityFilter, type AvailabilityRow } from "./availability.ts";

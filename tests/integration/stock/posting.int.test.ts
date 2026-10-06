@@ -383,8 +383,9 @@ describe("lokasyon ve ürün durumu (T-243 MAJOR) ve depo kuralı (A-145)", () =
     await blocker.query("SELECT id FROM public.locations WHERE id=$1 FOR NO KEY UPDATE", [loc]); // arşivleyicinin ara hâli
     const pending = post(d).then(() => undefined, (e: unknown) => e as AppError);
     // işlemenin lokasyon kilidinde beklediğini gözle (en çok ~5 sn)
+    // Doğru koşulu bekle: işleme lokasyon kilidinde "bekliyor" görünene dek (üst sınır 30 sn; yavaş CI'da yanlış kırmızı vermesin).
     let waiting = false;
-    for (let i = 0; i < 50 && !waiting; i++) {
+    for (let i = 0; i < 300 && !waiting; i++) {
       await new Promise((r) => setTimeout(r, 100));
       const w = await q<{ n: string }>("SELECT count(*)::text AS n FROM pg_stat_activity WHERE wait_event_type='Lock' AND query ILIKE '%public.locations%FOR SHARE%'");
       waiting = w[0]?.n !== "0";

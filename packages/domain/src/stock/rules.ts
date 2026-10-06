@@ -2,7 +2,7 @@
 // düz verilerle çalışır; kilit/okuma `posting.ts`'tedir. Kodlar: 15 §Hata kodları.
 //   - Yeterlilik: çıkış boyutunda `quantity − reserved_quantity ≥ toplam çıkış`, aksi `INSUFFICIENT_STOCK` (negatif stok yok; istisna yolu YOK).
 //     A-217-2: aynı belgedeki girişler çıkışı karşılamaz (kuralın metni; satır sırasından bağımsız, muhafazakâr).
-//   - Arşivli ürün/lokasyon → `VALIDATION_FAILED`/`IN_USE`; STOCK_OUT kaynağı RECEIVING iken izinli (lokasyon türü kısıtı yok; sevk niteliği 3A).
+//   - Arşivli ürün/lokasyon `IN_USE` ve depo eşitliği: `documents.ts` yardımcıları (kilitli okuma). STOCK_OUT kaynağı RECEIVING iken izinli (lokasyon türü kısıtı yok; sevk niteliği 3A).
 //   - Miktar ölçeği (`QUANTITY_SCALE`), dönüşüm kopyası (I-09), takip modu (`tracking.ts`), seri tekilliği (`TRACKING_VIOLATION`).
 //   - A-145: satır lokasyonları belgenin deposunda olmalı (`VALIDATION_FAILED`).
 import { AppError } from "@wms/shared/errors";
@@ -11,14 +11,8 @@ import { assertTracking, type TrackingMode } from "./tracking.ts";
 
 export interface ItemInfo {
   readonly id: string;
-  readonly status: string;
   readonly trackingMode: TrackingMode;
   readonly quantityScale: number;
-}
-export interface LocationInfo {
-  readonly id: string;
-  readonly warehouseId: string;
-  readonly status: string;
 }
 export interface SerialInfo {
   readonly id: string;
@@ -28,27 +22,18 @@ export interface SerialInfo {
 
 const MICRO_DIGITS = 6;
 
-export const inUse = (): AppError => new AppError("VALIDATION_FAILED", { detail: "IN_USE" });
-
-/** Satır düzeyi kurallar (sıra: arşiv → depo → ölçek → dönüşüm → takip). */
+/**
+ * Satır düzeyi kurallar (sıra: ölçek → dönüşüm → takip). Ürün/lokasyon ACTIVE ve depo eşitliği (A-145) burada DEĞİL, kilitten sonra
+ * `documents.ts` yardımcılarındadır (`assertItemsActive`, `assertLocationsActiveInWarehouse`; FOR SHARE + durum tek yerde).
+ */
 export function assertLineRules(
   lines: readonly PostingLine[],
-  documentWarehouseId: string,
   items: ReadonlyMap<string, ItemInfo>,
-  locations: ReadonlyMap<string, LocationInfo>,
   serials: ReadonlyMap<string, SerialInfo>,
 ): void {
   for (const line of [...lines].sort((a, b) => a.lineNo - b.lineNo)) {
     const item = items.get(line.itemId.toLowerCase());
     if (item === undefined) throw new AppError("NOT_FOUND");
-    if (item.status !== "ACTIVE") throw inUse();
-    for (const id of [line.sourceLocationId, line.targetLocationId]) {
-      if (id === null) continue;
-      const loc = locations.get(id.toLowerCase());
-      if (loc === undefined) throw new AppError("NOT_FOUND");
-      if (loc.status !== "ACTIVE") throw inUse();
-      if (loc.warehouseId.toLowerCase() !== documentWarehouseId.toLowerCase()) throw new AppError("VALIDATION_FAILED"); // A-145
-    }
     const base = toMicro(line.baseQuantity);
     const divisor = 10n ** BigInt(MICRO_DIGITS - item.quantityScale);
     if (base % divisor !== 0n) throw new AppError("VALIDATION_FAILED", { detail: "QUANTITY_SCALE" });
