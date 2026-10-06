@@ -46,6 +46,15 @@ export const APP_ROLES = Object.freeze([
  * Geçici LOGIN + kısa ömürlü parola ayrı iş akışının işidir (T-105d).
  */
 export const OPS_ROLE = "wms_ops";
+/** Bilinen sabit rol adları (sır değil); bunlar dışındaki her ad (sahip rol adı = sahip URI'sinin kullanıcı adı) özete SINIFLA yazılır. */
+const KNOWN_ROLE_NAMES = new Set([...APP_ROLES.map((r) => r.role), OPS_ROLE, PROBE_ROLE]);
+/**
+ * Rol adını özet/log için sınıfa çevirir (T-105g): sahip/migration rolü adı Neon URI'sinden maskelenen bir değerdir ve
+ * özet sızıntı bekçisine takılır; yalnızca sabit wms_* adları olduğu gibi yazılır.
+ * @param {string} name @param {boolean} isOwner
+ */
+export const roleClass = (name, isOwner) => (isOwner ? "sahip-rol" : KNOWN_ROLE_NAMES.has(name) ? name : "diğer-rol");
+
 /** Fly'da bulunmaması gereken sır (sahip/migration URI'si uygulama süreçlerine verilmez; Supervisor eki (e)). */
 export const FORBIDDEN_FLY_SECRETS = Object.freeze(["DATABASE_URL_DIRECT", "STAGING_DATABASE_URL_DIRECT"]);
 export const MIN_DEMO_PASSWORD_LENGTH = 16;
@@ -180,9 +189,9 @@ export function opsRoleDeviations(r, members = []) {
   if (!r) return ["missing"];
   const d = appRoleDeviations({ ...r, login: true }).concat(r.login ? ["login"] : []);
   for (const m of members) {
-    if (m.set || m.inherit) d.push(`granted-to:${m.member}`);
+    if (m.set || m.inherit) d.push(`granted-to:${roleClass(m.member, m.me)}`);
     // MINOR-1: ADMIN satırı yalnızca migration rolünde ya da A-67 koşulunu (BYPASSRLS+CREATEROLE, süper kullanıcı değil) sağlayan sahip rolde kabul.
-    else if (!m.me && !(m.bypassrls && m.createrole && !m.super)) d.push(`admin-to:${m.member}`);
+    else if (!m.me && !(m.bypassrls && m.createrole && !m.super)) d.push(`admin-to:${roleClass(m.member, m.me)}`);
   }
   return d;
 }
@@ -229,9 +238,9 @@ COMMIT;`);
     }
     state = after;
   }
-  const adminOnly = state.members.filter((m) => m.admin && !m.set && !m.inherit).map((m) => m.member);
+  const adminOnly = [...new Set(state.members.filter((m) => m.admin && !m.set && !m.inherit).map((m) => roleClass(m.member, m.me)))];
   lines.push(`${OPS_ROLE}: OK (nologin, nosuperuser, nobypassrls, parolasız${created ? ", bu koşuda yaratıldı" : ""})`);
-  if (adminOnly.length > 0) lines.push(`${OPS_ROLE}: yalnızca-ADMIN üyeler (kaldırılamayan örtük satır, A-67 gerekçesi): ${adminOnly.join(", ")}`);
+  if (adminOnly.length > 0) lines.push(`${OPS_ROLE}: yalnızca-ADMIN üye sınıfları (kaldırılamayan örtük satır, A-67 gerekçesi; rol adı yazılmaz): ${adminOnly.join(", ")}`);
   return { status: "OK", lines, created, adminOnly };
 }
 
@@ -358,9 +367,9 @@ export function evaluateProbe(p, migrationRole, opts = {}) {
   if (mine.some((m) => m.admin)) ownerAdmin("migration-role-admin-option");
   if (mine.length > 0 && !mine.some((m) => m.set)) problems.push("migration-role-no-set");
   for (const m of others) {
-    if (m.set || m.inherit) problems.push(`other-member-set-or-inherit:${m.member}`);
+    if (m.set || m.inherit) problems.push(`other-member-set-or-inherit:${roleClass(m.member, false)}`);
     else if (APP_ROLES.some((r) => r.role === m.member)) problems.push(`app-role-member:${m.member}`);
-    else if (m.admin) adminOnly.push(m.member);
+    else if (m.admin) adminOnly.push(roleClass(m.member, false));
   }
   if (p.indirectAdmin === true) ownerAdmin("migration-role-indirect-admin");
   else if (p.indirectAdmin !== false) problems.push("indirect-admin-unknown");
