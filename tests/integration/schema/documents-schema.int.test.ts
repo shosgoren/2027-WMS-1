@@ -429,6 +429,35 @@ describe("T-206 (c) created_xid zorlama (I-16)", () => {
     });
     expectOk(worker);
     if (worker.ok) expect(worker.rows).toEqual([{ to_status: "APPROVED", actor: null }, { to_status: "POSTED", actor: A.memberUserId }]);
+    // Bağlamsız POSTED dışı geçişte (ör. CANCELLED) yedek aktör kullanılmaz: NULL.
+    const cancel = await inTenant(A.tenantId, async (q) => {
+      const id = randomUUID();
+      await q(...insDoc(A, id));
+      await q("UPDATE public.documents SET status = 'APPROVED', posting_job_id = $2, posting_requested_by = $3 WHERE id = $1", [id, randomUUID(), A.memberUserId]);
+      await q("UPDATE public.documents SET status = 'CANCELLED', posting_job_id = NULL, posting_requested_by = NULL WHERE id = $1", [id]);
+      return q("SELECT actor_user_id FROM public.document_status_history WHERE document_id = $1 AND to_status = 'CANCELLED'", [id]);
+    });
+    expectOk(cancel);
+    if (cancel.ok) expect(cancel.rows).toEqual([{ actor_user_id: null }]);
+    // Gerekçe uzunluk sınırı: 500 kabul, 501 → 23514 (belge ve geçmiş).
+    const long = (n: number): string => "x".repeat(n);
+    expectOk(await one(A.tenantId, "UPDATE public.documents SET reason = $2 WHERE id = $1", [A.documentId, long(500)]), "500 karakter");
+    expectFail(await one(A.tenantId, "UPDATE public.documents SET reason = $2 WHERE id = $1", [A.documentId, long(501)]), CHECK_VIOLATION, "documents.reason 501");
+    expectFail(await one(A.tenantId, "UPDATE public.documents SET status = 'CANCELLED', reason = $2 WHERE id = $1", [A.documentId, long(501)]), CHECK_VIOLATION, "geçiş gerekçesi 501");
+    expectFail(
+      await inTx(admin, A.tenantId, async (q) => q("UPDATE public.document_status_history SET reason = $2 WHERE id = $1", [A.statusHistoryId, long(501)])),
+      INSUFFICIENT_PRIVILEGE,
+      "append-only önce",
+    );
+    // Doğrudan INSERT (reason dolu) wms_app ve sahip için 42501.
+    const insReason = "INSERT INTO public.document_status_history (tenant_id, document_id, to_status, reason) VALUES ($1, $2, 'APPROVED', 'sahte gerekce')";
+    expectFail(await one(A.tenantId, insReason, [A.tenantId, A.documentId]), INSUFFICIENT_PRIVILEGE, "wms_app reason'lı doğrudan INSERT");
+    expectFail(await inTx(admin, A.tenantId, async (q) => q(insReason, [A.tenantId, A.documentId])), INSUFFICIENT_PRIVILEGE, "sahip reason'lı doğrudan INSERT");
+    expectFail(
+      await inTx(admin, A.tenantId, async (q) => q("INSERT INTO public.document_status_history (tenant_id, document_id, to_status, reason) VALUES ($1, $2, 'APPROVED', $3)", [A.tenantId, A.documentId, long(501)])),
+      CHECK_VIOLATION,
+      "geçmiş reason CHECK (doğrudan, sahip)",
+    );
     // Gerekçe: geçişte belge gerekçesi kopyalanır; sonraki geçiş önceki satırı değiştirmez (append-only).
     const rs = await inTenant(A.tenantId, async (q) => {
       const id = randomUUID();
