@@ -21,7 +21,7 @@ import { sql } from "../../../packages/db/node_modules/drizzle-orm/index.js";
 import { createDbClient, type DbClient } from "../../../packages/db/src/client.ts";
 import { withUser } from "../../../packages/db/src/index.ts";
 import { APP_ROLE, AUTH_ROLE, PROBE_ROLE, readIntEnv, redactErrorChain } from "../harness/env.ts";
-import { cleanupRegistry, mkMembership, mkUser, newRegistry, seedWorld, type TenantWorld } from "../fixtures/tenants.ts";
+import { mkMembership, mkUser, newRegistry, seedWorld, type TenantWorld } from "../fixtures/tenants.ts";
 
 const env = readIntEnv(process.env);
 const urls = [env.databaseUrl, env.databaseUrlDirect];
@@ -156,12 +156,43 @@ beforeAll(async () => {
   multi = { userId: await mkUser(admin, reg, "multi") };
   await mkMembership(admin, A.tenantId, multi.userId, { roles: ["READ_ONLY"] });
   await mkMembership(admin, B.tenantId, multi.userId, { roles: ["READ_ONLY"] });
+  // T-108: audit_logs append-only'dir ve wms_app tenant_id'ye INSERT edemez; fikstür (T-104) onu tohumlamaz. Satırlar wms_app ile
+  // (gerçek yol: tenant_id DEFAULT'u bağlamdan) A ve B bağlamında yazılır ve COMMIT edilir.
+  for (const w of [A, B]) {
+    await appClient.query("BEGIN");
+    try {
+      await appClient.query("SELECT set_config('app.current_tenant_id', $1, true)", [w.tenantId]);
+      await appClient.query("INSERT INTO public.audit_logs (action, entity_type, entity_id) VALUES ('tenant.created', 'tenant', $1)", [w.tenantId]);
+      await appClient.query("COMMIT");
+    } catch (e) {
+      await appClient.query("ROLLBACK");
+      throw e;
+    }
+  }
   tables = await discoverTables();
 }, 60_000);
 
+/**
+ * audit_logs satırı SİLİNEMEZ (I-12) ve tenants'a FK ile bağlıdır: tenant satırları bilerek silinmez (tek kullanımlık
+ * Testcontainers örneği; Neon'da `t104-*` slug'lı sentetik artık kalır — audit.int.test.ts ile aynı). Diğer fikstür satırları
+ * (FK sırasıyla) silinir; hatalar yutulmaz.
+ */
+async function cleanupExceptTenants(c: pg.Client, r: typeof reg): Promise<void> {
+  const tenantIds = r.worlds.map((w) => w.tenantId);
+  const userIds = [...r.worlds.flatMap((w) => [w.ownerUserId, w.memberUserId]), ...r.extraUsers];
+  if (tenantIds.length > 0) {
+    for (const t of ["invitations", "membership_roles", "tenant_memberships", "tenant_settings"]) {
+      await c.query(`DELETE FROM public.${t} WHERE tenant_id = ANY($1::uuid[])`, [tenantIds]);
+    }
+  }
+  if (userIds.length > 0) await c.query("DELETE FROM public.users WHERE id = ANY($1::uuid[])", [userIds]);
+  r.worlds.length = 0;
+  r.extraUsers.length = 0;
+}
+
 afterAll(async () => {
   try {
-    if (admin !== undefined) await cleanupRegistry(admin, reg);
+    if (admin !== undefined) await cleanupExceptTenants(admin, reg);
   } finally {
     await Promise.all(open.map((c) => c.end().catch(() => undefined)));
   }
@@ -266,6 +297,26 @@ describe("AC-04 DB — A bağlamında B kimliğiyle erişim (tablo başına)", (
       if (t.insertCols.length === 0) {
         const r = await attempt(appClient, [setTenant(A.tenantId)], `INSERT INTO public.${q(t.name)} DEFAULT VALUES`);
         if (r.ok || r.code !== INSUFFICIENT_PRIVILEGE) failures.push(`${t.name}: INSERT yetkisi yokken beklenen 42501, gelen ${fmt(r)}`);
+        continue;
+      }
+      if (!t.insertCols.includes(t.key)) {
+        // Tenant anahtarı sütununa INSERT yetkisi yok (ör. audit_logs): B anahtarını açıkça vermek yetki hatasıdır; anahtarsız
+        // kopya yalnızca bağlam tenant'ına (A) yazılabilir, asla B'ye.
+        const explicit = await attempt(appClient, [setTenant(A.tenantId)], `INSERT INTO public.${q(t.name)} (${q(t.key)}) VALUES ($1)`, [B.tenantId]);
+        if (explicit.ok || explicit.code !== INSUFFICIENT_PRIVILEGE) failures.push(`${t.name}: ${t.key}=B açık INSERT için 42501 beklenir, gelen ${fmt(explicit)}`);
+        const cols2 = t.insertCols.map(q).join(", ");
+        const sel2 = t.insertCols.map((c) => `r.${q(c)}`).join(", ");
+        const viaDefault = await attempt(
+          appClient,
+          [setTenant(A.tenantId)],
+          `INSERT INTO public.${q(t.name)} (${cols2})
+           SELECT ${sel2} FROM (SELECT (jsonb_populate_record(NULL::public.${q(t.name)}, to_jsonb(a))).* FROM public.${q(t.name)} a WHERE a.${q(t.key)} = $1 LIMIT 1) r
+           RETURNING ${q(t.key)}::text AS k`,
+          [A.tenantId],
+        );
+        if (!viaDefault.ok || viaDefault.rowCount !== 1 || (viaDefault.rows[0] as { k: string }).k !== A.tenantId) {
+          failures.push(`${t.name}: anahtarsız kopya yalnızca bağlam tenant'ına (A) 1 satır yazmalı, gelen ${fmt(viaDefault)}`);
+        }
         continue;
       }
       const cols = t.insertCols.map(q).join(", ");
