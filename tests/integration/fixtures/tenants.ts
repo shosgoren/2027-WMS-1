@@ -186,7 +186,6 @@ export async function seedWorld(
   // geçmişi, IN_PROGRESS idempotency kaydı ve numara serisi. Sistem fiş tipi sürümü migration tohumundan okunur (tenant_id NULL).
   const documentId = randomUUID();
   const documentLineId = randomUUID();
-  const statusHistoryId = randomUUID();
   const idempotencyRecordId = randomUUID();
   const tv = await c.query<{ id: string }>("SELECT id FROM public.document_type_versions WHERE tenant_id IS NULL AND key = 'STOCK_IN' AND version = 1");
   const typeVersionId = (tv.rows[0] as { id: string }).id;
@@ -201,10 +200,9 @@ export async function seedWorld(
      VALUES ($1, $2, $3, 1, $4, $5, 1, 1, 1, $6, $7, $8)`,
     [tenantId, documentLineId, documentId, itemId, unitId, rootLocationId, lotId, serialId],
   );
-  await c.query(
-    "INSERT INTO public.document_status_history (tenant_id, id, document_id, from_status, to_status, actor_user_id) VALUES ($1, $2, $3, NULL, 'DRAFT', $4)",
-    [tenantId, statusHistoryId, documentId, ownerUserId],
-  );
+  // Durum geçmişi satırını belge INSERT tetikleyicisi yazar (MINOR-3); kimliği okunur.
+  const hist = await c.query<{ id: string }>("SELECT id FROM public.document_status_history WHERE tenant_id = $1 AND document_id = $2", [tenantId, documentId]);
+  const statusHistoryId = (hist.rows[0] as { id: string }).id;
   await c.query(
     "INSERT INTO public.idempotency_records (tenant_id, id, command_type, client_key, actor_user_id, request_hash) VALUES ($1, $2, 'stock.document.create', $3, $4, $5)",
     [tenantId, idempotencyRecordId, randomUUID(), ownerUserId, createHash("sha256").update(hex(16)).digest("hex")],

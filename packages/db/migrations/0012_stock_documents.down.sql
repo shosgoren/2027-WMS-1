@@ -27,7 +27,10 @@ BEGIN
 END
 $guard$;
 
+DROP TRIGGER documents_status_history_upd ON public.documents;
+DROP TRIGGER documents_status_history_ins ON public.documents;
 DROP TRIGGER idempotency_records_guard_update ON public.idempotency_records;
+DROP TRIGGER document_status_history_trigger_path ON public.document_status_history;
 DROP TRIGGER document_status_history_no_truncate ON public.document_status_history;
 DROP TRIGGER document_status_history_append_only ON public.document_status_history;
 DROP TRIGGER document_status_history_server_fields ON public.document_status_history;
@@ -38,6 +41,8 @@ DROP TRIGGER documents_check_type_version ON public.documents;
 DROP TRIGGER number_sequences_guard_update ON public.number_sequences;
 DROP TRIGGER document_type_versions_immutable ON public.document_type_versions;
 
+DROP FUNCTION public.documents_write_status_history();
+DROP FUNCTION public.document_status_history_require_trigger_path();
 DROP FUNCTION public.idempotency_records_guard_update();
 DROP FUNCTION public.document_status_history_reject_change();
 DROP FUNCTION public.document_status_history_force_server_fields();
