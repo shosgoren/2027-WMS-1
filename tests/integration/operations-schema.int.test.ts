@@ -1148,7 +1148,12 @@ describe("T-302 sayım oturumu ve satırları", () => {
       ["gerekçe CANCELLED olmadan", async (q) => { const s = await mkSession(q, A); await q("UPDATE public.count_sessions SET cancel_reason = 'x' WHERE id = $1", [s]); }],
       ["SUBMITTED → COUNTING", async (q) => { const s = await mkSession(q, A); await q("UPDATE public.count_sessions SET status = 'SUBMITTED' WHERE id = $1", [s]); await q("UPDATE public.count_sessions SET status = 'COUNTING' WHERE id = $1", [s]); }],
       ["CANCELLED sonrası geri", async (q) => { const s = await mkSession(q, A); await q("UPDATE public.count_sessions SET status = 'CANCELLED', cancel_reason = 'x' WHERE id = $1", [s]); await q("UPDATE public.count_sessions SET status = 'COUNTING', cancel_reason = NULL WHERE id = $1", [s]); }],
-      ["POSTED sonrası iptal", async (q) => { const s = await mkSession(q, A); await q("UPDATE public.count_sessions SET status = 'APPROVED', approved_by = $2 WHERE id = $1", [s, A.ownerMembershipId]); await q("UPDATE public.count_sessions SET status = 'POSTED' WHERE id = $1", [s]); await q("UPDATE public.count_sessions SET status = 'CANCELLED', cancel_reason = 'x' WHERE id = $1", [s]); }],
+      ["POSTED sonrası iptal", async (q) => { const s = await mkSession(q, A); await q("UPDATE public.count_sessions SET status = 'SUBMITTED' WHERE id = $1", [s]); await q("UPDATE public.count_sessions SET status = 'APPROVED', approved_by = $2 WHERE id = $1", [s, A.ownerMembershipId]); await q("UPDATE public.count_sessions SET status = 'POSTED' WHERE id = $1", [s]); await q("UPDATE public.count_sessions SET status = 'CANCELLED', cancel_reason = 'x' WHERE id = $1", [s]); }],
+      ["COUNTING → POSTED (onay atlatılamaz)", async (q) => { const s = await mkSession(q, A); await q("UPDATE public.count_sessions SET status = 'POSTED' WHERE id = $1", [s]); }],
+      ["COUNTING → POSTED onaylı alanlarla", async (q) => { const s = await mkSession(q, A); await q("UPDATE public.count_sessions SET status = 'POSTED', approved_by = $2 WHERE id = $1", [s, A.ownerMembershipId]); }],
+      ["SUBMITTED → POSTED (onay atlatılamaz)", async (q) => { const s = await mkSession(q, A); await q("UPDATE public.count_sessions SET status = 'SUBMITTED' WHERE id = $1", [s]); await q("UPDATE public.count_sessions SET status = 'POSTED', approved_by = $2 WHERE id = $1", [s, A.ownerMembershipId]); }],
+      ["COUNTING → APPROVED (gönderim atlatılamaz)", async (q) => { const s = await mkSession(q, A); await q("UPDATE public.count_sessions SET status = 'APPROVED', approved_by = $2 WHERE id = $1", [s, A.ownerMembershipId]); }],
+      ["APPROVED → SUBMITTED", async (q) => { const s = await mkSession(q, A); await q("UPDATE public.count_sessions SET status = 'SUBMITTED' WHERE id = $1", [s]); await q("UPDATE public.count_sessions SET status = 'APPROVED', approved_by = $2 WHERE id = $1", [s, A.ownerMembershipId]); await q("UPDATE public.count_sessions SET status = 'SUBMITTED' WHERE id = $1", [s]); }],
       ["durum beyaz liste", async (q) => { const s = await mkSession(q, A); await q("UPDATE public.count_sessions SET status = 'DONE' WHERE id = $1", [s]); }],
     ];
     for (const [label, work] of fails) expectFail(await asApp(A.tenantId, work), CHECK_VIOLATION, label);
@@ -1245,16 +1250,20 @@ describe("T-302 sayım oturumu ve satırları", () => {
   });
 });
 
-describe("T-302 kapanmış oturumun satırı değişmez", () => {
-  it("POSTED/CANCELLED oturumda satır INSERT/UPDATE 23514; açık oturumda geçer; kapanmış oturumda değişmeyen UPDATE geçer", async () => {
-    const closeAs = async (q: Q, sid: string, to: "CANCELLED" | "POSTED"): Promise<void> => {
+describe("T-302 onaylanmış/kapanmış oturumun satırı değişmez", () => {
+  it("APPROVED/POSTED/CANCELLED oturumda satır INSERT/UPDATE 23514 (onaylanan fark donar); COUNTING/SUBMITTED oturumda geçer; kapanmış oturumda değişmeyen UPDATE geçer", async () => {
+    const closeAs = async (q: Q, sid: string, to: "CANCELLED" | "APPROVED" | "POSTED"): Promise<void> => {
       if (to === "CANCELLED") await q("UPDATE public.count_sessions SET status = 'CANCELLED', cancel_reason = 'x' WHERE id = $1", [sid]);
-      else {
+      else if (to === "APPROVED") {
+        await q("UPDATE public.count_sessions SET status = 'SUBMITTED' WHERE id = $1", [sid]);
+        await q("UPDATE public.count_sessions SET status = 'APPROVED', approved_by = $2 WHERE id = $1", [sid, A.ownerMembershipId]);
+      } else {
+        await q("UPDATE public.count_sessions SET status = 'SUBMITTED' WHERE id = $1", [sid]);
         await q("UPDATE public.count_sessions SET status = 'APPROVED', approved_by = $2 WHERE id = $1", [sid, A.ownerMembershipId]);
         await q("UPDATE public.count_sessions SET status = 'POSTED' WHERE id = $1", [sid]);
       }
     };
-    for (const to of ["CANCELLED", "POSTED"] as const) {
+    for (const to of ["CANCELLED", "APPROVED", "POSTED"] as const) {
       expectFail(
         await asApp(A.tenantId, async (q) => {
           const sid = await mkSession(q, A);

@@ -49,7 +49,7 @@ export interface TenantWorld {
   /** T-211: tenant'a ait processed_events olay kimliği ve stock_consistency_runs satırı. */
   processedEventId: string;
   consistencyRunId: string;
-  /** T-302: tohumlanan (CANCELLED) sayım oturumu; location_count_locks.count_session_id FK'sinin (A-84) geçerli hedefi — COUNTING kilidi kuran testler bunu kullanır. */
+  /** T-302: tohumlanan (SUBMITTED) sayım oturumu; location_count_locks.count_session_id FK'sinin (A-84) geçerli hedefi — COUNTING kilidi kuran testler bunu kullanır. */
   countSessionId: string;
   /** T-211: platform (tenant_id NULL) processed_events satırının olay kimliği (tüketici PLATFORM_FIXTURE_CONSUMER); kalıcı; temizlik yalnızca kayıttaki kimlikleri siler. */
   platformEventId: string;

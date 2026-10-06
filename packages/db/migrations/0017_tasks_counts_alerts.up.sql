@@ -11,7 +11,7 @@
 -- * Sunucu sütunları (status/version varsayılanı, completed_at, approved_at, resolved_at, counted_at) INSERT/UPDATE listesinde YOKTUR;
 --   tetikleyici yazar. Kimlik/anahtar sütunları UPDATE listesinde de yoktur ve ayrıca tetikleyiciyle (tablo sahibi dahil) değişmez.
 -- * Durum makineleri tetikleyicidedir (23514): görev DONE/CANCELLED, oturum POSTED/CANCELLED, uyarı RESOLVED terminaldir (değişiklik
---   reddedilir; değişmeyen UPDATE geçer). Oturum durumu geri gitmez; atlama serbesttir (A-154: atlama kuralı açık iş kuralı).
+--   reddedilir; değişmeyen UPDATE geçer). Oturum durumu sıkı sırayla ilerler (COUNTING→SUBMITTED→APPROVED→POSTED, atlama/geri yok; yalnız APPROVED→POSTED: onay atlatılamaz); CANCELLED POSTED dışındaki her durumdan.
 -- * stock_alerts yazımı: DB'de wms_app'in web yolu ile worker yolu ayrımı YAPILMAZ (aynı rol; ADR-019 rol tablosu); ayrım sütun
 --   yetkisiyle (yalnızca uyarı alanları) ve kod katmanıyla sağlanır. 0014 deseni (app.system_reason yazma politikası) AC-04 INSERT/UPDATE
 --   taramasını (SYSTEM_REASON_WRITE tablosu kartta yok) kıracağından bu tabloda KULLANILMADI; Bulgular'a yazıldı. DELETE yok.
@@ -234,14 +234,11 @@ END
 $fn$;
 REVOKE ALL ON FUNCTION public.warehouse_tasks_guard_state() FROM PUBLIC;
 
--- 2b. Sayım oturumu: durum geri gitmez; POSTED/CANCELLED terminal; approved_at sunucu değeri (APPROVED'a geçişte now()).
+-- 2b. Sayım oturumu: durum makinesi sıkıdır (atlama/geri yok); POSTED/CANCELLED terminal; approved_at sunucu değeri (APPROVED'a geçişte now()).
 CREATE FUNCTION public.count_sessions_guard_state() RETURNS trigger
   LANGUAGE plpgsql
   SET search_path = pg_catalog, pg_temp
 AS $fn$
-DECLARE
-  old_rank integer;
-  new_rank integer;
 BEGIN
   IF OLD.status IN ('POSTED', 'CANCELLED') THEN
     IF NEW.status IS DISTINCT FROM OLD.status
@@ -252,12 +249,13 @@ BEGIN
     END IF;
     RETURN NEW;
   END IF;
-  IF NEW.status <> OLD.status AND NEW.status <> 'CANCELLED' THEN
-    old_rank := CASE OLD.status WHEN 'COUNTING' THEN 1 WHEN 'SUBMITTED' THEN 2 WHEN 'APPROVED' THEN 3 END;
-    new_rank := CASE NEW.status WHEN 'COUNTING' THEN 1 WHEN 'SUBMITTED' THEN 2 WHEN 'APPROVED' THEN 3 WHEN 'POSTED' THEN 4 END;
-    IF new_rank < old_rank THEN
-      RAISE EXCEPTION 'count_sessions: durum geri alınamaz (% -> %)', OLD.status, NEW.status USING ERRCODE = '23514';
-    END IF;
+  -- Atlama yok: COUNTING -> SUBMITTED -> APPROVED -> POSTED; CANCELLED her açık durumdan (POSTED terminaldir, yukarıda).
+  IF NEW.status <> OLD.status AND NOT (
+       NEW.status = 'CANCELLED'
+       OR (OLD.status = 'COUNTING' AND NEW.status = 'SUBMITTED')
+       OR (OLD.status = 'SUBMITTED' AND NEW.status = 'APPROVED')
+       OR (OLD.status = 'APPROVED' AND NEW.status = 'POSTED')) THEN
+    RAISE EXCEPTION 'count_sessions: geçersiz durum geçişi (% -> %)', OLD.status, NEW.status USING ERRCODE = '23514';
   END IF;
   IF NEW.status = 'APPROVED' AND OLD.status <> 'APPROVED' THEN
     NEW.approved_at := pg_catalog.now();
@@ -285,10 +283,10 @@ END
 $fn$;
 REVOKE ALL ON FUNCTION public.count_session_lines_guard_state() FROM PUBLIC;
 
--- 2c'. Kapanmış (POSTED/CANCELLED) oturumun satırı eklenemez/değişmez (0016 field_docs_lines_guard_closed deseni): üst oturum FOR SHARE
+-- 2c'. Onaylanmış veya kapanmış (APPROVED/POSTED/CANCELLED) oturumun satırı eklenemez/değişmez (0016 field_docs_lines_guard_closed deseni): üst oturum FOR SHARE
 --      ile okunur (oturumu kapatan işlem commit olmadan eşzamanlı satır yazımı bloklanır). Değişmeyen UPDATE geçer (no-op). Görev
---      tablosu başlıksız tek satırdır; kapanmış görev değişmezliği 2a'daki terminal kuralındadır. SUBMITTED/APPROVED satırı serbesttir
---      (yeniden sayım / onay öncesi düzeltme kuralı açık: A-157).
+--      tablosu başlıksız tek satırdır; kapanmış görev değişmezliği 2a'daki terminal kuralındadır. SUBMITTED satırı onaya kadar
+--      yazılabilir; APPROVED'dan sonra satır donar (onaylanan fark, onay sonrası sayımla değiştirilemez).
 CREATE FUNCTION public.count_session_lines_guard_closed() RETURNS trigger
   LANGUAGE plpgsql
   SET search_path = pg_catalog, pg_temp
@@ -300,8 +298,8 @@ BEGIN
     RETURN NEW;
   END IF;
   SELECT h.status INTO parent_status FROM public.count_sessions h WHERE h.tenant_id = NEW.tenant_id AND h.id = NEW.session_id FOR SHARE;
-  IF parent_status IN ('POSTED', 'CANCELLED') THEN
-    RAISE EXCEPTION 'SESSION_CLOSED: kapanmış sayım oturumunun satırı eklenemez/değiştirilemez (oturum %)', parent_status USING ERRCODE = '23514';
+  IF parent_status IN ('APPROVED', 'POSTED', 'CANCELLED') THEN
+    RAISE EXCEPTION 'SESSION_CLOSED: onaylanmış/kapanmış sayım oturumunun satırı eklenemez/değiştirilemez (oturum %)', parent_status USING ERRCODE = '23514';
   END IF;
   RETURN NEW;
 END
