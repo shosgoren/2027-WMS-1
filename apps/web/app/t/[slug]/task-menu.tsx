@@ -9,7 +9,7 @@ import type { TaskCardTone } from "@wms/ui";
 
 export interface TaskMenuProps {
   readonly slug: string;
-  readonly allowed: { readonly usersManage: boolean; readonly settingsManage: boolean; readonly auditView: boolean };
+  readonly allowed: { readonly usersManage: boolean; readonly settingsManage: boolean; readonly auditView: boolean; readonly stockView: boolean };
 }
 
 function Icon({ children }: { children: ReactNode }) {
@@ -85,8 +85,8 @@ export async function TaskMenu({ slug, allowed }: TaskMenuProps) {
     { key: "members", kind: "link", allowed: allowed.usersManage, href: `/t/${encodeURIComponent(slug)}/members` },
     { key: "settings", kind: "link", allowed: allowed.settingsManage, href: `/t/${encodeURIComponent(slug)}/settings` },
     { key: "audit", kind: "link", allowed: allowed.auditView, href: `/t/${encodeURIComponent(slug)}/audit` },
-    // Ürün kartı (T-216): okuma `stock.view` (her rol); sayfa/eylem yetkiyi sunucuda denetler, yazma düğmeleri yetkiye göre kilitlenir.
-    { key: "items", kind: "link", allowed: true, href: `/t/${encodeURIComponent(slug)}/items` },
+    // Ürün kartı (T-216): okuma `stock.view`; bayrak yalnızca gösterimdir, sayfa/eylem yetkiyi sunucuda denetler.
+    { key: "items", kind: "link", allowed: allowed.stockView, href: `/t/${encodeURIComponent(slug)}/items` },
     { key: "receive", kind: "warehouse-soon", tone: "accent" },
     { key: "issue", kind: "warehouse-soon", tone: "accent" },
     { key: "transfer", kind: "warehouse-soon", tone: "accent" },

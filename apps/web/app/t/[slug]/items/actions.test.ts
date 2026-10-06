@@ -22,10 +22,12 @@ vi.mock("../../../../lib/rate-limit.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../../lib/rate-limit.ts")>()),
   createProductionLimiter: () => ({ check: () => Promise.resolve() }),
 }));
+vi.mock("next-intl/server", () => ({ getTranslations: () => Promise.resolve((key: string) => key) }));
 vi.mock("@wms/domain/identity/access", () => ({ runTenantQuery: () => Promise.resolve("t1") }));
 
 import { addBarcodeAction, archiveItemAction, createItemAction, removeBarcodeAction, setConversionAction, updateItemAction } from "./actions.ts";
 import { errorKey } from "./items-view.tsx";
+import { TaskMenu } from "../task-menu.tsx";
 
 const IID = "11111111-1111-4111-8111-111111111111";
 const UID = "22222222-2222-4222-8222-222222222222";
@@ -169,5 +171,30 @@ describe("errorKey eşlemesi ve mesaj anahtarları", () => {
         expect(typeof msgs.items.errors[`${k}Action`], `${lang}:${k}Action`).toBe("string");
       }
     }
+  });
+});
+
+describe('"Ürünler" kartı izne bağlı (stock.view)', () => {
+  interface El {
+    props?: { children?: unknown; locked?: unknown; href?: unknown; title?: unknown };
+  }
+  /** Kart ızgarasındaki `items` kartının TaskCard özellikleri (başlık anahtarına göre bulunur). */
+  async function itemsCard(stockView: boolean): Promise<NonNullable<El["props"]>> {
+    const ul = (await TaskMenu({ slug: "acme", allowed: { usersManage: true, settingsManage: true, auditView: true, stockView } })) as El;
+    const lis = ul.props?.children as El[];
+    const cards = lis.map((li) => li.props?.children as El);
+    const found = cards.find((c) => c.props?.title === "tasks.items.title");
+    expect(found).toBeDefined();
+    return (found as El).props as NonNullable<El["props"]>;
+  }
+  it("stock.view varsa bağlantı (kilit yok)", async () => {
+    const p = await itemsCard(true);
+    expect(p.href).toBe("/t/acme/items");
+    expect(p.locked).toBeUndefined();
+  });
+  it("stock.view yoksa (rolsüz üye) kilitli ve bağlantısız; yönetici izinleri bunu açmaz", async () => {
+    const p = await itemsCard(false);
+    expect(p.href).toBeUndefined();
+    expect(p.locked).toEqual({ reason: "lockedReason" });
   });
 });
