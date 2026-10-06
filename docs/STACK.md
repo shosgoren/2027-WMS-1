@@ -31,14 +31,18 @@ Kaynak sözdizimi: `<dosya>#<json.yolu>` (package.json alanı) veya `docker-comp
 | Neon pooler | — | — PgBouncer transaction (belge); sürüm gözlenemedi (Q-02 açık) | | ADR-004 |
 | Prepared statement ayarı | — | — `prepare=false` (üretim, T-005d kapı koşusu; Q-04 kapandı); kod kaynağı `packages/db` `DB_CLIENT_SETTINGS` | | ADR-004 |
 | Drizzle ORM (packages/auth, yalnızca `sql` etiketi) | drizzle-orm | 0.45.3 | packages/auth/package.json#dependencies.drizzle-orm | ADR-003 |
+| Drizzle ORM (packages/domain, yalnızca `sql` etiketi) | drizzle-orm | 0.45.3 | packages/domain/package.json#dependencies.drizzle-orm | ADR-003 |
 | Better Auth (kimlik katmanı) | better-auth | 1.7.7 | packages/auth/package.json#dependencies.better-auth | ADR-014 |
 | Argon2id parola özeti | @node-rs/argon2 | 2.2.1 | packages/auth/package.json#dependencies.@node-rs/argon2 | ADR-014 |
 | Kuyruk kütüphanesi | — | — pg-boss seçildi (ADR-005 eki 2026-10-05); sürüm ilk kuyruk kartında kilitlenir (aday 12.36.0) | | ADR-005 |
+| Kuyruk kütüphanesi | pg-boss | 12.36.0 | packages/queue-adapter/package.json#dependencies.pg-boss | ADR-005 |
 | Tailwind CSS | tailwindcss | — ilk kullanan kart | | |
 | Shadcn/Radix, Lucide | — | — ilk kullanan kart | | |
 | TanStack Query / Virtual | @tanstack/* | — ilk kullanan kart | | |
 | next-intl | next-intl | — ilk kullanan kart | | |
-| Zod | zod | — ilk kullanan kart | | |
+| Zod | zod | 4.6.5 | packages/shared/package.json#dependencies.zod | |
+| Zod (kuyruk bağdaştırıcısı) | zod | 4.6.5 | packages/queue-adapter/package.json#dependencies.zod | ADR-005 |
+| Drizzle ORM (kuyruk bağdaştırıcısı: `sql`) | drizzle-orm | 0.45.3 | packages/queue-adapter/package.json#dependencies.drizzle-orm | ADR-005 |
 
 Sürüm notları (kaynak: kurulu `package.json`/`pnpm-lock.yaml`, 2026-10-05):
 - **Kapsam kuralı (T-004b):** Workspace'lerin (`pnpm-lock.yaml#importers`) `package.json` dosyalarındaki her doğrudan bağımlılık (`dependencies`, `devDependencies`, `optionalDependencies`; `workspace:` hariç) bu tabloda kaynağıyla kilitli bir satıra sahip olmalıdır; eksikse `node scripts/check-docs.mjs` FAIL verir.
