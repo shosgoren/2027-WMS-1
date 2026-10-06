@@ -68,6 +68,29 @@ describe("evaluateHealth", () => {
   it("null gövde → FAIL", () => {
     expect(evaluateHealth(200, "null").ok).toBe(false);
   });
+
+  it("db alanı yok → mevcut davranış (OK, db beklenmez)", () => {
+    expect(evaluateHealth(200, '{"status":"ok"}')).toEqual({ ok: true, reason: 'HTTP 200 {status:"ok"}' });
+  });
+
+  it("db alanı 'ok' veya {status:'ok'} → OK", () => {
+    expect(evaluateHealth(200, '{"status":"ok","db":"ok"}').ok).toBe(true);
+    expect(evaluateHealth(200, '{"status":"ok","db":{"status":"ok"}}').ok).toBe(true);
+  });
+
+  it("db alanı ok değil → FAIL (sahte başarı yok)", () => {
+    for (const body of [
+      '{"status":"ok","db":"down"}',
+      '{"status":"ok","db":{"status":"error"}}',
+      '{"status":"ok","db":null}',
+      '{"status":"ok","db":{}}',
+      '{"status":"ok","db":true}',
+    ]) {
+      const r = evaluateHealth(200, body);
+      expect(r.ok, body).toBe(false);
+      expect(r.reason).toContain("db alanı ok değil");
+    }
+  });
 });
 
 describe("checkHealth", () => {
