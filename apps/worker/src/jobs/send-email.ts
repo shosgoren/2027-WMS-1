@@ -7,6 +7,7 @@
 //   (`permanent === true`: kip kapalı, geçersiz alıcı, mühür açılamadı, bilinmeyen şablon, sağlayıcı 4xx; 408, 409, 425, 429 hariç)
 //   kuyruk bağdaştırıcısında yeniden denenmeden `failed` olur; geçici hatalar (ağ, 5xx, 408, 409, 425, 429) yeniden denenir.
 import { currentTenantId } from "@wms/db";
+import { deliverExternalOnce } from "@wms/queue-adapter";
 import {
   EMAIL_SEND_JOB_TYPE,
   MailError,
@@ -80,8 +81,12 @@ export function createSendEmailHandler(deps: SendEmailDeps): JobHandler<"email.s
         throw new MailError("MAIL_DELIVERY_DISABLED", "recipient cannot be delivered in this environment");
       }
       const rendered = renderTemplate(template, locale, link);
-      await deps.mailer.send({ to, ...rendered, idempotencyKey: ctx.jobId });
-      deps.logger.info("email sent", { jobId: ctx.jobId, template, locale, recipient: maskRecipient(to) });
+      // ADR-019 §4: `processed_events` satırı varsa sağlayıcıya çağrı yok; yoksa Idempotency-Key = iş kimliği ile gönder,
+      // başarıdan sonra satırı yaz (yazım başarısızsa iş hata verir, yeniden teslim aynı anahtarla gönderir).
+      const called = await deliverExternalOnce(ctx, EMAIL_SEND_JOB_TYPE, (idempotencyKey) =>
+        deps.mailer.send({ to, ...rendered, idempotencyKey }),
+      );
+      if (called) deps.logger.info("email sent", { jobId: ctx.jobId, template, locale, recipient: maskRecipient(to) });
     } catch (err) {
       // Yalnızca ad/kod loglanır: hata mesajı adres veya bağlantı taşıyabilir (G-09).
       deps.logger.error("email.send failed", {

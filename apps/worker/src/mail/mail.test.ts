@@ -304,11 +304,58 @@ describe("Mailpit istemcisi", () => {
   });
 });
 
+/**
+ * `processed_events` için bellek içi sahte transaction: `consume.ts` SQL'ini `PgDialect` ile işleyip SELECT/INSERT
+ * davranışını taklit eder. Anahtar = bağlam + tüketici + olay (tenant bağlamı `scope`).
+ */
+function inspectSql(q: unknown): { text: string; params: unknown[] } {
+  // drizzle `sql` nesnesi: `queryChunks` = StringChunk ({ value: string[] }) ve Param ({ value }) dizisi (worker'ın drizzle
+  // bağımlılığı yok; yalnızca yapı okunur).
+  const chunks = (q as { queryChunks: unknown[] }).queryChunks;
+  let text = "";
+  const params: unknown[] = [];
+  for (const c of chunks) {
+    const inner = (c as { value?: unknown } | null)?.value;
+    if (Array.isArray(inner)) text += (inner as string[]).join("");
+    else {
+      text += "?";
+      params.push(typeof c === "object" && c !== null && "value" in c ? inner : c);
+    }
+  }
+  return { text, params };
+}
+
+function fakeProcessedStore() {
+  const rows = new Set<string>();
+  const state = { failInsert: false };
+  const tx = (scope: string) => ({
+    execute: (q: unknown) => {
+      const built = inspectSql(q);
+      if (/current_setting/i.test(built.text)) return Promise.resolve([{ tenant_id: scope === "platform" ? null : scope }]);
+      const p = built.params as string[];
+      const [a, b] = p.length === 3 ? [p[1], p[2]] : [p[0], p[1]];
+      if (/^\s*INSERT INTO processed_events/i.test(built.text)) {
+        if (state.failInsert) return Promise.reject(new Error("insert failed"));
+        const key = `${scope}|${a}|${b}`;
+        if (rows.has(key)) return Promise.resolve([]);
+        rows.add(key);
+        return Promise.resolve([{ one: 1 }]);
+      }
+      if (/^\s*SELECT 1 AS one FROM processed_events/i.test(built.text)) {
+        return Promise.resolve(rows.has(`${scope}|${a}|${b}`) ? [{ one: 1 }] : []);
+      }
+      return Promise.reject(new Error("unexpected statement"));
+    },
+  });
+  return { rows, state, tx };
+}
+
 describe("email.send işleyicisi", () => {
   const MAILPIT_ENV = { MAIL_MODE: "mailpit", MAILPIT_URL: "http://localhost:8025", MAIL_FROM: "a@b.c" };
   const key = newKey();
   const sealer = createSealer(key);
-  function setup(env: Record<string, string>, opts: { hasTenant?: boolean; inTenant?: () => Promise<void>; tenantId?: string; sealTenantId?: string | null; to?: string } = {}) {
+  function setup(env: Record<string, string>, opts: { hasTenant?: boolean; inTenant?: () => Promise<void>; tenantId?: string; sealTenantId?: string | null; to?: string; store?: ReturnType<typeof fakeProcessedStore>; jobId?: string } = {}) {
+    const store = opts.store ?? fakeProcessedStore();
     const runTenant = opts.tenantId ?? randomUUID();
     const lines: string[] = [];
     const logger = createJsonLogger((l) => lines.push(l));
@@ -318,13 +365,14 @@ describe("email.send işleyicisi", () => {
     const hasTenant = opts.hasTenant ?? false;
     const sealTenantId = opts.sealTenantId === undefined ? (hasTenant ? runTenant : null) : opts.sealTenantId;
     const payload = buildEmailSendPayload(sealer, { template: "password_reset", locale: "tr", to: opts.to ?? RECIPIENT, link: LINK, tenantId: sealTenantId });
-    const jobId = randomUUID();
+    const jobId = opts.jobId ?? randomUUID();
     const inTenant = vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => {
       await opts.inTenant?.();
-      return fn(undefined);
+      return fn(store.tx(runTenant));
     });
-    const ctx = { jobId, type: "email.send" as const, hasTenant, actorUserId: null, payload, inTenant } as unknown as Parameters<typeof handler>[0];
-    return { handler, ctx, send, lines, inTenant, jobId, payload };
+    const inPlatform = vi.fn((fn: (tx: unknown) => Promise<unknown>) => fn(store.tx("platform")));
+    const ctx = { jobId, type: "email.send" as const, hasTenant, actorUserId: null, payload, inTenant, inPlatform } as unknown as Parameters<typeof handler>[0];
+    return { handler, ctx, send, lines, inTenant, inPlatform, jobId, payload, store };
   }
 
   it("gönderir; idempotency anahtarı = iş kimliği; log'da tam adres/bağlantı yok", async () => {
@@ -344,10 +392,55 @@ describe("email.send işleyicisi", () => {
   it("tenant işinde ACTIVE doğrulaması ctx.inTenant ile; reddedilirse gönderilmez ve hata fırlar", async () => {
     const ok = setup(MAILPIT_ENV, { hasTenant: true });
     await ok.handler(ok.ctx);
-    expect(ok.inTenant).toHaveBeenCalledTimes(1);
+    // tenantId okuma + processed_events kontrolü + kayıt (ADR-019 §4): üç kısa transaction.
+    expect(ok.inTenant).toHaveBeenCalledTimes(3);
     const bad = setup(MAILPIT_ENV, { hasTenant: true, inTenant: () => Promise.reject(new Error("tenant status is not active")) });
     await expect(bad.handler(bad.ctx)).rejects.toThrow("tenant status");
     expect(bad.send).not.toHaveBeenCalled();
+  });
+  it("aynı iş iki kez teslim → sağlayıcıya tek çağrı (ilk başarılıysa); platform işinde tenant'sız bağlam", async () => {
+    const t = setup(MAILPIT_ENV);
+    await t.handler(t.ctx);
+    await t.handler(t.ctx);
+    expect(t.send).toHaveBeenCalledTimes(1);
+    expect(t.inPlatform).toHaveBeenCalledTimes(3);
+    expect(t.inTenant).not.toHaveBeenCalled();
+    expect([...t.store.rows]).toEqual([`platform|${EMAIL_SEND_JOB_TYPE}|${t.jobId}`]);
+    // Yinelenen teslimde "email sent" yeniden yazılmaz.
+    expect(t.lines.filter((l) => l.includes("email sent"))).toHaveLength(1);
+  });
+  it("tenant işinde de aynı iş iki kez → tek çağrı; başka tenant'ın aynı iş kimliği ayrı etki sayılır", async () => {
+    const store = fakeProcessedStore();
+    const jobId = randomUUID();
+    const a = setup(MAILPIT_ENV, { hasTenant: true, store, jobId });
+    await a.handler(a.ctx);
+    await a.handler(a.ctx);
+    expect(a.send).toHaveBeenCalledTimes(1);
+    const b = setup(MAILPIT_ENV, { hasTenant: true, store, jobId });
+    await b.handler(b.ctx);
+    expect(b.send).toHaveBeenCalledTimes(1);
+    expect(store.rows.size).toBe(2);
+  });
+  it("çağrı başarılı ama processed_events yazımı başarısız → iş hata verir; yeniden teslimde AYNI anahtarla yeniden çağrı", async () => {
+    const t = setup(MAILPIT_ENV);
+    t.store.state.failInsert = true;
+    await expect(t.handler(t.ctx)).rejects.toThrow("insert failed");
+    expect(t.send).toHaveBeenCalledTimes(1);
+    expect(t.store.rows.size).toBe(0);
+    t.store.state.failInsert = false;
+    await t.handler(t.ctx);
+    expect(t.send).toHaveBeenCalledTimes(2);
+    expect(t.send.mock.calls[1]?.[0].idempotencyKey).toBe(t.jobId);
+    expect(t.send.mock.calls[0]?.[0].idempotencyKey).toBe(t.jobId);
+    expect(t.store.rows.size).toBe(1);
+  });
+  it("sağlayıcı hatasında satır yazılmaz (yeniden deneme çağrıyı tekrarlar)", async () => {
+    const t = setup(MAILPIT_ENV);
+    t.send.mockRejectedValueOnce(new MailError("MAIL_SEND_FAILED", "resend responded with status 500"));
+    await expect(t.handler(t.ctx)).rejects.toBeInstanceOf(MailError);
+    expect(t.store.rows.size).toBe(0);
+    await t.handler(t.ctx);
+    expect(t.send).toHaveBeenCalledTimes(2);
   });
   it("teslim edilemeyen ortamda MAIL_DELIVERY_DISABLED fırlatır, sahte başarı yok", async () => {
     for (const env of [{ MAIL_MODE: "disabled" } as Record<string, string>, { MAIL_MODE: "resend", RESEND_API_KEY: apiKey, MAIL_FROM: "a@b.c" }]) {
