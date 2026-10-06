@@ -8,8 +8,10 @@
 --
 -- Zarf biçimi: data = {"v":1,"tenantId":<uuid|null>,...}. `tenantId` JSON null = tenant'sız platform işi.
 --   wms_app    INSERT: tenantId = oturumun tenant'ı (zarf sahteciliği reddedilir) VEYA platform işi.
---   wms_app    SELECT: yalnızca kendi tenant'ı + platform işleri (INSERT ... RETURNING id ve tekilleştirme için gerekli;
---              platform işi yükü mühürlüdür, tenant verisi taşımaz). UPDATE/DELETE politikası YOK + yetki yok.
+--   wms_app    SELECT: tenant bağlamındaki oturum YALNIZCA kendi tenant'ının işlerini görür (tekilleştirme sorgusu için).
+--              Platform işleri (tenantId null) yalnızca tenant ayarı BOŞ/ayarsız oturumda görünür (enqueuePlatform'un
+--              INSERT ... RETURNING id yolu); tenant bağlamı başka tenant'ın da platform işlerinin de satırını görmez.
+--              UPDATE/DELETE politikası YOK + yetki yok. Boş dize tenant sayılmaz (nullif).
 --   wms_worker ALL: tüm satırlar (tüketici tüm tenant'ların işlerini işler; tenant verisine ayrı bağlantıyla erişir).
 -- ENABLE + FORCE: tablo sahibi de (BYPASSRLS/süper kullanıcı değilse) politikaya tabidir.
 DO $rls$
@@ -28,13 +30,16 @@ BEGIN
     EXECUTE format('DROP POLICY IF EXISTS job_worker_all ON %s', t);
     EXECUTE format($p$CREATE POLICY job_app_insert ON %s FOR INSERT TO wms_app
       WITH CHECK (
-        data->>'tenantId' = current_setting('app.current_tenant_id', true)
+        data->>'tenantId' = nullif(current_setting('app.current_tenant_id', true), '')
         OR jsonb_typeof(data->'tenantId') = 'null'
       )$p$, t);
     EXECUTE format($p$CREATE POLICY job_app_select ON %s FOR SELECT TO wms_app
       USING (
-        data->>'tenantId' = current_setting('app.current_tenant_id', true)
-        OR jsonb_typeof(data->'tenantId') = 'null'
+        data->>'tenantId' = nullif(current_setting('app.current_tenant_id', true), '')
+        OR (
+          jsonb_typeof(data->'tenantId') = 'null'
+          AND nullif(current_setting('app.current_tenant_id', true), '') IS NULL
+        )
       )$p$, t);
     EXECUTE format($p$CREATE POLICY job_worker_all ON %s FOR ALL TO wms_worker
       USING (true)

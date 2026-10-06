@@ -109,6 +109,29 @@ function failureOutput(err: unknown): Record<string, unknown> {
   };
 }
 
+/**
+ * Geçici hata sarmalayıcısı: pg-boss `fail()` fırlatılan hatanın mesajını + stack'ini + numaralandırılabilir alanlarını
+ * `pgboss.job.output`'a yazar (e-posta adresi/bağlantı bilgisi/iç yol sızabilir, G-09). Bu yüzden yeniden fırlatılan
+ * hata yalnızca `{name, code}` taşır; mesaj yalnızca ad, stack tek satırdır. Orijinal hata yalnızca ad/SQLSTATE ile loga gider.
+ */
+class SanitizedJobError extends Error {
+  readonly code?: string;
+  constructor(name: string, code: string | undefined) {
+    super(name);
+    this.name = name;
+    this.stack = name;
+    if (code !== undefined) this.code = code;
+  }
+}
+
+function sanitizedFailure(err: unknown): SanitizedJobError {
+  const code = (err as { code?: unknown } | null)?.code;
+  return new SanitizedJobError(
+    err instanceof Error && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(err.name) ? err.name : "Error",
+    typeof code === "string" && /^[A-Z][A-Z0-9_]{2,63}$/.test(code) ? code : undefined,
+  );
+}
+
 export interface QueueLogger {
   error(msg: string, fields?: Record<string, unknown>): void;
 }
@@ -276,7 +299,10 @@ export function createJobQueue(options: JobQueueOptions): PgBossJobQueue {
             } as Parameters<JobHandler<T, TenantTx>>[0]);
             results.push({ id: bossJob.id, status: "completed" });
           } catch (err) {
-            if (!isPermanentFailure(err)) throw err;
+            if (!isPermanentFailure(err)) {
+              logger?.error("job handler failed (transient; will retry)", { jobId: bossJob.id, type, ...safeErrorFields(err) });
+              throw sanitizedFailure(err);
+            }
             results.push({ id: bossJob.id, status: "deadletter", output: failureOutput(err) });
           }
         }
@@ -333,7 +359,8 @@ function revokeSql(schema: string): string {
  * - `queue` SELECT: `insertJobs` (`JOIN queue q`), `failJobsBody` dead-letter (`JOIN queue q`), `getQueues` önbelleği.
  * - `version(version)` SELECT: `start()` sürüm denetimi (`check`); başka sütun yok.
  *
- * wms_app (yalnızca GÖNDEREN): `job` INSERT (`insertJobs`) + SELECT (INSERT ... RETURNING id satır görünürlüğü ve
+ * wms_app (yalnızca GÖNDEREN): `job_common` INSERT (`insertJobs` doğrudan bölüme yazar; ana tabloya INSERT yetkisi YOK)
+ * + `job`/`job_common` SELECT (INSERT ... RETURNING id satır görünürlüğü ve
  * tekilleştirme sorgusu; RLS yalnızca kendi tenant'ı + tenant'sız platform işleri). UPDATE/DELETE YOK: başka
  * tenant'ın (hatta kendi) işini iptal/değiştir/sil yapamaz.
  *
@@ -353,14 +380,12 @@ function revokeSql(schema: string): string {
 export const QUEUE_GRANTS_SQL = `
   ${revokeSql(QUEUE_SCHEMA)};
   GRANT USAGE ON SCHEMA ${QUEUE_SCHEMA} TO wms_app, wms_worker;
-  GRANT SELECT, INSERT ON ${QUEUE_SCHEMA}.job, ${QUEUE_SCHEMA}.job_common TO wms_app;
+  GRANT SELECT, INSERT ON ${QUEUE_SCHEMA}.job_common TO wms_app;
+  GRANT SELECT ON ${QUEUE_SCHEMA}.job TO wms_app;
   GRANT SELECT, INSERT, UPDATE, DELETE ON ${QUEUE_SCHEMA}.job, ${QUEUE_SCHEMA}.job_common TO wms_worker;
   GRANT SELECT ON ${QUEUE_SCHEMA}.queue TO wms_app, wms_worker;
   GRANT SELECT (version) ON ${QUEUE_SCHEMA}.version TO wms_app, wms_worker;
   GRANT EXECUTE ON FUNCTION ${QUEUE_SCHEMA}.job_now() TO wms_app, wms_worker`;
-
-/** Geriye dönük ad (T-115 testleri). */
-export const QUEUE_APP_GRANTS_SQL = QUEUE_GRANTS_SQL;
 
 /**
  * Job RLS politikaları (`job-rls.sql`; idempotent DDL). Ayrı dosya: tenant ayarı yalnızca SQL tarafında anılır.
@@ -508,8 +533,9 @@ export async function installQueueSchema(options: InstallQueueSchemaOptions): Pr
       await boss.createQueue(type, { policy: "standard", ...QUEUE_DEFAULTS });
     }
     const db = boss.getDb();
-    await db.executeSql(QUEUE_GRANTS_SQL);
-    await db.executeSql(queueRlsSql());
+    // Tek çok-ifadeli sorgu = tek örtük transaction (hata olursa hiçbiri uygulanmaz); RLS önce, yetkiler sonra:
+    // yetki verildiği an politikalar yürürlüktedir.
+    await db.executeSql(`${queueRlsSql()};\n${QUEUE_GRANTS_SQL}`);
   } catch (err) {
     throw describeFailure(err);
   } finally {

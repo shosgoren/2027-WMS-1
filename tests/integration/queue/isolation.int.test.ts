@@ -2,9 +2,11 @@
 // `wms_worker` tüm tenant'ların işini tüketir (fetch/complete/fail/retry) ve başka hiçbir şeye erişemez.
 // Gerçek roller, PgBouncer (DATABASE_URL / DATABASE_URL_WORKER); migration rolü (DATABASE_URL_DIRECT) yalnızca kurulum,
 // sentetik iş yazma ve doğrulama okumaları içindir (superuser RLS'i aşar). Veriler sentetik UUID'lerdir (G-09).
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { runTenantCommandById } from "../../../packages/domain/src/identity/access.ts";
+import { AppError } from "../../../packages/shared/src/errors.ts";
 import { createDbClient, currentTenantId, withTenant } from "../../../packages/db/src/index.ts";
 import { DB_CLIENT_SETTINGS, createTenantContext, type DbClient } from "../../../packages/db/src/client.ts";
 import { QUEUE_SCHEMA, createJobQueue, installQueueSchema, workerPrincipal, type PgBossJobQueue } from "../../../packages/queue-adapter/src/index.ts";
@@ -21,7 +23,11 @@ let admin: pg.Client;
 let client: DbClient;
 const queues: PgBossJobQueue[] = [];
 const createdTenants: string[] = [];
+const fixtureTenants: string[] = [];
+const fixtureUsers: string[] = [];
 
+const LEAK_EMAIL = "victim.t115c@example.test";
+const SECRET_MESSAGE = `smtp rejected ${LEAK_EMAIL} password=hunter2`;
 const reseed = (): Job => ({ type: "demo.reseed", payload: {} });
 const newTenant = (): string => {
   const id = randomUUID();
@@ -91,6 +97,10 @@ afterEach(async () => {
 });
 
 afterAll(async () => {
+  await admin.query("DELETE FROM public.membership_roles WHERE tenant_id = ANY($1::uuid[])", [fixtureTenants]);
+  await admin.query("DELETE FROM public.tenant_memberships WHERE tenant_id = ANY($1::uuid[])", [fixtureTenants]);
+  await admin.query("DELETE FROM public.tenants WHERE id = ANY($1::uuid[])", [fixtureTenants]);
+  await admin.query("DELETE FROM public.users WHERE id = ANY($1::uuid[])", [fixtureUsers]);
   if (createdTenants.length > 0) {
     await admin.query(`DELETE FROM ${QUEUE_SCHEMA}.job WHERE data->>'tenantId' = ANY($1::text[])`, [createdTenants]);
   }
@@ -117,7 +127,7 @@ describe("wms_worker rolü ve yetki matrisi", () => {
     );
     expect(tables).toEqual(expect.arrayContaining(["job", "job_common", "queue", "version", "bam", "schedule", "subscription"]));
     const expected: Record<string, Record<string, string[]>> = {
-      wms_app: { job: ["SELECT", "INSERT"], job_common: ["SELECT", "INSERT"], queue: ["SELECT"] },
+      wms_app: { job: ["SELECT"], job_common: ["SELECT", "INSERT"], queue: ["SELECT"] },
       wms_worker: { job: ["SELECT", "INSERT", "UPDATE", "DELETE"], job_common: ["SELECT", "INSERT", "UPDATE", "DELETE"], queue: ["SELECT"] },
     };
     for (const role of ["wms_app", "wms_worker"]) {
@@ -183,7 +193,17 @@ describe("wms_worker rolü ve yetki matrisi", () => {
 });
 
 describe("wms_app: yalnızca gönderen, kendi tenant'ı (RLS)", () => {
-  it.each(TABLES)("%s: kendi tenant'ına iş ekler; başka tenant'a (zarf tenantId sahteciliği) ve tenantId'siz zarfa ekleyemez", async (table) => {
+  it("job (üst tablo): wms_app INSERT yetkisi yoktur (pg-boss insertJobs doğrudan job_common'a yazar); SELECT vardır", async () => {
+    const a = newTenant();
+    await asRole(env.databaseUrl, a, async (c) => {
+      await expect(c.query(`INSERT INTO ${QUEUE_SCHEMA}.job (name, data) VALUES ('demo.reseed', $1::jsonb)`, [JSON.stringify(envelope(a))])).rejects.toMatchObject(denied);
+    });
+    await asRole(env.databaseUrl, a, async (c) => {
+      await expect(c.query(`SELECT 1 FROM ${QUEUE_SCHEMA}.job LIMIT 1`)).resolves.toBeDefined();
+    });
+  });
+
+  it.each(["job_common"] as const)("%s: kendi tenant'ına iş ekler; başka tenant'a (zarf tenantId sahteciliği) ve tenantId'siz zarfa ekleyemez", async (table) => {
     const a = newTenant();
     const b = newTenant();
     await asRole(env.databaseUrl, a, async (c) => {
@@ -212,15 +232,40 @@ describe("wms_app: yalnızca gönderen, kendi tenant'ı (RLS)", () => {
       expect(ids.map((r: { id: string }) => r.id)).toEqual([idA]);
       const byId = await c.query(`SELECT 1 FROM ${QUEUE_SCHEMA}.${table} WHERE id = $1`, [idB]);
       expect(byId.rows).toEqual([]);
-      // Görünen her satır kendi tenant'ına ya da platforma ait.
+      // Tenant bağlamındaki oturum yalnızca KENDİ tenant'ının satırlarını görür: platform (tenantId null) dahil başkası yok.
       const all = (await c.query(`SELECT data FROM ${QUEUE_SCHEMA}.${table}`)).rows as { data: { tenantId: string | null } }[];
-      for (const row of all) expect([a, null]).toContain(row.data.tenantId);
+      for (const row of all) expect(row.data.tenantId).toBe(a);
     });
     // Bağlamsız oturum hiçbir tenant işini görmez.
     await asRole(env.databaseUrl, undefined, async (c) => {
       const all = (await c.query(`SELECT data FROM ${QUEUE_SCHEMA}.${table}`)).rows as { data: { tenantId: string | null } }[];
       for (const row of all) expect(row.data.tenantId).toBeNull();
     });
+  });
+
+  it.each(TABLES)("%s: platform (tenantId null) işi yalnızca tenant ayarı BOŞ oturumda görünür; tenant bağlamı görmez", async (table) => {
+    const a = newTenant();
+    const platformId = await adminInsertJob(envelope(null, { payload: { marker: randomUUID() } }));
+    await asRole(env.databaseUrl, a, async (c) => {
+      expect((await c.query(`SELECT 1 FROM ${QUEUE_SCHEMA}.${table} WHERE id = $1`, [platformId])).rows).toEqual([]);
+      expect((await c.query(`SELECT 1 FROM ${QUEUE_SCHEMA}.${table} WHERE jsonb_typeof(data->'tenantId') = 'null'`)).rows).toEqual([]);
+    });
+    // Boş dize ayarı da (transaction-local set_config sonrası havuzdaki bağlantı durumu) bağlamsızdır.
+    await asRole(env.databaseUrl, "", async (c) => {
+      const r = await c.query(`SELECT 1 FROM ${QUEUE_SCHEMA}.${table} WHERE id = $1`, [platformId]);
+      expect(r.rows.length).toBe(1);
+    });
+    await asRole(env.databaseUrl, undefined, async (c) => {
+      expect((await c.query(`SELECT 1 FROM ${QUEUE_SCHEMA}.${table} WHERE id = $1`, [platformId])).rows.length).toBe(1);
+    });
+  });
+
+  it("wms_app platform işini (tenantId null, bağlamsız) yazar ve RETURNING ile id'sini görür (tenant ayarı boş oturum)", async () => {
+    const q = queueFor(env.databaseUrl);
+    await q.start();
+    const res = await q.enqueuePlatform({ type: "demo.reseed", payload: {} });
+    expect(res.jobId).toEqual(expect.any(String));
+    expect((await stateOf(res.jobId as string))?.state).toBe("created");
   });
 
   it.each(TABLES)("%s: başka tenant'ın (ve kendi) işini iptal/değiştir/sil yapamaz; tüketemez (UPDATE/DELETE yetkisi yok)", async (table) => {
@@ -295,12 +340,13 @@ describe("wms_worker: tüm tenant'ların işini tüketir (fetch/complete/fail/re
     const permId = await adminInsertJob(envelope(permTenant));
     const tempId = await adminInsertJob(envelope(tempTenant));
     const calls: Record<string, number> = {};
-    const worker = queueFor(workerUrl);
+    const logged: Record<string, unknown>[] = [];
+    const worker = queueFor(workerUrl, (f) => logged.push(f ?? {}));
     await worker.work("demo.reseed", async (ctx) => {
       const t = ctx.hasTenant ? await ctx.inTenant((tx) => currentTenantId(tx)) : undefined;
       calls[t ?? "?"] = (calls[t ?? "?"] ?? 0) + 1;
-      if (t === permTenant) throw Object.assign(new Error("boom"), { name: "MailError", code: "MAIL_DELIVERY_DISABLED", permanent: true });
-      if (t === tempTenant) throw Object.assign(new Error("transient"), { permanent: false });
+      if (t === permTenant) throw Object.assign(new Error(`boom ${SECRET_MESSAGE}`), { name: "MailError", code: "MAIL_DELIVERY_DISABLED", permanent: true });
+      if (t === tempTenant) throw Object.assign(new Error(`transient ${SECRET_MESSAGE}`), { name: "MailError", code: "MAIL_TRANSIENT", permanent: false, to: LEAK_EMAIL });
     });
     await waitFor(async () => (await stateOf(permId))?.state === "failed", "kalıcı hata -> failed");
     await waitFor(async () => (await stateOf(tempId))?.state === "retry", "geçici hata -> retry");
@@ -308,9 +354,24 @@ describe("wms_worker: tüm tenant'ların işini tüketir (fetch/complete/fail/re
     expect(perm?.retry_count).toBe(0);
     expect(perm?.output).toMatchObject({ permanent: true, name: "MailError", code: "MAIL_DELIVERY_DISABLED" });
     const temp = await stateOf(tempId);
+    expect(temp?.output).toMatchObject({ name: "MailError", code: "MAIL_TRANSIENT" });
     expect(temp?.retry_count).toBeLessThan(temp?.retry_limit ?? 0);
     expect(calls[permTenant]).toBe(1);
     expect(calls[tempTenant]).toBe(1);
+    // Hem geçici hem kalıcı yolda output (pgboss.job) mesaj/stack/e-posta/sır taşımaz; yalnızca ad + kod.
+    for (const out of [perm?.output, temp?.output]) {
+      const text = JSON.stringify(out);
+      expect(text).not.toContain(LEAK_EMAIL);
+      expect(text).not.toContain("hunter2");
+      expect(text).not.toMatch(/\bat\s|\.ts|node_modules/i);
+      // pg-boss `message`/`stack` anahtarlarını her zaman yazar; değerleri yalnızca hata adıdır (sızıntı yok).
+      const o = (out ?? {}) as Record<string, unknown>;
+      expect(Object.keys(o).every((k) => ["name", "code", "permanent", "message", "stack"].includes(k))).toBe(true);
+      for (const k of ["message", "stack"]) if (k in o) expect(o[k]).toBe(o.name);
+    }
+    // Yapılandırılmış log da mesaj/e-posta taşımaz (yalnızca ad/SQLSTATE/jobId/type).
+    expect(JSON.stringify(logged)).not.toContain(LEAK_EMAIL);
+    expect(JSON.stringify(logged)).not.toContain("hunter2");
   });
 });
 
@@ -321,6 +382,26 @@ describe("worker principal kuralı (T-113 MINOR-4)", () => {
     expect(workerPrincipal(null)).toBeNull();
     // İş yükü/zarf mfaVerified taşıyamaz: tek parametre actorUserId'dir.
     expect(workerPrincipal.length).toBe(1);
+  });
+
+  it("workerPrincipal ile kurulan principal, TENANT_ADMIN MFA'sı gerektiren ById komutunda MFA_REQUIRED alır", async () => {
+    const user = (await admin.query("INSERT INTO public.users (name, email) VALUES ('T115c fixture', $1) RETURNING id", [`t115c-${randomBytes(6).toString("hex")}@example.test`])).rows[0].id as string;
+    fixtureUsers.push(user);
+    const tenant = randomUUID();
+    await admin.query("INSERT INTO public.tenants (id, slug, name, status, is_demo) VALUES ($1, $2, 'T115c', 'ACTIVE', false)", [tenant, `t115c-${randomBytes(6).toString("hex")}`]);
+    fixtureTenants.push(tenant);
+    const m = await admin.query("INSERT INTO public.tenant_memberships (tenant_id, user_id, status, is_owner) VALUES ($1, $2, 'ACTIVE', false) RETURNING id", [tenant, user]);
+    await admin.query("INSERT INTO public.membership_roles (tenant_id, membership_id, role_key) VALUES ($1, $2, 'TENANT_ADMIN')", [tenant, m.rows[0].id]);
+    const principal = workerPrincipal(user);
+    expect(principal).not.toBeNull();
+    let error: unknown;
+    try {
+      await runTenantCommandById({ db: client, principal, tenantId: tenant, permission: "settings.manage" }, async () => "ran");
+    } catch (e) {
+      error = e;
+    }
+    expect(error).toBeInstanceOf(AppError);
+    expect([(error as AppError).code, (error as AppError).detail]).toEqual(["FORBIDDEN", "MFA_REQUIRED"]);
   });
 
   it("zarfa/yüke gömülmüş mfaVerified işi VALIDATION_FAILED ile failed yapar; handler çağrılmaz", async () => {
