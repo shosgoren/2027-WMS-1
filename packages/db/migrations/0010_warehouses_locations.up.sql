@@ -124,11 +124,14 @@ AS $fn$
 DECLARE
   parent_depth smallint;
 BEGIN
-  -- BEFORE tetikleyici WITH CHECK'ten ÖNCE çalışır: bağlam tenant'ı doluyken başka tenant'a satır yazma denemesi, ebeveyn
-  -- hatasına dönüşmeden RLS ile aynı hata kodu/iletiyle reddedilir (rol bağımsız; BYPASSRLS rolde de geçerli).
+  -- BEFORE tetikleyici WITH CHECK'ten ÖNCE çalışır (T-235): bağlam tenant'ı doluyken satırın tenant'ı bağlamdan farklıysa
+  -- ebeveyn/depo aramasına GİRİLMEZ ve ret üretilmez; reddi FORCE RLS WITH CHECK (42501, polroles={0}) verir. Böylece
+  -- uyuşmazlık ebeveyn hatasına (23503/23514) dönüşemez ve ret kaynağı tek (politika) olur. Erken dönüş yeni yol açmaz:
+  -- WITH CHECK her NOBYPASSRLS rol için (wms_app, wms_auth, wms_ops; sahip dahil, FORCE) satırı mutlaka reddeder.
+  -- Bağlam yoksa (boş/ayarsız) bu dal atlanır ve aşağıdaki denetimler aynen çalışır.
   IF NULLIF(pg_catalog.current_setting('app.current_tenant_id', true), '') IS NOT NULL
      AND NEW.tenant_id IS DISTINCT FROM NULLIF(pg_catalog.current_setting('app.current_tenant_id', true), '')::uuid THEN
-    RAISE EXCEPTION 'new row violates row-level security policy for table "locations"' USING ERRCODE = '42501';
+    RETURN NEW;
   END IF;
   IF NEW.parent_id IS NULL THEN
     IF NEW.depth <> 0 THEN
