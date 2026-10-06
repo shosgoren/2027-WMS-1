@@ -4,8 +4,8 @@
 // - Mühür AAD'si tenant kimliğini içerir (tenant işinde işin yazıldığı tenant, `ctx.inTenant` içinde okunur;
 //   platform işinde `platform`): başka tenant'ın işine taşınan mühür açılmaz.
 // - Alıcı adresi ve bağlantı loglanmaz (maskeli alıcı). Hata yutulmaz: fırlatılır. Kalıcı hatalar
-//   (`permanent === true`: kip kapalı, geçersiz alıcı, mühür açılamadı, bilinmeyen şablon, sağlayıcı 4xx ≠ 429)
-//   kuyruk bağdaştırıcısında yeniden denenmeden `failed` olur; geçici hatalar (ağ, 5xx, 429) yeniden denenir.
+//   (`permanent === true`: kip kapalı, geçersiz alıcı, mühür açılamadı, bilinmeyen şablon, sağlayıcı 4xx; 408, 409, 425, 429 hariç)
+//   kuyruk bağdaştırıcısında yeniden denenmeden `failed` olur; geçici hatalar (ağ, 5xx, 408, 409, 425, 429) yeniden denenir.
 import { currentTenantId } from "@wms/db";
 import {
   EMAIL_SEND_JOB_TYPE,
@@ -60,7 +60,8 @@ export function createSendEmailHandler(deps: SendEmailDeps): JobHandler<"email.s
     try {
       let sealTenant: string = PLATFORM_SEAL_SCOPE;
       if (ctx.hasTenant) {
-        // Tenant ACTIVE değilse withSystemTenant reddeder; iş hata ile döner. Kimlik transaction-local ayardan
+        // Tenant ACTIVE değilse withSystemTenant reddeder; hata `permanent` taşımaz, yani geçici sayılır ve kuyruk
+        // yeniden dener (tenant yeniden ACTIVE olursa iş tamamlanır; olmazsa deneme sınırında `failed`). Kimlik transaction-local ayardan
         // okunur (zarftan değil): mühür, işin gerçekten çalıştığı tenant'a bağlıdır.
         const read = deps.readTenantId ?? ((tx: unknown) => currentTenantId(tx as Parameters<typeof currentTenantId>[0]));
         const tenantId = await ctx.inTenant((tx) => read(tx));

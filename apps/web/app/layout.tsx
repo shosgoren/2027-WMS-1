@@ -26,7 +26,7 @@ export async function generateMetadata(): Promise<Metadata> {
 async function setView(formData: FormData): Promise<void> {
   "use server";
   const next = parseView(String(formData.get("view") ?? ""));
-  (await cookies()).set(VIEW_COOKIE, next, { path: "/", maxAge: ONE_YEAR_SECONDS, sameSite: "lax" });
+  (await cookies()).set(VIEW_COOKIE, next, { path: "/", maxAge: ONE_YEAR_SECONDS, sameSite: "lax", secure: process.env.NODE_ENV === "production" });
 }
 
 const TOUCH = "min-h-12 min-w-12";
