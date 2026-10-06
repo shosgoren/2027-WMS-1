@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { cookies } from "next/headers";
 import Link from "next/link";
 import { NextIntlClientProvider } from "next-intl";
@@ -19,9 +19,13 @@ function parseView(value: string | undefined): View {
   return VIEWS.find((v) => v === value) ?? "flow";
 }
 
+// Cihaz uyumu (T-254): `viewport-fit=cover` ile `env(safe-area-inset-*)` kullanılabilir (çentik, ana ekran çubuğu); yakınlaştırma
+// engellenmez (erişilebilirlik). Ana ekrana eklenince tam ekran açılır (`apple-mobile-web-app-capable`).
+export const viewport: Viewport = { width: "device-width", initialScale: 1, viewportFit: "cover" };
+
 export async function generateMetadata(): Promise<Metadata> {
   const t = await getTranslations("shell");
-  return { title: t("productName") };
+  return { title: t("productName"), appleWebApp: { capable: true, title: t("productName"), statusBarStyle: "default" } };
 }
 
 async function setView(formData: FormData): Promise<void> {
@@ -50,7 +54,7 @@ export default async function RootLayout({ children }: Readonly<{ children: Reac
           >
             {t("skipToContent")}
           </a>
-          <header className="sticky top-0 z-40 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-border bg-surface px-4 py-2">
+          <header className="app-header sticky top-0 z-40 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-border bg-surface px-4 py-2">
             <div className="flex min-w-0 items-center gap-3">
               <span
                 aria-hidden="true"

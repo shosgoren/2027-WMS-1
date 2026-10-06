@@ -16,6 +16,19 @@
     "help": {
       "full": "Call for help",
       "short": "Help"
+    },
+    "menu": {
+      "open": "Open menu",
+      "title": "Menu",
+      "close": "Close"
+    },
+    "nav": {
+      "label": "Main navigation",
+      "home": "Home",
+      "scan": "Scan",
+      "tasks": "My tasks",
+      "menu": "Menu",
+      "soon": "Soon"
     }
   },
   "auth": {
