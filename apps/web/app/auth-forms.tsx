@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useTranslations } from "next-intl";
 import { useState } from "react";
 import type { FormEvent, ReactNode } from "react";
-import { Banner, Button, TextField } from "@wms/ui";
+import { Banner, Button, CircleAlert, TextField } from "@wms/ui";
 import { acceptInvitationAction } from "./invite/[token]/actions.ts";
 import { authPost } from "../lib/auth-client.ts";
 import type { AuthCallError } from "../lib/auth-client.ts";
@@ -528,8 +528,11 @@ export function SignOutButton() {
         {t("signOut.label")}
       </Button>
       {failed ? (
-        <span id="signout-error" role="alert" className="text-sm font-medium text-undo-ink">
-          {t("signOut.failed")} {t("signOut.failedAction")}
+        <span id="signout-error" role="alert" className="inline-flex items-start gap-1 text-sm font-medium text-danger-ink">
+          <CircleAlert className="size-4 shrink-0 text-danger" strokeWidth={2} aria-hidden="true" />
+          <span>
+            {t("signOut.failed")} {t("signOut.failedAction")}
+          </span>
         </span>
       ) : null}
     </>
