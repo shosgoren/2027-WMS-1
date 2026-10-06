@@ -471,11 +471,32 @@ export interface SecurityEventInput {
 
 const EVENT_TYPE = /^[a-z][a-z0-9_.]{0,63}$/;
 
+export interface RecordSecurityEventOptions {
+  /**
+   * `false`: `RETURNING id` kullanılmaz (T-112c). `wms_auth`'ın `security_events` üzerinde SELECT yetkisi yoktur
+   * (0002; append-only okuma sızıntısı yok) → `INSERT ... RETURNING` 42501 verir. İstemci UUID'si seçilmedi: `id`
+   * sütununda INSERT yetkisi bilinçli verilmemiştir (0002), olay kimliği sunucu varsayılanıdır.
+   */
+  readonly returning?: boolean;
+}
+
 /**
  * Platform olayını (tenant bağlamı olmadan) KENDİ kısa transaction'ında `security_events`'e yazar; `detail` aynı
- * maskelemeye ve boyut sınırına tabidir. Dönen değer olay kimliğidir.
+ * maskelemeye ve boyut sınırına tabidir. Varsayılan: olay kimliği döner (SELECT yetkisi gerekir: `wms_app`);
+ * `{ returning: false }`: kimlik dönmez (`wms_auth`). Kimlik sınıfı olaylar (`login_*`, `reauth.*`, …) DB'de
+ * yalnızca `wms_auth` ile yazılabilir (0005 tetikleyicisi, 42501).
  */
-export async function recordSecurityEvent(client: DbClient, event: SecurityEventInput): Promise<string> {
+export async function recordSecurityEvent(client: DbClient, event: SecurityEventInput): Promise<string>;
+export async function recordSecurityEvent(
+  client: DbClient,
+  event: SecurityEventInput,
+  options: RecordSecurityEventOptions & { readonly returning: false },
+): Promise<void>;
+export async function recordSecurityEvent(
+  client: DbClient,
+  event: SecurityEventInput,
+  options?: RecordSecurityEventOptions,
+): Promise<string | void> {
   if (typeof event !== "object" || event === null) throw new AuditError("security event is required");
   if (typeof event.eventType !== "string" || !EVENT_TYPE.test(event.eventType)) {
     throw new AuditError("eventType is not a valid event type");
@@ -487,6 +508,15 @@ export async function recordSecurityEvent(client: DbClient, event: SecurityEvent
   const requestId = optText(event.requestId, "requestId", 128);
   const { json } = maskChangeSummary(event.detail ?? {});
   const db = rawDb(client);
+  if (options?.returning === false) {
+    await db.transaction(async (tx) => {
+      await tx.execute(
+        sql`INSERT INTO public.security_events (user_id, event_type, ip, user_agent, request_id, detail)
+            VALUES (${userId}::uuid, ${event.eventType}, ${ip}, ${userAgent}, ${requestId}, ${json}::jsonb)`,
+      );
+    });
+    return;
+  }
   return db.transaction(async (tx) => {
     const rows = await tx.execute<{ id: string }>(
       sql`INSERT INTO public.security_events (user_id, event_type, ip, user_agent, request_id, detail)

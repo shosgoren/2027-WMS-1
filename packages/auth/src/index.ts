@@ -2,13 +2,13 @@
 //
 // - Yalnızca platform kimlik tablolarına (`users`, `sessions`, `accounts`, `verifications`, `two_factors`,
 //   `auth_rate_limits`) ve `wms_auth` rolüyle yazar (ADR-014 §10): `client` = `AUTH_DATABASE_URL`.
-//   `security_events` yazımı ayrı `eventClient` (DATABASE_URL, wms_app) ile `recordSecurityEvent` üzerinden
-//   yapılır (wms_auth `security_events` üzerinde SELECT taşımaz, `INSERT ... RETURNING` çalışmaz; bulgu).
+//   `security_events` kimlik olayları (login_*, logout, password_*, two_factor_*, reauth.*) da `wms_auth` ile yazılır
+//   (T-112c, migration 0005: `wms_app` bu sınıfı yazamaz); `wms_auth`'ın SELECT yetkisi yoktur → `returning: false`.
 // - Better Auth nesnesi paket dışına çıkmaz; yalnızca `handler` (route) ve dar yüzey: `getPrincipal`,
-//   `requireRecentAuth`, `revokeUserSessions`.
+//   `requireRecentAuth`, `reauthenticate`, `revokeUserSessions`.
 // - Ortam doğrulaması tembeldir (ilk kullanımda): `next build` bu değişkenler olmadan geçer (G-07: eksikse
 //   çalışma anında açık hata, değer asla yazılmaz — G-09).
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { APIError, createAuthMiddleware, getIP, getSessionFromCtx, isAPIError } from "better-auth/api";
 import { betterAuth } from "better-auth";
@@ -81,7 +81,7 @@ export type EnvSource = Readonly<Record<string, string | undefined>>;
 export interface AuthEnv {
   readonly secret: string;
   readonly baseUrl: string;
-  /** `wms_app` (DATABASE_URL): yalnızca `recordSecurityEvent` için. */
+  /** `wms_app` (DATABASE_URL): yalnızca yapılandırma doğrulaması (rol ayrımı); bu pakette bağlantı açılmaz (T-112c). */
   readonly databaseUrl: string;
   /** `wms_auth` (AUTH_DATABASE_URL): Better Auth tabloları. */
   readonly authDatabaseUrl: string;
@@ -225,6 +225,16 @@ export const RATE_LIMIT_RULES = Object.freeze({
 /** 2FA: A-41 — 5 hatalı kod → 15 dk kilit (Better Auth `accountLockout`, kullanıcı başına). */
 export const TWO_FACTOR_LOCKOUT = Object.freeze({ enabled: true, maxFailedAttempts: 5, durationSeconds: 15 * 60 });
 
+let dummyHash: Promise<string> | undefined;
+/** Sabit maliyetli sahte doğrulama için süreç başına bir kez üretilen geçerli Argon2id özeti (rastgele parola; saklanmaz). */
+function dummyPasswordHash(): Promise<string> {
+  dummyHash ??= hashPassword(randomBytes(24).toString("hex"));
+  return dummyHash;
+}
+
+/** Yeniden doğrulama olayları (T-112c); yazımı DB'de yalnızca wms_auth'a açık sınıf (`reauth.`). */
+const REAUTH_EVENT = Object.freeze({ succeeded: "reauth.succeeded", failed: "reauth.failed" });
+
 const SECURITY_EVENT = Object.freeze({
   loginSucceeded: "login_succeeded",
   loginFailed: "login_failed",
@@ -263,6 +273,14 @@ export interface AuthService {
   getPrincipal(headers: Headers): Promise<Principal | null>;
   /** Kimlik doğrulaması `maxAgeSec` içinde değilse `AuthError` (UNAUTHENTICATED). Zaman DB `now()` ile. */
   requireRecentAuth(principal: Principal, maxAgeSec: number): Promise<void>;
+  /**
+   * Yeniden doğrulama (T-112c): oturumun sahibi parolayı yeniden kanıtlar. Başarıda `reauth.succeeded` olayı `wms_auth`
+   * ile yazılır (DB tetikleyicisi yalnızca wms_auth'a izin verir); başarısızlıkta `reauth.failed` yazılır ve e-posta
+   * başına başarısız giriş sayacı artar (A-41; kilitliyse parola denenmez). Her başarısızlık (yanlış parola, kilit, geçersiz
+   * oturum, parolasız hesap) tekdüze `AuthError("REAUTH_REQUIRED")` olur (parola oracle'ı yok). HTTP ucu YOK
+   * (`/verify-password` kapalı); çağıran sunucu kodudur. `requireRecentAuth` bu olaya BAĞLI DEĞİLDİR (sonraki kart).
+   */
+  reauthenticate(principal: Principal, password: string, headers?: Headers): Promise<void>;
   /** Kullanıcının tüm oturumlarını siler. */
   revokeUserSessions(userId: string): Promise<void>;
   /** Davetle hesap açar (T-117 çağırır). E-posta/doğrulama durumu parametre değildir; bkz. policy.ts. */
@@ -272,8 +290,6 @@ export interface AuthService {
 export interface CreateAuthParams {
   /** `wms_auth` bağlantısı (AUTH_DATABASE_URL). */
   readonly client: DbClient;
-  /** `security_events` için bağlantı (DATABASE_URL). */
-  readonly eventClient: DbClient;
   readonly env: AuthEnv;
 }
 
@@ -592,7 +608,7 @@ export function inspectAuthOptions(service: AuthService): AuthOptionsSnapshot {
 
 /** Better Auth yapılandırmasını kurar ve dar yüzeyi döndürür. */
 export function createAuth(params: CreateAuthParams): AuthService {
-  const { client, eventClient, env } = params;
+  const { client, env } = params;
   const baseOrigin = new URL(env.baseUrl).origin;
   const authDb = maskedDb(rawDb(client));
   const rateStore = createRateLimitStorage(client);
@@ -606,18 +622,43 @@ export function createAuth(params: CreateAuthParams): AuthService {
     failOpen = false,
     suppressNetworkMeta = false,
   ): Promise<void> {
+    await write(
+      type,
+      userId,
+      () => {
+        const headers = headersOf(source);
+        return { ip: headers === undefined ? null : getIP(headers, options), ua: headers?.get("user-agent") ?? null };
+      },
+      detail,
+      failOpen,
+      suppressNetworkMeta,
+    );
+  }
+
+  async function write(
+    type: string,
+    userId: string | null,
+    meta: () => { ip: string | null; ua: string | null },
+    detail: Record<string, unknown>,
+    failOpen: boolean,
+    suppressNetworkMeta: boolean,
+  ): Promise<void> {
     try {
-      const headers = headersOf(source);
-      const ip = headers === undefined ? null : getIP(headers, options);
-      const ua = headers?.get("user-agent") ?? null;
-      await recordSecurityEvent(eventClient, {
-        eventType: type,
-        userId,
-        ip,
-        userAgent: ua === null || ua === "" ? null : ua.slice(0, EVENT_UA_MAX),
-        detail,
-        suppressNetworkMeta,
-      });
+      const { ip, ua } = meta();
+      // `wms_auth` bağlantısı (maskeli değil: `recordSecurityEvent` kendi sarmalıyla `rawDb` kullanır; hata `toStoreError`'dan
+      // geçer). RETURNING yok: wms_auth'ın SELECT yetkisi yoktur.
+      await recordSecurityEvent(
+        client,
+        {
+          eventType: type,
+          userId,
+          ip,
+          userAgent: ua === null || ua === "" ? null : ua.slice(0, EVENT_UA_MAX),
+          detail,
+          suppressNetworkMeta,
+        },
+        { returning: false },
+      );
     } catch (error) {
       // Hata maskeli günlüğe (parametre/e-posta/IP yok). Varsayılan fail-closed: istek 500 olur.
       // Kaynakta kes: yeniden fırlatılan hata parametresiz (cause/params yok).
@@ -983,10 +1024,9 @@ export function createAuth(params: CreateAuthParams): AuthService {
       };
     },
 
-    // M5 / T-112c kapısı: bu kontrol `security_events` olaylarına (`reauth.succeeded`) DAYANMAZ; yalnızca
-    // oturum `createdAt` ve DB `now()` kullanır. `reauth.*` yazımının `wms_auth`'a kısıtlanması migration
-    // ister (tetikleyici) ve bu kartta yoktur → olay tabanlı yeniden doğrulama T-112c'ye kadar KAPALI;
-    // `wms_app` ile `reauth.*` sahteciliği DB'de engellenmemiştir (T-112c).
+    // M5 kapısı: bu kontrol `security_events` olaylarına (`reauth.succeeded`) DAYANMAZ; yalnızca oturum `createdAt`
+    // ve DB `now()` kullanır. `reauth.*` yazımı artık DB'de yalnızca `wms_auth`'a açıktır (0005, T-112c) ve
+    // `reauthenticate` olayı yazar; `requireRecentAuth`'u bu olaya bağlamak AYRI bir sonraki değişikliktir.
     async requireRecentAuth(principal, maxAgeSec) {
       if (!Number.isFinite(maxAgeSec) || maxAgeSec < 0) {
         throw new AuthConfigError("requireRecentAuth: maxAgeSec must be a non-negative number");
@@ -999,6 +1039,46 @@ export function createAuth(params: CreateAuthParams): AuthService {
       );
       const age = Number(rows[0]?.age);
       if (!Number.isFinite(age) || age > maxAgeSec) throw new AuthError("REAUTH_REQUIRED");
+    },
+
+    async reauthenticate(principal, password, headers) {
+      const fail = (): never => {
+        throw new AuthError("REAUTH_REQUIRED");
+      };
+      if (typeof password !== "string" || password === "" || password.length > PASSWORD_MAX_LENGTH) return fail();
+      // Oturum hâlâ geçerli ve principal'e ait olmalı; hesap parolası aynı sorguda okunur.
+      const rows = await masked(() =>
+        authDb.execute<{ email: string; password: string | null }>(
+          sql`SELECT u.email, a.password
+                FROM public.sessions s
+                JOIN public.users u ON u.id = s.user_id
+                LEFT JOIN public.accounts a ON a.user_id = u.id AND a.provider_id = 'credential'
+               WHERE s.id = ${principal.sessionId}::uuid AND s.user_id = ${principal.userId}::uuid AND s.expires_at > now()
+               LIMIT 1`,
+        ),
+      );
+      const row = rows[0];
+      if (row === undefined) return fail();
+      // IP yalnızca `Fly-Client-IP` (A-41); demo kullanıcıda ip/user_agent yazılmaz (ADR-016 §10).
+      const ip = resolveClientIp(headers);
+      const uaRaw = headers?.get("user-agent") ?? null;
+      const ua = uaRaw === null || uaRaw === "" ? null : uaRaw;
+      const demo = isDemoEmail(row.email, env.demoEmailDomain);
+      const failKey = emailRateKey("signin-fail", row.email);
+      // A-41 atomik rezervasyon (giriş ucuyla aynı anahtar/tasarım): deneme Argon2'den ÖNCE rezerve edilir (consume;
+      // eşik aşıldıysa kilitli → parola denenmez); başarıda rezerv geri alınır (refund), başarısızlıkta kalır.
+      const verdict = await masked(() => rateStore.consume(failKey, EMAIL_RATE_RULES.failedSignIn));
+      const locked = !verdict.allowed;
+      // Zamanlama eşitliği: kilitli ya da parolasız hesapta da aynı maliyetli Argon2 doğrulaması çalışır (sonuç yok sayılır).
+      const hash = locked || row.password === null ? await dummyPasswordHash() : row.password;
+      const verified = await verifyPassword({ hash, password });
+      const ok = !locked && row.password !== null && verified;
+      if (!ok) {
+        await write(REAUTH_EVENT.failed, principal.userId, () => ({ ip, ua }), { locked }, true, demo);
+        return fail();
+      }
+      await masked(() => rateStore.refund(failKey));
+      await write(REAUTH_EVENT.succeeded, principal.userId, () => ({ ip, ua }), { sref: sha256Hex(principal.sessionId) }, false, demo);
     },
 
     async createInvitedAccount(input) {
@@ -1058,7 +1138,6 @@ export function getAuthService(env: EnvSource = process.env): AuthService {
     const parsed = readAuthEnv(env);
     instance = createAuth({
       client: createDbClient({ url: parsed.authDatabaseUrl, ...DB_CLIENT_SETTINGS }),
-      eventClient: createDbClient({ url: parsed.databaseUrl, ...DB_CLIENT_SETTINGS }),
       env: parsed,
     });
   }

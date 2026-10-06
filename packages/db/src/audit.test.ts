@@ -483,6 +483,16 @@ describe("recordSecurityEvent", () => {
     expect(q.params).toContain(JSON.stringify({ code: REDACTED, method: "password" }));
   });
 
+  it("returning:false → RETURNING kullanılmaz ve değer dönmez (wms_auth: SELECT yetkisi yok; T-112c)", async () => {
+    const client = newClient();
+    const { tx, queries } = fakeTx();
+    vi.spyOn(rawDb(client), "transaction").mockImplementation(async (cb) => cb(tx as Parameters<typeof cb>[0]));
+    const out = await recordSecurityEvent(client, { eventType: "reauth.succeeded", userId: USER }, { returning: false });
+    expect(out).toBeUndefined();
+    expect((queries[0] as { sql: string }).sql).not.toMatch(/RETURNING/i);
+    expect((queries[0] as { sql: string }).sql).toContain("public.security_events");
+  });
+
   it("bayrak yokken ip/user_agent yazılır", async () => {
     const client = newClient();
     const { tx, queries } = fakeTx();

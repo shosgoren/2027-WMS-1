@@ -338,4 +338,17 @@ describe(`audit schema (T-107, target=${env.target})`, () => {
     );
     expect(chk[0]?.def).toContain("[0-9a-f]{64}");
   });
+
+  it("security_events: kimlik olayi yazar tetikleyicisi BEFORE INSERT ROW, ENABLE ALWAYS, SECURITY INVOKER (0005, T-112c)", async () => {
+    const trg = await query<{ tgenabled: string; tgtype: number; prosecdef: boolean; proconfig: string[] | null }>(
+      `SELECT t.tgenabled, t.tgtype, p.prosecdef, p.proconfig
+         FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
+        WHERE t.tgrelid = 'public.security_events'::regclass AND t.tgname = 'security_events_identity_writers'`,
+    );
+    expect(trg).toHaveLength(1);
+    expect(trg[0]?.tgenabled).toBe("A");
+    expect(trg[0]?.tgtype).toBe(1 | 2 | 4); // tgtype bitleri: ROW=1, BEFORE=2, INSERT=4 (başka olay yok)
+    expect(trg[0]?.prosecdef).toBe(false);
+    expect(trg[0]?.proconfig).toEqual(["search_path=pg_catalog, pg_temp"]);
+  });
 });

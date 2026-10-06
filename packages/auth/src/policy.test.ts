@@ -118,7 +118,7 @@ describe("etkin Better Auth yapılandırması (auth.options; ADR-014 4. tur, MAJ
   const make = (extra: Record<string, string> = {}): AuthService => {
     const e = readAuthEnv({ ...BASE_ENV, ...extra });
     const mk = (url: string) => createDbClient({ url, ...DB_CLIENT_SETTINGS });
-    return createAuth({ client: mk(e.authDatabaseUrl), eventClient: mk(e.databaseUrl), env: e });
+    return createAuth({ client: mk(e.authDatabaseUrl), env: e });
   };
   const build = (extra: Record<string, string> = {}): AuthOptionsSnapshot => inspectAuthOptions(make(extra));
 
