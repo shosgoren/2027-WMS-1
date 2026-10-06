@@ -135,10 +135,13 @@ function defaultTarget(root) {
  */
 function revParse(root, rev) {
   try {
-    return git(root, ["rev-parse", "--verify", "--quiet", `${rev}^{commit}`]).trim();
+    return git(root, ["rev-parse", "--verify", "--quiet", rev]).trim();
   } catch (e) {
-    if (!(e instanceof GitError)) throw e;
-    return null;
+    // `^{commit}` soyulması yok: nesnesi silinmiş ebeveyn de kimliğiyle döner (sessiz `null` olmaz).
+    // Yalnızca "ref gerçekten yok" (`--verify --quiet`: çıkış 1, çıktı ve stderr boş) = null.
+    // Diğer her git hatası (bozuk depo, izin, sinyal → çıkış ≠ 1) fail-closed: GitError yukarı çıkar.
+    if (e instanceof GitError && e.status === 1 && e.stdout.trim() === "" && e.stderr.trim() === "") return null;
+    throw e;
   }
 }
 

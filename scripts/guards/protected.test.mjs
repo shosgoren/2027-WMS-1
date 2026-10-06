@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { main } from "./cli.mjs";
+import { verifyPushMerge } from "./protected.mjs";
 import { approvalLine, REASONS, securityLine } from "./lib/approval.mjs";
 import { gitEnv } from "./lib/git.mjs";
 import { API_VERSION, contextFromEnv, createGitHubClient, GitHubError, toPullInfo } from "./lib/github.mjs";
@@ -1052,6 +1053,38 @@ describe("check:protected", () => {
     expect(res.code).toBe(1);
     expect(res.text).toContain(`FAIL ${REASONS.UNVERIFIABLE} docs/INVARIANTS.md`);
     expect(res.text).toContain("ikinci ebeveyni");
+  });
+
+  it("T-008m: ikinci ebeveyn yok (squash) → revParse null; ağaç önizlemeye eşit → null (OK)", () => {
+    const r = fixture();
+    r.write("docs/INVARIANTS.md", "# I2\n").commit("x");
+    const prHead = head(r);
+    r.checkout("main");
+    r.git("merge", "--quiet", "--squash", "feat/T-100-x");
+    r.commit("Squash PR #7");
+    expect(verifyPushMerge(r.dir, prHead)).toBeNull();
+  });
+
+  it("T-008m: ikinci ebeveyn nesnesi silinmiş → sessiz atlama yok; PR head'ine eşit değilse FAIL", () => {
+    const r = fixture();
+    r.write("docs/INVARIANTS.md", "# I2\n").commit("x");
+    r.checkout("main").merge("feat/T-100-x", "Merge pull request #7");
+    const second = r.git("rev-parse", "HEAD^2").trim();
+    rmSync(path.join(r.dir, ".git", "objects", second.slice(0, 2), second.slice(2)), { force: true });
+    const res = verifyPushMerge(r.dir, "0".repeat(40));
+    expect(res).not.toBeNull();
+    expect(res).toContain("ikinci ebeveyni");
+  });
+
+  it("T-008m: gerçek git hatası (bozuk HEAD) → 'ref yok' sayılmaz, git ile doğrulanamadı (GIT_ERROR yolu)", () => {
+    const r = fixture();
+    r.write("docs/INVARIANTS.md", "# I2\n").commit("x");
+    const prHead = head(r);
+    r.checkout("main").merge("feat/T-100-x", "Merge pull request #7");
+    writeFileSync(path.join(r.dir, ".git", "HEAD"), "bozuk\n");
+    const res = verifyPushMerge(r.dir, prHead);
+    expect(res).not.toBeNull();
+    expect(res).toContain("git ile doğrulanamadı");
   });
 
   it("MINOR 6 saldırısı: birleştirme commit'ine PR dışı içerik eklenmiş (evil merge) → APPROVAL_UNVERIFIABLE", async () => {
