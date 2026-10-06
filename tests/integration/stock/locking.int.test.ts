@@ -183,12 +183,96 @@ describe("boyut anahtarı sırası = PostgreSQL ORDER BY … NULLS FIRST (uygula
     );
     expect(rows.map((r) => r.id)).toEqual(appOrder);
   });
+
+  // T-238 (MINOR-6): lot/seri NULL ile dolu değer AYNI (item, location) önekinde yan yana. Gerçek tabloya eklenemez (takip modu tetikleyicisi lot/seri
+  // doluluğunu üründe sabitler), bu yüzden uygulamanın NORMALİZE ETTİĞİ sıra, boyut eklemesi sorgusuna giden JSON'dan yakalanır (sorgu çalıştırılmaz,
+  // transaction geri alınır) ve PostgreSQL'e AYNI satırlarda `ORDER BY … NULLS FIRST` yaptırılarak karşılaştırılır.
+  it("lot/seri NULL + dolu karışımı (aynı item/location öneki): uygulama sırası = DB ORDER BY NULLS FIRST", async () => {
+    // Lokasyonlar gerçek (sayım kilidi adımı onları görmeli); ürün/lot/seri/sahip rastgele (boyut ekleme sorgusu çalıştırılmaz).
+    const [itemA, itemB, lot1, lot2, ser1, ser2, owner] = Array.from({ length: 7 }, () => randomUUID());
+    const [locA, locB] = [A.rootLocationId, A.childLocationId];
+    const keys: StockDimensionKey[] = [];
+    for (const itemId of [itemA as string, itemB as string]) {
+      for (const locationId of [locA as string, locB as string]) {
+        for (const lotId of [null, lot1 as string, lot2 as string]) {
+          for (const serialId of [null, ser1 as string, ser2 as string]) {
+            for (const stockStatus of ["AVAILABLE", "BLOCKED"] as const) {
+              for (const inventoryOwnerId of [null, owner as string]) {
+                for (const handlingUnitId of [null, A.handlingUnitId]) keys.push(dim(itemId, locationId, { lotId, serialId, stockStatus, inventoryOwnerId, handlingUnitId }));
+              }
+            }
+          }
+        }
+      }
+    }
+    expect(keys).toHaveLength(2 * 2 * 3 * 3 * 2 * 2 * 2);
+    const shuffled = [...keys].sort((a, b) => (JSON.stringify(a) < JSON.stringify(b) ? 1 : -1));
+    // `tx.execute` çağrılarını izleyen vekil: boyut ekleme sorgusunun JSON parametresini yakalar, sorguyu çalıştırmadan keser.
+    const textOf = (q: unknown, out: { text: string; json: string | undefined }): void => {
+      const chunks = (q as { queryChunks?: unknown[] } | null)?.queryChunks;
+      if (!Array.isArray(chunks)) return;
+      for (const c of chunks) {
+        const o = c as { value?: unknown; queryChunks?: unknown[] } | string | null;
+        if (typeof o === "string") {
+          if (o.startsWith("[")) out.json = o;
+        } else if (o !== null && Array.isArray(o.queryChunks)) textOf(o, out);
+        else if (o !== null && Array.isArray(o.value)) out.text += (o.value as string[]).join("");
+        else if (o !== null && typeof o.value === "string" && o.value.startsWith("[")) out.json = o.value;
+      }
+    };
+    let captured: string | undefined;
+    class Captured extends Error {}
+    await withTenant(ctxA, async (tx) => {
+      const spy = new Proxy(tx, {
+        get(target, prop) {
+          const v = Reflect.get(target, prop, target) as unknown;
+          if (prop !== "execute") return v;
+          return (q: unknown, ...rest: unknown[]) => {
+            if (typeof q !== "string") {
+              const seen = { text: "", json: undefined as string | undefined };
+              textOf(q, seen);
+              if (seen.text.includes("INSERT INTO public.stock_dimensions") && seen.json !== undefined) {
+                captured = seen.json;
+                throw new Captured("captured");
+              }
+            }
+            return (v as (...a: unknown[]) => unknown).call(target, q, ...rest);
+          };
+        },
+      });
+      await acquireStockLocks(spy, A.tenantId, empty({ dimensions: shuffled }));
+    }).catch((e: unknown) => {
+      if (captured === undefined) throw e;
+    });
+    expect(captured).toBeDefined();
+    const sent = JSON.parse(captured as string) as { ord: number; item_id: string; lot_id: string | null; serial_id: string | null; location_id: string }[];
+    expect(sent).toHaveLength(keys.length);
+    expect(sent.map((r) => r.ord)).toEqual(sent.map((_r, i) => i));
+    // Karışım gerçekten var: aynı (item, location) önekinde hem NULL hem dolu lot/seri.
+    const prefix = sent.filter((r) => r.item_id === itemA && r.location_id === locA);
+    expect(prefix.some((r) => r.lot_id === null)).toBe(true);
+    expect(prefix.some((r) => r.lot_id !== null)).toBe(true);
+    expect(prefix.some((r) => r.serial_id === null)).toBe(true);
+    expect(prefix.some((r) => r.serial_id !== null)).toBe(true);
+    const rows = await withTenant(ctxA, (tx) =>
+      // Yalnızca bu testin ürettiği rastgele UUID/sabit sözcüklerden oluşan JSON; değişmez (kullanıcı girdisi yok).
+      tx.execute<{ ord: number }>(
+        `SELECT w.ord FROM jsonb_to_recordset('${captured as string}'::jsonb) AS w(ord int, item_id uuid, location_id uuid, lot_id uuid, serial_id uuid, stock_status text, inventory_owner_id uuid, handling_unit_id uuid)
+          ORDER BY w.item_id, w.location_id, w.lot_id NULLS FIRST, w.serial_id NULLS FIRST, w.stock_status, w.inventory_owner_id NULLS FIRST, w.handling_unit_id NULLS FIRST`,
+      ),
+    );
+    expect(rows.map((r) => Number(r.ord))).toEqual(sent.map((r) => r.ord));
+  });
 });
 
-describe("eşzamanlı ters sıralı planlar: deadlock yok", () => {
-  // Ayırt edici tasarım (inceleme MAJOR-3): belge YOK; her tur TAZE lokasyonda 8 YENİ boyut (henüz var olmayan satırlar: sıralı olmayan
-  // ekleme ters kilit sırası = 40P01) + 4 rezervasyon, iki yönde. Planı normalize eden sıralama kaldırılırsa test 40P01 ile kırmızıya döner
-  // (mutasyon kanıtı rapordadır). Kontrol testi AYNI satır kümesini elle ters sırayla kilitler ve 40P01 üretir.
+describe("eşzamanlı ters sıralı planlar: deadlock yok (bariyerli, olasılıksız)", () => {
+  // T-238 (T-210 son inceleme MINOR-2/3): zamanlamaya (pg_sleep) DAYANMAZ.
+  //  * Her taraf kendi transaction'ında önce `ALIVE` kilidini (advisory 238,i) alır; JS kapısı iki tarafın da yaşadığını garantiler.
+  //  * `zz_t238_dimension_barrier` (yalnızca bu testin lokasyonunda etkin; `t238.loc` ayarı yoksa hiçbir şey yapmaz) her tarafın 2. boyut
+  //    satırından ÖNCE bariyer kurar: karşı taraf da bariyere gelene, ya da karşı tarafı BENİM kilidim bekletene, ya da karşı taraf bitene dek bekler.
+  //    Böylece sıralama yokken iki taraf da ilk satırını eklemiş olarak karşı satıra gider => 40P01 HER koşuda; sıralıyken ikinci taraf
+  //    ilk satırda birinciyi bekler (bariyer "beni bekliyor" koşuluyla açılır) => deadlock imkânsızdır.
+  // Mutasyon kanıtı: `normalizePlan` içindeki `.sort(compareDimensionKeys)` kaldırılınca bu test her koşuda kırmızıdır (rapor: 10/10).
   const extraReservations: string[] = [];
   const roundKeys = (locationId: string): StockDimensionKey[] =>
     (["AVAILABLE", "QUARANTINE", "DAMAGED", "BLOCKED"] as const).flatMap((stockStatus) =>
@@ -206,8 +290,30 @@ describe("eşzamanlı ters sıralı planlar: deadlock yok", () => {
     });
     return locationId;
   };
-  const hold = (tx: Parameters<Parameters<typeof withTenant>[1]>[0]) => tx.execute("SELECT pg_sleep(0.05)");
-  let lastLocation = "";
+  /** İki tarafın birlikte geçtiği kapı; bir taraf düşerse diğeri takılı kalmasın diye zaman aşımı vardır. */
+  const makeGate = (parties: number) => {
+    let arrived = 0;
+    const waiters: (() => void)[] = [];
+    return {
+      arrive: (): Promise<void> =>
+        new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error("t238 gate timeout")), 30_000);
+          waiters.push(() => {
+            clearTimeout(timer);
+            resolve();
+          });
+          if (++arrived === parties) for (const w of waiters) w();
+        }),
+    };
+  };
+  type Tx = Parameters<Parameters<typeof withTenant>[1]>[0];
+  /** Taraf `me` (1|2): kimlik/lokasyon ayarları + ALIVE kilidi, kapı, sonra iş. */
+  const party = <T,>(me: 1 | 2, locationId: string, gate: ReturnType<typeof makeGate>, work: (tx: Tx) => Promise<T>): Promise<T> =>
+    withTenant(ctxA, async (tx) => {
+      await tx.execute(`SELECT set_config('t238.me', '${me}', true), set_config('t238.loc', '${locationId}', true), pg_advisory_xact_lock(238, ${me})`);
+      await gate.arrive();
+      return work(tx);
+    });
 
   beforeAll(async () => {
     // Mevcut boyuta 3 ek ACTIVE rezervasyon (rezerve toplamı bakiyede aynı transaction'da güncellenir; mutlak denetim ertelenmiş).
@@ -224,33 +330,88 @@ describe("eşzamanlı ters sıralı planlar: deadlock yok", () => {
       }
       await q("UPDATE public.stock_balances SET reserved_quantity = reserved_quantity + 3 WHERE tenant_id = $1 AND stock_dimension_id = $2", [A.tenantId, A.dimensionId]);
     });
+    await admin.query(`
+      CREATE OR REPLACE FUNCTION public.t238_dimension_barrier() RETURNS trigger LANGUAGE plpgsql AS $fn$
+      DECLARE
+        loc text := nullif(current_setting('t238.loc', true), '');
+        me int; other int; n int;
+        t0 timestamptz := clock_timestamp();
+      BEGIN
+        IF loc IS NULL OR NEW.location_id::text <> loc THEN RETURN NEW; END IF;
+        me := current_setting('t238.me')::int;
+        other := 3 - me;
+        n := coalesce(nullif(current_setting('t238.n', true), ''), '0')::int + 1;
+        PERFORM set_config('t238.n', n::text, true);
+        IF n <> 2 THEN RETURN NEW; END IF;
+        PERFORM pg_advisory_xact_lock(238, 10 + me);
+        LOOP
+          EXIT WHEN EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND classid = 238::oid AND objid = (10 + other)::oid AND granted)
+            OR NOT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND classid = 238::oid AND objid = other::oid AND granted)
+            OR EXISTS (SELECT 1 FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+                        WHERE l.locktype = 'advisory' AND l.classid = 238::oid AND l.objid = other::oid AND l.granted
+                          AND pg_backend_pid() = ANY (pg_blocking_pids(a.pid)));
+          IF clock_timestamp() - t0 > interval '30 seconds' THEN RAISE EXCEPTION 't238 barrier timeout'; END IF;
+          PERFORM pg_sleep(0.005);
+        END LOOP;
+        RETURN NEW;
+      END
+      $fn$`);
+    await admin.query("DROP TRIGGER IF EXISTS zz_t238_dimension_barrier ON public.stock_dimensions");
+    await admin.query("CREATE TRIGGER zz_t238_dimension_barrier BEFORE INSERT ON public.stock_dimensions FOR EACH ROW EXECUTE FUNCTION public.t238_dimension_barrier()");
   }, 60_000);
 
-  it("acquireStockLocks: iki yönde ters sıralı boyut ve rezervasyon planları; belge yok; her tur yeni satırlar; deadlock'suz", async () => {
+  afterAll(async () => {
+    await admin.query("DROP TRIGGER IF EXISTS zz_t238_dimension_barrier ON public.stock_dimensions");
+    await admin.query("DROP FUNCTION IF EXISTS public.t238_dimension_barrier()");
+  }, 60_000);
+
+  it("acquireStockLocks: bariyerde buluşan iki işlem, ters sıralı boyut ve rezervasyon planları; her tur taze lokasyon; deadlock'suz", async () => {
     const reservations = [A.reservationId, ...extraReservations];
-    for (let round = 0; round < 6; round++) {
-      lastLocation = await freshLocation();
-      const keys = roundKeys(lastLocation);
+    for (let round = 0; round < 3; round++) {
+      const locationId = await freshLocation();
+      const keys = roundKeys(locationId);
       const forward = empty({ dimensions: keys, reservationIds: reservations });
       const backward = empty({ dimensions: [...keys].reverse(), reservationIds: [...reservations].reverse() });
-      const outcomes = await Promise.all([sqlstateOf(run(forward, hold)), sqlstateOf(run(backward, hold)), sqlstateOf(run(forward, hold)), sqlstateOf(run(backward, hold))]);
-      expect(outcomes).toEqual([undefined, undefined, undefined, undefined]);
+      const gate = makeGate(2);
+      const outcomes = await Promise.all([
+        sqlstateOf(party(1, locationId, gate, (tx) => acquireStockLocks(tx, A.tenantId, forward))),
+        sqlstateOf(party(2, locationId, gate, (tx) => acquireStockLocks(tx, A.tenantId, backward))),
+      ]);
+      expect(outcomes).toEqual([undefined, undefined]);
     }
   }, 120_000);
 
-  it("kontrol: AYNI satır kümesi (son turun 8 bakiyesi) elle ters sırayla kilitlenince 40P01 üretir (eşzamanlılık gerçek)", async () => {
-    const seeded = await run(empty({ dimensions: roundKeys(lastLocation) }));
+  it("kontrol 1 (donanım): AYNI bariyer, ters sırayla elle eklenen iki satırda her koşuda tam bir 40P01 üretir", async () => {
+    const locationId = await freshLocation();
+    const row = (status: string) => `('${A.tenantId}'::uuid, '${A.itemNoneId}'::uuid, '${locationId}'::uuid, NULL, NULL, '${status}', NULL, NULL)`;
+    const insert = (rows: string[]) => (tx: Tx) =>
+      tx.execute(
+        `INSERT INTO public.stock_dimensions (tenant_id, item_id, location_id, lot_id, serial_id, stock_status, inventory_owner_id, handling_unit_id) VALUES ${rows.join(", ")}`,
+      );
+    const a = row("AVAILABLE");
+    const b = row("QUARANTINE");
+    const gate = makeGate(2);
+    const results = await Promise.all([sqlstateOf(party(1, locationId, gate, insert([a, b]))), sqlstateOf(party(2, locationId, gate, insert([b, a])))]);
+    expect(results.filter((r) => r === "40P01")).toHaveLength(1);
+    expect(results.filter((r) => r === undefined)).toHaveLength(1);
+  }, 30_000);
+
+  it("kontrol 2: AYNI satır kümesi (kendi lokasyonu; 8 bakiye) elle ters sırayla kilitlenince JS kapısıyla her koşuda tam bir 40P01 üretir", async () => {
+    const locationId = await freshLocation();
+    const seeded = await run(empty({ dimensions: roundKeys(locationId) }));
     const ids = seeded.dimensions.map((d) => d.id);
     expect(ids).toHaveLength(8);
+    const gate = makeGate(2);
     const lockAll = (order: string[]) =>
       withTenant(ctxA, async (tx) => {
         for (const [n, id] of order.entries()) {
           await tx.execute(`SELECT 1 FROM public.stock_balances WHERE tenant_id = '${A.tenantId}'::uuid AND stock_dimension_id = '${id}'::uuid FOR UPDATE`);
-          if (n === 0) await tx.execute("SELECT pg_sleep(0.3)");
+          if (n === 0) await gate.arrive(); // iki taraf da ilk kilidi aldıktan sonra karşı kilide gider
         }
       });
     const results = await Promise.all([sqlstateOf(lockAll(ids)), sqlstateOf(lockAll([...ids].reverse()))]);
     expect(results.filter((r) => r === "40P01")).toHaveLength(1);
+    expect(results.filter((r) => r === undefined)).toHaveLength(1);
   }, 30_000);
 });
 

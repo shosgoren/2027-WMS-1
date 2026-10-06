@@ -621,6 +621,12 @@ const STOCK_SCHEMA_OBJECTS = new Set(["stockLedger", "stockBalances", "reservati
  * Daraltma (yalnızca kimlik tabloları) ayrı karttadır.
  */
 const STOCK_SCHEMA_NAMESPACE_FILES = ["packages/auth/src/index.ts"];
+/**
+ * Şema nesnesi importunun serbest olduğu dizin (T-238, MINOR-5 daraltması): yalnızca tabloları TANIMLAYAN şema dizini
+ * (`schema/index.ts` `export *`, dosyalar arası içe aktarım). Önceden tüm `packages/db/src/**` serbestti; db paketindeki diğer dosyalar
+ * (locking.ts hariç: STOCK_WRITE_FILES) stok şema nesnesine ihtiyaç duymaz, okuma/yazma ham SQL'dir. Genişletme yalnızca korunan PR'la.
+ */
+const STOCK_SCHEMA_FREE_DIR = "packages/db/src/schema/";
 const STOCK_LOCK_VALUE_EXPORTS = new Set(["acquireStockLocks"]);
 /** Tablo adı (isteğe bağlı `public.` ve çift tırnak). */
 /** @param {string[]} tables */
@@ -636,10 +642,36 @@ const STOCK_WRITE_VERB_RE = /(?<![\w])(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM|MERG
 const STOCK_WRITE_TABLE_ANY_RE = new RegExp(`(?<![\\w])${tableRe(STOCK_WRITE_TABLES)}`, "i");
 const STOCK_WRITE_TABLE_EXACT_RE = new RegExp(`^\\s*${tableRe(STOCK_WRITE_TABLES)}\\s*$`, "i");
 const STOCK_FOR_MODE_RE = /^\s*(?:no\s+key\s+update|update|share|key\s+share)\s*$/i;
+/** T-238: DEĞERİ tam olarak bir stok tablosu adı olan dize (sabit modülü/takma ad/`join`/`sql.raw` yolları bununla kapanır). */
+const STOCK_LOCK_TABLE_EXACT_RE = new RegExp(`^\\s*${tableRe(STOCK_LOCK_TABLES)}\\s*$`, "i");
+/**
+ * T-238: SQL yorumlarını boşluğa çevirir (`UPDATE /**\/ stock_balances`, `FOR -- x\n UPDATE`); PostgreSQL blok yorumları iç içe olabilir (en içten dışa).
+ * Yorum içeren ve içermeyen iki biçim birlikte denenir (`"-- " + x + " UPDATE …"`: x satır sonu taşıyabilir; aşırı soyma açık kapı bırakmasın).
+ * @param {string} t
+ */
+const stripSqlComments = (t) => {
+  let out = t;
+  for (let prev = ""; prev !== out; ) {
+    prev = out;
+    out = out.replace(/\/\*(?:(?!\/\*|\*\/)[\s\S])*\*\//g, " ");
+  }
+  return out.replace(/--[^\n]*/g, " ");
+};
+/** @param {RegExp} re @param {string} t */
+const testSql = (re, t) => re.test(t) || re.test(stripSqlComments(t));
 /** Tabloyu `pgTable("…")` ile tanımlayan şema dosyaları (tanım, yazma değildir). */
 const STOCK_SCHEMA_DEFINITION_FILES = ["packages/db/src/schema/stock.ts", "packages/db/src/schema/warehouse.ts"];
+/**
+ * T-238 tam-ad kuralının izinli dosyaları: şema tanım dosyaları + `catalog.ts` (yalnızca `pgTable("serials")` tanımı için; `serials` kilit tablosudur,
+ * yazma tablosu değildir, bu yüzden `pgTable` kuralı (ii) katalog için gevşemez). Yanlış pozitif tek kaynağı budur (repo geneli lint'te doğrulandı).
+ */
+const STOCK_TABLE_NAME_FILES = [...STOCK_SCHEMA_DEFINITION_FILES];
+const STOCK_TABLE_NAME_SERIALS_FILE = "packages/db/src/schema/catalog.ts";
+const SERIALS_EXACT_RE = new RegExp(`^\\s*${tableRe(["serials"])}\\s*$`, "i");
 const MSG_STOCK_LOCK = "Stok tablolarında FOR UPDATE/FOR SHARE yalnızca packages/db/src/locking.ts içindedir (`acquireStockLocks`; I-15, T-210).";
 const MSG_STOCK_WRITE = "Stok tablolarına INSERT/UPDATE/DELETE yalnızca STOCK_WRITE_FILES dosyalarındadır (G-01, I-04, T-210).";
+const MSG_STOCK_TABLE_NAME =
+  "Değeri tam olarak bir stok tablosu adı olan dize yalnızca STOCK_WRITE_FILES ve şema tanım dosyalarındadır; sabit modülü/takma ad/join/sql.raw ile tablo adı taşıma yasaktır (G-01, T-238).";
 const MSG_STOCK_SCHEMA =
   "Stok tablosu şema nesneleri (stockLedger, stockBalances, reservations, locationCountLocks, stockDimensions) STOCK_WRITE_FILES ve packages/db/src dışında import edilemez; okuma ham SQL SELECT ile yapılır (G-01, T-210).";
 const MSG_STOCK_EXPORT = "locking.ts yalnızca `acquireStockLocks` ve tip dışa aktarır; kilit alt adımları export edilemez (I-15, T-210).";
@@ -663,15 +695,17 @@ const staticText = (n) => {
 };
 /** @type {import("eslint").Rule.RuleModule} */
 const stockSqlGuard = {
-  meta: { type: "problem", schema: [], messages: { lock: MSG_STOCK_LOCK, write: MSG_STOCK_WRITE, schema: MSG_STOCK_SCHEMA, exports: MSG_STOCK_EXPORT } },
+  meta: { type: "problem", schema: [], messages: { lock: MSG_STOCK_LOCK, write: MSG_STOCK_WRITE, schema: MSG_STOCK_SCHEMA, exports: MSG_STOCK_EXPORT, tableName: MSG_STOCK_TABLE_NAME } },
   create(context) {
     const rel = path.posix.normalize(repoRelative(context.filename));
     const isLockFile = rel === STOCK_LOCK_FILE;
     const writeAllowed = STOCK_WRITE_FILES.includes(rel);
-    const schemaAllowed = writeAllowed || rel.startsWith("packages/db/src/");
+    const schemaAllowed = writeAllowed || rel.startsWith(STOCK_SCHEMA_FREE_DIR);
+    const definesTables = STOCK_SCHEMA_DEFINITION_FILES.includes(rel);
+    const tableNameAllowed = writeAllowed || STOCK_TABLE_NAME_FILES.includes(rel);
     /** Aynı düğüm için aynı ileti ikinci kez raporlanmaz (statik ve dinamik tespit çakışabilir). @type {Set<string>} */
     const reported = new Set();
-    /** @param {any} node @param {"lock"|"write"|"schema"|"exports"} messageId */
+    /** @param {any} node @param {"lock"|"write"|"schema"|"exports"|"tableName"} messageId */
     const report = (node, messageId) => {
       const k = `${messageId}@${node.range?.[0]}-${node.range?.[1]}`;
       if (reported.has(k)) return;
@@ -684,12 +718,29 @@ const stockSqlGuard = {
       while (x && (x.type === "TSAsExpression" || x.type === "TSNonNullExpression" || x.type === "TSSatisfiesExpression" || x.type === "TSTypeAssertion")) x = x.expression;
       return x;
     };
+    /** `sql.identifier("…")`/`pgTable("…")` zaten raporlanan ilk argüman düğümleri (tek ihlal = tek rapor). @type {Set<any>} */
+    const coveredArgs = new Set();
     /** (iv) dosya düzeyi: stok tablosu adı bir dizede geçiyor mu; ifadeli şablon/birleştirmede yazma/kilit fiili var mı. */
     const seen = { writeTable: false, lockTable: false };
     /** @type {{ node: any, kind: "write" | "lock" }[]} */
     const dynamicVerbs = [];
     /** @type {Set<string>} stok şemasının ad alanı yerel adları (yalnızca STOCK_SCHEMA_NAMESPACE_FILES) */
     const nsNames = new Set();
+    /**
+     * T-238: ifade, ad alanı nesnesinin kendisini (üye erişimi olmadan) döndürebilir mi? Yalnızca STOCK_SCHEMA_NAMESPACE_FILES'ta anlamlıdır.
+     * `schema`, `schema as X`, `c ? schema : y`, `schema || y`, `(0, schema)`. Üye erişimi (`schema.users`) nesneyi dışarı taşımaz.
+     * @param {any} e @returns {boolean}
+     */
+    const refsNamespace = (e) => {
+      const x = unwrap(e);
+      if (x === null || x === undefined) return false;
+      if (x.type === "Identifier") return nsNames.has(x.name);
+      if (x.type === "ConditionalExpression") return refsNamespace(x.consequent) || refsNamespace(x.alternate);
+      if (x.type === "LogicalExpression") return refsNamespace(x.left) || refsNamespace(x.right);
+      if (x.type === "SequenceExpression") return refsNamespace(x.expressions[x.expressions.length - 1]);
+      if (x.type === "AwaitExpression") return refsNamespace(x.argument);
+      return false;
+    };
     /** @param {any} node */
     const checkText = (node) => {
       const parent = node.parent;
@@ -697,14 +748,30 @@ const stockSqlGuard = {
       if (parent?.type === "ImportDeclaration" || parent?.type === "ExportAllDeclaration" || parent?.type === "ExportNamedDeclaration") return;
       const text = staticText(node);
       if (text === null) return;
-      if (STOCK_WRITE_TABLE_ANY_RE.test(text)) seen.writeTable = true;
-      if (STOCK_LOCK_TABLE_RE.test(text)) seen.lockTable = true;
+      checkString(node, text);
+    };
+    /** @param {any} node @param {string} text */
+    const checkString = (node, text) => {
+      if (testSql(STOCK_WRITE_TABLE_ANY_RE, text)) seen.writeTable = true;
+      if (testSql(STOCK_LOCK_TABLE_RE, text)) seen.lockTable = true;
       if (text.includes("\u0000")) {
-        if (!writeAllowed && STOCK_WRITE_VERB_RE.test(text)) dynamicVerbs.push({ node, kind: "write" });
-        if (!isLockFile && STOCK_LOCK_SQL_RE.test(text)) dynamicVerbs.push({ node, kind: "lock" });
+        if (!writeAllowed && testSql(STOCK_WRITE_VERB_RE, text)) dynamicVerbs.push({ node, kind: "write" });
+        if (!isLockFile && testSql(STOCK_LOCK_SQL_RE, text)) dynamicVerbs.push({ node, kind: "lock" });
       }
-      if (!isLockFile && STOCK_LOCK_SQL_RE.test(text) && STOCK_LOCK_TABLE_RE.test(text)) report(node, "lock");
-      if (!writeAllowed && STOCK_WRITE_SQL_RE.test(text)) report(node, "write");
+      if (!isLockFile && testSql(STOCK_LOCK_SQL_RE, text) && testSql(STOCK_LOCK_TABLE_RE, text)) report(node, "lock");
+      if (!writeAllowed && testSql(STOCK_WRITE_SQL_RE, text)) report(node, "write");
+      // `+` zincirinin tamamı statikse (`"stock_" + "balances"`) tam ad denetimi zincir düzeyinde de yapılır.
+      if ((node.type === "BinaryExpression" || node.type === "TemplateLiteral") && !text.includes("\u0000")) checkExactName(node, text);
+    };
+    /**
+     * T-238: değeri TAM stok tablosu adı olan her dize/şablon parçası ihlaldir (sabit modülü, takma ad, `join`, `sql.raw` yolları kapanır).
+     * Tanım dosyaları ve izinli (yazma) dosyalar hariç.
+     * @param {any} node @param {string} text
+     */
+    const checkExactName = (node, text) => {
+      if (tableNameAllowed || coveredArgs.has(node)) return;
+      if (rel === STOCK_TABLE_NAME_SERIALS_FILE && testSql(SERIALS_EXACT_RE, text)) return;
+      if (testSql(STOCK_LOCK_TABLE_EXACT_RE, text)) report(node, "tableName");
     };
     /** @param {any} src */
     const isSchemaSource = (src) => {
@@ -735,9 +802,20 @@ const stockSqlGuard = {
     };
     /** @type {import("eslint").Rule.RuleListener} */
     const listener = {
-      Literal: checkText,
+      Literal: (/** @type {any} */ n) => {
+        checkText(n);
+        const k = n.parent?.type;
+        if (typeof n.value === "string" && k !== "ImportDeclaration" && k !== "ExportAllDeclaration" && k !== "ExportNamedDeclaration") checkExactName(n, n.value);
+      },
+      TemplateElement: (/** @type {any} */ n) => {
+        if (n.parent?.type === "TemplateLiteral" && n.parent.expressions.length > 0) checkExactName(n, n.value.cooked ?? n.value.raw);
+      },
       TemplateLiteral: checkText,
       BinaryExpression: checkText,
+      ImportSpecifier: (/** @type {any} */ n) => {
+        // T-238: `import { pgTable as tbl }` — takma adla tablo tanımı. Tanım dosyaları/izinli dosyalar hariç.
+        if (!writeAllowed && !definesTables && importedName(n) === "pgTable" && n.local?.name !== "pgTable") report(n, "write");
+      },
       ImportDeclaration: (/** @type {any} */ n) => {
         if (STOCK_SCHEMA_NAMESPACE_FILES.includes(rel) && isSchemaSource(n.source)) {
           for (const sp of n.specifiers) if (sp.type === "ImportNamespaceSpecifier") nsNames.add(sp.local.name);
@@ -779,19 +857,35 @@ const stockSqlGuard = {
           (c.type === "MemberExpression" && c.property.type === "Identifier" && REQUIRE_NAME_JS_RE.test(c.property.name)) ||
           (c.type === "CallExpression" && (c.callee.name === "createRequire" || c.callee.property?.name === "createRequire"));
         if (loader && n.arguments.length > 0) dynamicSchema(n, n.arguments[0]);
-        const prop = c.type === "MemberExpression" && !c.computed && c.property.type === "Identifier" ? c.property.name : null;
+        // T-238: hesaplanmış üye (`qb["for"](…)`, `` qb[`for`](…) ``) statik adıyla aynı sayılır; statik olmayan hesaplanmış üye `dynamicMember`dır.
+        const memberText = c.type === "MemberExpression" && c.computed ? staticText(c.property) : null;
+        const prop =
+          c.type === "MemberExpression"
+            ? !c.computed && c.property.type === "Identifier"
+              ? c.property.name
+              : memberText !== null && !memberText.includes("\u0000")
+                ? memberText.trim()
+                : null
+            : null;
+        const dynamicMember = c.type === "MemberExpression" && c.computed && prop === null;
         const first = n.arguments[0];
         const firstText = first === undefined ? null : staticText(first);
         // (i) sql.identifier("<stok tablosu>")
-        if (!writeAllowed && prop === "identifier" && firstText !== null && STOCK_WRITE_TABLE_EXACT_RE.test(firstText)) report(n, "write");
+        if (!writeAllowed && prop === "identifier" && firstText !== null && STOCK_WRITE_TABLE_EXACT_RE.test(firstText)) {
+          coveredArgs.add(first);
+          report(n, "write");
+        }
         // (ii) pgTable("<stok tablosu>")
         const isPgTable = (c.type === "Identifier" && c.name === "pgTable") || prop === "pgTable";
         if (!writeAllowed && !STOCK_SCHEMA_DEFINITION_FILES.includes(rel) && isPgTable && firstText !== null && STOCK_WRITE_TABLE_EXACT_RE.test(firstText)) {
+          coveredArgs.add(first);
           report(n, "write");
         }
-        // (iii) .for("update" | "share" | "no key update" | "key share") (Drizzle sorgu oluşturucusu kilidi); `Symbol.for` hariç
-        if (!isLockFile && prop === "for" && !(c.object.type === "Identifier" && c.object.name === "Symbol")) {
-          if (first === undefined || firstText === null || STOCK_FOR_MODE_RE.test(firstText)) report(n, "lock");
+        // (iii) .for("update" | "share" | "no key update" | "key share") (Drizzle sorgu oluşturucusu kilidi); `Symbol.for` hariç.
+        // T-238: `qb["for"]("update")`; ayrıca statik olmayan hesaplanmış üyeye (`qb[k]("update")`) kilit kipi verilirse ihlal.
+        if (!isLockFile && !(c.object?.type === "Identifier" && c.object.name === "Symbol")) {
+          if (prop === "for" && (first === undefined || firstText === null || testSql(STOCK_FOR_MODE_RE, firstText))) report(n, "lock");
+          if (dynamicMember && firstText !== null && testSql(STOCK_FOR_MODE_RE, firstText)) report(n, "lock");
         }
       },
       MemberExpression: (/** @type {any} */ n) => {
@@ -801,12 +895,24 @@ const stockSqlGuard = {
         if (name === null || STOCK_SCHEMA_OBJECTS.has(name)) report(n, "schema");
       },
       VariableDeclarator: (/** @type {any} */ n) => {
+        // T-238: `const { pgTable: tbl } = …` — tablo tanımlayıcısına takma ad (yapı bozma).
+        if (!writeAllowed && !definesTables) {
+          // `const t = pgTable` tek başına ihlal DEĞİLDİR (AC-28 örneği `export const t = pgTable` serbesttir); tablo adı yazılırsa tam-ad kuralı yakalar.
+          const destructuresPgTable =
+            n.id.type === "ObjectPattern" && n.id.properties.some((/** @type {any} */ p) => p.type === "Property" && !p.computed && (p.key.name ?? p.key.value) === "pgTable" && p.value?.name !== "pgTable");
+          if (destructuresPgTable) report(n, "write");
+        }
+        // T-238: ad alanı nesnesi başka değişkene atanamaz (`const s = schema; s.stockBalances`). Yapı bozma aşağıda anahtar anahtar denetlenir.
+        if (n.id.type !== "ObjectPattern" && refsNamespace(n.init)) report(n, "schema");
         const init = unwrap(n.init);
         if (init?.type !== "Identifier" || !nsNames.has(init.name) || n.id.type !== "ObjectPattern") return;
         for (const prop of n.id.properties) {
           const key = prop.type === "Property" && !prop.computed ? (prop.key.name ?? String(prop.key.value)) : null;
           if (key === null || STOCK_SCHEMA_OBJECTS.has(key)) report(prop, "schema");
         }
+      },
+      AssignmentExpression: (/** @type {any} */ n) => {
+        if (refsNamespace(n.right)) report(n, "schema");
       },
       "Program:exit": () => {
         for (const { node, kind } of dynamicVerbs) {

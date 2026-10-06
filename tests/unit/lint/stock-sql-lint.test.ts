@@ -115,15 +115,19 @@ describe("(c) şema nesnesi importu", () => {
   it.each(FORBIDDEN.slice(0, 7))("izinli yazma dosyasında %s temiz", async (_n, code) => {
     expect(await hits(code, POSTING)).toEqual([]);
   });
-  it("packages/db/src altında şema importu serbest", async () => {
-    expect(await hits('import { stockBalances } from "./schema/stock.ts";\nexport const t = stockBalances;\n', DB_OTHER)).toEqual([]);
+  it("T-238 (MINOR-5): serbest dizin yalnızca packages/db/src/schema/; db paketindeki diğer dosyalar artık serbest değildir", async () => {
+    const imp = 'import { stockBalances } from "./schema/stock.ts";\nexport const t = stockBalances;\n';
+    expect(await hits(imp, DB_OTHER)).toHaveLength(1);
+    expect(await hits('import { stockBalances } from "./stock.ts";\nexport const t = stockBalances;\n', "packages/db/src/schema/other.ts")).toEqual([]);
+    expect(await hits('export * from "./stock.ts";\nexport * from "./warehouse.ts";\n', "packages/db/src/schema/index.ts")).toEqual([]);
   });
   it("stok olmayan şema nesneleri (kimlik, katalog) ve tipler serbest", async () => {
     const code = 'import { users, type StockStatus } from "@wms/db/internal/schema";\nexport const t = [users, null as StockStatus | null];\n';
     expect(await hits(code, CONSISTENCY)).toEqual([]);
   });
   it("auth/src/index.ts: yalnızca ad alanı importu istisnadır", async () => {
-    expect(await hits('import * as schema from "@wms/db/internal/schema";\nexport const t = schema;\n', AUTH_INDEX)).toEqual([]);
+    // T-238: ad alanı nesnesi başka değişkene atanamaz; örnek, nesneyi özellik olarak geçirir (gerçek kullanım: `{ schema }`).
+    expect(await hits('import * as schema from "@wms/db/internal/schema";\nexport const t = { schema };\n', AUTH_INDEX)).toEqual([]);
     expect(await hits('import { stockBalances } from "@wms/db/internal/schema";\nexport const t = stockBalances;\n', AUTH_INDEX)).toHaveLength(1);
     expect(await hits('import * as schema from "@wms/db/internal/schema";\nexport const t = schema;\n', "packages/auth/src/other.ts")).toHaveLength(1);
   });
@@ -231,5 +235,150 @@ describe("inceleme MINOR-1: auth ad alanı üye erişimi", () => {
   });
   it("kimlik tablosu üye erişimi temiz", async () => {
     expect(await hits(`${NS}export const t = schema.users;\nexport const { sessions } = schema;\n`, AUTH_INDEX)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// T-238 (T-210 son inceleme MINOR-1/2/3/5/6): kasıtlı dolambaçlar. Her ihlal sınıfı için yanlış pozitif olmayan örnek de vardır.
+// ---------------------------------------------------------------------------------------------------------------------------------
+describe("T-238: tablo adı taşıma (sabit modülü, takma ad, join, sql.raw)", () => {
+  it.each([
+    ["sabit modülü", 'export const T = "stock_balances";\n'],
+    ["public. önekli", 'export const T = "public.stock_ledger";\n'],
+    ["çift tırnaklı", 'export const T = "\\"reservations\\"";\n'],
+    ["serials (kilit tablosu)", 'export const T = "serials";\n'],
+    ["boşluklu, büyük harf", 'export const T = "  STOCK_DIMENSIONS ";\n'],
+    ["şablon (ifadesiz)", "export const T = `location_count_locks`;\n"],
+    ["şablon parçası (ifadeli)", "export const q = (p: string) => `${p}stock_balances${p}`;\n"],
+    ["+ ile bölünmüş", 'export const T = "stock_" + "ledger";\n'],
+    ["+ zincirinde yaprak", 'export const q = (p: string) => p + "stock_balances";\n'],
+    ["join (fiil dizisi)", 'export const q = ["UPDATE", "stock_balances"].join(" ");\n'],
+    ["join (ad değişkenle)", 'const t = "stock_balances";\nexport const q = ["UPDATE", t].join(" ");\n'],
+    ["sql.identifier(sabit)", 'import { sql } from "drizzle-orm";\nconst T = "stock_balances";\nexport const q = sql.identifier(T);\n'],
+    ["sql.raw(birleştirme)", 'import { sql } from "drizzle-orm";\nconst T = "stock_balances";\nexport const q = sql.raw("UPDATE " + T);\n'],
+    ["özellik anahtarı", 'export const m = { "stock_balances": 1 };\n'],
+    ["yorum içeren ad", 'export const T = "/* x */ stock_balances";\n'],
+  ])("consistency.ts içinde %s → ihlal", async (_n, code) => {
+    expect((await hits(code, CONSISTENCY)).length).toBeGreaterThanOrEqual(1);
+  });
+  it("tüketici dosya (ad başka modülden gelir) tek başına temizdir: ihlal sabiti tutan modüldedir (bilinen sınır: izinli dosyadan dışa aktarılan sabit)", async () => {
+    const consumer = 'import { sql } from "drizzle-orm";\nimport { T } from "./tables.ts";\nexport const q = sql.identifier(T);\nexport const r = sql.raw("UPDATE " + T);\nexport const j = ["UPDATE", T].join(" ");\n';
+    expect(await hits(consumer, CONSISTENCY)).toEqual([]);
+  });
+  it.each([
+    ["benzer ad (_view, _archive)", 'export const a = ["stock_balances_view", "stock_ledger_archive", "reservations_total"];\n'],
+    ["ad başka metnin içinde", 'export const a = "my stock_balances note";\n'],
+    ["stok olmayan tablo adları", 'export const a = ["users", "items", "documents", "locations", "serial"];\n'],
+    ["şablon: ad yalnızca parça sonekinde", "export const q = (p: string) => `${p}_stock_balances`;\n"],
+    ["yorumdaki ad", "// stock_balances\n/* reservations */\nexport const a = 1;\n"],
+    ["tür düzeyi şablon", 'export type K = `${"a" | "b"}_x`;\n'],
+  ])("yanlış pozitif yok: %s", async (_n, code) => {
+    expect(await hits(code, CONSISTENCY)).toEqual([]);
+  });
+  it("izinli yazma dosyalarında ve şema tanım dosyalarında tam ad serbest; başka şema dosyasında değil", async () => {
+    for (const rel of [LOCKING, POSTING, "packages/domain/src/stock/reservations.ts", "packages/domain/src/stock/reversal.ts", "packages/db/src/schema/stock.ts", "packages/db/src/schema/warehouse.ts"]) {
+      // locking.ts'te (d) kuralı gereği dışa aktarım yoktur; dışa aktarımsız biçim tüm izinli dosyalarda denenir.
+      expect(await hits('const T = "stock_balances";\nvoid T;\n', rel)).toEqual([]);
+    }
+    // catalog.ts yalnızca `serials` tanımı için izinlidir; yazma tablosu adı orada da ihlaldir.
+    expect(await hits('export const T = "serials";\n', "packages/db/src/schema/catalog.ts")).toEqual([]);
+    expect(await hits('export const T = "stock_balances";\n', "packages/db/src/schema/catalog.ts")).toHaveLength(1);
+    expect(await hits('export const T = "serials";\n', "packages/db/src/schema/other.ts")).toHaveLength(1);
+  });
+  it("tests/** kapsam dışı", async () => {
+    expect(await hits('export const T = "stock_balances";\n', "tests/integration/fixtures/x.ts")).toEqual([]);
+  });
+});
+
+describe("T-238: pgTable takma adı", () => {
+  it.each([
+    ["import as", 'import { pgTable as tbl, uuid } from "drizzle-orm/pg-core";\nexport const t = tbl("x", { id: uuid("id") });\n'],
+    ["import as + stok adı", 'import { pgTable as tbl, uuid } from "drizzle-orm/pg-core";\nexport const t = tbl("stock_balances", { id: uuid("id") });\n'],
+    ["yapı bozma takma adı", 'import * as pg from "drizzle-orm/pg-core";\nconst { pgTable: tbl } = pg;\nexport const t = tbl("x", {});\n'],
+  ])("consistency.ts içinde %s → ihlal", async (_n, code) => {
+    expect((await hits(code, CONSISTENCY)).length).toBeGreaterThanOrEqual(1);
+  });
+  it("yanlış pozitif yok: takmasız pgTable (stok olmayan), diğer içe aktarımlar takma adlı olabilir", async () => {
+    expect(await hits('import { pgTable, uuid } from "drizzle-orm/pg-core";\nexport const t = pgTable("widgets", { id: uuid("id") });\n', CONSISTENCY)).toEqual([]);
+    expect(await hits('import { uuid as u, text as tx } from "drizzle-orm/pg-core";\nexport const c = [u, tx];\n', CONSISTENCY)).toEqual([]);
+    // Bilinen sınır: `const tbl = pgTable` tek başına ihlal değildir (AC-28 örneği); tablo adı yazıldığında tam-ad kuralı yakalar.
+    expect(await hits('import { pgTable } from "drizzle-orm/pg-core";\nexport const t = pgTable;\n', CONSISTENCY)).toEqual([]);
+    expect((await hits('import { pgTable } from "drizzle-orm/pg-core";\nconst tbl = pgTable;\nexport const t = tbl("stock_balances", {});\n', CONSISTENCY)).length).toBeGreaterThanOrEqual(1);
+  });
+  it("şema tanım dosyası ve izinli dosyada takma ad serbest", async () => {
+    const code = 'import { pgTable as tbl, uuid } from "drizzle-orm/pg-core";\nexport const t = tbl("x", { id: uuid("id") });\n';
+    expect(await hits(code, "packages/db/src/schema/stock.ts")).toEqual([]);
+    expect(await hits(code, POSTING)).toEqual([]);
+  });
+});
+
+describe("T-238: hesaplanmış .for üyesi ve yorumla bölünmüş SQL", () => {
+  it.each([
+    ['qb["for"]("update")', 'export const f = (qb: any) => qb["for"]("update");\n'],
+    ["qb[`for`](share)", 'export const f = (qb: any) => qb[`for`]("share");\n'],
+    ['qb["for"](değişkenli mod)', 'export const f = (qb: any, m: string) => qb["for"](m);\n'],
+    ['qb?.["for"]("update")', 'export const f = (qb: any) => qb?.["for"]("update");\n'],
+    ["qb[k]('update') (statik olmayan üye)", 'export const f = (qb: any, k: string) => qb[k]("update");\n'],
+    ["qb[k]('NO KEY UPDATE')", 'export const f = (qb: any, k: string) => qb[k]("NO KEY UPDATE");\n'],
+  ])("%s locking.ts dışında → ihlal", async (_n, code) => {
+    expect(await hits(code, CONSISTENCY)).toHaveLength(1);
+  });
+  it("yanlış pozitif yok: ilgisiz hesaplanmış üyeler, Symbol[\"for\"], kilit kipi olmayan argüman; locking.ts içinde temiz", async () => {
+    expect(await hits('export const a = (o: any, k: string) => [o["map"](1), o[k](1), o["for"]("each"), o[k]("x")];\n', CONSISTENCY)).toEqual([]);
+    expect(await hits('export const s = Symbol["for"]("@wms/x");\n', CONSISTENCY)).toEqual([]);
+    expect(await hits('const f = (qb: any) => qb["for"]("update");\nvoid f;\n', LOCKING)).toEqual([]);
+  });
+  it.each([
+    ["UPDATE /**/ tablo", q('"UPDATE /**/ stock_balances SET quantity = 0"')],
+    ["UPDATE /* x */ ONLY tablo", q('"UPDATE /* x */ ONLY /* y */ stock_balances SET quantity = 0"')],
+    ["iç içe blok yorum", q('"UPDATE /* a /* b */ c */ stock_balances SET quantity = 0"')],
+    ["satır yorumu + yeni satır", q('"UPDATE -- x\\n stock_balances SET quantity = 0"')],
+    ["INSERT INTO /**/ tablo", q('"INSERT INTO/**/stock_ledger (a) VALUES (1)"')],
+    ["DELETE FROM /**/ tablo", q('"DELETE /**/ FROM /**/ reservations"')],
+    ["şablon + yorum", q("`UPDATE /**/ public.stock_balances SET quantity = ${1}`")],
+    ["FOR /**/ UPDATE", q('"SELECT 1 FROM stock_balances FOR /**/ UPDATE"')],
+    ["FOR -- yorum UPDATE", q('"SELECT 1 FROM stock_balances FOR -- x\\n UPDATE"')],
+  ])("consistency.ts içinde %s → ihlal", async (_n, code) => {
+    expect((await hits(code, CONSISTENCY)).length).toBeGreaterThanOrEqual(1);
+  });
+  it("yanlış pozitif yok: yorum içeren stok dışı SQL ve yorumla ayrılmış ilgisiz sözcükler; izinli dosyada yorumlu yazma temiz", async () => {
+    expect(await hits(q('"UPDATE /* not */ users SET a = 1 -- stock"'), CONSISTENCY)).toEqual([]);
+    expect(await hits(q('"SELECT 1 /* UPDATE */ FROM stock_balances_view"'), CONSISTENCY)).toEqual([]);
+    expect(await hits(q('"UPDATE /**/ stock_balances SET quantity = 0"'), POSTING)).toEqual([]);
+    expect(await hits(q('"SELECT 1 FROM stock_balances FOR /**/ UPDATE"'), LOCKING)).toEqual([]);
+  });
+});
+
+describe("T-238: auth ad alanı nesnesi başka değişkene atanamaz", () => {
+  const NS = 'import * as schema from "@wms/db/internal/schema";\n';
+  it.each([
+    ["const s = schema", `${NS}const s = schema;\nexport const t = s.stockBalances;\n`],
+    ["const s = schema as X", `${NS}const s = schema as Record<string, unknown>;\nexport const t = s;\n`],
+    ["const s = schema!", `${NS}const s = schema!;\nexport const t = s;\n`],
+    ["const s = c ? schema : null", `${NS}const s = Math.random() > 0.5 ? schema : null;\nexport const t = s;\n`],
+    ["const s = x || schema", `${NS}const s = (globalThis as any).x || schema;\nexport const t = s;\n`],
+    ["const s = (0, schema)", `${NS}const s = (0, schema);\nexport const t = s;\n`],
+    ["let s; s = schema", `${NS}let s: unknown;\ns = schema;\nexport const t = s;\n`],
+  ])("auth/src/index.ts içinde %s → ihlal", async (_n, code) => {
+    expect((await hits(code, AUTH_INDEX)).length).toBeGreaterThanOrEqual(1);
+  });
+  it("yanlış pozitif yok: üye erişimi, yapı bozma, nesne özelliği olarak geçirme, çağrı argümanı, ilgisiz değişkenler", async () => {
+    const code = [
+      NS,
+      "const users = schema.users;",
+      "const { sessions } = schema;",
+      "const cfg = { schema };",
+      "declare function use(x: unknown): unknown;",
+      "const used = use(schema);",
+      "const other = 1;",
+      "let again: unknown;",
+      "again = other;",
+      "export const all = [users, sessions, cfg, used, again];",
+      "",
+    ].join("\n");
+    expect(await hits(code, AUTH_INDEX)).toEqual([]);
+  });
+  it("ad alanı atama kuralı başka dosyalarda geçerli değildir (ad alanı importunun kendisi zaten ihlal)", async () => {
+    expect(await hits("const schema = { a: 1 };\nconst s = schema;\nexport const t = s;\n", "packages/auth/src/other.ts")).toEqual([]);
   });
 });
