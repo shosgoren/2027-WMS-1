@@ -45,6 +45,15 @@ export const PROTECTED_GLOBS = Object.freeze([
   "scripts/test-ac/**",
   "scripts/lib/**",
   ".githooks/**",
+  // Gizli bilgi taraması muafiyet listesi (T-017): parmak izi eklemek taramayı susturur
+  ".gitleaksignore",
+  "**/.gitleaksignore",
+  // gitleaks yapılandırması: 8.30.1 yalnızca `(hedef yol)/.gitleaks.toml` dosyasını otomatik yükler
+  // (`gitleaks git --help`); `gitleaks.toml` savunma amaçlı eklendi (kural kapatma/allowlist).
+  ".gitleaks.toml",
+  "**/.gitleaks.toml",
+  "gitleaks.toml",
+  "**/gitleaks.toml",
   // Karantina kaydı
   "tests/QUARANTINE.md",
   // pnpm kancaları (kurulumda kod çalıştırır; T-003 security-reviewer MAJOR)
@@ -895,7 +904,8 @@ function flowPlain(v) {
  *     (sürüm, peer çözümü, `resolution`/integrity, engines …). Eksik düğüm `<yok>` olarak yazılır;
  *   - herhangi bir yerdeki takma ad değeri (`x: other@ver`, `npm:` önekli specifier/sürüm);
  *   - herhangi bir paketin integrity dışı çözümlemesi: `resolution` ayrıştırılmış anahtarlarıyla
- *     yalnızca `{integrity: <skaler>}` değilse (tırnaklı `"tarball"` dahil; T-016, `nonIntegrityResolution`).
+ *     yalnızca `{integrity: <skaler>}` değilse (tırnaklı `"tarball"` dahil; T-016, `nonIntegrityResolution`)
+ *     veya `resolution` alanı hiç yoksa (T-008j).
  * Desteklenmeyen biçim `LockfileError` fırlatır (çağıran korunan sayar).
  * @param {string | null} text
  * @returns {string}
@@ -960,7 +970,9 @@ export function lockfileGuarded(text) {
     lockMap(node, `packages.${key}`);
     if (isGuardedPackage(lockKeyName(key))) out.push(`package ${key} ${canon(node)}`);
     const res = node.kind === "map" ? node.entries.get("resolution") : undefined;
-    const nonIntegrity = res === undefined ? null : nonIntegrityResolution(res, `packages.${key}.resolution`);
+    // T-008j: `resolution` alanı olmayan girdi integrity-yalnız sayılmaz (fail-closed): pnpm neyi
+    // indireceğini başka alandan/varsayılandan çıkarır, integrity doğrulaması yoktur.
+    const nonIntegrity = res === undefined ? "<resolution yok>" : nonIntegrityResolution(res, `packages.${key}.resolution`);
     if (nonIntegrity !== null) out.push(`resolution ${key} ${nonIntegrity}`);
   }
 

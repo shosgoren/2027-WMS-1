@@ -15,14 +15,14 @@
 #     (PR ağacının dışında; PR'ın commit'lediği dosya raporun yerine geçemez). Bu işte token yok.
 #   - Önyükleme istisnası: taban `main` VE main'de `scripts/guards/cli.mjs` yoksa iş "bootstrap"
 #     yazar ve geçer. Başka her durumda tabanda bekçi yoksa FAIL.
-#   - Geçiş kipi ("legacy"): tabanda `cli.mjs` var ama `all.mjs` (bu kart) yok → tabanın bekçileri
-#     tek tek, tabanın kendi `main(argv, { root })` işleviyle PR dizinine karşı koşar (yine tabanın
-#     kodu; gevşetme değil). `main`'e `all.mjs` girdikten sonra kullanılmaz; kaldırılması takip işidir.
+#   - Geçiş ("legacy") kipi kaldırıldı (T-008k): tabanda `cli.mjs` var ama `all.mjs` yoksa FAIL.
 #   - Tabanda bulunmayan bekçi (Supervisor kararı; her iki kipte, `all.mjs` ile aynı kural): modül
 #     tabanda yoksa `SKIPPED_NOT_IN_BASE` (özet `<ad> SKIPPED(base)`), PR'ın kopyasından koşturulmaz.
 #     Yeni bekçi korunan dosyadır; onu tanıtan PR tabandan koşan check:protected onayından geçer ve
 #     ilk birleşmeden sonra tabandan koşar. Güven kökü (scope, tests, protected) tabanda yoksa FAIL.
 #     `check-pilot` tabanda `pilot.mjs` yoksa aynı kuralla atlanır.
+#   - Taban dalı rapordan/koşudan sonra değişirse (ör. sonradan geri alınırsa) koşu yeniden
+#     tetiklenmez; Supervisor birleştirmeden hemen önce guards'ı yeniden koşturur.
 #   - Yalnızca yerleşik GITHUB_TOKEN (G-09), yalnızca `check-all`'ın bekçi adımında (check:protected
 #     PR açıklamasını API'den okur). İzinler en dar: contents: read, pull-requests: read.
 # Commit öncesi kanca (`.githooks/pre-commit`) atlanabilir (`--no-verify`); zorlama buradadır.
@@ -35,10 +35,11 @@ on:
     branches:
       - main
       - "int/**"
+  # push yalnızca `main` (T-008j): `int/**` dallarına giriş PR üzerinden (yukarıdaki `pull_request`)
+  # denetlenir; int dalına doğrudan push koşusu kaldırıldı (birleştirme commit'i PR'da zaten denetlendi).
   push:
     branches:
       - main
-      - "int/**"
 
 concurrency:
   group: guards-${{ github.event.pull_request.number || github.ref }}
@@ -126,7 +127,9 @@ jobs:
         run: |
           set -euo pipefail
           if [ -f base/scripts/guards/all.mjs ]; then mode=current
-          elif [ -f base/scripts/guards/cli.mjs ]; then mode=legacy
+          elif [ -f base/scripts/guards/cli.mjs ]; then
+            echo "::error::taban ($BASE_NAME) bekçisinde scripts/guards/all.mjs yok (geçiş kipi kaldırıldı)"
+            exit 1
           elif [ "$BASE_NAME" = "main" ]; then mode=bootstrap
           else
             echo "::error::taban ($BASE_NAME) bekçi içermiyor (scripts/guards/cli.mjs yok); önyükleme istisnası yalnızca main tabanında"
@@ -155,49 +158,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: node base/scripts/guards/cli.mjs all --root pr
-      - name: check:all (legacy base guards → pr/)
-        if: steps.mode.outputs.mode == 'legacy'
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          echo "::warning::taban bekçisinde all.mjs yok (geçiş kipi): tabanın bekçileri tek tek koşuyor"
-          node --input-type=module - <<'EOF'
-          import { existsSync, readFileSync } from "node:fs";
-          import path from "node:path";
-          import { pathToFileURL } from "node:url";
-          const base = path.resolve("base");
-          const root = path.resolve("pr");
-          const { main } = await import(pathToFileURL(path.join(base, "scripts/guards/cli.mjs")).href);
-          const steps = [];
-          const trustRoot = ["scope", "tests", "protected"];
-          for (const g of ["scope", "tests", "ac-ratchet", "protected", "assertions"]) {
-            if (!existsSync(path.join(base, "scripts/guards", `${g}.mjs`))) {
-              if (trustRoot.includes(g)) {
-                console.log(`[check:${g}] FAIL GUARD_NOT_IN_BASE - — tabanda ${g}.mjs yok; güven kökü bekçisi atlanamaz`);
-                steps.push([g, "FAIL"]);
-              } else {
-                console.log(`[check:${g}] SKIPPED_NOT_IN_BASE ${g} — tabanda ${g}.mjs yok; PR'ın kopyası koşturulmaz`);
-                steps.push([g, "SKIPPED(base)"]);
-              }
-              continue;
-            }
-            steps.push([g, (await main([g], { root })) === 0 ? "OK" : "FAIL"]);
-          }
-          const docsFile = path.join(base, "scripts/check-docs.mjs");
-          if (existsSync(docsFile)) {
-            const { checkStack, checkMap, summaryLine } = await import(pathToFileURL(docsFile).href);
-            const read = (rel) => { try { return readFileSync(path.join(root, rel), "utf8"); } catch { return null; } };
-            const stackMd = read("docs/STACK.md");
-            const mapMd = read("docs/MAP.md");
-            const stack = stackMd === null ? { ok: false, count: 0, failures: ["stack: docs/STACK.md okunamadı"] } : checkStack(stackMd, read);
-            const map = mapMd === null ? { ok: false, count: 0, failures: ["map: docs/MAP.md okunamadı"] } : checkMap(mapMd, (rel) => existsSync(path.join(root, rel)));
-            for (const f of [...stack.failures, ...map.failures]) console.log(f);
-            console.log(summaryLine(stack, map));
-            steps.push(["docs", stack.ok && map.ok ? "OK" : "FAIL"]);
-          }
-          console.log(`check:all (geçiş) → ${steps.map(([n, st]) => `${n} ${st}`).join(" | ")}`);
-          process.exitCode = steps.some(([, st]) => st === "FAIL") ? 1 : 0;
-          EOF
       # upload-artifact gizli yolları atlar; .artifacts gizli olmayan geçici dizine kopyalanır.
       - name: Stage guard artifacts
         if: always()
@@ -255,19 +215,6 @@ jobs:
       - name: test:ac --ci (base runner → pr/)
         if: needs.check-all.outputs.mode == 'current'
         run: node base/scripts/test-ac/cli.mjs --ci --root pr --out "$RUNNER_TEMP/test-ac"
-      - name: test:ac --ci (legacy base runner → pr/)
-        if: needs.check-all.outputs.mode == 'legacy'
-        run: |
-          echo "::warning::taban koşturucusunda --root/--out ve çalışma anı atlama denetimi yok (geçiş kipi)"
-          node --input-type=module - <<'EOF'
-          import path from "node:path";
-          import { pathToFileURL } from "node:url";
-          const root = path.resolve("pr");
-          const { main } = await import(pathToFileURL(path.resolve("base/scripts/test-ac/cli.mjs")).href);
-          process.exitCode = main(["--ci"], { root, vitestBin: path.join(root, "node_modules/.bin/vitest") });
-          EOF
-          mkdir -p "$RUNNER_TEMP/test-ac"
-          if [ -d pr/.artifacts/test-ac ]; then cp -R pr/.artifacts/test-ac/. "$RUNNER_TEMP/test-ac/"; fi
       - name: Upload test-ac report
         if: always() && needs.check-all.outputs.mode != 'bootstrap'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -336,8 +283,8 @@ jobs:
           elif [ -f base/scripts/guards/all.mjs ]; then
             node base/scripts/guards/cli.mjs pilot --root pr
           elif [ -f base/scripts/guards/cli.mjs ]; then
-            echo "::warning::taban bekçisinde --root yok (geçiş kipi)"
-            node --input-type=module -e 'import path from "node:path"; import { pathToFileURL } from "node:url"; const { main } = await import(pathToFileURL(path.resolve("base/scripts/guards/cli.mjs")).href); process.exitCode = await main(["pilot"], { root: path.resolve("pr") });'
+            echo "::error::taban ($BASE_NAME) bekçisinde scripts/guards/all.mjs yok (geçiş kipi kaldırıldı)"
+            exit 1
           elif [ "$BASE_NAME" = "main" ]; then
             echo "::notice::bootstrap — main'de bekçi yok; check:pilot koşmadı"
           else

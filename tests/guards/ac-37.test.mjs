@@ -12,6 +12,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { runAll } from "../../scripts/guards/all.mjs";
+import { scanSource } from "../../scripts/guards/lib/assertion-count.mjs";
+import { countSummaryLines, reportMismatch } from "../../scripts/test-ac/run.mjs";
 import { createRepo } from "../../scripts/guards/lib/testkit.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -74,7 +76,12 @@ const STACK = `# Stack
 | bileşen | paket/imaj | sürüm | kaynak | ADR |
 |---|---|---|---|---|
 | örnek | x | — kilitsiz | — | — |
+| TS | typescript | 6.0.3 | package.json#devDependencies.typescript | — |
 `;
+
+/** T-008k: `checkStackCoverage` denetimi atlanmasın diye fikstürde geçerli kilit + paket dosyası bulunur. */
+const PACKAGE_JSON = `${JSON.stringify({ name: "fx", private: true, devDependencies: { typescript: "6.0.3" } }, null, 2)}\n`;
+const LOCK = ["lockfileVersion: '9.0'", "", "importers:", "", "  .:", "    devDependencies:", "      typescript:", "        specifier: 6.0.3", "        version: 6.0.3", ""].join("\n");
 
 const MAP = `# Harita
 | yol | durum | açıklama |
@@ -86,8 +93,9 @@ const MAP = `# Harita
  * `main`: kart, testler, AC tabanı, lint yapılandırması; dal `feat/T-100-x` kapsam içi zararsız bir
  * değişiklik + `mutate` taşır.
  * @param {(r: import("../../scripts/guards/lib/testkit.mjs").TestRepo) => void} [mutate]
+ * @param {{ lock?: string | null, pkg?: string }} [opts] `lock: null` → `pnpm-lock.yaml` hiç yok (taban dahil)
  */
-function fixture(mutate) {
+function fixture(mutate, opts = {}) {
   const r = createRepo({ prefix: "ac37-" });
   cleanups.push(() => r.cleanup());
   r.writeAll({
@@ -100,6 +108,8 @@ function fixture(mutate) {
     "tests/unit.test.mjs": UNIT_FILE,
     "tests/.ac-baseline.json": BASELINE,
     "eslint.config.mjs": ESLINT,
+    "package.json": opts.pkg ?? PACKAGE_JSON,
+    ...(opts.lock === null ? {} : { "pnpm-lock.yaml": opts.lock ?? LOCK }),
   });
   r.commit("init").publish("main");
   r.branch("feat/T-100-x");
@@ -186,6 +196,23 @@ describe("AC-37 bekçi zinciri (check:all, CI kipi)", { timeout: 60_000 }, () =>
     expect(res.summary).toBe(onlyFailing("protected"));
   });
 
+  it("@AC-37 kilit dosyası yok → docs FAIL (denetim atlanmaz), yalnızca docs kırmızı", () => {
+    const r = fixture(undefined, { lock: null });
+    const res = checkAll(r.dir);
+    expect(res.code).toBe(1);
+    expect(res.text).toContain("stack: pnpm-lock.yaml okunamadı");
+    expect(res.summary).toBe(onlyFailing("docs"));
+  });
+
+  it("@AC-37 STACK'te kilitli olmayan doğrudan bağımlılık → docs FAIL, yalnızca docs kırmızı", () => {
+    const pkg = JSON.stringify({ name: "fx", private: true, devDependencies: { typescript: "6.0.3", leftpad: "1.0.0" } });
+    const r = fixture(undefined, { pkg });
+    const res = checkAll(r.dir);
+    expect(res.code).toBe(1);
+    expect(res.text).toContain("doğrudan bağımlılık STACK'te kilitli değil: leftpad");
+    expect(res.summary).toBe(onlyFailing("docs"));
+  });
+
   it("@AC-37 --root verilen dizini denetler (çağıranın deposunu değil); ayrıntı o kökün .artifacts'ına", () => {
     const r = fixture((x) => x.write("docs/notlar.md", "# kart dışı\n"));
     const res = checkAll(r.dir);
@@ -263,6 +290,14 @@ describe("test:ac --ci çalışma anı atlama denetimi + --root/--out (T-008g 5c
     expect(report.runtimeSkipAudit.skipped).toEqual([]);
   });
 
+  it("@AC-37 detached alt süreç sahte ikinci Tests özet satırı basar → REPORT_MISMATCH, çıkış 1 (T-008k)", () => {
+    const forged = `import { spawn } from "node:child_process";\nimport { expect, it } from "vitest";\n\nit("sahte özet", async () => {\n  const child = spawn(process.execPath, ["-e", "process.stdout.write('      Tests  1 passed (1)\\\\n')"], { detached: true, stdio: "inherit" });\n  await new Promise((resolve) => child.on("close", resolve));\n  expect(1).toBe(1);\n});\n`;
+    const { root, out } = acFixture({ "tests/sahte.test.mjs": forged });
+    const res = testAcCi(root, out);
+    expect(res.text).toMatch(/REPORT_MISMATCH çalışma anı atlama denetimi: vitest stdout'unda tam olarak bir "Tests" özet satırı olmalı \(bulunan: 2\)/);
+    expect(res.code).toBe(1);
+  });
+
   it("--root olmayan dizin → kullanım hatası (çıkış 2)", () => {
     const res = spawnSync(process.execPath, [TEST_AC_CLI, "--ci", "--root", path.join(os.tmpdir(), "ac37-olmayan-dizin")], {
       cwd: REPO_ROOT,
@@ -320,5 +355,119 @@ describe("check:all tabanda bulunmayan bekçi (Supervisor kararı, T-008g bulgu 
     expect(res.summary).toContain(`${g} FAIL`);
     expect(res.ran).not.toContain(g);
     expect(res.code).toBe(1);
+  });
+});
+
+/**
+ * T-008k madde 7: etkisiz assertion biçimleri. Her vaka bir `@AC` testinin gövdesidir; tek assertion'ı
+ * etkisizse sayı 0 ve NO_ASSERTION bulgusu çıkar. Yanlış pozitif vakaları (etkili benzerleri) sayılır.
+ * `ASSERT` düz metin olarak fikstür içindedir (bu dosyanın assertion'ı değildir).
+ */
+const ASSERT = "expect(v()).toBe(2);";
+/** @param {string} body @param {string} [pre] */
+function acSource(body, pre = "") {
+  return `import { expect, it } from "vitest";\n${pre}\nfunction v() {\n  return 2;\n}\n\nit("vaka ${TAG}01", async () => {\n${body}\n});\n`;
+}
+
+/** @type {Array<[string, string, string?]>} [ad, gövde, ön kod] */
+const INEFFECTIVE = [
+  ["const-yerel sabit yanlış koşul", `const f = false;\nif (f) {\n  ${ASSERT}\n}`],
+  ["const-yerel sabit doğru koşulun else kolu", `const f = 1;\nif (f) {\n} else {\n  ${ASSERT}\n}`],
+  ["modül düzeyi const sabit koşul", `if (DEBUG) {\n  ${ASSERT}\n}`, "const DEBUG = false;"],
+  ["for-of boş dizi", `for (const x of []) {\n  ${ASSERT}\n  void x;\n}`],
+  ["for-of const-yerel boş dizi", `const xs = [];\nfor (const x of xs) {\n  ${ASSERT}\n  void x;\n}`],
+  ["for sıfır turlu sayaç", `for (let i = 0; i < 0; i++) {\n  ${ASSERT}\n}`],
+  ["boş dizi forEach", `[].forEach(() => {\n  ${ASSERT}\n});`],
+  ["const-yerel boş dizi map", `const xs = [];\nxs.map(() => {\n  ${ASSERT}\n});`],
+  ["setTimeout geri çağrısı", `setTimeout(() => {\n  ${ASSERT}\n}, 10);`],
+  ["queueMicrotask geri çağrısı", `queueMicrotask(() => {\n  ${ASSERT}\n});`],
+  ["globalThis.setImmediate geri çağrısı", `globalThis.setImmediate(() => {\n  ${ASSERT}\n});`],
+  ["await'siz then", `Promise.resolve().then(() => {\n  ${ASSERT}\n});`],
+  ["await'siz catch", `Promise.reject(new Error("x")).catch(() => {\n  ${ASSERT}\n});`],
+  ["await'siz then zinciri", `Promise.resolve().then(() => 1).then(() => {\n  ${ASSERT}\n});`],
+  ["finally içinde return", `try {\n  ${ASSERT}\n} finally {\n  return;\n}`],
+  ["catch + finally return", `try {\n  throw new Error("x");\n} catch {\n  ${ASSERT}\n} finally {\n  return;\n}`],
+  ["çağrılmayan iç işlev bildirimi", `function inner() {\n  ${ASSERT}\n}`],
+  ["çağrılmayan iç ok işlevi", `const inner = () => {\n  ${ASSERT}\n};`],
+  ["ifade deyimi işlev", `(() => {\n  ${ASSERT}\n});`],
+  // T-008k güvenlik incelemesi MINOR 1-4.
+  ["döngüsel const tanımı (RangeError yok, sayılmaz)", `if (a) {\n  ${ASSERT}\n}`, "const a = b;\nconst b = a;"],
+  ["kendine başvuran const koşulu", `if (a) {\n  ${ASSERT}\n}`, "const a = a;"],
+  ["işlev yalnızca `void` ile geçirilmiş (bildirim)", `function inner() {\n  ${ASSERT}\n}\nvoid inner;`],
+  ["işlev yalnızca takma adla geçirilmiş (ok işlevi)", `const inner = () => {\n  ${ASSERT}\n};\nconst alias = inner;\nvoid alias;`],
+  ["const sayaç sınırı sıfır", `const n = 0;\nfor (let i = 0; i < n; i++) {\n  ${ASSERT}\n}`],
+  ["const başlangıç ve sınır", `const s = 5;\nconst n = 3;\nfor (let i = s; i < n; i++) {\n  ${ASSERT}\n}`],
+  ["for-of Array.from([])", `for (const x of Array.from([])) {\n  ${ASSERT}\n  void x;\n}`],
+  ["boş dizi concat() forEach", `[].concat().forEach(() => {\n  ${ASSERT}\n});`],
+  ["Array.from([]) const forEach", `const xs = Array.from([]);\nxs.forEach(() => {\n  ${ASSERT}\n});`],
+  ["new Array() for-of", `for (const x of new Array()) {\n  ${ASSERT}\n  void x;\n}`],
+  ["hesaplanmış üye globalThis[\"setTimeout\"]", `globalThis["setTimeout"](() => {\n  ${ASSERT}\n}, 10);`],
+  ["hesaplanmış üye boş dizi [\"forEach\"]", `[]["forEach"](() => {\n  ${ASSERT}\n});`],
+  ["hesaplanmış üye await'siz [\"then\"]", `Promise.resolve()["then"](() => {\n  ${ASSERT}\n});`],
+  ["yalnızca kendi gövdesinde özyinelemeli çağrılan işlev", `function inner(n) {\n  ${ASSERT}\n  if (n > 0) inner(n - 1);\n}`],
+  ["yalnızca kendi gövdesinde özyinelemeli çağrılan ok işlevi", `const inner = (n) => {\n  ${ASSERT}\n  if (n > 0) inner(n - 1);\n};`],
+  ["const boş dizi yalnızca okunuyor", `const xs = [];\nvoid xs.length;\nfor (const x of xs) {\n  ${ASSERT}\n  void x;\n}`],
+];
+
+/** @type {Array<[string, string, string?]>} */
+const EFFECTIVE = [
+  ["let sabit koşul (yeniden atanabilir)", `let f = false;\nf = true;\nif (f) {\n  ${ASSERT}\n}`],
+  ["const doğru koşul", `const f = true;\nif (f) {\n  ${ASSERT}\n}`],
+  ["parametre const'u gölgeler", `const g = (f) => {\n  if (f) {\n    ${ASSERT}\n  }\n};\ng(true);`, "const f = false;"],
+  ["for-of dolu dizi", `for (const x of [1, 2]) {\n  ${ASSERT}\n  void x;\n}`],
+  ["for sayaç 2 tur", `for (let i = 0; i < 2; i++) {\n  ${ASSERT}\n}`],
+  ["dolu dizi forEach", `[1].forEach(() => {\n  ${ASSERT}\n});`],
+  ["zamanlayıcıyı bekleyip sonra assertion", `await new Promise((resolve) => setTimeout(resolve, 1));\n${ASSERT}`],
+  ["await edilen then", `await Promise.resolve().then(() => {\n  ${ASSERT}\n});`],
+  ["return edilen then", `return Promise.resolve().then(() => {\n  ${ASSERT}\n});`],
+  ["await edilen then zinciri", `await Promise.resolve().then(() => 1).then(() => {\n  ${ASSERT}\n});`],
+  ["await Promise.all içindeki then", `await Promise.all([Promise.resolve().then(() => {\n  ${ASSERT}\n})]);`],
+  ["finally yalnızca temizlik", `try {\n  ${ASSERT}\n} finally {\n  v();\n}`],
+  ["çağrılan iç işlev bildirimi", `function inner() {\n  ${ASSERT}\n}\ninner();`],
+  ["çağrılan iç ok işlevi", `const inner = () => {\n  ${ASSERT}\n};\ninner();`],
+  ["çağrılan IIFE", `(() => {\n  ${ASSERT}\n})();`],
+  // T-008k güvenlik incelemesi MINOR 1-4.
+  ["işlev argüman olarak geçirilmiş", `function inner() {\n  ${ASSERT}\n}\n[1].forEach(inner);`],
+  ["işlev .call ile çağrılmış", `const inner = () => {\n  ${ASSERT}\n};\ninner.call(null);`],
+  ["const sayaç sınırı 2", `const n = 2;\nfor (let i = 0; i < n; i++) {\n  ${ASSERT}\n}`],
+  ["let sayaç sınırı yeniden atanır", `let n = 0;\nn = 2;\nfor (let i = 0; i < n; i++) {\n  ${ASSERT}\n}`],
+  ["const dizi push sonrası for-of", `const xs = [];\nxs.push(1);\nfor (const x of xs) {\n  ${ASSERT}\n  void x;\n}`],
+  ["const dizi unshift sonrası forEach", `const xs = [];\nxs.unshift(1);\nxs.forEach(() => {\n  ${ASSERT}\n});`],
+  ["const dizi splice sonrası for-of", `const xs = [];\nxs.splice(0, 0, 1);\nfor (const x of xs) {\n  ${ASSERT}\n  void x;\n}`],
+  ["const dizi length ataması sonrası for-of", `const xs = [];\nxs.length = 2;\nfor (const x of xs) {\n  ${ASSERT}\n  void x;\n}`],
+  ["const dizi dizin ataması sonrası for-of", `const xs = [];\nxs[0] = 1;\nfor (const x of xs) {\n  ${ASSERT}\n  void x;\n}`],
+  ["const dizi argüman olarak geçirilip doldurulur", `const xs = [];\nfill(xs);\nfor (const x of xs) {\n  ${ASSERT}\n  void x;\n}`, "function fill(a) {\n  a.push(1);\n}"],
+  ["const dizi takma adla doldurulur", `const xs = [];\nconst ys = xs;\nys.push(1);\nfor (const x of xs) {\n  ${ASSERT}\n  void x;\n}`],
+  ["Array.from([1]) for-of", `for (const x of Array.from([1])) {\n  ${ASSERT}\n  void x;\n}`],
+  ["boş dizi concat([1]) forEach", `[].concat([1]).forEach(() => {\n  ${ASSERT}\n});`],
+  ["özyinelemeli işlev dışarıdan da çağrılıyor", `function inner(n) {\n  ${ASSERT}\n  if (n > 0) inner(n - 1);\n}\ninner(1);`],
+  ["const dizi hesaplanmış length += sonrası for-of", `const xs = [];\nxs["length"] += 2;\nfor (const x of xs) {\n  ${ASSERT}\n  void x;\n}`],
+  ["hesaplanmış üye zamanlayıcıyı bekleyip sonra assertion", `await new Promise((resolve) => globalThis["setTimeout"](resolve, 1));\n${ASSERT}`],
+];
+
+describe("assertion-count etkisiz assertion biçimleri (T-008k madde 7)", () => {
+  it.each(INEFFECTIVE)("@AC-37 saldırı: %s → assertion sayılmaz, NO_ASSERTION", (_n, body, pre) => {
+    const scan = scanSource(acSource(body, pre), "tests/x.test.mjs");
+    expect(scan.assertions).toBe(0);
+    expect(scan.noAssertion).toHaveLength(1);
+  });
+
+  it.each(EFFECTIVE)("@AC-37 yanlış pozitif yok: %s → assertion sayılır", (_n, body, pre) => {
+    const scan = scanSource(acSource(body, pre), "tests/x.test.mjs");
+    expect(scan.assertions).toBe(1);
+    expect(scan.noAssertion).toHaveLength(0);
+  });
+});
+
+describe("test-ac tek Tests özet satırı şartı (T-008k madde 6)", () => {
+  const outcome = { file: "a.test.mjs", fullName: "t", status: "passed" };
+  it("@AC-37 özet satırı sayısı: 0 ve >1 → uyuşmazlık, tam 1 + eşleşen sayı → null", () => {
+    const one = "      Tests  1 passed (1)\n";
+    expect(countSummaryLines(one)).toBe(1);
+    expect(reportMismatch([outcome], one)).toBeNull();
+    expect(reportMismatch([outcome], "özet yok\n")).toContain("bulunan: 0");
+    expect(reportMismatch([outcome], `${one}${one}`)).toContain("bulunan: 2");
+    expect(reportMismatch([outcome], `      Tests  9 passed (9)\n${one}`)).toContain("bulunan: 2");
+    expect(reportMismatch([outcome], "      Tests  2 passed (2)\n")).toContain("uyuşmuyor");
   });
 });

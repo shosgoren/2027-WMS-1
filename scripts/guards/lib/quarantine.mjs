@@ -13,7 +13,8 @@
 //       onayı `check:protected` denetler — §Onay kaynağı)
 //   (c) test, kapısı değerlendirilen fazın (`currentGatePhase`) `@AC` testi değil → aksi QUARANTINE_GATE_AC
 //   (d) bitiş ≤ eklendiği tarih + 14 gün → aksi QUARANTINE_TOO_LONG; bugün (UTC) ≤ bitiş →
-//       aksi QUARANTINE_EXPIRED. Bu ikisi kayıt satırı için etiketten bağımsız da hatadır.
+//       aksi QUARANTINE_EXPIRED; eklendiği tarih ≤ bugün (UTC) → aksi QUARANTINE_FUTURE_DATE (T-008j:
+//       ileri tarihli "eklendi" 14 gün sınırını öteler). Bu üçü kayıt satırı için etiketten bağımsız da hatadır.
 // Kayıt dosyası ayrıştırılamazsa QUARANTINE_REGISTRY_INVALID (fail-closed).
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -31,6 +32,7 @@ export const CODES = Object.freeze({
   GATE_AC: "QUARANTINE_GATE_AC",
   EXPIRED: "QUARANTINE_EXPIRED",
   TOO_LONG: "QUARANTINE_TOO_LONG",
+  FUTURE_DATE: "QUARANTINE_FUTURE_DATE",
   REGISTRY_INVALID: "QUARANTINE_REGISTRY_INVALID",
 });
 
@@ -197,7 +199,7 @@ export function loadQuarantine(root, opts = {}) {
 }
 
 /**
- * Kayıt satırının etiketten bağımsız süre bulguları (TOO_LONG, EXPIRED).
+ * Kayıt satırının etiketten bağımsız süre bulguları (TOO_LONG, EXPIRED, FUTURE_DATE).
  * @param {QuarantineEntry} entry
  * @param {string} today
  * @returns {QuarantineFinding[]}
@@ -208,6 +210,9 @@ export function entryDateFindings(entry, today) {
   const days = daysBetween(entry.added, entry.end);
   if (days > MAX_DAYS) {
     out.push({ code: CODES.TOO_LONG, message: `${entry.id}: ${entry.added} → ${entry.end} = ${days} gün (en fazla ${MAX_DAYS})` });
+  }
+  if (entry.added > today) {
+    out.push({ code: CODES.FUTURE_DATE, message: `${entry.id}: eklendiği tarih ${entry.added} bugünden (${today} UTC) ileri; karantina eklendiği gün tarihlenir` });
   }
   if (today > entry.end) {
     out.push({ code: CODES.EXPIRED, message: `${entry.id}: bitiş ${entry.end} geçti (bugün ${today} UTC); test düzeltilir ya da kayıt yeniden onaylanır` });

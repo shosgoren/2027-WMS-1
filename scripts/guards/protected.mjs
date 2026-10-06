@@ -21,7 +21,8 @@
 // Güvenlik özeti raporun incelediği commit'e bağlıdır (`security-reviewer: … @ <sha>`; T-008i MINOR 8):
 // SHA head'in atası/kendisi olmalı ve `sha..head` arasında korunan değişiklik olmamalı (yalnızca
 // korunmayan belgelere — ör. Supervisor'ın `SUPERVISOR_PATHS` kayıtlarına — yapılan commit'ler
-// raporu bayatlatmaz); aksi SECURITY_REPORT_STALE.
+// raporu bayatlatmaz); aksi SECURITY_REPORT_STALE. T-008k: karşılaştırma PR'ın KENDİ korunan
+// değişiklik kümesi üzerindendir (`merge-base(taban, uç)..uç`); tabanı birleştirmek raporu bayatlatmaz.
 // Push kipinde (T-008i MINOR 6) commit PR'ın kendisi olmalı: birleştirme commit'inde
 // `HEAD^2 == head.sha`, her durumda `HEAD^{tree}` = `git merge-tree HEAD^1 head.sha` önizleme ağacı;
 // aksi APPROVAL_UNVERIFIABLE (onay başka içeriğe taşınamaz).
@@ -158,12 +159,44 @@ function protectedBetween(root, from, to) {
 }
 
 /**
- * Güvenlik raporu SHA'sının tazelik denetimi (T-008i MINOR 8). `null` = taze.
+ * `rev` ağacındaki `file` girdisi: `"<mod> <blob id>"`; yol yoksa `""` (silinme/yeni dosya = girdi
+ * yokluğu). Metin farkına bakmaz: satır/blok taşıma, ikili dosya, `.gitattributes -diff`, kip
+ * değişikliği (chmod +x) hepsi (mod, blob) çiftinde görünür (T-008k güvenlik MINOR/BLOCKER-1).
+ * @param {string} root
+ * @param {string} rev
+ * @param {string} file
+ * @returns {string}
+ */
+function treeEntry(root, rev, file) {
+  const out = git(root, ["--literal-pathspecs", "ls-tree", "-z", rev, "--", file]);
+  for (const rec of out.split("\0")) {
+    const tab = rec.indexOf("\t");
+    if (tab < 0 || rec.slice(tab + 1) !== file) continue;
+    const [mode, type, id] = rec.slice(0, tab).split(" ");
+    return `${mode} ${type} ${id}`;
+  }
+  return "";
+}
+
+/**
+ * Not: taban dalı rapordan sonra değişirse (ör. taban sonradan geri alınırsa) koşu yeniden
+ * tetiklenmez; Supervisor birleştirmeden hemen önce guards'ı yeniden koşturur (PROTOCOL).
+ * Git yol argümanları `--literal-pathspecs` ile verilir (`:`, `*`, `?`, `[` sihirli sayılmaz).
+ *
+ * Güvenlik raporu SHA'sının tazelik denetimi (T-008i MINOR 8; T-008k madde 8). `null` = taze.
+ * `target` verilirse (PR tabanı: `origin/<base>` veya push'ta `HEAD^1`) karar metin farkıyla değil
+ * AĞAÇ GİRDİSİ karşılaştırmasıyla verilir. Aday yollar: PR'ın korunan değişiklikleri
+ * (`merge-base(target, uç)..uç`, iki uç için) ∪ `sha..head` arasında değişen korunan yollar. Her yol
+ * p için (mod, blob) çifti: head[p] == rapor[p] → taze; değilse head[p] == taban[p] (tabanın o
+ * yoldaki girdisi birebir alınmış; yalnızca taban birleştirmesi) → taze; aksi STALE. Hem PR hem
+ * taban aynı dosyayı değiştirdiyse sonuç ikisinden de farklıdır → STALE (muhafazakâr). `target`
+ * verilmezse eski davranış (`sha..head` doğrudan fark).
  * @param {string} root
  * @param {string} head PR head SHA'sı
+ * @param {string} [target] PR tabanı ref'i
  * @returns {(sha: string) => string | null}
  */
-export function securityFreshness(root, head) {
+export function securityFreshness(root, head, target) {
   return (sha) => {
     if (sha === head) return null;
     try {
@@ -175,8 +208,30 @@ export function securityFreshness(root, head) {
         if (!(e instanceof GitError)) throw e;
         return "PR head'inin atası değil";
       }
-      const hits = protectedBetween(root, sha, head);
-      if (hits.length > 0) return `rapordan sonra korunan değişiklik: ${hits.map((h) => h.path).join(", ")}`;
+      if (target === undefined) {
+        const hits = protectedBetween(root, sha, head);
+        if (hits.length > 0) return `rapordan sonra korunan değişiklik: ${hits.map((h) => h.path).join(", ")}`;
+        return null;
+      }
+      if (!refExists(root, target)) return `PR tabanı (${target}) yerelde yok; tazelik doğrulanamadı`;
+      const mbSha = git(root, ["merge-base", target, sha]).trim();
+      const mbHead = git(root, ["merge-base", target, head]).trim();
+      const ownAtSha = protectedBetween(root, mbSha, sha).map((h) => h.path);
+      const ownAtHead = protectedBetween(root, mbHead, head).map((h) => h.path);
+      const between = protectedBetween(root, sha, head).map((h) => h.path);
+      const changed = [...new Set([...ownAtSha, ...ownAtHead, ...between])].filter((f) => {
+        const h = treeEntry(root, head, f);
+        const r = treeEntry(root, sha, f);
+        const b = treeEntry(root, target, f);
+        // Fail-closed: aday yol (bir uçta değiştiği biliniyor) hiçbir uçta okunamadıysa doğrulanamadı = bayat.
+        if (h === "" && r === "" && b === "") return true;
+        if (h === r) return false;
+        // head == taban yalnızca rapor anında PR bu yolu DEĞİŞTİRMEDİYSE (rapor == merge-base) taze;
+        // PR'ın incelenen değişikliği sonradan tabana geri döndürüldüyse bayat (MINOR-1).
+        if (h === b) return r !== treeEntry(root, mbSha, f);
+        return true;
+      });
+      if (changed.length > 0) return `rapordan sonra korunan değişiklik: ${changed.join(", ")}`;
       return null;
     } catch (e) {
       if (!(e instanceof GitError)) throw e;
@@ -355,8 +410,9 @@ export async function checkProtected(ctx) {
       return;
     }
     const result = evaluateApproval(found.pull.body, found.pull.headSha, {
-      securityFresh: securityFreshness(root, found.pull.headSha.toLowerCase()),
+      securityFresh: securityFreshness(root, found.pull.headSha.toLowerCase(), target),
     });
+    out.detail("freshnessNote", "taban dalı değişirse koşu yeniden tetiklenmez; Supervisor birleştirmeden hemen önce guards'ı yeniden koşturur");
     out.detail("approval", {
       pr: found.pull.number,
       headSha: found.pull.headSha,
