@@ -270,7 +270,7 @@ describe("demo tohumu: ürün, lokasyon, açılış stoğu (A-43, A-79)", () => 
 
   it("ilk koşu: 2 ürün + dönüşüm, depo/lokasyon ağacı, STOCK_IN/RECEIPT ile açılış stoğu; defter = bakiye", async () => {
     const first = await reseed(randomUUID());
-    expect(first.catalog).toEqual({ itemsCreated: 2, locationsCreated: 4, stockDocuments: 1, stockLines: DEMO_STOCK_TARGETS.length });
+    expect(first.catalog).toEqual({ itemsCreated: DEMO_ITEMS.length, locationsCreated: DEMO_LOCATIONS.length, stockDocuments: 1, stockLines: DEMO_STOCK_TARGETS.length });
     expect(await demoBalances()).toEqual(targetBalances);
     await expectLedgerEqualsBalance();
 
@@ -281,23 +281,24 @@ describe("demo tohumu: ürün, lokasyon, açılış stoğu (A-43, A-79)", () => 
     expect(s.settings).toMatchObject({ v: 2, st: "COMPLETED" });
     expect(s.settings.steps.map((x) => x.key)).toEqual(V2_STEPS);
 
-    // ağaç: Bölge A > Raf 1 > Göz 01/02 (STORAGE), KABUL/SEVK kökte
+    // ağaç: Bölge A > 3 raf > 4 göz (STORAGE), KABUL/SEVK kökte
     const locs = await q<{ code: string; depth: number; kind: string; parent: string | null }>(
-      "SELECT l.code, l.depth, l.kind, p.code AS parent FROM public.locations l LEFT JOIN public.locations p ON p.tenant_id = l.tenant_id AND p.id = l.parent_id WHERE l.tenant_id = $1 ORDER BY l.code", [DEMO_TENANT_ID]);
-    expect(locs).toEqual([
-      { code: "A", depth: 0, kind: "STORAGE", parent: null },
-      { code: "A-R1", depth: 1, kind: "STORAGE", parent: "A" },
-      { code: "KABUL", depth: 0, kind: "RECEIVING", parent: null },
-      { code: "R-01", depth: 2, kind: "STORAGE", parent: "A-R1" },
-      { code: "R-02", depth: 2, kind: "STORAGE", parent: "A-R1" },
-      { code: "SEVK", depth: 0, kind: "STAGING", parent: null },
-    ]);
-    expect(locs.filter((l) => DEMO_LOCATIONS.some((d) => d.code === l.code))).toHaveLength(DEMO_LOCATIONS.length);
+      "SELECT l.code, l.depth, l.kind, p.code AS parent FROM public.locations l LEFT JOIN public.locations p ON p.tenant_id = l.tenant_id AND p.id = l.parent_id WHERE l.tenant_id = $1 ORDER BY l.code COLLATE \"C\"", [DEMO_TENANT_ID]);
+    const depthOf = (c: string | null): number => (c === null ? -1 : depthOf(DEMO_LOCATIONS.find((d) => d.code === c)?.parent ?? null) + 1);
+    expect(locs).toEqual(
+      [
+        ...DEMO_LOCATIONS.map((d) => ({ code: d.code, depth: depthOf(d.code), kind: d.kind, parent: d.parent })),
+        { code: "KABUL", depth: 0, kind: "RECEIVING", parent: null },
+        { code: "SEVK", depth: 0, kind: "STAGING", parent: null },
+      ].sort((a, b) => (a.code < b.code ? -1 : 1)),
+    );
+    expect(locs).toHaveLength(18);
+    expect(locs.filter((l) => l.depth === 2)).toHaveLength(12);
 
     // ürün katsayıları ürün bazında (A-32)
     const conv = await q<{ item: string; unit: string; f: string }>(
       "SELECT i.code item, u.code unit, c.to_base_factor::text f FROM public.unit_conversions c JOIN public.items i ON i.tenant_id = c.tenant_id AND i.id = c.item_id JOIN public.units u ON u.tenant_id = c.tenant_id AND u.id = c.unit_id WHERE c.tenant_id = $1 ORDER BY 1, 2", [DEMO_TENANT_ID]);
-    expect(conv.map((c) => `${c.item}:${c.unit}:${Number(c.f)}`)).toEqual(
+    expect(conv.map((c) => `${c.item}:${c.unit}:${Number(c.f)}`).sort()).toEqual(
       DEMO_ITEMS.flatMap((i) => Object.entries(i.conversions).map(([u, f]) => `${i.code}:${u}:${f}`)).sort(),
     );
 
@@ -321,8 +322,8 @@ describe("demo tohumu: ürün, lokasyon, açılış stoğu (A-43, A-79)", () => 
   }, 120_000);
 
   it("iki koşu arasında kullanıcı çıkış yaparsa sonraki koşu farkı YENİ anahtarla kapatır (IDEMPOTENCY_MISMATCH yok); defter silinmez", async () => {
-    await userStockOut("KRT-3020", "R-01", "100");
-    expect((await demoBalances())["KRT-3020@R-01"]).toBe("1100");
+    await userStockOut("KRT-3020", "A1-G01", "100");
+    expect((await demoBalances())["KRT-3020@A1-G01"]).toBe("1100");
     const ledgerBefore = await n("SELECT count(*) n FROM public.stock_ledger WHERE tenant_id = $1", [DEMO_TENANT_ID]);
     const third = await reseed(randomUUID());
     expect(third.catalog).toMatchObject({ stockDocuments: 1, stockLines: 1 });
@@ -335,13 +336,13 @@ describe("demo tohumu: ürün, lokasyon, açılış stoğu (A-43, A-79)", () => 
 
   it("hedefin ÜSTÜNDE kalan bakiye STOCK_OUT farkıyla hedefe indirilir", async () => {
     const adminId = await demoAdmin();
-    const item = (await q<{ id: string; base_unit_id: string }>("SELECT id, base_unit_id FROM public.items WHERE tenant_id = $1 AND code = 'BNT-45'", [DEMO_TENANT_ID]))[0]!;
-    const loc = (await q<{ id: string; warehouse_id: string }>("SELECT id, warehouse_id FROM public.locations WHERE tenant_id = $1 AND code = 'R-02'", [DEMO_TENANT_ID]))[0]!;
+    const item = (await q<{ id: string; base_unit_id: string }>("SELECT id, base_unit_id FROM public.items WHERE tenant_id = $1 AND code = 'BNT-45S'", [DEMO_TENANT_ID]))[0]!;
+    const loc = (await q<{ id: string; warehouse_id: string }>("SELECT id, warehouse_id FROM public.locations WHERE tenant_id = $1 AND code = 'A2-G01'", [DEMO_TENANT_ID]))[0]!;
     const access = { db: app, principal: { userId: adminId, mfaVerified: false }, tenantSlug: "demo" } as const;
     const doc = await createStockDocument({ ...access, clientKey: randomUUID() }, { kind: "STOCK_IN", warehouseId: loc.warehouse_id, lines: [{ itemId: item.id, unitId: item.base_unit_id, quantity: "30", conversionFactor: "1", baseQuantity: "30", targetLocationId: loc.id }] });
     await approveDocument({ ...access, clientKey: randomUUID() }, { documentId: doc.documentId as string, expectedVersion: 1 });
     await postDocument({ ...access, clientKey: randomUUID() }, { documentId: doc.documentId as string, expectedVersion: 2 });
-    expect((await demoBalances())["BNT-45@R-02"]).toBe("750");
+    expect((await demoBalances())["BNT-45S@A2-G01"]).toBe("750");
     const r = await reseed(randomUUID());
     expect(r.catalog).toMatchObject({ stockDocuments: 1, stockLines: 1 });
     expect(await demoBalances()).toEqual(targetBalances);
@@ -350,7 +351,7 @@ describe("demo tohumu: ürün, lokasyon, açılış stoğu (A-43, A-79)", () => 
 
   it("aynı işin yeniden teslimi (aynı koşu kimliği) ikinci belge üretmez; yarıda kesilen işlem aynı anahtarlarla tamamlanır", async () => {
     // kesinti: işleme adımı (defter yazımı) başarısız → belge APPROVED kalır
-    await userStockOut("KRT-3020", "R-02", "50");
+    await userStockOut("KRT-3020", "A1-G02", "50");
     const runId = randomUUID();
     await q(`CREATE OR REPLACE FUNCTION public.t223_fail_ledger() RETURNS trigger LANGUAGE plpgsql AS $f$
       BEGIN RAISE EXCEPTION 'injected ledger failure'; END $f$`);
@@ -362,7 +363,7 @@ describe("demo tohumu: ürün, lokasyon, açılış stoğu (A-43, A-79)", () => 
       await q("DROP TRIGGER IF EXISTS t223_fail_ledger ON public.stock_ledger");
       await q("DROP FUNCTION IF EXISTS public.t223_fail_ledger()");
     }
-    expect((await demoBalances())["KRT-3020@R-02"]).toBe("250");
+    expect((await demoBalances())["KRT-3020@A1-G02"]).toBe("250");
     expect(await docCount("STOCK_IN", "APPROVED")).toBe(1);
     const inDocsBefore = await docCount("STOCK_IN");
 
@@ -381,9 +382,9 @@ describe("demo tohumu: ürün, lokasyon, açılış stoğu (A-43, A-79)", () => 
 
   it("aynı koşu kimliği + değişen içerik: yeni fark yeni anahtar üretir (IDEMPOTENCY_MISMATCH yok)", async () => {
     const runId = randomUUID();
-    await userStockOut("BNT-45", "R-02", "20");
+    await userStockOut("BNT-45S", "A2-G01", "20");
     expect((await reseed(runId)).catalog.stockDocuments).toBe(1);
-    await userStockOut("BNT-45", "R-02", "40"); // farklı fark, aynı iş kimliği
+    await userStockOut("BNT-45S", "A2-G01", "40"); // farklı fark, aynı iş kimliği
     const r = await reseed(runId);
     expect(r.catalog.stockDocuments).toBe(1);
     expect(await demoBalances()).toEqual(targetBalances);

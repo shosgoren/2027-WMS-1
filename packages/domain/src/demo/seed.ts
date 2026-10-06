@@ -487,10 +487,23 @@ export interface DemoItemDef {
   readonly conversions: Readonly<Record<string, string>>;
 }
 
-/** X ve Y: 16 Senaryo D adlandırması (R-01 → X, R-02 → Y). */
+/**
+ * Sentetik ambalaj/hırdavat kataloğu (G-09). Temel birim ADET (rulo ürünlerde 1 ADET = 1 rulo); koli/paket/rulo katsayıları ürün bazındadır (A-32).
+ * Son üç ürün (`BLN-100`, `PLT-8012`, `PSE-2030`) bilerek stoksuzdur (sıfır bakiye ekranı).
+ */
 export const DEMO_ITEMS: readonly DemoItemDef[] = Object.freeze<readonly DemoItemDef[]>([
-  { code: "KRT-3020", name: "Karton kutu 30x20", conversions: { KOLI: "50", PAKET: "10" } },
-  { code: "BNT-45", name: "Koli bandı 45mm", conversions: { KOLI: "36" } },
+  { code: "KRT-3020", name: "Karton kutu 30x20x15", conversions: { PAKET: "10", KOLI: "50" } },
+  { code: "KRT-4030", name: "Karton kutu 40x30x25", conversions: { PAKET: "10", KOLI: "25" } },
+  { code: "KRT-6040", name: "Karton kutu 60x40x40", conversions: { PAKET: "5", KOLI: "20" } },
+  { code: "BNT-45S", name: "Koli bandı 45mm şeffaf", conversions: { KOLI: "36" } },
+  { code: "BNT-48K", name: "Koli bandı 48mm kahverengi", conversions: { KOLI: "36" } },
+  { code: "STR-500", name: "Streç film 500mm 2,3kg", conversions: { KOLI: "6" } },
+  { code: "KSB-35", name: "Köşebent karton 35x35x3mm", conversions: { PAKET: "25", KOLI: "100" } },
+  { code: "ETK-100", name: "Etiket 100x150 termal", conversions: { RULO: "500", KOLI: "6000" } },
+  { code: "CMB-12", name: "Çember kayışı PP 12mm", conversions: { KOLI: "4" } },
+  { code: "BLN-100", name: "Balonlu naylon 100cm x 100m", conversions: { KOLI: "4" } },
+  { code: "PLT-8012", name: "Ahşap palet 80x120", conversions: { PAKET: "5" } },
+  { code: "PSE-2030", name: "Şeffaf poşet 20x30", conversions: { PAKET: "100", KOLI: "1000" } },
 ]);
 
 export interface DemoLocationDef {
@@ -500,12 +513,13 @@ export interface DemoLocationDef {
   readonly kind: LocationKindValue;
 }
 
-/** `Bölge A > Raf 1 > Göz 01 / Göz 02` (A-14); `R-01`, `R-02` yaprak STORAGE lokasyonlarıdır (Senaryo D). */
+/** 1 bölge × 3 raf × 4 göz (A-14, Bölge>Raf>Göz): `A` > `A-R1..A-R3` > `A1-G01..A3-G04`; ebeveyn her zaman çocuktan önce. */
 export const DEMO_LOCATIONS: readonly DemoLocationDef[] = Object.freeze<readonly DemoLocationDef[]>([
   { code: "A", name: "Bölge A", parent: null, kind: "STORAGE" },
-  { code: "A-R1", name: "Raf 1", parent: "A", kind: "STORAGE" },
-  { code: "R-01", name: "Göz 01", parent: "A-R1", kind: "STORAGE" },
-  { code: "R-02", name: "Göz 02", parent: "A-R1", kind: "STORAGE" },
+  ...[1, 2, 3].flatMap((r) => [
+    { code: `A-R${r}`, name: `Raf ${r}`, parent: "A", kind: "STORAGE" as const },
+    ...[1, 2, 3, 4].map((g) => ({ code: `A${r}-G0${g}`, name: `Göz 0${g}`, parent: `A-R${r}`, kind: "STORAGE" as const })),
+  ]),
 ]);
 
 export interface DemoStockTarget {
@@ -516,9 +530,17 @@ export interface DemoStockTarget {
 }
 
 export const DEMO_STOCK_TARGETS: readonly DemoStockTarget[] = Object.freeze<readonly DemoStockTarget[]>([
-  { item: "KRT-3020", location: "R-01", quantity: "1200" }, // 24 koli
-  { item: "KRT-3020", location: "R-02", quantity: "300" },
-  { item: "BNT-45", location: "R-02", quantity: "720" }, // 20 koli
+  { item: "KRT-3020", location: "A1-G01", quantity: "1200" }, // 24 koli
+  { item: "KRT-3020", location: "A1-G02", quantity: "300" },
+  { item: "KRT-4030", location: "A1-G03", quantity: "800" },
+  { item: "KRT-6040", location: "A1-G04", quantity: "240" },
+  { item: "BNT-45S", location: "A2-G01", quantity: "720" }, // 20 koli
+  { item: "BNT-45S", location: "A2-G02", quantity: "144" },
+  { item: "BNT-48K", location: "A2-G03", quantity: "432" },
+  { item: "STR-500", location: "A2-G04", quantity: "180" },
+  { item: "KSB-35", location: "A3-G01", quantity: "2000" },
+  { item: "ETK-100", location: "A3-G02", quantity: "3000" }, // 6 rulo
+  { item: "CMB-12", location: "A3-G03", quantity: "60" },
 ]);
 
 /** Sabit ad alanı (uuidv5; yalnızca demo anahtarları için). */

@@ -123,7 +123,10 @@ describe("demo içeriği tanımı (T-223)", () => {
   it("hedefler tanımlı ürün ve lokasyonlara bakar; yalnızca yaprak STORAGE lokasyonları", () => {
     const items = new Set(DEMO_ITEMS.map((i) => i.code));
     const locs = new Map(DEMO_LOCATIONS.map((l) => [l.code, l]));
-    expect(items.size).toBe(2);
+    expect(items.size).toBeGreaterThanOrEqual(10);
+    expect(DEMO_LOCATIONS.filter((l) => l.parent === "A")).toHaveLength(3); // 3 raf
+    expect(DEMO_LOCATIONS.filter((l) => l.parent?.startsWith("A-R"))).toHaveLength(12); // 3 x 4 göz
+    expect(new Set(DEMO_STOCK_TARGETS.map((t) => t.item)).size).toBeLessThan(items.size); // bazı ürünler stoksuz
     for (const t of DEMO_STOCK_TARGETS) {
       expect(items.has(t.item)).toBe(true);
       expect(locs.get(t.location)?.kind).toBe("STORAGE");
@@ -153,7 +156,7 @@ describe("demo stok farkı ve koşu anahtarı (MINOR-11)", () => {
   });
   it("özet belirlenimli ve içeriğe duyarlı; anahtar koşu/fark/tür/aşamaya göre ayrışır, aynı girdi aynı UUID", () => {
     const a = diffDemoStock(DEMO_STOCK_TARGETS, cur({}));
-    const b = diffDemoStock(DEMO_STOCK_TARGETS, cur({ "KRT-3020|R-01": 1_000_000n }));
+    const b = diffDemoStock(DEMO_STOCK_TARGETS, cur({ "KRT-3020|A1-G01": 1_000_000n }));
     expect(demoDiffDigest(a)).toBe(demoDiffDigest(diffDemoStock(DEMO_STOCK_TARGETS, cur({}))));
     expect(demoDiffDigest(a)).not.toBe(demoDiffDigest(b));
     const run = "11111111-1111-4111-8111-111111111111";
