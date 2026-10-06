@@ -30,15 +30,15 @@ export class GitError extends Error {
   /**
    * @param {string} message
    * @param {string[]} args
-   * @param {{ status?: number | null, stdout?: string, stderr?: string }} [info] süreç çıkış kodu (sinyalle ölümde `null`) ve çıktıları
+   * @param {{ status?: number | null, stdoutEmpty?: boolean, stderrEmpty?: boolean }} [info] süreç çıkış kodu (sinyalle ölümde `null`) ve çıktıların boş olup olmadığı (ham çıktı taşınmaz)
    */
   constructor(message, args, info = {}) {
     super(message);
     this.name = "GitError";
     this.args = args;
     this.status = info.status ?? null;
-    this.stdout = info.stdout ?? "";
-    this.stderr = info.stderr ?? "";
+    this.stdoutEmpty = info.stdoutEmpty ?? false;
+    this.stderrEmpty = info.stderrEmpty ?? false;
   }
 }
 
@@ -75,8 +75,8 @@ export function git(cwd, args) {
     const msg = stderr || String(err.message ?? e);
     throw new GitError(`git ${args.join(" ")}: ${msg}`, args, {
       status: typeof err.status === "number" ? err.status : null,
-      stdout: typeof err.stdout === "string" ? err.stdout : "",
-      stderr,
+      stdoutEmpty: typeof err.stdout === "string" && err.stdout.trim() === "",
+      stderrEmpty: stderr === "",
     });
   }
 }

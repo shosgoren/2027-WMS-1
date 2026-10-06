@@ -129,18 +129,28 @@ function defaultTarget(root) {
 }
 
 /**
+ * `revParse` hatası "ref gerçekten yok" mu? `--verify --quiet`: çıkış 1, stdout ve stderr boş.
+ * Uyarılı stderr (ör. belirsiz refname), çıkış ≠ 1 (bozuk depo, izin, sinyal) = gerçek hata.
+ * @param {unknown} e
+ * @returns {boolean}
+ */
+export function isMissingRef(e) {
+  return e instanceof GitError && e.status === 1 && e.stdoutEmpty && e.stderrEmpty;
+}
+
+/**
  * @param {string} root
  * @param {string} rev
  * @returns {string | null}
  */
-function revParse(root, rev) {
+export function revParse(root, rev) {
   try {
+    // `^{commit}` soyulması yok: nesnesi silinmiş ebeveyn (HEAD^2) kimliğiyle döner, sessiz `null`
+    // olmaz. HEAD'in kendi nesnesi silinmişse sonuç yine `null`'dır; çağıranlar bunu FAIL sayar.
+    // Yalnızca "ref gerçekten yok" = null; diğer her git hatası fail-closed (GitError yukarı çıkar).
     return git(root, ["rev-parse", "--verify", "--quiet", rev]).trim();
   } catch (e) {
-    // `^{commit}` soyulması yok: nesnesi silinmiş ebeveyn de kimliğiyle döner (sessiz `null` olmaz).
-    // Yalnızca "ref gerçekten yok" (`--verify --quiet`: çıkış 1, çıktı ve stderr boş) = null.
-    // Diğer her git hatası (bozuk depo, izin, sinyal → çıkış ≠ 1) fail-closed: GitError yukarı çıkar.
-    if (e instanceof GitError && e.status === 1 && e.stdout.trim() === "" && e.stderr.trim() === "") return null;
+    if (isMissingRef(e)) return null;
     throw e;
   }
 }

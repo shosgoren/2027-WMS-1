@@ -7,9 +7,9 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { main } from "./cli.mjs";
-import { verifyPushMerge } from "./protected.mjs";
+import { isMissingRef, revParse, verifyPushMerge } from "./protected.mjs";
 import { approvalLine, REASONS, securityLine } from "./lib/approval.mjs";
-import { gitEnv } from "./lib/git.mjs";
+import { GitError, gitEnv } from "./lib/git.mjs";
 import { API_VERSION, contextFromEnv, createGitHubClient, GitHubError, toPullInfo } from "./lib/github.mjs";
 import { createReporter, UsageError } from "./lib/output.mjs";
 import { createRepo } from "./lib/testkit.mjs";
@@ -1074,6 +1074,60 @@ describe("check:protected", () => {
     const res = verifyPushMerge(r.dir, "0".repeat(40));
     expect(res).not.toBeNull();
     expect(res).toContain("ikinci ebeveyni");
+  });
+
+  it("T-008m: silinmiş ikinci ebeveyn + ağacı önizlemeye eşit birleştirme → FAIL (eski kod null sayıp geçerdi)", () => {
+    const r = fixture();
+    r.write("docs/INVARIANTS.md", "# I2\n").commit("x");
+    const prHead = head(r);
+    r.checkout("main");
+    const base = r.git("rev-parse", "HEAD").trim();
+    const tree = (r.git("merge-tree", "--write-tree", "--no-messages", base, prHead).split("\n")[0] ?? "").trim();
+    const prTree = r.git("rev-parse", `${prHead}^{tree}`).trim();
+    const second = r.git("commit-tree", prTree, "-m", "sahte ikinci ebeveyn").trim();
+    const merged = r.git("commit-tree", tree, "-p", base, "-p", second, "-m", "Merge pull request #7").trim();
+    r.git("reset", "--quiet", "--hard", merged);
+    rmSync(path.join(r.dir, ".git", "objects", second.slice(0, 2), second.slice(2)), { force: true });
+    const res = verifyPushMerge(r.dir, prHead);
+    expect(res).not.toBeNull();
+    expect(res).toContain("ikinci ebeveyni");
+  });
+
+  it("T-008m: isMissingRef — yalnızca çıkış 1 + boş stdout/stderr; uyarılı stderr veya çıkış ≠ 1 gerçek hata", () => {
+    const err = (/** @type {number | null} */ status, /** @type {boolean} */ out, /** @type {boolean} */ se) =>
+      new GitError("x", ["rev-parse"], { status, stdoutEmpty: out, stderrEmpty: se });
+    expect(isMissingRef(err(1, true, true))).toBe(true);
+    expect(isMissingRef(err(1, true, false))).toBe(false); // uyarı (ör. belirsiz refname)
+    expect(isMissingRef(err(1, false, true))).toBe(false);
+    expect(isMissingRef(err(128, true, true))).toBe(false);
+    expect(isMissingRef(err(null, true, true))).toBe(false); // sinyal
+    expect(isMissingRef(new Error("x"))).toBe(false);
+  });
+
+  it("T-008m: revParse — olmayan ref null, bozuk depoda GitError fırlatır", () => {
+    const r = fixture();
+    expect(revParse(r.dir, "HEAD^9")).toBeNull();
+    expect(revParse(r.dir, "HEAD")).toMatch(/^[0-9a-f]{40}$/);
+    writeFileSync(path.join(r.dir, ".git", "HEAD"), "bozuk\n");
+    expect(() => revParse(r.dir, "HEAD^2")).toThrow(GitError);
+  });
+
+  it("T-008m: findPull içinde git hatası (PR alındıktan sonra bozulan depo) → GIT_ERROR, FAIL", async () => {
+    const r = fixture();
+    r.write("docs/INVARIANTS.md", "# I2\n").commit("x");
+    const h = head(r);
+    const inner = fakeClient({ pulls: [pull({ headSha: h })] }).client;
+    /** @type {GitHubClient} */
+    const client = {
+      ...inner,
+      getPull: async (n) => {
+        writeFileSync(path.join(r.dir, ".git", "HEAD"), "bozuk\n");
+        return inner.getPull(n);
+      },
+    };
+    const res = await check(r, { env: prEnv(r), client });
+    expect(res.code).toBe(1);
+    expect(res.text).toContain("FAIL GIT_ERROR");
   });
 
   it("T-008m: gerçek git hatası (bozuk HEAD) → 'ref yok' sayılmaz, git ile doğrulanamadı (GIT_ERROR yolu)", () => {
