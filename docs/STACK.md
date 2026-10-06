@@ -22,7 +22,9 @@ Kaynak sözdizimi: `<dosya>#<json.yolu>` (package.json alanı) veya `docker-comp
 | PgBouncer (yerel/CI, transaction mode) | edoburu/pgbouncer | v1.26.0-p0 | docker-compose.yml#pgbouncer | ADR-004 |
 | MinIO (yerel/CI) | alpine/minio | RELEASE.2025-10-15T17-29-55Z | docker-compose.yml#minio | ADR-006 |
 | Mailpit (yerel/CI) | axllent/mailpit | v1.31.4 | docker-compose.yml#mailpit | |
-| Testcontainers | testcontainers | — T-005a | | |
+| Testcontainers | testcontainers | 12.2.0 | package.json#devDependencies.testcontainers | |
+| node-postgres (yalnızca test/harness) | pg | 8.23.1 | package.json#devDependencies.pg | |
+| node-postgres tipleri | @types/pg | 8.23.1 | package.json#devDependencies.@types/pg | |
 | Drizzle ORM | drizzle-orm | 0.45.3 | packages/db/package.json#dependencies.drizzle-orm | ADR-003; Neon koşu 3 (T-005d) |
 | PostgreSQL sürücüsü (postgres.js) | postgres | 3.4.9 | packages/db/package.json#dependencies.postgres | ADR-003; Neon koşu 3 (T-005d) |
 | PostgreSQL (Neon) | — | — sağlayıcı yönetir, kilitlenemez; gözlenen 18.6 (proje pg_version 18, Q-05, T-005d koşu 3) | | ADR-004 |
@@ -36,6 +38,8 @@ Kaynak sözdizimi: `<dosya>#<json.yolu>` (package.json alanı) veya `docker-comp
 | Zod | zod | — ilk kullanan kart | | |
 
 Sürüm notları (kaynak: kurulu `package.json`/`pnpm-lock.yaml`, 2026-10-05):
+- **Kapsam kuralı (T-004b):** Workspace'lerin (`pnpm-lock.yaml#importers`) `package.json` dosyalarındaki her doğrudan bağımlılık (`dependencies`, `devDependencies`, `optionalDependencies`; `workspace:` hariç) bu tabloda kaynağıyla kilitli bir satıra sahip olmalıdır; eksikse `node scripts/check-docs.mjs` FAIL verir.
+- **pg 8.23.1:** yalnızca testlerde kullanılır (entegrasyon düzeneği: rol/RLS probu, PgBouncer yönetimi); uygulama sürücüsü postgres.js'tir.
 - **TypeScript 6.0.3'te kalınır:** typescript-eslint 8.71.0'ın desteklediği TypeScript aralığı `<6.1.0`; TS yükseltmesi typescript-eslint desteğini bekler.
 - **Node.js:** 24 Active LTS (`engines` `>=24 <25`). Node 26 LTS'e 2026-10-28'de geçer; geçiş ayrı kartla yapılır (`engines`, `@types/node`, CI Node sürümü birlikte).
 - **PostgreSQL 18.x:** Neon projesi `pg_version=18`, `server_version` 18.6 (pooled ve doğrudan; T-005d koşu 3: https://github.com/shosgoren/2027-WMS-1/actions/runs/37388724069). Yerel/CI compose `postgres:18.6-trixie` bununla hizalıdır (T-005e). Önceki "PG 17" kaydı (kullanıcı beyanı 2026-10-05) ölçümle düzeltildi. Neon küçük sürümü sağlayıcı yönetir; ana sürüm değişikliği yeniden spike tetikleyicisidir (ADR-004).

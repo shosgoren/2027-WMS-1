@@ -2,7 +2,7 @@
 // GitHub istemcisi (`lib/github.mjs`, sahte `fetch` yalnızca burada), kipler ve fail-closed davranış.
 // Fixture depolar `lib/testkit.mjs` ile geçici dizinde gerçek git ile kurulur. "… saldırısı" adlı
 // testler security-reviewer'ın (int/faz0-bekciler-1) denediği atlatmanın kendisidir (T-008h).
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -12,7 +12,7 @@ import { gitEnv } from "./lib/git.mjs";
 import { API_VERSION, contextFromEnv, createGitHubClient, GitHubError, toPullInfo } from "./lib/github.mjs";
 import { createReporter, UsageError } from "./lib/output.mjs";
 import { createRepo } from "./lib/testkit.mjs";
-import { checkProtected, parseProtectedArgs, WARN_LOCAL } from "./protected.mjs";
+import { checkProtected, parseProtectedArgs, securityFreshness, WARN_LOCAL } from "./protected.mjs";
 import {
   acceptedDecisionIds,
   adrAccepted,
@@ -1098,6 +1098,137 @@ describe("check:protected", () => {
     expect(stale.text).toContain("rapordan sonra korunan değişiklik: package.json");
   });
 
+  it("T-008k madde 8: tabanı birleştirmek raporu bayatlatmaz; PR'ın kendi korunan dosyasına veya başka daldan gelen korunan değişikliğe dokunmak bayatlatır", async () => {
+    const r = fixture();
+    r.write("docs/INVARIANTS.md", "# I2\n").commit("PR: kendi korunan değişikliği");
+    const reviewed = head(r);
+    const body = () => `${approvalLine(head(r))}\n${SEC0(reviewed)}\n`;
+    const run = () => check(r, { env: prEnv(r), client: fakeClient({ pulls: [pull({ headSha: head(r), body: body() })] }).client });
+    // Taban ilerler (korunan yola dokunur) ve PR'a birleştirilir.
+    r.checkout("main").write("scripts/guards/x.mjs", "export const baseSide = 1;\n").commit("taban: korunan değişiklik").publish("main");
+    r.checkout("feat/T-100-x").merge("main", "Merge main into feat");
+    const merged = head(r);
+    // Eski hesap (taban bilgisiz `reviewed..head` farkı) bu birleştirmeyi bayat sayardı; yeni hesap saymaz.
+    expect(securityFreshness(r.dir, merged)(reviewed)).toContain("scripts/guards/x.mjs");
+    expect(securityFreshness(r.dir, merged, "origin/main")(reviewed)).toBeNull();
+    const fresh = await run();
+    expect(fresh.text).not.toContain(REASONS.SECURITY_STALE);
+    expect(fresh.code).toBe(0);
+    // Yanlış pozitif kontrolü: PR kendi korunan dosyasına dokunursa bayat.
+    r.write("docs/INVARIANTS.md", "# I3\n").commit("PR: rapordan sonra kendi korunan dosyası");
+    const own = await run();
+    expect(own.code).toBe(1);
+    expect(own.text).toContain("rapordan sonra korunan değişiklik: docs/INVARIANTS.md");
+    // Saldırı: taban olmayan bir daldan korunan değişiklik getirmek (PR'ın kendi kümesine girer) bayat.
+    const r2 = fixture();
+    r2.write("docs/INVARIANTS.md", "# I2\n").commit("PR");
+    const reviewed2 = head(r2);
+    r2.checkout("main").branch("yan").write("package.json", JSON.stringify({ ...ROOT_PKG, scripts: { ...ROOT_PKG.scripts, postinstall: "node x" } }, null, 2) + "\n").commit("yan dal");
+    r2.checkout("feat/T-100-x").merge("yan", "Merge yan");
+    const stale = securityFreshness(r2.dir, head(r2), "origin/main")(reviewed2);
+    expect(stale).toContain("rapordan sonra korunan değişiklik: package.json");
+    // Taban yoksa fail-closed.
+    expect(securityFreshness(r2.dir, head(r2), "origin/yok")(reviewed2)).toContain("yerelde yok");
+  });
+
+  describe("T-008k güvenlik BLOCKER-1: tazelik ağaç girdisi (mod, blob) karşılaştırmasıdır", () => {
+    const X = "scripts/guards/x.mjs";
+    /** PR korunan dosyayı oluşturur, rapor o commit'e bağlanır; `mutate` rapordan sonraki değişikliktir. */
+    const afterReport = (/** @type {string | Buffer} */ initial, /** @type {(r: ReturnType<typeof fixture>) => void} */ mutate, /** @type {(r: ReturnType<typeof fixture>) => void} */ prep = () => {}) => {
+      const r = fixture();
+      prep(r);
+      r.write(X, /** @type {string} */ (initial)).commit("PR: korunan dosya");
+      const reviewed = head(r);
+      mutate(r);
+      return securityFreshness(r.dir, head(r), "origin/main")(reviewed);
+    };
+
+    it("saldırı: tek satır taşıma (+/- satır kümesi aynı) → bayat", () => {
+      const stale = afterReport("export const a = 1;\nexport const b = 2;\nexport const c = 3;\n", (r) =>
+        r.write(X, "export const b = 2;\nexport const a = 1;\nexport const c = 3;\n").commit("taşı"));
+      expect(stale).toContain(`rapordan sonra korunan değişiklik: ${X}`);
+    });
+
+    it("saldırı: blok taşıma → bayat", () => {
+      const lines = ["// 1", "// 2", "// 3", "// 4", "// 5", "// 6"];
+      const moved = [...lines.slice(3), ...lines.slice(0, 3)];
+      const stale = afterReport(lines.join("\n") + "\n", (r) => r.write(X, moved.join("\n") + "\n").commit("blok taşı"));
+      expect(stale).toContain(X);
+    });
+
+    it("saldırı: NUL baytlı dosya + .gitattributes -diff (metin farkı boş) → bayat", () => {
+      const stale = afterReport(
+        "export const a = 1;\0\nfoo\n",
+        (r) => r.write(X, "export const a = 1;\0\nbar\n").commit("ikili değişiklik"),
+        (r) => r.write(".gitattributes", `${X} -diff\n`).commit("attr"),
+      );
+      expect(stale).toContain(X);
+    });
+
+    it("saldırı: yalnızca kip değişikliği (chmod +x) → bayat", () => {
+      const stale = afterReport("export const a = 1;\n", (r) => {
+        chmodSync(path.join(r.dir, X), 0o755);
+        r.commit("chmod +x");
+      });
+      expect(stale).toContain(X);
+    });
+
+    it("saldırı: korunan dosyayı rapordan sonra silmek → bayat", () => {
+      const stale = afterReport("export const a = 1;\n", (r) => r.remove(X).commit("sil"));
+      expect(stale).toContain(X);
+    });
+
+    it("yanlış pozitif yok: rapordan sonra yalnızca taban birleştirmesi korunan dosyayı getirir → taze", () => {
+      const r = fixture();
+      r.write(X, "export const own = 1;\n").commit("PR");
+      const reviewed = head(r);
+      r.checkout("main").write("scripts/guards/y.mjs", "export const base = 1;\n").commit("taban").publish("main");
+      r.checkout("feat/T-100-x").merge("main", "Merge main");
+      expect(securityFreshness(r.dir, head(r), "origin/main")(reviewed)).toBeNull();
+    });
+
+    it("muhafazakâr: PR ve taban aynı korunan dosyayı değiştirdi (birleşik içerik ikisinden de farklı) → bayat", () => {
+      const r = fixture();
+      r.write(X, "a\nb\nc\nd\ne\nf\ng\n").commit("taban tohumu").publish("main").git("update-ref", "refs/heads/main", "HEAD");
+      r.branch("feat/T-101-y");
+      r.write(X, "A\nb\nc\nd\ne\nf\ng\n").commit("PR");
+      const reviewed = head(r);
+      r.checkout("main").write(X, "a\nb\nc\nd\ne\nf\nG\n").commit("taban").publish("main");
+      r.checkout("feat/T-101-y").merge("main", "Merge main");
+      expect(securityFreshness(r.dir, head(r), "origin/main")(reviewed)).toContain(X);
+    });
+
+    for (const f of [":x/package.json", ":x/eslint.config.mjs", "a*b/tsconfig.json", "[x]/package.json", "a?b/package.json"]) {
+      it(`güvenlik MAJOR-1: pathspec sihirli karakterli yol (${f}) rapordan sonra eklenince bayat; taban birleştirmesiyle gelince taze`, () => {
+        const body = f.endsWith("package.json") ? JSON.stringify({ scripts: { postinstall: "node x" } }) + "\n" : "{}\n";
+        const r = fixture();
+        r.write("docs/INVARIANTS.md", "# I2\n").commit("PR");
+        const reviewed = head(r);
+        r.write(f, body).commit("rapordan sonra sihirli yol");
+        expect(securityFreshness(r.dir, head(r), "origin/main")(reviewed)).toContain(f);
+        const r2 = fixture();
+        r2.write("docs/INVARIANTS.md", "# I2\n").commit("PR");
+        const reviewed2 = head(r2);
+        r2.checkout("main").write(f, body).commit("taban").publish("main");
+        r2.checkout("feat/T-100-x").merge("main", "Merge main");
+        expect(securityFreshness(r2.dir, head(r2), "origin/main")(reviewed2)).toBeNull();
+      });
+    }
+
+    it("güvenlik MINOR-1: rapor anında PR'ın değiştirdiği dosya sonradan tabandaki sürüme döndürülürse bayat", () => {
+      const r = fixture();
+      r.write(X, "export const own = 1;\n").commit("PR: incelenen değişiklik");
+      const reviewed = head(r);
+      r.write(X, "export {};\n").commit("tabandaki sürüme geri döndür");
+      expect(securityFreshness(r.dir, head(r), "origin/main")(reviewed)).toContain(X);
+    });
+
+    it("yanlış pozitif yok: rapordan sonra korunmayan dosya değişir → taze", () => {
+      const stale = afterReport("export const a = 1;\n", (r) => r.write("docs/STATE.md", "# durum 2\n").commit("belge"));
+      expect(stale).toBeNull();
+    });
+  });
+
   it("push: before ≠ HEAD^1 (birden fazla birleştirme) → APPROVAL_UNVERIFIABLE", async () => {
     const r = fixture();
     r.write("docs/INVARIANTS.md", "# I2\n").commit("x");
@@ -1224,5 +1355,41 @@ describe("check:protected", () => {
     expect(await main(["protected", "--local"], { root: r.dir, log: (l) => lines.push(l) })).toBe(0);
     expect(lines.join("\n")).toContain(WARN_LOCAL);
     expect(await main(["protected", "--nope"], { root: r.dir, log: () => {} })).toBe(2);
+  });
+});
+
+// T-008j (bekciler-2 incelemesi MINOR): `resolution` alanı olmayan `packages:` girdisi integrity-yalnız
+// sayılmıyordu ama hiç değerlendirilmiyordu da (kapanış dışı pakette serbestti) → artık fail-closed.
+describe("protected-paths: resolution'sız packages girdisi (T-008j madde 5)", () => {
+  const ZOD = "  zod@4.0.0:\n    resolution: {integrity: sha512-ZZZ}\n";
+
+  it.each(/** @type {Array<[string, string]>} */ ([
+    ["resolution satırı silinir, başka alan kalır", "  zod@4.0.0:\n    engines: {node: '>=18'}\n"],
+    ["girdi boş akış eşlemesi", "  zod@4.0.0: {}\n"],
+    ["resolution yerine tarball dışı alan (tarball anahtarı girdinin kendisinde)", "  zod@4.0.0:\n    tarball: https://evil.example.invalid/zod.tgz\n"],
+  ]))("saldırı: kapanış dışı pakette %s → korunur", (_name, entry) => {
+    const after = LOCK.replace(ZOD, entry);
+    expect(after).not.toBe(LOCK);
+    expect(lockfileGuarded(after)).toMatch(/^resolution zod@4\.0\.0 <resolution yok>$/m);
+    const hits = contentRules("pnpm-lock.yaml", LOCK, after);
+    expect(hits.map((h) => h.rule)).toEqual(["lockfile"]);
+    expect(hits[0]?.reason).not.toContain("ayrıştırılamadı");
+  });
+
+  it("saldırı: resolution'sız yeni packages girdisi eklenir → korunur", () => {
+    const after = LOCK.replace(ZOD, `${ZOD}\n  evil@1.0.0:\n    engines: {node: '*'}\n`);
+    expect(after).not.toBe(LOCK);
+    expect(contentRules("pnpm-lock.yaml", LOCK, after).map((h) => h.rule)).toEqual(["lockfile"]);
+  });
+
+  it("yanlış pozitif yok: integrity'li resolution + ek alan serbest; değişmeyen kilit serbest", () => {
+    const withEngines = LOCK.replace(ZOD, "  zod@4.0.0:\n    resolution: {integrity: sha512-ZZZ}\n    engines: {node: '>=18'}\n");
+    expect(withEngines).not.toBe(LOCK);
+    expect(lockfileGuarded(withEngines)).not.toMatch(/^resolution /m);
+    expect(contentRules("pnpm-lock.yaml", LOCK, withEngines)).toEqual([]);
+    expect(contentRules("pnpm-lock.yaml", LOCK, LOCK)).toEqual([]);
+    // Depodaki gerçek kilit dosyasında resolution'sız girdi yok (yanlış alarm üretmez).
+    const real = readFileSync(path.join(import.meta.dirname, "../../pnpm-lock.yaml"), "utf8");
+    expect(lockfileGuarded(real)).not.toMatch(/^resolution /m);
   });
 });

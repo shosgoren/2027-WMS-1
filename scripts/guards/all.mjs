@@ -16,7 +16,7 @@
 // (`GUARD_NOT_IN_BASE`); onlarsız onay ve kapsam denetlenemez.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { checkMap, checkStack, summaryLine } from "../check-docs.mjs";
+import { checkMap, checkStack, checkStackCoverage, summaryLine } from "../check-docs.mjs";
 import { UsageError } from "./lib/output.mjs";
 
 /** Sıra PROTOCOL §3b ve REPORT_TEMPLATE özet satırıyla aynıdır. */
@@ -65,7 +65,14 @@ export function checkDocs(root, log) {
   };
   const stackMd = readFile("docs/STACK.md");
   const mapMd = readFile("docs/MAP.md");
-  const stack = stackMd === null ? { ok: false, count: 0, failures: ["stack: docs/STACK.md okunamadı"] } : checkStack(stackMd, readFile);
+  // T-008k: `check-docs.mjs main()` ile aynı: sürüm denetimi + doğrudan bağımlılık kapsamı (kilit dosyası yoksa FAIL).
+  const versions = stackMd === null ? { ok: false, count: 0, failures: ["stack: docs/STACK.md okunamadı"] } : checkStack(stackMd, readFile);
+  const coverage = stackMd === null ? { ok: false, count: 0, failures: [] } : checkStackCoverage(stackMd, readFile);
+  const stack = {
+    ok: versions.ok && coverage.ok,
+    count: versions.count,
+    failures: [...versions.failures, ...coverage.failures],
+  };
   const map =
     mapMd === null
       ? { ok: false, count: 0, failures: ["map: docs/MAP.md okunamadı"] }

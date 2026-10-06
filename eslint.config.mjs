@@ -113,6 +113,20 @@ const IMPORT_NON_STATIC = {
   message: MSG_NON_STATIC,
 };
 
+/**
+ * T-008k: bekçi yükleyicisinin tek serbest biçimi `import(pathToFileURL(<ifade>).href)`; yalnızca
+ * noktalı `.href` (hesaplanmış `["href"]`, çıplak değişken, `x.href` serbest değildir), tek ve yayılımsız argüman.
+ */
+const IMPORT_PATH_TO_FILE_URL_HREF =
+  "[source.type='MemberExpression'][source.computed=false][source.optional=false][source.property.name='href']" +
+  "[source.object.type='CallExpression'][source.object.optional=false][source.object.callee.type='Identifier']" +
+  "[source.object.callee.name='pathToFileURL'][source.object.arguments.length=1]" +
+  ":not([source.object.arguments.0.type='SpreadElement'])";
+const IMPORT_NON_STATIC_EXCEPT_FILE_URL = {
+  selector: `ImportExpression:not([source.type='Literal'], [source.type='TemplateLiteral'], ${IMPORT_PATH_TO_FILE_URL_HREF})`,
+  message: MSG_NON_STATIC,
+};
+
 /** AC-28 / T-005g Yapılacak 1: dinamik biçimlerde aynı yasaklı küme. */
 const RAW_CLIENT_SYNTAX = [
   // import("…"), import(`…`)
@@ -368,6 +382,31 @@ const TENANT_SETTING_SYNTAX = [
   },
 ];
 
+/**
+ * T-008k güvenlik MINOR-5: `import(pathToFileURL(x).href)` muafiyeti ADA bakar; ad yeniden bağlanırsa
+ * (gölgeleme, başka modülden içe aktarma, yerel işlev/değişken, parametre, desen) muafiyet sahte olur.
+ * cli.mjs'te `pathToFileURL` yalnızca `node:url`'den `import { pathToFileURL }` ile bağlanabilir.
+ */
+const MSG_PATH_TO_FILE_URL_REBIND =
+  "cli.mjs'te `pathToFileURL` adı yalnızca `import { pathToFileURL } from \"node:url\"` ile bağlanabilir; yeniden bağlama/gölgeleme yasak (T-008k).";
+const PATH_TO_FILE_URL = "[name='pathToFileURL']";
+const PATH_TO_FILE_URL_REBINDING = [
+  "ImportDeclaration:not([source.value='node:url']) > :matches(ImportSpecifier, ImportDefaultSpecifier, ImportNamespaceSpecifier)[local.name='pathToFileURL']",
+  "ImportDeclaration > ImportSpecifier[local.name='pathToFileURL']:not([imported.name='pathToFileURL'])",
+  "ImportDeclaration > :matches(ImportDefaultSpecifier, ImportNamespaceSpecifier)[local.name='pathToFileURL']",
+  "VariableDeclarator[id.name='pathToFileURL']",
+  ":matches(ObjectPattern, ArrayPattern) Identifier" + PATH_TO_FILE_URL,
+  "FunctionDeclaration[id.name='pathToFileURL']",
+  "FunctionExpression[id.name='pathToFileURL']",
+  "ClassDeclaration[id.name='pathToFileURL']",
+  "ClassExpression[id.name='pathToFileURL']",
+  ":function > Identifier.params" + PATH_TO_FILE_URL,
+  ":function > AssignmentPattern.params > Identifier.left" + PATH_TO_FILE_URL,
+  ":function > RestElement.params > Identifier.argument" + PATH_TO_FILE_URL,
+  "CatchClause > Identifier.param" + PATH_TO_FILE_URL,
+  "AssignmentExpression[left.name='pathToFileURL']",
+].map((selector) => ({ selector, message: MSG_PATH_TO_FILE_URL_REBIND }));
+
 /** `import(<ifade>)` muafiyetinin tek dosyası (T-015). */
 const GUARD_LOADER_FILE = "scripts/guards/cli.mjs";
 
@@ -422,16 +461,20 @@ export default defineConfig(
     // T-015: bekçi giriş noktası `scripts/guards/<ad>.mjs` modülünü `import(pathToFileURL(file).href)`
     // ile yükler; `<ad>` `isGuardName` ile sabit `GUARDS` listesine karşı doğrulanır ve testler
     // (`scope.test.mjs`) `guardsDir` ile geçici dizinden sahte modül yükler — statik harita bunu
-    // karşılayamaz. Muafiyet YALNIZCA bu dosya ve YALNIZCA `import(<ifade>)` seçicisi içindir: aynı
+    // karşılayamaz. Muafiyet YALNIZCA bu dosya ve YALNIZCA `import(pathToFileURL(<ifade>).href)` biçimi içindir (T-008k): aynı
     // dosyada yasaklı küme (statik/dinamik/require), statik olmayan `require` ve tenant ayarı
     // denetimleri aynen geçerlidir (ac-28-lint.test.ts bunu doğrular).
     files: [GUARD_LOADER_FILE],
+    // Satır içi yapılandırma/devre dışı bırakma yorumları cli.mjs'te etkisizdir (yüklenen muafiyeti
+    // `eslint-disable` ile genişletmek mümkün değil; yorum varsa ESLint uyarı verir).
+    linterOptions: { noInlineConfig: true },
     rules: {
       "no-restricted-syntax": [
         "error",
-        ...RAW_CLIENT_SYNTAX.filter((s) => s !== IMPORT_NON_STATIC),
+        ...RAW_CLIENT_SYNTAX.map((s) => (s === IMPORT_NON_STATIC ? IMPORT_NON_STATIC_EXCEPT_FILE_URL : s)),
         ...CODE_EXEC_SYNTAX,
         ...TENANT_SETTING_SYNTAX,
+        ...PATH_TO_FILE_URL_REBINDING,
       ],
     },
   },
