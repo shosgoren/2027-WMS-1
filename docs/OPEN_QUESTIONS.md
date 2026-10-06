@@ -75,6 +75,11 @@ Q-78 | Rezervasyon tahsis önerisi politikası | Faz 3A planı | açık — A-13
 Q-79 | Saha belgeleri ve COUNT_ADJUSTMENT numara önekleri | Faz 3A planı | açık — A-139
 Q-80 | Sipariş durumları ve toplama görevlendirmesinin kapsamı | Faz 3A planı | açık — A-140
 Q-81 | 'Ürün bulunamadı' sonrası sayım görevi ve otomatik yeniden tahsis | Faz 3A planı | açık — A-141
+Q-82 | "Geri al" (undo) kapsamı ve yetkisi: hangi işlemler onay yerine 10 sn geri al ile telafi edilir; `reversal.create` izni olmayan rol (PICKER, COUNTER) kendi az önceki işlemini geri alabilmeli mi; bildirim kapandıktan sonra geri alma olağan ters kayıt akışına (onaylı) mı düşer? | T-262, ADR-024 (öneri), spec 08 §Kurallar, UX_NOVICE N-03 | açık — A-157
+Q-83 | Saha yerleştirme/toplamada önerilenden farklı ama geçerli lokasyon okutulursa: ret mi, gerekçeli onayla kabul mü, kim onaylar? Yanlış ürün okutmasında yönetici aşma (override) yetkisi olacak mı? | T-263, T-313, T-314 | açık — A-158
+Q-84 | "Yardım çağır" gerçek bildirim göndermeli mi; kime (TENANT_ADMIN, WAREHOUSE_MANAGER, atanmış sorumlu), hangi kanalla (uygulama içi, e-posta)? | T-265, spec 08 §"Sıfır eğitim" | açık — A-159
+Q-85 | Ürün içi kullanılabilirlik telemetrisi (yardım dokunuşu, görev süresi, terk, yanlış tarama oranı) olay şeması, saklama süresi ve KVKK dayanağı; UX_NOVICE §5 hedefleri (görev başarı ≥%90, K-19 yardımsız başarı ≥%80) onaylanıyor mu? | T-265, T-266, UX_NOVICE §5, Q-07 | açık — A-160
+Q-86 | Sihirbaz/uzman modu ve görünüm tercihleri (tur görüldü, büyük yazı, sesli okuma) kimde ve nerede: kullanıcı tercihi mi, rol varsayılanı mı, tenant ayarı (`settings.manage`) mı; sunucuda saklanmalı mı? İlk kullanım turunun rol eşlemesi doğru mu? | T-266, T-267, T-268 | açık — A-161, A-162
 
 ## Varsayımlar
 A-01 | Neon pooler'ı transaction-mode PgBouncer'dır (kullanıcı kararı kaydı, 2026-10-05) — **teyit edildi 2026-10-05, sürüm hariç** (belge + T-005d koşu 3 çoklama gözlemi, https://github.com/shosgoren/2027-WMS-1/actions/runs/37388724069); PgBouncer sürümü gözlenemedi | Neon pooler türünü/kipini değiştirdiğini duyurana veya yeniden spike aksini gösterene kadar | Q-02
@@ -226,3 +231,9 @@ A-152 | Belge kaynak bağlantısı polimorfik (FK yok); DB tür beyaz listesi ve
 A-153 | İade durum kümesi kabul belgesiyle aynı (DRAFT, OPEN, CLOSED, CANCELLED) | Q-75 | T-301
 A-154 | (kodda A-248-1) Durum geçişi fail-closed beyaz liste: yalnız QUARANTINE→AVAILABLE ve AVAILABLE→QUARANTINE; DAMAGED/BLOCKED'a/dan geçiş matris netleşene dek VALIDATION_FAILED. Hedef durum yalnız STOCK_MOVE'da (NULL = kaynakla aynı). A-147/A-217-1 kaldırıldı | Q-49, 16 kural 3 | T-248
 A-155 | (kodda A-248-2) Rezerve kısım durum değiştirmez: yeterlilik quantity − reserved kuralıyla INSUFFICIENT_STOCK; rezervasyon taşıması AVAILABLE olmayan hedefe gidemez | 16 kural 5, ADR-009 | T-248
+A-157 | Geri al yalnız işlenmiş (POSTED), hiç ters çevrilmemiş STOCK_IN/STOCK_OUT/STOCK_MOVE belgesinde, belgeyi işleyen kullanıcı tarafından ve mevcut `reversal.create` izniyle (yeni izin yok) `reverseDocument` "ALL" üzerinden; izni olmayanda "Geri al" düğmesi gösterilmez. Bildirim kapandıktan sonra geri alma olağan ters kayıt akışıyla (onaylı). Stok dışı işlemler (arşivleme vb.) kapsam dışı | Q-82 | T-262
+A-158 | Yanlış lokasyon/ürün okutması her zaman ret: tam ekran uyarı + "Anladım, tekrar okut", aşma yok; miktar üst sınırı beklenen kalan miktar (A-133) | Q-83 | T-263
+A-159 | Faz 3A'da "Yardım çağır" bildirim göndermez; bağlamsal ipucu + `/help` sayfası + destek kodu gösterir (T-122 davranışı, sahte işlev yok) | Q-84 | T-265
+A-160 | Ürün içi telemetri yok; kullanılabilirlik ölçümleri yalnız elle yapılan "ilk kez kullanan" yürüyüşünde (`.artifacts/novice-walkthrough/`); UX_NOVICE §5 hedefleri bağlayıcı değil, taban ölçümü sonrası onaya sunulur | Q-85 | T-265, UX_NOVICE §5
+A-161 | Sihirbaz modu varsayılan açık; "Uzman modu", tur görüldü, büyük yazı ve sesli okuma tercihleri yalnız cihazda (localStorage; anahtar tenant + kullanıcı kimliği özeti, değer kişisel veri/miktar içermez); sunucu kalıcılığı ve migration yok. Ortak cihazda her kullanıcı kendi anahtarını görür | Q-86 | T-266, T-267, T-268
+A-162 | İlk kullanım turu rol eşlemesi: TENANT_ADMIN → "dükkân sahibi" (kurulum), WAREHOUSE_MANAGER ve READ_ONLY → "yönetici", PICKER ve COUNTER → "depo çalışanı"; çok rollüde bu sıradaki ilk eşleşen; tur yetki vermez | Q-86 | T-267
