@@ -270,7 +270,13 @@ describe("shouldSuppressNetworkMeta (A-43/ADR-016 §10, T-112e)", () => {
   });
 
   it("kullanıcı araması başarısızsa gizlilik lehine bastırır", async () => {
-    const r = await shouldSuppressNetworkMeta(DOMAIN, { userId: realId, lookupEmail: () => Promise.reject(new Error("db")) });
+    const seen: unknown[] = [];
+    const r = await shouldSuppressNetworkMeta(DOMAIN, {
+      userId: realId,
+      lookupEmail: () => Promise.reject(new Error("db")),
+      onLookupError: (e) => seen.push(e),
+    });
     expect(r).toBe(true);
+    expect(seen).toHaveLength(1); // sessiz yutulmaz (G-07)
   });
 });

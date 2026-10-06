@@ -702,6 +702,8 @@ export async function shouldSuppressNetworkMeta(
     readonly userId: string | null;
     readonly requestEmail?: string | null;
     readonly lookupEmail: (userId: string) => Promise<string | null>;
+    /** Arama hatası bildirimi (maskeli günlük; sessiz yutulmaz, G-07). */
+    readonly onLookupError?: (error: unknown) => void;
   },
 ): Promise<boolean> {
   if (subject.explicit === true) return true;
@@ -710,7 +712,8 @@ export async function shouldSuppressNetworkMeta(
   if (subject.userId === null) return false;
   try {
     return isDemoEmail(await subject.lookupEmail(subject.userId), demoEmailDomain);
-  } catch {
+  } catch (error) {
+    subject.onLookupError?.(error);
     return true;
   }
 }
@@ -736,6 +739,7 @@ export function createAuth(params: CreateAuthParams): AuthService {
       explicit: suppressNetworkMeta,
       userId,
       requestEmail,
+      onLookupError: (error) => logMasked("error", `network meta suppressed: subject lookup failed (${type})`, error),
       lookupEmail: async (id) => {
         const rows = await authDb.execute<{ email: string }>(sql`SELECT email FROM public.users WHERE id = ${id}::uuid`);
         return rows[0]?.email ?? null;
@@ -1215,7 +1219,7 @@ export function createAuth(params: CreateAuthParams): AuthService {
           const current = await getSessionFromCtx(ctx);
           // M2: fail-open YALNIZCA çıkış için — denetim yazımı başarısızsa oturum yine silinir (kullanıcı çıkış
           // yapabilmeli; kalan oturum güvenlik riski, eksik çıkış olayı değil). Hata maskeli loglanır.
-          await emit(SECURITY_EVENT.logout, current?.user.id ?? null, ctx.request ?? ctx.headers, ctx.context.options, {}, true);
+          await emit(SECURITY_EVENT.logout, current?.user.id ?? null, ctx.request ?? ctx.headers, ctx.context.options, {}, true, false, current?.user.email ?? null);
         }
       }),
       after: createAuthMiddleware(async (ctx) => {
@@ -1230,7 +1234,7 @@ export function createAuth(params: CreateAuthParams): AuthService {
               const known = email === undefined ? null : await ctx.context.internalAdapter.findUserByEmail(email.toLowerCase());
               await emit(SECURITY_EVENT.loginFailed, known?.user.id ?? null, source, options, {
                 reason: (ctx.context.returned as APIError).body?.code ?? "UNKNOWN",
-              }, false, false, email ?? null);
+              }, false, false, known?.user.email ?? email ?? null);
               return;
             }
             // Başarılı giriş: rezervasyon geri alınır (başarısız denemeler sayılmaya devam eder).
@@ -1243,6 +1247,10 @@ export function createAuth(params: CreateAuthParams): AuthService {
               created.user.id,
               source,
               options,
+              {},
+              false,
+              false,
+              created.user.email,
             );
             return;
           }
@@ -1260,7 +1268,7 @@ export function createAuth(params: CreateAuthParams): AuthService {
               await sessionWriteOrRevoke(created.session.token, () =>
                 authDb.execute(sql`UPDATE public.sessions SET mfa_verified_at = now() WHERE token = ${created.session.token}`),
               );
-              await emit(SECURITY_EVENT.loginSucceeded, created.user.id, source, options, { mfa: true });
+              await emit(SECURITY_EVENT.loginSucceeded, created.user.id, source, options, { mfa: true }, false, false, created.user.email);
             }
             return;
           }
