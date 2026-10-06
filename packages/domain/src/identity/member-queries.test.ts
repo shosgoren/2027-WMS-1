@@ -6,11 +6,16 @@ const ok = { callerCanManage: true, tenantIsDemo: false, isSelf: false, isDemoTa
 describe("maskEmail", () => {
   it("yerel kısım >=4: ilk 2 + ***; alan adı ilk harf + ***, TLD açık", () => {
     expect(maskEmail("alice@example.test")).toBe("al***@e***.test");
-    expect(maskEmail("abcd@mail.example.test")).toBe("ab***@m***.example.test");
+    expect(maskEmail("abcd@mail.acme.com.tr")).toBe("ab***@m***.tr");
+    expect(maskEmail("abcd@mail.example.test")).toBe("ab***@m***.test");
   });
   it("yerel kısım <4: ***", () => {
     expect(maskEmail("abc@example.test")).toBe("***@e***.test");
     expect(maskEmail("a@example.test")).toBe("***@e***.test");
+  });
+  it("kesme kod noktasına göre: BMP dışı karakter bölünmez", () => {
+    expect(maskEmail("\u{1F600}\u{1F601}\u{1F602}x@\u{1F680}site.test")).toBe("\u{1F600}\u{1F601}***@\u{1F680}***.test");
+    expect(maskEmail("\u{1F600}\u{1F601}\u{1F602}@example.test")).toBe("***@e***.test");
   });
   it("noktasız alan adı ve geçersiz adres", () => {
     expect(maskEmail("alice@localhost")).toBe("al***@l***");
