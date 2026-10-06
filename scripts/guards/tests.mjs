@@ -32,6 +32,7 @@
 //   QUARANTINE_UNREGISTERED   kayıt yok / kimliksiz etiket / kayıt başka dosya için
 //   QUARANTINE_NOT_APPROVED   kayıt satırı `origin/main`'de birebir yok (karantinayı ekleyen PR birleşmemiş)
 //   QUARANTINE_GATE_AC        test (veya altındaki test) `currentGatePhase` fazının `@AC` testi
+//   QUARANTINE_FUTURE_DATE    (kayıt satırı) eklendi tarihi bugünden (UTC) ileri (T-008j)
 //   QUARANTINE_EXPIRED        (kayıt satırı) bitiş tarihi geçti (UTC)
 //   QUARANTINE_TOO_LONG       (kayıt satırı) bitiş > eklendiği tarih + 14 gün
 //   QUARANTINE_REGISTRY_INVALID  `tests/QUARANTINE.md` ayrıştırılamadı

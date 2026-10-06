@@ -1,10 +1,10 @@
 # STATE (≤80 satır — her görev sonunda Supervisor günceller)
 
-**Oturum kilidi:** session_01C59FRaUynaDdhNGZoRbKsY · 2026-10-05T16:30Z (zamanlanmış oturum: kilit 3 saatten yeniyse ve başka oturumunsa hiçbir şey yapmadan çık; değilse kendi kimliğinle yenile, her push'ta zamanı güncelle)
+**Oturum kilidi:** session_01C59FRaUynaDdhNGZoRbKsY · 2026-10-05T23:55Z (zamanlanmış oturum: kilit 3 saatten yeniyse ve başka oturumunsa hiçbir şey yapmadan çık; değilse kendi kimliğinle yenile, her push'ta zamanı güncelle)
 **Faz:** 0 — Kararlar & iskelet
-**Aktif görev:** `int/faz0-bekciler-2` → `main` PR (T-008d/e/f/g) ∥ T-005d Neon koşusu (../wt-T-005d → `int/faz0-neon`). STATE'in güncel kopyası: `int/faz0-bekciler-2`.
-**Son tamamlanan:** #19 `int/faz0-pooler` → `main` (T-005a/b/c/g, T-015, T-016; security-reviewer 3. tur 0/0/9) · #13 Fly staging (ilk dağıtım yeşil) · #14 T-008g → bekciler-2
-**Sonraki adım:** T-008d → T-008e; T-008f; sonra T-008g (bekçiler taban daldan, `--root`, test-ac `$RUNNER_TEMP`, çalışma anı skip denetimi) → bekciler-2 PR. T-005g → pooler paketi yeniden inceleme → PR. Sonra T-005d (Neon, Actions) ve T-010 (Fly; FLY_API_TOKEN bekleniyor).
+**Aktif görev:** Faz 0 kapısı. **Neon koşu 3 PASS** (run 37388724069: Q-01 aws-eu-central-1 · Q-02 PgBouncer transaction, sürüm gözlenemedi · Q-04 prepare=false 0 hata · Q-05 PG 18.6 · Q-06 yalnızca düz parola; AC-05 pool1/2 + AC-28 + harness PASS; RTT p95 113 ms). #33 T-005e → int/faz0-neon birleşti (0763930). T-005f (architect, wt-T-005f) ADR-004/STACK/OQ'ya işliyor → PR → int/faz0-neon → main; int/faz0-kapanis → main; sonra `pnpm test:ac --phase 0` + check:pilot + JOURNAL kapı raporu. #28 T-110 → int/faz1-ui-temel birleşti (ad6c254); T-110b güvenlik incelemesi sürüyor. Faz 1 yığını (birleştirme kapıdan sonra): T-115 0468d7e (0·0·1) + T-115b 62ec6d2 (0·0·0) hazır · T-112b cd0bf42 (test:int 245/245) inceleme sürüyor · çalışan: T-116 mailer, T-113 (wt-T-113 = T-112b+T-115), T-112c (← T-112b). Bekleyen PR'lar: #29 Faz 1 planı, #30 T-101. Supervisor STATE işleri `/home/user/wt-kapanis`'ta.
+**Son tamamlanan:** #33 T-005e · #28 T-110 · #31 neon-spike gecikme bütçesi → main · #26 T-008k → int/faz0-kapanis · #20 `int/faz0-bekciler-2` → `main` (T-008d/e/f/g; bekçiler CI'da taban daldan) · #19 pooler · #13 Fly staging
+**Sonraki adım:** Faz 1 planı güvenlik 3. tur @b400466 BLOCKER 0 · MAJOR 0 · MINOR 8 → MINOR'lar kartlara → ADR-014/015/016 kabul PR'ı (korunan). #25/#26/#27 CI yeşilse birleştir. T-005d (Neon Actions koşusu; iş akışı main'e girince dispatch) → T-005e/f; T-008j; T-004b; T-009b canlı AC-43; sonra Faz 0 kapısı (`pnpm test:ac --phase 0` + check:pilot + JOURNAL kapı raporu) → Faz 1 kart seti (architect).
 
 ## Çalışma biçimi (kullanıcı kararı 2026-10-05 — ADR-012 rev., PROTOCOL §Onay kaynağı)
 - Kullanıcı PR incelemez. Birleştirme kapısı: CI/oturumda `pnpm verify` + `check:all` + `test:int` + ilgili `test:ac` yeşil; risk matrisine göre `security-reviewer` ve `qa-verifier` BLOCKER: 0 → Supervisor PR'ı kendisi birleştirir (`mcp__github__merge_pull_request`). Korunan değişiklikte PR açıklamasında `APPROVED-BY: supervisor (ADR-012 rev.)`.
@@ -24,30 +24,36 @@ ADR-001 Next.js + ayrı worker · 002 İngilizce kod/DB, Türkçe UI · 003 Driz
 - [x] T-003 CI (`ci.yml`: verify, infra, secrets, deps; A-36 audit istisnası bitiş 2026-10-19). Takip: lockfile bütünlüğü (el ile düzenlenmiş lockfile audit'i kandırabilir) → T-008 ek kartı
 - [x] T-004 STACK + MAP + `scripts/check-docs.mjs` (#3). Bulgu: T-008g check-docs'u `check:all`'a bağlar; doğrudan bağımlılık STACK'te yoksa hata önerisi
 - [x] T-005a ✓ (#5) · T-005b ✓ (#6, postgres.js 3.4.9 + drizzle 0.45.3, prepare:false A-öneri) · T-005c ✓ (#7, AC-05 pool1/2 + AC-28 PASS) → paket incelemesi → `main`. Takipler: T-005e CI'da pool 1 koşusu; `@wms/db/internal` `sql` dışa verimi; DrizzleQueryError parametreleri loga (G-09) → gözlem kartı; DB_CLIENT_SETTINGS composition root (Faz 1); tests/**/*.ts typecheck kapsamı + STACK testcontainers/pg kilidi → T-004b; T-005c kartı mutasyonu `WITH CHECK (true)`
-- [ ] T-005d Neon gerçek pooler koşusu (GitHub Actions; sırlar: `NEON_API_KEY`, değişken `NEON_PROJECT_ID`) → T-005e CI eşdeğerliği → `int/faz0-neon`
+- [x] T-005d Neon gerçek pooler koşusu (koşu 3 PASS, 2026-10-05) · (GitHub Actions; sırlar: `NEON_API_KEY`, değişken `NEON_PROJECT_ID`) → T-005e CI eşdeğerliği → `int/faz0-neon`
 - [x] T-006 PILOT.md — varsayımsal profil (Q-12)
 - [x] T-007, T-008a/b/c/h/i, T-014 (#8). Bilinen risk: int kapsam sahtelemesi (m9), PR gövdesinde gizli HTML
 - [ ] Takip: lockfile bütünlüğü (T-003 MINOR) → T-008i
-- [ ] T-008d/e/f/g bekçiler → `int/faz0-bekciler-2`
+- [x] T-008d/e/f/g (#20). Açık MINOR'lar → T-008j
 - [~] T-009a — kimlik/CODEOWNERS kısmı iptal (ADR-012 rev.); kalan: kullanıcı isterse `main` branch protection · T-009b AC-43/44'ün yeni tanımına göre
 - [x] T-010 Fly staging (#11, #12, #13 main'de; ilk dağıtım yeşil). Takipler: `not found` desenini daralt, taban imaj güncelleme süreci, PR CI'da docker build
 
+## Faz 1 plan takipleri (security-reviewer @8335c6b MINOR; ilgili kart başlamadan küçük docs PR'ı)
+- m1 dolaylı ADMIN: `pg_has_role(current_user,'wms_identity_probe','MEMBER WITH ADMIN OPTION')=false` (T-103/T-105 öncesi) · m2 T-108 yerel/CI'da beklenmeyen ADMIN satırı FAIL · m3 demo bekçi işlevi `search_path` + `proowner`/`prosecdef` assertion · m4 ADR-016 açık risk (reset-password tx paylaşmaz) için Q kaydı + karar (T-117b öncesi) · m5 T-105:26, T-101b:18, ADR-015:29 artıkları
+- T-110 #28 MINOR: href yalnızca uygulama içi yol, Esc yükleniyorken, STACK lucide satırı, odak/48px T-131
+- T-102 MINOR-1 risk kaydı: wms_app security_events'te tenant'tan bağımsız tüm kullanıcıların ip/user_agent/detail'ini okur (kart gereği) — T-113'te sütun/işlevle daraltma değerlendirilir
+- T-005d düz parola yeniden denemesi (Supervisor kararı 2026-10-05): kabul edilen risk — parola koşuya özel, geçici dal silinir; Neon `log_statement`/`pg_stat_statements` metni ve dal silme başarısızsa rolün yaşaması bilinen risk; T-005f Q-06 kaydına işlenir
+- İnceleme takipleri (kart başlamadan ilgili karta işlenir): T-112 ← reauth.* olaylarını yalnızca wms_auth yazabilsin (T-102 @77317fe) · T-121 ← withNewTenant imzası (tenantId içeride, `created`, ad değişiminden sonra tekrar → IDEMPOTENCY_MISMATCH), SLUG_TAKEN hata kodu 15-engineering'e · T-105 ← Neon'da FORCE RLS altında operasyon rolü tenant bağlamı, ALLOWED_DB_LEVEL_SETTINGS, pg_subscription/largeobject okunabilirliği · app-settings bekçisini check:all'a bağlama kartı · T-131 ← ConfirmDialog çift Esc · OPEN_QUESTIONS A-xx ← T-103 varsayımları (tenants yaratıcı alanları nullable, tenant_settings varsayılanları, invitations.created_at yok, wms_app sütun GRANT'ları, süresi dolmuş davet T-117'de iptal)
+- Son inceleme takipleri (özet): T-005e imaj @sha256 sabitleme + neon'da sürüm assertion'ı yok · PG18 AFTER tetikleyicileri kuyruğa alan rolle (defter/audit kartlarına) · T-101c 0·0·3 · T-111 0·0·5 (require takma adı → bekçi kartı; tests/integration'da auth importu Q; T-112'de ham istemci yalnızca global auth tablolarında) · T-107 son MAJOR c3f711a'da düzeltildi
+- T-101 Faz 0 kapısından önce başlatıldı (Supervisor kararı: zaman kullanımı); birleştirme kapıdan sonra
+
 ## Engeller
-- U-06 (2026-10-05 istendi): `FLY_API_TOKEN`'ı org token yerine `etkin-wms-staging` uygulamasına kapsamlı deploy token'la değiştir, eski org token'ı iptal et. Staging ilk dağıtım yeşil: https://github.com/shosgoren/2027-WMS-1/actions/runs/37352935682 (web+worker fra started, smoke OK) → https://etkin-wms-staging.fly.dev / kullanıcı eylemi bekleyenler (2026-10-05 tek mesajla istendi)
+- U-06 kapandı (2026-10-05): kullanıcı `FLY_API_TOKEN`'ı uygulama kapsamlı deploy token'la değiştirdi; doğrulama dispatch koşusu yeşil https://github.com/shosgoren/2027-WMS-1/actions/runs/37356910665. Eski org token'ın iptali kullanıcıya hatırlatıldı.
+- U-07 kapandı (2026-10-05): kullanıcı `NEON_API_KEY`'i `etkin-wms` proje kapsamlı anahtarla değiştirdi; doğrulama ilk neon-spike koşusunda.
 - U-01 Neon: kullanıcı 2026-10-05 tamamladığını bildirdi (proje etkin-wms, AWS Frankfurt, PG 17; `NEON_API_KEY` sırrı + `NEON_PROJECT_ID` değişkeni). Doğrulama T-005d ilk Actions koşusunda → T-005d
 - U-02 Fly.io: kullanıcı 2026-10-05 tamamladığını bildirdi (hesap + kart + `FLY_API_TOKEN` repo sırrı). Doğrulama T-010 ilk dağıtım koşusunda
 - U-03 Resend: kullanıcı 2026-10-05 `RESEND_API_KEY` repo sırrını ekledi; alan adı bildirilmedi → doğrulanmış alan adı olana kadar Resend yalnızca hesap sahibinin adresine `onboarding@resend.dev`'den gönderebilir; diğer alıcılar için davet/şifre bağlantısı ekranda gösterilir (ADR-013, kapalı bayrak). Faz 1 e-posta kartında
 - U-04 Q-07 hukukçu onayı → yalnızca gerçek kişisel veriyle prod için; demo için engel değil
+- E-02 (2026-10-05 19:24Z→): GitHub barındırılan runner kapasitesi — işlerin çoğu "not acquired by Runner of type hosted" ile iptal; bazı işler (verify, secrets) koşuyor → kota/ödeme değil, kullanıcı işi değil. Yalnızca runner'a hiç atanmamış işler yeniden koşturulur; CI yeşil olmadan birleştirme yok. Docs-only int/faz1-plan push'larını grupla (kuyruk yükü).
 - E-01 kapandı: bu ortamda npm/Docker Hub açık.
 
 ## İnceleme takipleri (security-reviewer faz0-iskelet, MINOR — ilgili kartta ele alınır)
 - T-005b/d: uygulama süreçleri yalnızca `DATABASE_URL` alır, `DATABASE_URL_DIRECT` (süper kullanıcı) yalnızca migration (RLS bypass yolu) · AC-05 session-level `set_config` sızıntısını açıkça kapsar · T-005a `test:int` betiği eklenir
 - T-003: compose imajları digest ile sabitlenir · compose parola denetimine `\n`/`\r` · worker log maskeleme (DB/kuyruk eklenince) · ADR-006 adaptörü: bucket oluşturma + root olmayan erişim anahtarı
-
-## Supervisor kararı bekleyen tasarım noktaları (T-006…T-009 kart raporu)
-- T-007 `test:ac --ci`: PR'da mevcut `@AC` testleri koşar, `NO_TEST` yalnızca kapısı geçilmiş fazlar için hata → Supervisor T-007'de kesinleştirir
-- `check:pilot` `check:all`'a girmez; Faz 0 kapısında ayrıca denetlenir
-- Karantina: `skip` hiç serbest değil; karantinalı test koşar, kapıyı kırmaz
 
 ## Açık sorular (özet; detay OPEN_QUESTIONS.md)
 Q-01…Q-06 Neon teknik alanları (T-005) · Q-07 KVKK hukukçu onayı · Q-12 pilot değerleri · Q-13 pilot hacim tanımı · Q-10 Neon sır kanalı (→ GitHub repo sırları, ADR-013) · Q-11 BullMQ eşikleri
