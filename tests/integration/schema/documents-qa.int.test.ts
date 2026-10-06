@@ -190,15 +190,49 @@ describe("POSTED belge/satır değişmezliği", () => {
     expectRejected(fromFull, [CHECK_VIOLATION], "FULL → PARTIAL geri alma", /REVERSAL_DECREASE/);
   });
 
-  it("POSTED belgeye satır eklenemez, POSTED belgenin satırı silinemez (wms_app 23514); DRAFT satırında ters çevirme alanları değişemez", async () => {
+  it("satır INSERT/UPDATE/DELETE yalnızca DRAFT belgede: POSTED, APPROVED ve CANCELLED belgede reddedilir (23514, DOCUMENT_NOT_DRAFT); POSTED'da yalnızca ters çevirme alanları ilerler; DRAFT satırında ters çevirme alanları değişemez", async () => {
+    // POSTED (kalıcı fikstür)
     expectRejected(
       await appOne(A.tenantId, lineInsert, [A.tenantId, randomUUID(), posted.docId, 3, A.itemId, A.unitId, A.rootLocationId, null, null]),
       [CHECK_VIOLATION],
       "POSTED belgeye satır ekle",
-      /DOCUMENT_POSTED_IMMUTABLE/,
+      /DOCUMENT_NOT_DRAFT/,
     );
-    expectRejected(await appOne(A.tenantId, "DELETE FROM public.document_lines WHERE id = $1", [posted.line1]), [CHECK_VIOLATION], "POSTED satır sil", /DOCUMENT_POSTED_IMMUTABLE/);
-    expectRejected(await ownerOne(A.tenantId, "DELETE FROM public.document_lines WHERE document_id = $1", [posted.docId]), [CHECK_VIOLATION], "sahip: POSTED satır sil");
+    expectRejected(await appOne(A.tenantId, "DELETE FROM public.document_lines WHERE id = $1", [posted.line1]), [CHECK_VIOLATION], "POSTED satır sil", /DOCUMENT_NOT_DRAFT/);
+    expectRejected(await ownerOne(A.tenantId, "DELETE FROM public.document_lines WHERE document_id = $1", [posted.docId]), [CHECK_VIOLATION], "sahip: POSTED satır sil", /DOCUMENT_NOT_DRAFT/);
+    // APPROVED ve CANCELLED: belge durumu wms_app ile (gerçek yol) değiştirilir, sonra satır işlemleri denenir.
+    for (const status of ["APPROVED", "CANCELLED"]) {
+      const id = randomUUID();
+      const lineId = randomUUID();
+      const stage = async (q: Q): Promise<void> => {
+        await q(docInsert, [A.tenantId, id, "STOCK_IN", tv.STOCK_IN, null, A.warehouseId, A.ownerUserId]);
+        await q(lineInsert, [A.tenantId, lineId, id, 1, A.itemId, A.unitId, A.rootLocationId, null, null]);
+        await q("UPDATE public.documents SET status = $2 WHERE id = $1", [id, status]);
+      };
+      const ins = await attempt(app, A.tenantId, async (q) => {
+        await stage(q);
+        await q(lineInsert, [A.tenantId, randomUUID(), id, 2, A.itemId, A.unitId, A.rootLocationId, null, null]);
+      });
+      expectRejected(ins, [CHECK_VIOLATION], `${status} belgeye satır ekle`, /DOCUMENT_NOT_DRAFT/);
+      const upd = await attempt(app, A.tenantId, async (q) => {
+        await stage(q);
+        await q("UPDATE public.document_lines SET quantity = 11, base_quantity = 11 WHERE id = $1", [lineId]);
+      });
+      expectRejected(upd, [CHECK_VIOLATION], `${status} satırı güncelle`, /DOCUMENT_NOT_DRAFT/);
+      const del = await attempt(app, A.tenantId, async (q) => {
+        await stage(q);
+        await q("DELETE FROM public.document_lines WHERE id = $1", [lineId]);
+      });
+      expectRejected(del, [CHECK_VIOLATION], `${status} satırı sil`, /DOCUMENT_NOT_DRAFT/);
+    }
+    // Kontrol: DRAFT belgede ekleme/güncelleme/silme çalışır.
+    const draft = await attempt(app, A.tenantId, async (q) => {
+      const l = randomUUID();
+      await q(lineInsert, [A.tenantId, l, A.documentId, 7, A.itemId, A.unitId, A.rootLocationId, null, null]);
+      await q("UPDATE public.document_lines SET quantity = 11, base_quantity = 11 WHERE id = $1", [l]);
+      await q("DELETE FROM public.document_lines WHERE id = $1", [l]);
+    });
+    expect(draft.ok, `DRAFT kontrol: ${fmt(draft)}`).toBe(true);
     expectRejected(
       await appOne(A.tenantId, "UPDATE public.document_lines SET reversed_quantity = 1, reversal_status = 'PARTIAL' WHERE id = $1", [A.documentLineId]),
       [CHECK_VIOLATION],
@@ -372,7 +406,12 @@ describe("belge satırı ve belge başlığı bileşik FK'leri", () => {
       [FK_VIOLATION],
       "durum geçmişi → B belgesi",
     );
-    const ctl = await appOne(A.tenantId, "INSERT INTO public.document_status_history (tenant_id, document_id, to_status) VALUES ($1, $2, 'APPROVED')", [A.tenantId, A.documentId]);
+    // Kontrol: geçmiş satırı artık yalnızca belge durum değişikliğiyle (tetikleyici) doğar.
+    const ctl = await attempt(app, A.tenantId, async (q) => {
+      await q("UPDATE public.documents SET status = 'APPROVED' WHERE id = $1", [A.documentId]);
+      const h = await q("SELECT from_status, to_status FROM public.document_status_history WHERE document_id = $1 AND to_status = 'APPROVED'", [A.documentId]);
+      expect(h.rows).toEqual([{ from_status: "DRAFT", to_status: "APPROVED" }]);
+    });
     expect(ctl.ok, fmt(ctl)).toBe(true);
   });
 
@@ -544,39 +583,44 @@ describe("idempotency_records", () => {
 describe("document_status_history", () => {
   const hist = "INSERT INTO public.document_status_history (tenant_id, document_id, from_status, to_status, actor_user_id) VALUES ($1, $2, NULL, 'DRAFT', $3)";
 
-  it("wms_app istemci created_xid / occurred_at veremez (sütun yetkisi yok, 42501); normal INSERT'te created_xid = bu transaction'ın xid'i", async () => {
-    expectRejected(
-      await appOne(A.tenantId, "INSERT INTO public.document_status_history (tenant_id, document_id, to_status, created_xid) VALUES ($1, $2, 'DRAFT', '1'::xid8)", [A.tenantId, A.documentId]),
-      [INSUFFICIENT_PRIVILEGE],
-      "created_xid",
-    );
-    expectRejected(
-      await appOne(A.tenantId, "INSERT INTO public.document_status_history (tenant_id, document_id, to_status, occurred_at) VALUES ($1, $2, 'DRAFT', '2000-01-01')", [A.tenantId, A.documentId]),
-      [INSUFFICIENT_PRIVILEGE],
-      "occurred_at",
-    );
-    const r = await attempt(app, A.tenantId, async (q) => {
-      const ins = await q(`${hist} RETURNING created_xid::text AS x, occurred_at = now() AS now_ok`, [A.tenantId, A.documentId, A.ownerUserId]);
-      const cur = await q("SELECT pg_current_xact_id()::text AS x");
-      expect(ins.rows[0]).toEqual({ x: (cur.rows[0] as { x: string }).x, now_ok: true });
+  it("doğrudan INSERT herkes için 42501: wms_app (created_xid/occurred_at dahil) ve tablo sahibi/süper kullanıcı (replica modunda da)", async () => {
+    const plain = "INSERT INTO public.document_status_history (tenant_id, document_id, to_status) VALUES ($1, $2, 'DRAFT')";
+    const forged =
+      "INSERT INTO public.document_status_history (tenant_id, document_id, to_status, created_xid, occurred_at) VALUES ($1, $2, 'DRAFT', '1'::xid8, '2000-01-01T00:00:00Z')";
+    expectRejected(await appOne(A.tenantId, plain, [A.tenantId, A.documentId]), [INSUFFICIENT_PRIVILEGE], "wms_app doğrudan INSERT", /yalnızca documents durum tetikleyicisiyle/);
+    expectRejected(await appOne(A.tenantId, forged, [A.tenantId, A.documentId]), [INSUFFICIENT_PRIVILEGE], "wms_app created_xid/occurred_at (sütun yetkisi)");
+    expectRejected(await ownerOne(A.tenantId, plain, [A.tenantId, A.documentId]), [INSUFFICIENT_PRIVILEGE], "sahip doğrudan INSERT", /yalnızca documents durum tetikleyicisiyle/);
+    expectRejected(await ownerOne(A.tenantId, forged, [A.tenantId, A.documentId]), [INSUFFICIENT_PRIVILEGE], "sahip sahte created_xid/occurred_at", /yalnızca documents durum tetikleyicisiyle/);
+    const replica = await attempt(admin, A.tenantId, async (q) => {
+      await q("SET LOCAL session_replication_role = replica");
+      return q(forged, [A.tenantId, A.documentId]);
     });
-    expect(r.ok, fmt(r)).toBe(true);
+    expectRejected(replica, [INSUFFICIENT_PRIVILEGE], "sahip, replica modunda sahte INSERT");
+    // Reddedilen denemelerden hiçbiri kalıcı satır bırakmadı (hepsi ROLLBACK; kontrol sahip bağlantısından).
+    const n = await admin.query<{ n: string }>("SELECT count(*)::text AS n FROM public.document_status_history WHERE created_xid::text = '1' OR occurred_at < '2020-01-01'");
+    expect(n.rows[0]?.n, "sahte created_xid/occurred_at'li satır").toBe("0");
   });
 
-  it("tablo sahibi/süper kullanıcı istemci created_xid ve occurred_at verse bile sunucu değeri yazılır (yok sayılır); replica modunda da", async () => {
-    for (const replica of [false, true]) {
-      const r = await attempt(admin, A.tenantId, async (q) => {
-        if (replica) await q("SET LOCAL session_replication_role = replica");
-        const ins = await q(
-          `INSERT INTO public.document_status_history (tenant_id, document_id, to_status, created_xid, occurred_at)
-           VALUES ($1, $2, 'DRAFT', '1'::xid8, '2000-01-01T00:00:00Z') RETURNING created_xid::text AS x, occurred_at > '2020-01-01' AS recent`,
-          [A.tenantId, A.documentId],
-        );
+  it("tetikleyicinin yazdığı geçmiş satırında created_xid = bu transaction'ın xid'i ve occurred_at = now() (sunucu değeri): wms_app ve tablo sahibi; belge INSERT'i NULL→durum, durum değişimi ESKİ→YENİ yazar", async () => {
+    for (const who of ["wms_app", "owner"] as const) {
+      const client = who === "wms_app" ? app : admin;
+      const id = randomUUID();
+      const r = await attempt(client, A.tenantId, async (q) => {
+        await q(docInsert, [A.tenantId, id, "STOCK_IN", tv.STOCK_IN, null, A.warehouseId, A.ownerUserId]);
+        await q("UPDATE public.documents SET status = 'APPROVED' WHERE id = $1", [id]);
         const cur = await q("SELECT pg_current_xact_id()::text AS x");
-        expect(ins.rows[0], `replica=${replica}`).toEqual({ x: (cur.rows[0] as { x: string }).x, recent: true });
-        expect((ins.rows[0] as { x: string }).x).not.toBe("1");
+        const h = await q(
+          `SELECT from_status, to_status, created_xid::text AS x, occurred_at = now() AS now_ok
+             FROM public.document_status_history WHERE document_id = $1 ORDER BY to_status`,
+          [id],
+        );
+        const x = (cur.rows[0] as { x: string }).x;
+        expect(h.rows, who).toEqual([
+          { from_status: "DRAFT", to_status: "APPROVED", x, now_ok: true },
+          { from_status: null, to_status: "DRAFT", x, now_ok: true },
+        ]);
       });
-      expect(r.ok, fmt(r)).toBe(true);
+      expect(r.ok, `${who}: ${fmt(r)}`).toBe(true);
     }
   });
 
