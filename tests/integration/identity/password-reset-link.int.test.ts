@@ -233,6 +233,8 @@ describe("issuePasswordResetLink — üretim denetimleri", () => {
     const evs = await events(target.userId);
     expect(evs).toContain("password_reset");
     expect(evs).toContain("password_reset_link.consumed");
+    const cons = await adm.query("SELECT detail FROM public.security_events WHERE user_id = $1 AND event_type = 'password_reset_link.consumed'", [target.userId]);
+    expect(cons.rows[0].detail).toMatchObject({ issuing_tenant_id: fx.tenant });
     // Tek kullanımlık.
     expect((await reset(auth, res.token)).status).toBeGreaterThanOrEqual(400);
   });
@@ -287,7 +289,7 @@ describe("issuePasswordResetLink — üretim denetimleri", () => {
     await expect(issue(fx, wm, target.membershipId)).rejects.toMatchObject({ code: "FORBIDDEN" });
 
     // Gerçek requireRecentAuth: 20 dk önce açılmış oturum, pencere 10 dk.
-    const stale = { userId: fx.admin.userId, sessionId: randomUUID(), authenticatedAt: new Date(Date.now() - 20 * 60_000), mfaVerified: true };
+    const stale = { userId: fx.admin.userId, sessionId: randomUUID(), authenticatedAt: new Date(Date.now() - 20 * 60_000), mfaVerified: true, isDemo: false, twoFactorEnabled: false };
     const err = await issue(fx, fx.admin, target.membershipId, { recentAuth: () => auth.requireRecentAuth(stale, 600) }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(AppError);
     expect(err).toMatchObject({ code: "UNAUTHENTICATED", detail: "RECENT_AUTH_REQUIRED" });
@@ -318,6 +320,9 @@ describe("issuePasswordResetLink — üretim denetimleri", () => {
     await expect(issue(fx, fx.admin, target.membershipId, {}, { port: failing })).rejects.toBeInstanceOf(AppError);
     expect(await adminRecordCount(target.userId)).toBe(0);
     expect(await grantCount(target.userId)).toBe(0);
+    // Audit "üretildi" dedi ama olay yazılamadı: telafi satırı var.
+    const au = await adm.query("SELECT change_summary->>'status' AS st FROM public.audit_logs WHERE tenant_id = $1 AND action = 'password_reset_link.issued' ORDER BY occurred_at, id", [fx.tenant]);
+    expect(au.rows.map((r: { st: string }) => r.st)).toEqual(["issued", "revoked_before_delivery"]);
   });
 });
 
@@ -437,6 +442,45 @@ describe("kullanım anı denetimi (before /reset-password)", () => {
     expect((await reset(auth, token)).status).toBe(200);
     expect(await pwHash(target.userId)).not.toBe(before);
     expect(await events(target.userId)).not.toContain("password_reset_link.rejected");
+  });
+});
+
+describe("B1: saklanan kimlik belirteç olarak gönderilemez; kısa parola bağlantıyı yakmaz", () => {
+  it("saklanan kimlik/özet belirteç olarak gönderilirse grant YAKILMADAN ve self-servis yola düşmeden reddedilir (ardışık iki istek dahil)", async () => {
+    const fx = await mkTenant();
+    const target = await mkMember(fx.tenant, "PICKER");
+    const link = await issue(fx, fx.admin, target.membershipId);
+    const stored = String(await scalar("SELECT identifier FROM public.verifications WHERE value = $1 AND identifier LIKE 'reset-password:%'", [target.userId]));
+    expect(stored).toMatch(/^reset-password:h\./);
+    const digest = stored.slice("reset-password:".length); // `h.<özet>`
+    const before = await pwHash(target.userId);
+    for (const attempt of [digest, digest.slice(2), stored, `adm_${fx.tenant.replaceAll("-", "")}_${digest}`]) {
+      // Biçim dışı → 403 (arama yok); biçime uyan özet (yalnızca alfasayısal) → kayıt bulunamaz (400). Hiçbiri 200 olamaz.
+      expect([400, 403]).toContain((await reset(auth, attempt)).status);
+      expect([400, 403]).toContain((await reset(auth, attempt)).status); // ikinci ardışık istek de self-servis yola düşmez
+    }
+    expect(await pwHash(target.userId)).toBe(before);
+    expect(await grantCount(target.userId)).toBe(1);
+    expect(await adminRecordCount(target.userId)).toBe(1);
+    // Asıl bağlantı hâlâ çalışır.
+    expect((await reset(auth, link.token)).status).toBe(200);
+    expect(await pwHash(target.userId)).not.toBe(before);
+  });
+
+  it("kısa parola ile kullanım bağlantıyı tüketmez", async () => {
+    const fx = await mkTenant();
+    const target = await mkMember(fx.tenant, "PICKER");
+    const link = await issue(fx, fx.admin, target.membershipId);
+    const short = await auth.handler(
+      new Request(`${BASE}/api/auth/reset-password`, {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: BASE, "fly-client-ip": nextIp(), "user-agent": "t117b-int" },
+        body: JSON.stringify({ token: link.token, newPassword: "kisa" }),
+      }),
+    );
+    expect(short.status).toBe(400);
+    expect(await grantCount(target.userId)).toBe(1);
+    expect((await reset(auth, link.token)).status).toBe(200);
   });
 });
 

@@ -18,7 +18,7 @@ import { AppError } from "@wms/shared/errors";
 import { buildEmailSendPayload, canDeliver, type MailConfig } from "@wms/shared/mailer";
 import type { Sealer } from "@wms/shared/seal";
 import type { JobQueue } from "@wms/shared/queue";
-import { mapAccessError, runTenantCommand, type AccessTx, type TenantAccessParams } from "./access.ts";
+import { mapAccessError, runTenantCommand, runTenantCommandById, type AccessTx, type TenantAccessParams } from "./access.ts";
 import { isDemoAddress } from "./invitations.ts";
 import { ROLE_KEYS, ROLE_PERMISSIONS, type RoleKey } from "./permissions.ts";
 
@@ -392,12 +392,14 @@ export interface IssuePasswordResetLinkResult {
 }
 
 /**
- * Sıra (3. tur m1): (1) `users.manage` + `requireRecentAuth` (`recentAuth` ZORUNLU) ve üretim denetimleri — tenant demo
- * değil, hedef demo/sahip/kendisi değil, `wms_probe.identity_exclusive_to_tenant` true (hedefin `users` satırını commit'e
- * kadar `FOR UPDATE` kilitler); (2) YÖNETİCİ İŞARETLİ doğrulama kaydı (`wms_auth`); (3) aynı `wms_app` transaction'ında
- * `admin_reset_grants` + audit; COMMIT; (4) `security_events` `password_reset_link.issued_by_admin`; (5) bağlantı yalnızca
- * commit + olay yazımından SONRA döner. (2)'den sonra herhangi bir adım başarısız olursa işaretli kayıt aynı istekte
- * silinir (silinemezse grant'siz olduğundan kullanılamaz ve 30 dk'da dolar).
+ * Sıra (3. tur m1; inceleme @3b7efdf MINOR-2): (1) `users.manage` + `requireRecentAuth` (`recentAuth` ZORUNLU) ve ön
+ * denetimler kısa bir transaction'da (hedef çözümü; kilit tutulmaz); (2) YÖNETİCİ İŞARETLİ doğrulama kaydı (`wms_auth`) —
+ * `wms_app` transaction'ı ve `users` kilidi DIŞINDA; (3) tek `wms_app` transaction'ında üretim denetimleri YENİDEN
+ * (tenant demo değil, hedef aynı kullanıcı/demo/sahip/kendisi değil, `wms_probe.identity_exclusive_to_tenant` true —
+ * hedefin `users` satırını commit'e kadar `FOR UPDATE` kilitler) + `admin_reset_grants` + audit; COMMIT; (4) `security_events`
+ * `password_reset_link.issued_by_admin`; (5) bağlantı yalnızca commit + olay yazımından SONRA döner. (2)'den sonra bir
+ * adım başarısız olursa işaretli kayıt aynı istekte silinir; (4) başarısız olduysa audit "üretildi" dediği için ek bir
+ * telafi audit satırı (`status: revoked_before_delivery`) yazılır.
  */
 export async function issuePasswordResetLink(
   params: IssuePasswordResetLinkParams,
@@ -407,25 +409,45 @@ export async function issuePasswordResetLink(
   const memberId = parseUuid(rawMember);
   if (access.recentAuth === undefined) throw new AppError("UNAUTHENTICATED", { detail: "RECENT_AUTH_REQUIRED" }); // fail-closed
   const { port } = deps;
+
+  const checkTarget = async (tx: AccessTx, tenantId: string, actorUserId: string): Promise<TargetMembership> => {
+    await assertTenantNotDemo(tx, tenantId);
+    // Bu tenant'ta ACTIVE olmayan hedef (çıkarılmış, sıfır üyelik, başka tenant kimliği): nötr FORBIDDEN (varlık sızmaz).
+    const target = await loadTarget(tx, tenantId, memberId).catch((e: unknown) => {
+      throw e instanceof AppError && e.code === "NOT_FOUND" ? deny("NOT_MEMBER") : e;
+    });
+    if (target.userId === actorUserId) throw new AppError("VALIDATION_FAILED");
+    if (isDemoAddress(target.email, deps.demoEmailDomain)) throw deny("DEMO");
+    if (target.isOwner) throw deny("OWNER");
+    return target;
+  };
+
   let createdVerificationId: string | undefined;
-  let issued: { token: string; expiresAt: Date; targetUserId: string; tenantId: string; adminUserId: string; membershipId: string };
+  let tenantIdForCleanup: string | undefined;
+  let issued:
+    | { token: string; expiresAt: Date; targetUserId: string; tenantId: string; adminUserId: string; membershipId: string; targetMembershipId: string }
+    | undefined;
   try {
-    issued = await runTenantCommand({ ...access, permission: "users.manage" }, async (tx, actor) => {
-      await assertTenantNotDemo(tx, actor.tenantId);
-      // Bu tenant'ta ACTIVE olmayan hedef (çıkarılmış, sıfır üyelik, başka tenant kimliği): nötr FORBIDDEN (varlık sızmaz).
-      const target = await loadTarget(tx, actor.tenantId, memberId).catch((e: unknown) => {
-        throw e instanceof AppError && e.code === "NOT_FOUND" ? deny("NOT_MEMBER") : e;
-      });
-      if (target.userId === actor.userId) throw new AppError("VALIDATION_FAILED");
-      if (isDemoAddress(target.email, deps.demoEmailDomain)) throw deny("DEMO");
-      if (target.isOwner) throw deny("OWNER");
+    // (1) ön denetim (recentAuth burada); kilit/transaction (2)'de tutulmaz.
+    const pre = await runTenantCommand({ ...access, permission: "users.manage" }, async (tx, actor) => {
+      const target = await checkTarget(tx, actor.tenantId, actor.userId);
+      return { tenantId: actor.tenantId, targetUserId: target.userId };
+    });
+    tenantIdForCleanup = pre.tenantId;
+    // (2) işaretli kayıt: wms_app transaction'ı ve users kilidi dışında.
+    const created = await port.createToken(pre.targetUserId, pre.tenantId);
+    createdVerificationId = created.verificationId;
+    // (3) üretim transaction'ı: tüm denetimler yeniden; tenant kimliği önceden çözülmüştür (recentAuth (1)'de geçti).
+    const { recentAuth: _recentAuth, tenantSlug: _slug, ...rest } = access;
+    void _recentAuth;
+    void _slug;
+    issued = await runTenantCommandById({ ...rest, tenantId: pre.tenantId, permission: "users.manage" }, async (tx, actor) => {
+      const target = await checkTarget(tx, actor.tenantId, actor.userId);
+      if (target.userId !== pre.targetUserId) throw deny("NOT_MEMBER"); // (1)-(3) arasında üyelik başka kullanıcıya geçmiş olamaz; fail-closed
       const exclusive = await tx.execute<{ ok: boolean }>(
         sql`SELECT wms_probe.identity_exclusive_to_tenant(${target.userId}::uuid) AS ok`,
       );
       if (exclusive[0]?.ok !== true) throw deny("IDENTITY_SHARED");
-
-      const created = await port.createToken(target.userId, actor.tenantId);
-      createdVerificationId = created.verificationId;
       await tx.execute(
         sql`INSERT INTO public.admin_reset_grants (user_id, issuing_tenant_id, issuing_membership_id, verification_id, expires_at)
             VALUES (${target.userId}::uuid, ${actor.tenantId}::uuid, ${actor.membershipId}::uuid, ${created.verificationId}::uuid,
@@ -437,7 +459,7 @@ export async function issuePasswordResetLink(
         entityType: "membership",
         entityId: target.id,
         requestId: requestId ?? null,
-        changeSummary: { expires_at: created.expiresAt.toISOString() },
+        changeSummary: { status: "issued", expires_at: created.expiresAt.toISOString() },
       });
       return {
         token: created.token,
@@ -446,6 +468,7 @@ export async function issuePasswordResetLink(
         tenantId: actor.tenantId,
         adminUserId: actor.userId,
         membershipId: actor.membershipId,
+        targetMembershipId: target.id,
       };
     });
     await port.recordIssued({
@@ -461,6 +484,28 @@ export async function issuePasswordResetLink(
       } catch (cleanup) {
         const c = cleanup as { name?: unknown } | null;
         deps.log?.({ level: "error", msg: "password reset token cleanup failed", error: typeof c?.name === "string" ? c.name : "unknown" });
+      }
+    }
+    // Audit commit edildi ama olay yazılamadı: kayıt "üretildi" diyor → telafi satırı (best-effort, yutulmaz: loglanır).
+    if (issued !== undefined && tenantIdForCleanup !== undefined) {
+      const done = issued;
+      try {
+        const { recentAuth: _r, tenantSlug: _s, ...rest } = access;
+        void _r;
+        void _s;
+        await runTenantCommandById({ ...rest, tenantId: done.tenantId, permission: "users.manage" }, (tx, actor) =>
+          appendAudit(tx, {
+            action: "password_reset_link.issued",
+            actorUserId: actor.userId,
+            entityType: "membership",
+            entityId: done.targetMembershipId,
+            requestId: requestId ?? null,
+            changeSummary: { status: "revoked_before_delivery" },
+          }),
+        );
+      } catch (comp) {
+        const c = comp as { name?: unknown } | null;
+        deps.log?.({ level: "error", msg: "password reset compensating audit failed", error: typeof c?.name === "string" ? c.name : "unknown" });
       }
     }
     throw mapMembershipError(e);

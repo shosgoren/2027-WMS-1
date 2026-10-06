@@ -242,7 +242,17 @@ export const ADMIN_RESET_TTL_SEC = 30 * 60;
  * kendi (self-servis) belirteci `generateId(24)` alfanümeriktir, `_` içermez → bu önek taklit edilemez. İşaret
  * `/reset-password` akışını bozmaz (kimlik = `reset-password:<belirteç>`; password.mjs:152-155).
  */
-const ADMIN_TOKEN_RE = /^adm_[0-9a-f]{32}_/;
+const ADMIN_TOKEN_RE = /^adm_[0-9a-f]{32}_[A-Za-z0-9_-]{43}$/;
+/**
+ * Gönderilebilir (kabul edilen) belirteç biçimleri — B1 (güvenlik incelemesi @3b7efdf): Better Auth 1.7.7 özetli arama
+ * bulamazsa DÜZ kimlikle de arar (internal-adapter.mjs `identifiersToTry=[stored, plain]`), yani `token=<saklanan
+ * özet>` gönderen saklanan kaydı doğrudan eşleştirirdi. Bu yüzden kanca belirteç biçimini kısıtlar: self-servis =
+ * Better Auth'un ürettiği alfabe `[a-zA-Z0-9]` (core `generateId`: "a-z","A-Z","0-9"; `generateId(24)`, password.mjs
+ * requestPasswordReset). Alt sınır 24 (üretilen uzunluk); üst sınır 64 mevcut testlerin 32 karakterlik sabit
+ * belirteçlerini ve olası uzunluk artışını karşılar. Yönetici = tam `adm_` biçimi. Saklanan yönetici kimliği `h.` içerir
+ * (aşağıda): bu iki biçimle de eşleşemez → gönderilen hiçbir belirteç saklanan kimliğe denk gelmez.
+ */
+const SELF_SERVICE_TOKEN_RE = /^[A-Za-z0-9]{24,64}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
@@ -253,8 +263,9 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  */
 export function hashVerificationIdentifier(identifier: string): string {
   const digest = createHash("sha256").update(identifier, "utf8").digest("base64url");
+  // `h.` ayracı belirteç alfabesinin (ve `adm_` biçiminin) dışındadır: saklanan kimlik gönderilebilir belirteç olamaz.
   return identifier.startsWith("reset-password:") && ADMIN_TOKEN_RE.test(identifier.slice("reset-password:".length))
-    ? `reset-password:${digest}`
+    ? `reset-password:h.${digest}`
     : digest;
 }
 
@@ -827,6 +838,7 @@ export function createAuth(params: CreateAuthParams): AuthService {
   interface PendingReset {
     readonly userId: string;
     readonly marked: boolean;
+    readonly issuingTenant: string | null;
     readonly at: number;
   }
   const pendingResets = new Map<string, PendingReset>();
@@ -845,6 +857,12 @@ export function createAuth(params: CreateAuthParams): AuthService {
     return undefined;
   }
 
+  /** `adm_<32 hex>_…` işaretindeki ihraç eden tenant (token yalnızca grant eşleştiğinde güvenilirdir; olay ayrıntısı). */
+  function tenantOfAdminToken(token: string): string | null {
+    const h = token.slice(4, 36);
+    return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+  }
+
   const resetRejected = (): APIError =>
     new APIError("FORBIDDEN", { message: "RESET_LINK_REJECTED", code: "RESET_LINK_REJECTED" });
 
@@ -853,7 +871,17 @@ export function createAuth(params: CreateAuthParams): AuthService {
     if (token === undefined) return; // Better Auth INVALID_TOKEN ile reddeder
     const source = ctx.request ?? ctx.headers;
     const options = ctx.context.options;
+    // Parola uzunluğu Better Auth'tan ÖNCE aynı sınırlarla denetlenir: işleyici bu durumda belirteci tüketmeden reddeder
+    // (password.mjs assertPasswordNotTooShort/Long, consume'dan önce) → kısa parola grant'i yakmasın.
+    const pw = (ctx.body as { newPassword?: unknown } | undefined)?.newPassword;
+    if (typeof pw !== "string" || pw.length < PASSWORD_MIN_LENGTH || pw.length > PASSWORD_MAX_LENGTH) return;
     const marked = ADMIN_TOKEN_RE.test(token);
+    // B1: tanınmayan biçim (saklanan kimlik/özet dahil) hiçbir arama/tüketim yapılmadan ve self-servis yola düşmeden RED.
+    if (!marked && !SELF_SERVICE_TOKEN_RE.test(token)) {
+      await emit("password_reset_link.rejected", null, source, options, { verdict: "malformed" }, true);
+      throw resetRejected();
+    }
+    const issuingTenant = marked ? tenantOfAdminToken(token) : null;
     let record: { id: string; value: string } | null;
     let verdict: string;
     try {
@@ -876,15 +904,22 @@ export function createAuth(params: CreateAuthParams): AuthService {
     const userId = record !== null && UUID_RE.test(record.value) ? record.value : null;
     if (marked) {
       if (verdict === "consumed" && record !== null && userId !== null) {
-        pruneAndRemember(token, { userId, marked: true, at: Date.now() });
+        pruneAndRemember(token, { userId, marked: true, issuingTenant, at: Date.now() });
         return;
       }
       // işaretli + 'invalid' / 'absent' (veya tanınmayan dönüş) → nötr RED
-      await emit("password_reset_link.rejected", userId, source, options, { verdict: verdict === "invalid" ? "invalid" : "absent" }, true);
+      await emit(
+        "password_reset_link.rejected",
+        userId,
+        source,
+        options,
+        { verdict: verdict === "invalid" ? "invalid" : "absent", issuing_tenant_id: issuingTenant },
+        true,
+      );
       throw resetRejected();
     }
     if (verdict === "absent") {
-      if (record !== null && userId !== null) pruneAndRemember(token, { userId, marked: false, at: Date.now() });
+      if (record !== null && userId !== null) pruneAndRemember(token, { userId, marked: false, issuingTenant: null, at: Date.now() });
       return; // self-servis akışı
     }
     if (verdict === "consumed" || verdict === "invalid") {
@@ -918,7 +953,7 @@ export function createAuth(params: CreateAuthParams): AuthService {
     const returned = returnedValue as { status?: unknown } | undefined;
     if (returned === undefined || returned === null || typeof returned !== "object" || returned.status !== true) return;
     if (pending.marked) {
-      await emit("password_reset_link.consumed", pending.userId, source, options, {}, true);
+      await emit("password_reset_link.consumed", pending.userId, source, options, { issuing_tenant_id: pending.issuingTenant }, true);
       return;
     }
     if (!env.emailRecoveryEnabled) return; // A-55: bayrak kapalıyken kurtarma etkisi yok
