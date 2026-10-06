@@ -108,6 +108,55 @@ test("yönetim ekranları: Akış/Kokpit x 375/1280 px", async ({ page }) => {
           await expectFocusRing(page, page.locator("#action"), "denetim: eylem süzgeci");
           await expectNoHorizontalOverflow(page, "denetim kaydı");
           await shot("audit");
+
+          // T-246d — Ürünler: arama alanı + durum seçimi + oluşturma penceresi.
+          await page.goto("/t/demo/items");
+          await expect(page.getByRole("heading", { level: 1, name: "Ürünler" })).toBeVisible();
+          await expectBorderStrong(page, page.getByRole("searchbox", { name: "Ürün ara" }), "ürünler: arama");
+          await expectBorderStrong(page, page.locator("#item-status"), "ürünler: durum seçimi");
+          await expectFocusRing(page, page.locator("#item-status"), "ürünler: durum seçimi");
+          await expectNoHorizontalOverflow(page, "ürünler");
+          await shot("items");
+          await page.getByRole("button", { name: "Yeni ürün" }).click();
+          const itemDialog = page.getByRole("dialog");
+          await expect(itemDialog).toBeVisible();
+          await expectBorderStrong(page, itemDialog.locator('input[name="code"]'), "ürün oluştur: kod");
+          await expectBorderStrong(page, itemDialog.locator("#create-base-unit"), "ürün oluştur: temel birim");
+          await expectNoHorizontalOverflow(page, "ürün oluştur penceresi");
+          await shot("items-create");
+          await page.keyboard.press("Escape");
+          await expect(itemDialog).toBeHidden();
+
+          // T-246d — Depolar: oluşturma penceresi (girdi + seçim) ve varsa lokasyon ağacı.
+          await page.goto("/t/demo/warehouses");
+          await expect(page.getByRole("heading", { level: 1, name: "Depo ve raflar" })).toBeVisible();
+          await expectNoHorizontalOverflow(page, "depolar");
+          await shot("warehouses");
+          await page.getByRole("button", { name: "Yeni depo" }).click();
+          const whDialog = page.getByRole("dialog");
+          await expect(whDialog).toBeVisible();
+          await expectBorderStrong(page, whDialog.locator('input[name="code"]'), "depo oluştur: kod");
+          await expectBorderStrong(page, whDialog.locator('input[name="name"]'), "depo oluştur: ad");
+          await expectFocusRing(page, whDialog.locator('input[name="name"]'), "depo oluştur: ad");
+          await expectNoHorizontalOverflow(page, "depo oluştur penceresi");
+          await shot("warehouses-create");
+          await page.keyboard.press("Escape");
+          await expect(whDialog).toBeHidden();
+          const openTree = page.getByRole("link", { name: "Lokasyonları aç" }).first();
+          if (await openTree.count()) {
+            await openTree.click();
+            await expect(page.getByRole("button", { name: "Lokasyon ekle", exact: true })).toBeVisible();
+            const toggle = page.getByRole("button", { name: /altını (aç|kapat)/ }).first();
+            if (await toggle.count()) await expectBorderStrong(page, toggle, "lokasyon ağacı: aç/kapat düğmesi");
+            await expectNoHorizontalOverflow(page, "lokasyon ağacı");
+            await shot("location-tree");
+            await page.getByRole("button", { name: "Lokasyon ekle", exact: true }).click();
+            const locDialog = page.getByRole("dialog");
+            await expectBorderStrong(page, locDialog.locator("#create-kind"), "lokasyon oluştur: tür");
+            await expectNoHorizontalOverflow(page, "lokasyon oluştur penceresi");
+            await page.keyboard.press("Escape");
+            await expect(locDialog).toBeHidden();
+          }
       });
     }
   }

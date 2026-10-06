@@ -32,7 +32,7 @@ export interface TreeCursor {
 
 const BADGE = "inline-flex items-center rounded-full px-2 text-xs font-bold";
 const TOGGLE =
-  "inline-flex size-12 shrink-0 items-center justify-center rounded-control border-2 border-border bg-surface text-lg font-bold text-ink focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus";
+  "inline-flex size-12 shrink-0 items-center justify-center rounded-control border-2 border-border-strong bg-surface text-lg font-bold text-ink focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus";
 const LINK_CLS =
   "inline-flex min-h-12 min-w-12 items-center justify-center rounded-control px-2 text-base font-semibold text-accent-ink underline focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus";
 
