@@ -27,6 +27,7 @@ Kaynak sözdizimi: `<dosya>#<json.yolu>` (package.json alanı) veya `docker-comp
 | MinIO (yerel/CI) | alpine/minio | RELEASE.2025-10-15T17-29-55Z | docker-compose.yml#minio | ADR-006 |
 | Mailpit (yerel/CI) | axllent/mailpit | v1.31.4 | docker-compose.yml#mailpit | |
 | Testcontainers | testcontainers | 12.2.0 | package.json#devDependencies.testcontainers | |
+| Playwright | @playwright/test | 1.56.1 | package.json#devDependencies.@playwright/test | Chromium r1194 (T-131; ortamdaki önkurulu tarayıcı ile eşleşir) |
 | node-postgres (yalnızca test/harness) | pg | 8.23.1 | package.json#devDependencies.pg | |
 | node-postgres tipleri | @types/pg | 8.23.1 | package.json#devDependencies.@types/pg | |
 | Drizzle ORM | drizzle-orm | 0.45.3 | packages/db/package.json#dependencies.drizzle-orm | ADR-003; Neon koşu 3 (T-005d) |
