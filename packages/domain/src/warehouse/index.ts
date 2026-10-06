@@ -36,8 +36,10 @@ export {
 export {
   WAREHOUSE_SCOPE_FLAG,
   assertWarehouseInScope,
+  assertWarehouseVisible,
   isWarehouseScopeEnabled,
   resolveWarehouseScope,
   setMembershipWarehouseScopes,
   type SetScopesInput,
+  type SetScopesResult,
 } from "./scope.ts";

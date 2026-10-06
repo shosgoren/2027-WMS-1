@@ -6,33 +6,38 @@
 //   ham INSERT kullanılır (varsayılan sütunlar listeye girmez).
 // - Kod: kırp + yalnızca ASCII a-z büyütülür (yerel ayar yok; `ı`/`İ`/`ß` gibi karakterler ham saklanır, karşılaştırma tam
 //   eşleşme). `code` oluşturulduktan sonra değişmez (A-83).
-// - Arşiv: aktif lokasyon veya pozitif `stock_balances.quantity` → `IN_USE` (salt SELECT, kilit yok; arşivle eşzamanlı stok girişi
+// - Arşiv: hedef satır `FOR UPDATE` (createLocation `FOR SHARE` okur → arşiv/oluşturma yarışı serileşir); aktif lokasyon veya pozitif `stock_balances.quantity` → `IN_USE` (bakiye okuması salt SELECT; arşivle eşzamanlı stok girişi
 //   yarışı lokasyon arşivinde çözülür, arşivli lokasyona stok komutu T-217'de reddedilir).
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { appendAudit } from "@wms/db";
 import { AppError } from "@wms/shared/errors";
 import { runTenantCommand, runTenantQuery, type AccessTx, type TenantAccessParams } from "../identity/access.ts";
-import { assertWarehouseInScope, pgUuidArray, resolveWarehouseScope } from "./scope.ts";
+import { assertWarehouseVisible, pgUuidArray, resolveWarehouseScope } from "./scope.ts";
 
 /** Çağıran bağlamı (izin komuta bağlıdır; çağıran veremez). */
 export type WarehouseCallParams = Omit<TenantAccessParams, "permission" | "recentAuth">;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const CODE_MAX = 64;
+export const CODE_MAX = 64;
 const NAME_MAX = 200;
 const CONTROL_RE = /\p{C}/u;
+const MARK_RE = /\p{Mn}/u;
 
 export function parseUuid(raw: unknown): string {
   if (typeof raw !== "string" || !UUID_RE.test(raw)) throw new AppError("VALIDATION_FAILED");
   return raw.toLowerCase();
 }
 
-/** Kırp + yalnızca ASCII küçük harfleri büyüt. Boş, çok uzun veya denetim karakteri içeren değer → `VALIDATION_FAILED`. */
+/**
+ * NFC'ye çevir, kırp, yalnızca ASCII küçük harfleri büyüt. Boş, çok uzun, denetim karakteri veya NFC sonrası kalan birleştirici
+ * işaret (`\p{Mn}`) içeren değer → `VALIDATION_FAILED`. Gerekçe: kanonik eşdeğer yazımlar (`I`+U+0307 ≡ `İ`) aynı koda iner,
+ * böylece görsel olarak aynı iki kod ayrı kayıt olamaz; bileşik karaktere dönüşemeyen işaretler görünmez/aldatıcı olduğundan reddedilir.
+ */
 export function normalizeCode(raw: unknown): string {
   if (typeof raw !== "string") throw new AppError("VALIDATION_FAILED");
-  const v = raw.trim().replace(/[a-z]/g, (c) => c.toUpperCase());
-  if (v === "" || Array.from(v).length > CODE_MAX || CONTROL_RE.test(v)) throw new AppError("VALIDATION_FAILED");
+  const v = raw.normalize("NFC").trim().replace(/[a-z]/g, (c) => c.toUpperCase());
+  if (v === "" || Array.from(v).length > CODE_MAX || CONTROL_RE.test(v) || MARK_RE.test(v)) throw new AppError("VALIDATION_FAILED");
   return v;
 }
 
@@ -140,7 +145,7 @@ export async function renameWarehouse(params: WarehouseCallParams, input: Rename
   const warehouseId = parseUuid(input.warehouseId);
   const name = normalizeName(input.name);
   return runTenantCommand({ ...params, permission: "settings.manage" }, async (tx, m) => {
-    await assertWarehouseInScope(tx, m, [warehouseId]);
+    await assertWarehouseVisible(tx, m, [warehouseId]);
     const cur = await tx.execute<{ name: string; status: string }>(
       sql`SELECT name, status FROM public.warehouses WHERE tenant_id = ${m.tenantId}::uuid AND id = ${warehouseId}::uuid`,
     );
@@ -170,9 +175,10 @@ export interface ArchiveWarehouseInput {
 export async function archiveWarehouse(params: WarehouseCallParams, input: ArchiveWarehouseInput): Promise<{ readonly archived: boolean }> {
   const warehouseId = parseUuid(input.warehouseId);
   return runTenantCommand({ ...params, permission: "settings.manage" }, async (tx, m) => {
-    await assertWarehouseInScope(tx, m, [warehouseId]);
+    await assertWarehouseVisible(tx, m, [warehouseId]);
+    // FOR UPDATE: eşzamanlı `createLocation` (depo satırını FOR SHARE okur) ile serileştirir; kontroller kilitten SONRA yeni görüntüyle çalışır.
     const cur = await tx.execute<{ status: string }>(
-      sql`SELECT status FROM public.warehouses WHERE tenant_id = ${m.tenantId}::uuid AND id = ${warehouseId}::uuid`,
+      sql`SELECT status FROM public.warehouses WHERE tenant_id = ${m.tenantId}::uuid AND id = ${warehouseId}::uuid FOR UPDATE`,
     );
     if (cur[0] === undefined) throw new AppError("NOT_FOUND");
     if (cur[0].status === "ARCHIVED") return { archived: false };
