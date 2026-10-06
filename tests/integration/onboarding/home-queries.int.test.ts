@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDbClient } from "../../../packages/db/src/index.ts";
 import { DB_CLIENT_SETTINGS, type DbClient } from "../../../packages/db/src/client.ts";
 import { listMyActionsToday } from "../../../packages/domain/src/audit/today.ts";
+import { listMyActionsTodayAt } from "../../../packages/domain/src/audit/today-impl.ts";
 import { getTenantSettings } from "../../../packages/domain/src/onboarding/settings-queries.ts";
 import { readIntEnv, redactErrorChain } from "../harness/env.ts";
 
@@ -111,17 +112,20 @@ describe("listMyActionsToday", () => {
   });
   it("keyset: limit ve imleçle sayfalar, tekrar/atlama yok", async () => {
     const fx = await mkTenant();
-    for (let i = 0; i < 5; i++) await audit(fx, fx.owner, `member.invited`);
+    const expected = [0, 1, 2, 3, 4].map((i) => `test.e${i}`);
+    for (const a of expected) await audit(fx, fx.owner, a);
     const seen: string[] = [];
     let cursor;
     let pages = 0;
     do {
       const p = await listMyActionsToday(acc(fx, fx.owner), { limit: 2, ...(cursor === undefined ? {} : { cursor }) });
-      seen.push(...p.items.map((i) => `${i.occurredAt.getTime()}`));
+      seen.push(...p.items.map((i) => i.action));
       cursor = p.nextCursor ?? undefined;
       pages++;
     } while (cursor !== undefined && pages < 10);
     expect(seen).toHaveLength(5);
+    expect(new Set(seen).size).toBe(5);
+    expect([...seen].sort()).toEqual(expected);
     expect(pages).toBe(3);
   });
   it("gün sınırı tenant saat dilimine göre", async () => {
@@ -134,24 +138,24 @@ describe("listMyActionsToday", () => {
     const minutesToMidnight = 24 * 60 - (local.getUTCHours() * 60 + local.getUTCMinutes());
     const before = new Date(t.getTime() + (minutesToMidnight - 1) * 60_000);
     const after = new Date(t.getTime() + (minutesToMidnight + 1) * 60_000);
-    expect((await listMyActionsToday(acc(fx, fx.owner), { now: before })).timeZone).toBe(tz);
-    expect((await listMyActionsToday(acc(fx, fx.owner), { now: before })).items).toHaveLength(1);
-    expect((await listMyActionsToday(acc(fx, fx.owner), { now: after })).items).toHaveLength(0);
+    expect((await listMyActionsTodayAt(acc(fx, fx.owner), {}, before)).timeZone).toBe(tz);
+    expect((await listMyActionsTodayAt(acc(fx, fx.owner), {}, before)).items).toHaveLength(1);
+    expect((await listMyActionsTodayAt(acc(fx, fx.owner), {}, after)).items).toHaveLength(0);
     // Aynı an, farklı dilimde (UTC): sonuç o dilimin günüyle belirlenir
     const fz = await mkTenant({ tz: "UTC" });
     await audit(fz, fz.owner, "member.invited");
     const r2 = await adm.query<{ t: Date }>("SELECT occurred_at AS t FROM public.audit_logs WHERE tenant_id = $1", [fz.tenant]);
     const t2 = (r2.rows[0] as { t: Date }).t;
     const utcMin = 24 * 60 - (t2.getUTCHours() * 60 + t2.getUTCMinutes());
-    expect((await listMyActionsToday(acc(fz, fz.owner), { now: new Date(t2.getTime() + (utcMin - 1) * 60_000) })).items).toHaveLength(1);
-    expect((await listMyActionsToday(acc(fz, fz.owner), { now: new Date(t2.getTime() + (utcMin + 1) * 60_000) })).items).toHaveLength(0);
+    expect((await listMyActionsTodayAt(acc(fz, fz.owner), {}, new Date(t2.getTime() + (utcMin - 1) * 60_000))).items).toHaveLength(1);
+    expect((await listMyActionsTodayAt(acc(fz, fz.owner), {}, new Date(t2.getTime() + (utcMin + 1) * 60_000))).items).toHaveLength(0);
   });
   it("dünkü satır bugün listesinde yok; okuma izni her rolde (READ_ONLY)", async () => {
     const fx = await mkTenant();
     const ro = await mkMember(fx.tenant, "READ_ONLY");
     await audit(fx, ro, "member.left");
     expect((await listMyActionsToday(acc(fx, ro))).items).toHaveLength(1);
-    expect((await listMyActionsToday(acc(fx, ro), { now: inMs(36 * 3600_000) })).items).toHaveLength(0);
+    expect((await listMyActionsTodayAt(acc(fx, ro), {}, inMs(36 * 3600_000))).items).toHaveLength(0);
   });
   it("limit > 20 → VALIDATION_FAILED", async () => {
     const fx = await mkTenant();
