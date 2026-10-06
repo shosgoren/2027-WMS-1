@@ -1,7 +1,9 @@
 // Lokasyon komutları ve okuyucuları (T-205; A-68, A-83, A-86, A-89; 0010 tetikleyicileri).
 //
 // - Eşzamanlılık (READ COMMITTED): `createLocation` depo ve ebeveyn satırını `FOR SHARE` okur; `archiveLocation`/`archiveWarehouse`
-//   hedef satırı `FOR UPDATE` okur (+ `archiveLocation` sayım kilidi satırı `FOR UPDATE`) ve kontrolleri kilitten SONRA yapar →
+//   hedef satırı `FOR NO KEY UPDATE` okur (stok komutlarının FK KEY SHARE'iyle çakışmaz, `FOR SHARE` ile çakışır); `archiveLocation`
+//   önce sayım kilidi satırını (I-15: sayım kilidi önce), sonra lokasyon satırını kilitler; değişiklik komutları (`loadActive`,
+//   `renameWarehouse`) da satırı kilitleyerek okur (arşivli kayıt güncellenemez) ve kontrolleri kilitten SONRA yapar →
 //   arşivli ebeveyn/depo altında aktif lokasyon oluşamaz (FK KEY SHARE tek başına NO KEY UPDATE ile çakışmaz).
 // - Kapsam dışı depo/lokasyon `NOT_FOUND` (varlık sızmaz); stok komutları `assertWarehouseInScope` ile `FORBIDDEN` verir.
 // - Yazma `settings.manage`, okuma `stock.view`; her yazma aynı transaction'da `appendAudit`. Ham INSERT açık sütunlarla
@@ -144,7 +146,7 @@ export async function createLocation(params: WarehouseCallParams, input: CreateL
 /** Değişiklik komutlarının ortak ön okuması: satır yoksa `NOT_FOUND`, arşivliyse `VALIDATION_FAILED`; kapsam denetimi. */
 async function loadActive(tx: AccessTx, m: Membership, locationId: string): Promise<LocationRow> {
   const rows = await tx.execute<LocationDbRow>(
-    sql`SELECT ${COLS} FROM public.locations WHERE tenant_id = ${m.tenantId}::uuid AND id = ${locationId}::uuid`,
+    sql`SELECT ${COLS} FROM public.locations WHERE tenant_id = ${m.tenantId}::uuid AND id = ${locationId}::uuid FOR NO KEY UPDATE`,
   );
   if (rows[0] === undefined) throw new AppError("NOT_FOUND");
   const row = toRow(rows[0]);
@@ -215,17 +217,23 @@ export interface ArchiveLocationInput {
 export async function archiveLocation(params: WarehouseCallParams, input: ArchiveLocationInput): Promise<{ readonly archived: boolean }> {
   const locationId = parseUuid(input.locationId);
   return runTenantCommand({ ...params, permission: "settings.manage" }, async (tx, m) => {
+    // Kilit sırası (I-15): sayım kilidi satırı → lokasyon satırı. `warehouse_id` değişmez (tetikleyici) → kilitsiz ön okuma güvenli.
+    const pre = await tx.execute<{ warehouse_id: string }>(
+      sql`SELECT warehouse_id FROM public.locations WHERE tenant_id = ${m.tenantId}::uuid AND id = ${locationId}::uuid`,
+    );
+    if (pre[0] === undefined) throw new AppError("NOT_FOUND");
+    await assertWarehouseVisible(tx, m, [pre[0].warehouse_id]);
+    const lock = await tx.execute<{ location_id: string }>(
+      sql`SELECT location_id FROM public.location_count_locks
+           WHERE tenant_id = ${m.tenantId}::uuid AND location_id = ${locationId}::uuid FOR NO KEY UPDATE`,
+    );
+    if (lock[0] === undefined) throw new AppError("COUNT_LOCK_ROW_MISSING");
     const rows = await tx.execute<LocationDbRow>(
-      sql`SELECT ${COLS} FROM public.locations WHERE tenant_id = ${m.tenantId}::uuid AND id = ${locationId}::uuid FOR UPDATE`,
+      sql`SELECT ${COLS} FROM public.locations WHERE tenant_id = ${m.tenantId}::uuid AND id = ${locationId}::uuid FOR NO KEY UPDATE`,
     );
     if (rows[0] === undefined) throw new AppError("NOT_FOUND");
     const cur = toRow(rows[0]);
-    await assertWarehouseVisible(tx, m, [cur.warehouseId]);
     if (cur.status === "ARCHIVED") return { archived: false };
-    // Sayım kilidi satırı da kilitlenir (sayım başlatma ile arşiv yarışı); kontroller kilitlerden SONRA.
-    await tx.execute(
-      sql`SELECT location_id FROM public.location_count_locks WHERE tenant_id = ${m.tenantId}::uuid AND location_id = ${locationId}::uuid FOR UPDATE`,
-    );
     const child = await tx.execute<{ used: boolean }>(
       sql`SELECT EXISTS (SELECT 1 FROM public.locations
                           WHERE tenant_id = ${m.tenantId}::uuid AND parent_id = ${locationId}::uuid AND status = 'ACTIVE') AS used`,
