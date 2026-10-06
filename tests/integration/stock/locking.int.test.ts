@@ -444,7 +444,11 @@ describe("eşzamanlı ters sıralı planlar: deadlock yok (bariyerli, olasılık
 });
 
 describe("sayım kilidi", () => {
-  const session = randomUUID();
+  // T-302: kilit satırı count_sessions'a FK'lidir (A-84); fikstürün tohumladığı oturum kullanılır.
+  let session = "";
+  beforeAll(() => {
+    session = A.countSessionId;
+  });
   const setCounting = (locationId: string, counting: boolean) =>
     adminTx(A.tenantId, async (q) => {
       if (counting) {

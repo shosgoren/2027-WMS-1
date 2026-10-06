@@ -5,7 +5,8 @@
 // - `wms_app` INSERT yetkisi sütun düzeyindedir (`created_at`/`status`/`archived_at` yok) → Drizzle `insert()` DEĞİL, açık sütunlu
 //   ham INSERT kullanılır (varsayılan sütunlar listeye girmez).
 // - Kod: kırp + yalnızca ASCII a-z büyütülür (yerel ayar yok; `ı`/`İ`/`ß` gibi karakterler ham saklanır, karşılaştırma tam
-//   eşleşme). `code` oluşturulduktan sonra değişmez (A-83).
+//   eşleşme). `code` T-251'den beri değiştirilebilir (A-83 kalktı): `renameWarehouse`/`renameLocation` kod değişimini `code_history` + `*.code_changed` audit
+//   ile aynı transaction'da yazar; eşzamanlı aynı koda iki değişimde kaybeden `CODE_TAKEN` alır.
 // - Arşiv: hedef satır `FOR NO KEY UPDATE` (createLocation `FOR SHARE` okur → arşiv/oluşturma yarışı serileşir); aktif lokasyon veya pozitif bakiye → `IN_USE` (bakiye okuması salt SELECT). Arşivle eşzamanlı stok girişi yarışı:
 //   `archiveLocation` sayım kilidini `acquireStockLocks` ile `FOR SHARE` alır (T-243) — bu, stok komutunun aynı kipteki kilidiyle
 //   ÇAKIŞMAZ. Serileşmeyi stok yazıcısı sağlar: T-217 yazıcıları `acquireStockLocks` sonrası lokasyon satırını `FOR SHARE` ile okuyup
@@ -14,7 +15,7 @@ import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { appendAudit } from "@wms/db";
 import { AppError } from "@wms/shared/errors";
-import { runTenantCommand, runTenantQuery, type TenantAccessParams } from "../identity/access.ts";
+import { runTenantCommand, runTenantQuery, type AccessTx, type TenantAccessParams } from "../identity/access.ts";
 import { assertWarehouseVisible, pgUuidArray, resolveWarehouseScope } from "./scope.ts";
 import { hasPositiveBalance } from "./stock-usage.ts";
 
@@ -114,33 +115,86 @@ export async function createWarehouse(params: WarehouseCallParams, input: Create
   });
 }
 
+/** 23505 (eşzamanlı aynı koda iki değişimde kaybeden) → `CODE_TAKEN`; diğer hatalar aynen. */
+export function mapCodeConflict(e: unknown): unknown {
+  let cur: unknown = e;
+  for (let i = 0; i < 6 && cur !== undefined && cur !== null; i++) {
+    if ((cur as { code?: unknown }).code === "23505") return codeTaken();
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  return e;
+}
+
+/** Kod geçmişi satırı (T-251); çağıranın transaction'ında, kod UPDATE'iyle birlikte yazılır. */
+export async function insertCodeHistory(
+  tx: AccessTx,
+  m: { readonly tenantId: string; readonly userId: string },
+  entityType: "warehouse" | "location",
+  entityId: string,
+  oldCode: string,
+  newCode: string,
+): Promise<void> {
+  await tx.execute(
+    sql`INSERT INTO public.code_history (tenant_id, id, entity_type, entity_id, old_code, new_code, changed_by)
+        VALUES (${m.tenantId}::uuid, gen_random_uuid(), ${entityType}, ${entityId}::uuid, ${oldCode}, ${newCode}, ${m.userId}::uuid)`,
+  );
+}
+
 export interface RenameWarehouseInput {
   readonly warehouseId: string;
-  readonly name: string;
+  /** Ad ve/veya kod (en az biri). */
+  readonly name?: string;
+  /** Yeni depo kodu (T-251): `normalizeCode` biçimi, tenant içi benzersiz; ARCHIVED değiştirilemez. */
+  readonly code?: string;
   readonly requestId?: string | null;
 }
 
 export async function renameWarehouse(params: WarehouseCallParams, input: RenameWarehouseInput): Promise<{ readonly changed: boolean }> {
   const warehouseId = parseUuid(input.warehouseId);
-  const name = normalizeName(input.name);
+  if (input.name === undefined && input.code === undefined) throw new AppError("VALIDATION_FAILED");
+  const name = input.name === undefined ? undefined : normalizeName(input.name);
+  const code = input.code === undefined ? undefined : normalizeCode(input.code);
   return runTenantCommand({ ...params, permission: "settings.manage" }, async (tx, m) => {
     await assertWarehouseVisible(tx, m, [warehouseId]);
-    const cur = await tx.execute<{ name: string; status: string }>(
-      sql`SELECT name, status FROM public.warehouses WHERE tenant_id = ${m.tenantId}::uuid AND id = ${warehouseId}::uuid FOR NO KEY UPDATE`,
+    const cur = await tx.execute<{ name: string; code: string; status: string }>(
+      sql`SELECT name, code, status FROM public.warehouses WHERE tenant_id = ${m.tenantId}::uuid AND id = ${warehouseId}::uuid FOR NO KEY UPDATE`,
     );
     const row = cur[0];
     if (row === undefined) throw new AppError("NOT_FOUND");
     if (row.status !== "ACTIVE") throw new AppError("VALIDATION_FAILED");
-    if (row.name === name) return { changed: false };
-    await tx.execute(sql`UPDATE public.warehouses SET name = ${name} WHERE tenant_id = ${m.tenantId}::uuid AND id = ${warehouseId}::uuid`);
-    await appendAudit(tx, {
-      action: "warehouse.updated",
-      actorUserId: m.userId,
-      entityType: "warehouse",
-      entityId: warehouseId,
-      requestId: input.requestId ?? null,
-      changeSummary: { from_name: row.name, to_name: name },
-    });
+    const newName = name ?? row.name;
+    const newCode = code ?? row.code;
+    const nameChanged = newName !== row.name;
+    const codeChanged = newCode !== row.code;
+    if (!nameChanged && !codeChanged) return { changed: false };
+    try {
+      await tx.execute(
+        sql`UPDATE public.warehouses SET name = ${newName}, code = ${newCode} WHERE tenant_id = ${m.tenantId}::uuid AND id = ${warehouseId}::uuid`,
+      );
+    } catch (e) {
+      throw codeChanged ? mapCodeConflict(e) : e;
+    }
+    if (nameChanged) {
+      await appendAudit(tx, {
+        action: "warehouse.updated",
+        actorUserId: m.userId,
+        entityType: "warehouse",
+        entityId: warehouseId,
+        requestId: input.requestId ?? null,
+        changeSummary: { from_name: row.name, to_name: newName },
+      });
+    }
+    if (codeChanged) {
+      await insertCodeHistory(tx, m, "warehouse", warehouseId, row.code, newCode);
+      await appendAudit(tx, {
+        action: "warehouse.code_changed",
+        actorUserId: m.userId,
+        entityType: "warehouse",
+        entityId: warehouseId,
+        requestId: input.requestId ?? null,
+        changeSummary: { from_code: row.code, to_code: newCode },
+      });
+    }
     return { changed: true };
   });
 }
