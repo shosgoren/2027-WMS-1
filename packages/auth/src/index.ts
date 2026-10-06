@@ -1030,6 +1030,15 @@ export function createAuth(params: CreateAuthParams): AuthService {
       // her ortamda (vitest dahil) köken ve CSRF denetimi açıkça açık (init-options.d.mts:295, 310).
       disableOriginCheck: false,
       disableCSRFCheck: false,
+      // Better Auth 1.7.7 `runInBackgroundOrAwait` (create-context.mjs:214): işleyici verilirse gönderim beklenmez. Sıfırlama
+      // e-postası kuyruğa yazımı yanıtı geciktirmez; hesap var/yok zamanlama farkı oluşmaz. Hata Better Auth günlükçüsüne
+      // gider (`Failed to run background task`) ve `sendResetPassword` ayrıca maskeli loglar (yutulmaz). Süreç Node'dur
+      // (sunucusuz değil), bu yüzden bekleyen söz kaybolmaz.
+      backgroundTasks: {
+        handler: (promise) => {
+          void promise;
+        },
+      },
     },
     emailAndPassword: {
       enabled: true,

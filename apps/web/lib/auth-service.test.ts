@@ -1,7 +1,7 @@
 // T-116d: web auth kurulumu — sıfırlama e-postası portu fail-closed davranışı (A-42). Alıcı/bağlantı yalnızca mühürlü yükte.
 import { randomBytes } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildResetMail, type QueueHolder } from "./auth-service.ts";
+import { QUEUE_NEGATIVE_CACHE_MS, QUEUE_PREPARE_TIMEOUT_MS, buildResetMail, createRouteHandler, type QueueHolder } from "./auth-service.ts";
 
 vi.mock("@wms/auth", () => ({ getAuthService: () => ({}) }));
 vi.mock("./queue.ts", () => ({ getSenderQueue: () => Promise.resolve(undefined) }));
@@ -52,5 +52,51 @@ describe("buildResetMail", () => {
     const port = buildResetMail(MAILPIT, holder);
     holder.queue = undefined;
     await expect(port?.sendResetLink({ to: TO, link: "https://app.example.test/x", locale: "tr" })).rejects.toThrow();
+  });
+});
+
+describe("createRouteHandler (kuyruk hazırlığı yalnızca sıfırlama isteğinde)", () => {
+  const post = (path: string): Request => new Request(`https://app.example.test/api/auth/${path}`, { method: "POST" });
+  const mk = (getQueue: () => Promise<never | undefined>, now = () => 0) => {
+    const holder: QueueHolder = { queue: undefined };
+    const handler = vi.fn(() => Promise.resolve(new Response("ok")));
+    const getQ = vi.fn(getQueue);
+    return { holder, handler, getQ, route: createRouteHandler({ hasPort: () => true, getQueue: getQ, holder, handler, now }) };
+  };
+
+  it("get-session / sign-in isteklerinde getSenderQueue çağrılmaz", async () => {
+    const t = mk(() => Promise.resolve({} as never));
+    await t.route(new Request("https://app.example.test/api/auth/get-session"));
+    await t.route(post("sign-in/email"));
+    expect(t.getQ).not.toHaveBeenCalled();
+    expect(t.handler).toHaveBeenCalledTimes(2);
+  });
+
+  it("sıfırlama isteğinde kuyruk hazırlanır", async () => {
+    const q = {} as never;
+    const t = mk(() => Promise.resolve(q));
+    await t.route(post("request-password-reset"));
+    expect(t.getQ).toHaveBeenCalledTimes(1);
+    expect(t.holder.queue).toBe(q);
+  });
+
+  it("kuyruk asılıyken sign-in etkilenmez; sıfırlama 2 sn sonra queue=undefined ile devam eder, 30 sn negatif önbellek", async () => {
+    vi.useFakeTimers();
+    try {
+      let clock = 0;
+      const t = mk(() => new Promise(() => undefined), () => clock);
+      const signIn = await t.route(post("sign-in/email"));
+      expect(signIn.status).toBe(200);
+      expect(t.getQ).not.toHaveBeenCalled();
+      const pending = t.route(post("request-password-reset"));
+      await vi.advanceTimersByTimeAsync(QUEUE_PREPARE_TIMEOUT_MS);
+      await pending;
+      expect(t.holder.queue).toBeUndefined();
+      clock = QUEUE_NEGATIVE_CACHE_MS - 1;
+      await t.route(post("request-password-reset"));
+      expect(t.getQ).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -1,17 +1,15 @@
 // T-116d: web'in sıfırlama e-postası kurulumu (`buildResetMail`) + gerçek Better Auth işleyicisi (A-42). Fikstürler sentetik (G-09).
-// Kuyruk sahte (yalnızca `enqueuePlatform` kaydı); amaç port bağlama, tekdüze yanıt (hesap varlığı sızmaz) ve fail-closed 503.
+// İlk üç test kuyruğu sahte tutar (yalnızca `enqueuePlatform` kaydı); sonuncusu üretim bağlantısını (web sarmalayıcısı, gerçek pg-boss) sınar.
 import { randomBytes } from "node:crypto";
 import pg from "pg";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDbClient } from "../../../packages/db/src/index.ts";
 import { DB_CLIENT_SETTINGS, type DbClient } from "../../../packages/db/src/client.ts";
 import { createAuth, readAuthEnv, type AuthService, type ResetMailPort } from "../../../packages/auth/src/index.ts";
 import { hashPassword } from "../../../packages/auth/src/password.ts";
 import { readAuthDatabaseUrl, readIntEnv, redactErrorChain } from "../harness/env.ts";
 
-vi.mock("../../../apps/web/lib/queue.ts", () => ({ getSenderQueue: () => Promise.resolve(undefined) }));
-const { buildResetMail } = await import("../../../apps/web/lib/auth-service.ts");
-
+// Üretim bağlantısı testi için ortam, web modülleri içe aktarılmadan ÖNCE kurulur (tekil Better Auth örneği process.env okur).
 const env = readIntEnv(process.env);
 const authUrl = readAuthDatabaseUrl(process.env);
 const BASE = "http://localhost:3000";
@@ -23,6 +21,15 @@ const MAIL_ENV = {
   WMS_ENV: "ci",
   QUEUE_SEAL_KEY: randomBytes(32).toString("hex"),
 };
+Object.assign(process.env, MAIL_ENV, {
+  BETTER_AUTH_SECRET: SECRET,
+  BETTER_AUTH_URL: BASE,
+  DATABASE_URL: env.databaseUrl,
+  AUTH_DATABASE_URL: authUrl,
+});
+const { buildResetMail, authRouteHandlers } = await import("../../../apps/web/lib/auth-service.ts");
+const { closeSenderQueue } = await import("../../../apps/web/lib/queue.ts");
+const { installQueueSchema, QUEUE_SCHEMA } = await import("../../../packages/queue-adapter/src/index.ts");
 
 let authClient: DbClient;
 let adm: pg.Client;
@@ -42,6 +49,7 @@ beforeAll(async () => {
   adm.on("error", () => undefined);
   try {
     await adm.connect();
+    await installQueueSchema({ url: env.databaseUrlDirect });
   } catch (e) {
     throw new Error(`connect failed: ${redactErrorChain(e, [env.databaseUrl, env.databaseUrlDirect, authUrl])}`);
   }
@@ -50,6 +58,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await adm.query("DELETE FROM public.verifications WHERE value = ANY($1::text[])", [createdUsers]).catch(() => undefined);
   if (createdUsers.length > 0) await adm.query("DELETE FROM public.users WHERE id = ANY($1::uuid[])", [createdUsers]).catch(() => undefined);
+  await closeSenderQueue();
   await adm.end();
   await authClient.close();
 }, 60_000);
@@ -124,4 +133,28 @@ describe("web sıfırlama e-postası kurulumu (T-116d, A-42)", () => {
     expect(res.status).toBe(503);
     expect(jobs).toHaveLength(0);
   });
+
+  it("üretim bağlantısı: web sarmalayıcısı + gerçek getSenderQueue + gerçek pg-boss; iş kuyrukta, düz e-posta yok", async () => {
+    const t0 = new Date(Date.now() - 1000);
+    const email = await mkUser();
+    ip += 1;
+    const res = await authRouteHandlers.POST(
+      new Request(`${BASE}/api/auth/request-password-reset`, {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: BASE, "fly-client-ip": `203.0.113.${(ip % 250) + 1}`, "user-agent": "t116d-int" },
+        body: JSON.stringify({ email }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    // Gönderim arka plandadır (yanıtı geciktirmez): işin görünmesini bekle.
+    let rows: { data: unknown }[] = [];
+    for (let n = 0; n < 40 && rows.length === 0; n += 1) {
+      rows = (await adm.query(`SELECT data FROM ${QUEUE_SCHEMA}.job WHERE name = 'email.send' AND created_on >= $1 AND data->'payload'->>'template' = 'password_reset'`, [t0])).rows;
+      if (rows.length === 0) await new Promise((r) => setTimeout(r, 250));
+    }
+    expect(rows.length).toBeGreaterThanOrEqual(1);
+    const text = JSON.stringify(rows);
+    expect(text).not.toContain(email);
+    expect(text).not.toContain("reset-password");
+  }, 30_000);
 });

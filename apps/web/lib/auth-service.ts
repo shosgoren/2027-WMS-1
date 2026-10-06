@@ -15,7 +15,7 @@ import { getSenderQueue } from "./queue.ts";
 type EnvLike = Readonly<Record<string, string | undefined>>;
 type EnqueueOnly = Pick<JobQueue, "enqueuePlatform">;
 
-/** İstek başına yenilenen kuyruk tutucusu: `canDeliver` eşzamanlıdır, kuyruk başlatması eşzamansızdır. */
+/** Kuyruk tutucusu: `canDeliver` eşzamanlıdır, kuyruk başlatması eşzamansızdır; sıfırlama isteğinde (önbellekli) yenilenir. */
 export interface QueueHolder {
   queue: EnqueueOnly | undefined;
 }
@@ -66,19 +66,60 @@ function webResetMail(): ResetMailPort | undefined {
   return resetMail;
 }
 
-/** Web'in tekil Better Auth örneği (port enjekte). Kuyruk tutucusunu yenilemek için `webAuthHandler` kullanın. */
+/** Web'in tekil Better Auth örneği (port enjekte). Kuyruk hazırlığı `authRouteHandlers` içinde yapılır. */
 export function getAuthService(): AuthService {
   const port = webResetMail();
   return getBaseAuthService(process.env, port === undefined ? {} : { resetMail: port });
 }
 
-/** `/api/auth/*`: kuyruğu (önbellekli) hazırlar, sonra Better Auth'a devreder; kuyruk yoksa `canDeliver` false kalır. */
-async function handle(request: Request): Promise<Response> {
-  if (webResetMail() !== undefined) {
-    holder.queue = await getSenderQueue();
-  }
-  return getAuthService().handler(request);
+/** Better Auth 1.7.7 kurulu yolu (`dist/api/routes/password.mjs`: createAuthEndpoint("/request-password-reset")). */
+const RESET_REQUEST_SUFFIX = "/request-password-reset";
+export const QUEUE_PREPARE_TIMEOUT_MS = 2_000;
+export const QUEUE_NEGATIVE_CACHE_MS = 30_000;
+
+export interface RouteDeps {
+  readonly hasPort: () => boolean;
+  readonly getQueue: () => Promise<EnqueueOnly | undefined>;
+  readonly holder: QueueHolder;
+  readonly handler: (request: Request) => Promise<Response>;
+  readonly now?: () => number;
 }
+
+/**
+ * `/api/auth/*` işleyicisi. Kuyruk hazırlığı YALNIZCA `POST …/request-password-reset` için yapılır (diğer uçlar kuyruğa hiç
+ * dokunmaz; kuyruk asılsa da giriş etkilenmez). Hazırlık süre sınırlıdır; başarısızlık/aşım `canDeliver`'ı false yapar (503) ve
+ * `QUEUE_NEGATIVE_CACHE_MS` boyunca yeniden denenmez.
+ */
+export function createRouteHandler(deps: RouteDeps): (request: Request) => Promise<Response> {
+  const now = deps.now ?? Date.now;
+  let retryAfter = 0;
+  return async (request) => {
+    if (request.method === "POST" && new URL(request.url).pathname.endsWith(RESET_REQUEST_SUFFIX) && deps.hasPort()) {
+      if (now() < retryAfter) {
+        deps.holder.queue = undefined;
+      } else {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<undefined>((resolve) => {
+          timer = setTimeout(() => resolve(undefined), QUEUE_PREPARE_TIMEOUT_MS);
+        });
+        try {
+          deps.holder.queue = await Promise.race([deps.getQueue().catch(() => undefined), timeout]);
+        } finally {
+          clearTimeout(timer);
+        }
+        if (deps.holder.queue === undefined) retryAfter = now() + QUEUE_NEGATIVE_CACHE_MS;
+      }
+    }
+    return deps.handler(request);
+  };
+}
+
+const handle = createRouteHandler({
+  hasPort: () => webResetMail() !== undefined,
+  getQueue: getSenderQueue,
+  holder,
+  handler: (request) => getAuthService().handler(request),
+});
 
 export const authRouteHandlers = Object.freeze({
   GET: handle,
