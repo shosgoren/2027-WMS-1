@@ -641,7 +641,7 @@ describe("worker-ids --all (T-106c)", () => {
 
 describe("checkWorkerStability sıkılaştırma (fail-open kapatma)", () => {
   const rid = () => randomBytes(7).toString("hex"); // 14 karakter [0-9a-f]
-  const ev = (/** @type {string} */ type, /** @type {number} */ ts) => ({ type, status: "x", timestamp: ts });
+  const ev = (/** @type {string} */ type, /** @type {number} */ ts, status = type === "start" ? "started" : "x") => ({ type, status, timestamp: ts });
   const mach = (/** @type {string} */ id, /** @type {string} */ state, /** @type {any} */ events = undefined) => {
     /** @type {any} */
     const m = { id, state, config: { metadata: { fly_process_group: "worker" } } };
@@ -708,5 +708,50 @@ describe("checkWorkerStability sıkılaştırma (fail-open kapatma)", () => {
     expect(r.reason).not.toContain("::");
     expect(r.reason).not.toContain(evil);
     expect(r.reason).toContain("?:");
+  });
+});
+
+describe("start olayı aşamaları: starting + started tek başlatmadır (deploy #28)", () => {
+  const ev = (/** @type {string} */ type, /** @type {string} */ status, /** @type {number} */ ts) => ({ type, status, timestamp: ts });
+  const id = randomBytes(7).toString("hex");
+  const snap = (/** @type {string} */ state, /** @type {any[]} */ events) =>
+    JSON.stringify({ Machines: [{ id, state, config: { metadata: { fly_process_group: "worker" } }, events }] });
+  const old = [ev("update", "stopped", 2000), ev("launch", "created", 1000)];
+  const before = snap("stopped", old);
+  const run = (/** @type {any[]} */ added, afterState = "started") => {
+    const e = [...added, ...old];
+    return checkWorkerStability(before, snap(afterState, e), snap(afterState, e));
+  };
+
+  it("gerçek dizi: starting + started → OK", () => {
+    expect(run([ev("start", "started", 3100), ev("start", "starting", 3000)]).ok).toBe(true);
+  });
+
+  it("iki started → FAIL (çökme döngüsü)", () => {
+    const r = run([ev("start", "started", 4100), ev("start", "starting", 4000), ev("start", "started", 3100), ev("start", "starting", 3000)]);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/2 start\/started/);
+  });
+
+  it("starting, started, starting, starting (exit yok) → FAIL", () => {
+    const r = run([ev("start", "starting", 3400), ev("start", "starting", 3300), ev("start", "started", 3100), ev("start", "starting", 3000)]);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/start\/starting/);
+  });
+
+  it("starting + started + exit → FAIL", () => {
+    const r = run([ev("exit", "stopped", 3500), ev("start", "started", 3100), ev("start", "starting", 3000)]);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/exit\/restart/);
+  });
+
+  it("yalnızca starting (started yok) → FAIL", () => {
+    const r = run([ev("start", "starting", 3000)]);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/start olayı yok/);
+  });
+
+  it("bilinmeyen start status'u → FAIL (fail-closed)", () => {
+    expect(run([ev("start", "started", 3100), ev("start", `x${randomBytes(3).toString("hex")}`, 3000)]).ok).toBe(false);
   });
 });
