@@ -879,5 +879,24 @@
       "internal": "Something went wrong.",
       "internalAction": "Try again shortly; if it persists, send the error code to support."
     }
+  },
+  "labels": {
+    "title": "Print labels",
+    "preview": "Label preview",
+    "print": "Print",
+    "downloadZpl": "Download ZPL",
+    "bridge": "Send via local bridge (not ready)",
+    "summary": "{count} labels · template {version}",
+    "noSource": "No item or location was selected for labels.",
+    "noSourceAction": "Open this page from an item detail or the location tree.",
+    "locked": "You do not have permission to view labels.",
+    "lockedAction": "Ask your workspace administrator.",
+    "errors": {
+      "copies": "Copies must be a number from 1 to {max}, and the total label count must not exceed {max}.",
+      "charset": "Barcode content can only contain ASCII characters (no Turkish letters such as ö, ş, ğ).",
+      "charsetAction": "Fix the item code or barcode to use ASCII characters.",
+      "tooLong": "The barcode does not fit the label width.",
+      "tooLongAction": "Shorten the code or barcode."
+    }
   }
 }
