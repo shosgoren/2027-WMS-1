@@ -52,7 +52,7 @@ function stripUrl(raw: string): string {
 
 /** Serbest metindeki (konsol, pageerror, CSP blockedURI) URL'ler `stripUrl`'den geçer; kalan metinde belirteçler maskelenir. */
 function scrubText(raw: string): string {
-  return maskTokens(raw.replace(/https?:\/\/[^\s"'<>)]+/g, (u) => stripUrl(u)));
+  return maskTokens(raw.replace(/https?:\/\/[^\s"'<>)\\]+/g, (u) => stripUrl(u)));
 }
 
 /**
