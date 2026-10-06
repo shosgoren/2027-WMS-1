@@ -83,5 +83,6 @@ DROP TABLE public.count_sessions;
 DROP TABLE public.warehouse_tasks;
 DROP FUNCTION public.stock_alerts_guard_state();
 DROP FUNCTION public.count_session_lines_guard_state();
+DROP FUNCTION public.count_session_lines_guard_closed();
 DROP FUNCTION public.count_sessions_guard_state();
 DROP FUNCTION public.warehouse_tasks_guard_state();

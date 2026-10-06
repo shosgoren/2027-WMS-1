@@ -285,6 +285,32 @@ END
 $fn$;
 REVOKE ALL ON FUNCTION public.count_session_lines_guard_state() FROM PUBLIC;
 
+-- 2c'. Kapanmış (POSTED/CANCELLED) oturumun satırı eklenemez/değişmez (0016 field_docs_lines_guard_closed deseni): üst oturum FOR SHARE
+--      ile okunur (oturumu kapatan işlem commit olmadan eşzamanlı satır yazımı bloklanır). Değişmeyen UPDATE geçer (no-op). Görev
+--      tablosu başlıksız tek satırdır; kapanmış görev değişmezliği 2a'daki terminal kuralındadır. SUBMITTED/APPROVED satırı serbesttir
+--      (yeniden sayım / onay öncesi düzeltme kuralı açık: A-157).
+CREATE FUNCTION public.count_session_lines_guard_closed() RETURNS trigger
+  LANGUAGE plpgsql
+  SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+  parent_status text;
+BEGIN
+  IF TG_OP = 'UPDATE' AND NEW IS NOT DISTINCT FROM OLD THEN
+    RETURN NEW;
+  END IF;
+  SELECT h.status INTO parent_status FROM public.count_sessions h WHERE h.tenant_id = NEW.tenant_id AND h.id = NEW.session_id FOR SHARE;
+  IF parent_status IN ('POSTED', 'CANCELLED') THEN
+    RAISE EXCEPTION 'SESSION_CLOSED: kapanmış sayım oturumunun satırı eklenemez/değiştirilemez (oturum %)', parent_status USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END
+$fn$;
+REVOKE ALL ON FUNCTION public.count_session_lines_guard_closed() FROM PUBLIC;
+-- Alfabetik sıra: guard_closed, guard_keys ve guard_state'ten ÖNCE çalışır; her ret 23514.
+CREATE TRIGGER count_session_lines_guard_closed BEFORE INSERT OR UPDATE ON public.count_session_lines
+  FOR EACH ROW EXECUTE FUNCTION public.count_session_lines_guard_closed();
+
 -- 2d. Uyarı: RESOLVED terminal; resolved_at sunucu değeri (RESOLVED'a geçişte now()).
 CREATE FUNCTION public.stock_alerts_guard_state() RETURNS trigger
   LANGUAGE plpgsql

@@ -1245,6 +1245,52 @@ describe("T-302 sayım oturumu ve satırları", () => {
   });
 });
 
+describe("T-302 kapanmış oturumun satırı değişmez", () => {
+  it("POSTED/CANCELLED oturumda satır INSERT/UPDATE 23514; açık oturumda geçer; kapanmış oturumda değişmeyen UPDATE geçer", async () => {
+    const closeAs = async (q: Q, sid: string, to: "CANCELLED" | "POSTED"): Promise<void> => {
+      if (to === "CANCELLED") await q("UPDATE public.count_sessions SET status = 'CANCELLED', cancel_reason = 'x' WHERE id = $1", [sid]);
+      else {
+        await q("UPDATE public.count_sessions SET status = 'APPROVED', approved_by = $2 WHERE id = $1", [sid, A.ownerMembershipId]);
+        await q("UPDATE public.count_sessions SET status = 'POSTED' WHERE id = $1", [sid]);
+      }
+    };
+    for (const to of ["CANCELLED", "POSTED"] as const) {
+      expectFail(
+        await asApp(A.tenantId, async (q) => {
+          const sid = await mkSession(q, A);
+          const lid = randomUUID();
+          await q(insSessionLine, [A.tenantId, lid, sid, A.warehouseId, A.rootLocationId, A.dimensionId, A.itemNoneId, "10"]);
+          await closeAs(q, sid, to);
+          await q("UPDATE public.count_session_lines SET counted_quantity = 1, counted_by = $2 WHERE id = $1", [lid, A.ownerMembershipId]);
+        }),
+        CHECK_VIOLATION,
+        `${to} oturumda satır UPDATE`,
+      );
+      expectFail(
+        await asApp(A.tenantId, async (q) => {
+          const sid = await mkSession(q, A);
+          await closeAs(q, sid, to);
+          await q(insSessionLine, [A.tenantId, randomUUID(), sid, A.warehouseId, A.rootLocationId, null, A.itemId, "0"]);
+        }),
+        CHECK_VIOLATION,
+        `${to} oturuma satır INSERT`,
+      );
+    }
+    expectOk(
+      await asApp(A.tenantId, async (q) => {
+        const sid = await mkSession(q, A);
+        const lid = randomUUID();
+        await q(insSessionLine, [A.tenantId, lid, sid, A.warehouseId, A.rootLocationId, A.dimensionId, A.itemNoneId, "10"]);
+        await q("UPDATE public.count_sessions SET status = 'SUBMITTED' WHERE id = $1", [sid]);
+        await q("UPDATE public.count_session_lines SET counted_quantity = 2, counted_by = $2 WHERE id = $1", [lid, A.ownerMembershipId]);
+        await closeAs(q, sid, "CANCELLED");
+        await q("UPDATE public.count_session_lines SET counted_quantity = counted_quantity WHERE id = $1", [lid]);
+      }),
+      "açık oturumda yazım + kapanmışta no-op",
+    );
+  });
+});
+
 describe("T-302 min-maks politikası ve uyarılar", () => {
   it("CHECK 0 ≤ min ≤ max (23514); depo × ürün tek politika (23505, A-131); değerler güncellenebilir", async () => {
     for (const [label, mn, mx] of [["min > max", "5", "4"], ["min < 0", "-1", "4"]] as const) {

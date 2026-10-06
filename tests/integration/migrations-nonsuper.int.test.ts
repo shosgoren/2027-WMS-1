@@ -1172,7 +1172,7 @@ describe("0013–0014 — süper kullanıcı olmayan migrator", () => {
       const thru17 = (): string => (thru17Dir ??= copyMigrations("0017"));
       const ALL17 = [...ALL16, "0017"];
       const NEW17 = ["warehouse_tasks", "count_sessions", "count_session_lines", "item_stock_policies", "stock_alerts"];
-      const FUNCS17 = ["warehouse_tasks_guard_state", "count_sessions_guard_state", "count_session_lines_guard_state", "stock_alerts_guard_state"];
+      const FUNCS17 = ["warehouse_tasks_guard_state", "count_sessions_guard_state", "count_session_lines_guard_state", "count_session_lines_guard_closed", "stock_alerts_guard_state"];
 
       it("ileri (0001–0017) → 0017 geri (to 0016) → ileri: parmak izi birebir; tablolar/işlevler/sütun/FK/COUNT_ADJUSTMENT down'da yok; eski CHECK'ler ve FORCE RLS geri gelir", async () => {
         await setProbeMemberships(STANDARD_GRANT);
