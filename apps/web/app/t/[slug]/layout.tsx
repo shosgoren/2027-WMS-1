@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { getTranslations } from "next-intl/server";
 import type { ReactNode } from "react";
+import { Banner } from "@wms/ui";
 import { getAppDb } from "@wms/db";
 import { runTenantQuery } from "@wms/domain/identity/access";
 import { getMembershipSummary } from "@wms/domain/identity/member-queries";
@@ -31,6 +32,23 @@ export default async function TenantLayout({ children, params }: { children: Rea
         notFound();
       }
       if (e.code === "UNAUTHENTICATED") redirect(`/login?next=${encodeURIComponent(`/t/${slug}/members`)}`);
+      if (e.code === "TENANT_SUSPENDED" || e.code === "TENANT_CLOSING") {
+        // Sunucu bileşeni hataları üretimde maskelenir (yalnızca digest); kod `error.tsx`'e taşınamaz. Bu yüzden durum burada
+        // kodla yakalanır ve çerçeveli bir durum olarak render edilir (çocuklar render edilmez).
+        const te = await getTranslations("members.errors");
+        const key = e.code.toLowerCase();
+        return (
+          <main className="mx-auto flex w-full max-w-md min-w-0 flex-col gap-4 px-4 py-6">
+            <h1 className="break-words text-2xl font-extrabold text-ink">{te("tenantStatusTitle")}</h1>
+            <Banner kind="warning">
+              <p>
+                {te(key)} {te(`${key}Action`)}
+              </p>
+              <p className="mt-1 text-sm">{te("code", { code: e.code })}</p>
+            </Banner>
+          </main>
+        );
+      }
     }
     throw e;
   }

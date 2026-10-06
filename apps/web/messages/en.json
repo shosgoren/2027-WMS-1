@@ -243,7 +243,12 @@
       "tenant_closing": "This workspace is being closed.",
       "tenant_closingAction": "Contact support if you need to export your data.",
       "internal": "The action could not be completed right now.",
-      "internalAction": "Try again shortly; if it continues, tell your administrator with the error code."
-    }
+      "internalAction": "Try again shortly; if it continues, tell your administrator with the error code.",
+      "retry": "Try again",
+      "boundaryTitle": "Something went wrong",
+      "supportCode": "Support code: {code}",
+      "tenantStatusTitle": "Workspace unavailable"
+    },
+    "demoLocked": "This action is disabled for the demo account."
   }
 }

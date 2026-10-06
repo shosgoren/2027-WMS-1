@@ -168,9 +168,10 @@ export function MembersView({
           <ul className="m-0 flex min-w-0 list-none flex-col gap-3 p-0">
             {members.map((m) => {
               const self = m.userId === selfUserId;
-              const lockText = !canManage ? t("lockedReason") : m.isDemo ? t("unavailableReason") : null;
-              const resetLocked = lockText !== null || !m.resetLinkAvailable;
-              const resetText = lockText ?? (m.resetLinkAvailable ? null : t("unavailableReason"));
+              // Demo satırı: rol/çıkarma/devir için ayrı nötr metin; sıfırlama kilidi 2. tur m6 metninde kalır.
+              const lockText = !canManage ? t("lockedReason") : m.isDemo ? t("demoLocked") : null;
+              const resetLocked = !canManage || m.isDemo || !m.resetLinkAvailable;
+              const resetText = !canManage ? t("lockedReason") : m.isDemo || !m.resetLinkAvailable ? t("unavailableReason") : null;
               const current = m.roles[0] ?? "";
               const selected = draft[m.userId] ?? current;
               const noteId = `lock-${m.userId}`;
@@ -222,12 +223,17 @@ export function MembersView({
                             {t("transfer")}
                           </Button>
                         )}
-                        <Button variant="secondary" disabled={resetLocked} aria-describedby={resetText === null ? undefined : noteId} onClick={() => setConfirm({ kind: "reset", member: m })}>
+                        <Button variant="secondary" disabled={resetLocked} aria-describedby={resetText === null ? undefined : `${noteId}-reset`} onClick={() => setConfirm({ kind: "reset", member: m })}>
                           {t("resetLink")}
                         </Button>
                       </div>
-                      {resetText === null ? null : (
+                      {lockText === null ? null : (
                         <p id={noteId} className="break-words text-sm text-ink-muted">
+                          {lockText}
+                        </p>
+                      )}
+                      {resetText === null ? null : (
+                        <p id={`${noteId}-reset`} className="break-words text-sm text-ink-muted">
                           {resetText}
                         </p>
                       )}

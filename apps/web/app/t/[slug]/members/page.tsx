@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { headers } from "next/headers";
-import { redirect } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { getTranslations } from "next-intl/server";
 import { getAppDb } from "@wms/db";
 import { listMembers, listPendingInvitations } from "@wms/domain/identity/member-queries";
@@ -22,7 +22,19 @@ export default async function MembersPage({ params }: { params: Promise<{ slug: 
   const principal = await getAuthService().getPrincipal(await headers());
   if (principal === null) redirect(`/login?next=${encodeURIComponent(`/t/${slug}/members`)}`);
   const db = getAppDb();
-  const members = await listMembers({ db, principal, tenantSlug: slug }, { demoEmailDomain: process.env.DEMO_EMAIL_DOMAIN?.trim().toLowerCase() || null });
+  const returnTo = `/t/${slug}/members`;
+  let members: Awaited<ReturnType<typeof listMembers>>;
+  try {
+    members = await listMembers({ db, principal, tenantSlug: slug }, { demoEmailDomain: process.env.DEMO_EMAIL_DOMAIN?.trim().toLowerCase() || null });
+  } catch (e) {
+    // Layout'tan bağımsız (sayfa kendi kararını verir): üye değil → 404; zorunlu MFA → kurulum; oturum yok → giriş.
+    if (e instanceof AppError) {
+      if (e.code === "NOT_FOUND") notFound();
+      if (e.code === "FORBIDDEN" && e.detail === "MFA_REQUIRED") redirect(`/mfa?next=${encodeURIComponent(returnTo)}`);
+      if (e.code === "UNAUTHENTICATED") redirect(`/login?next=${encodeURIComponent(returnTo)}`);
+    }
+    throw e;
+  }
 
   // Yönetim yetkisi kararı sunucudadır: bekleyen davet listesi `users.manage` ister; FORBIDDEN → eylemler kilitli.
   let pending: PendingView[] | null = null;

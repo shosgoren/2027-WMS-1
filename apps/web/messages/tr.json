@@ -243,7 +243,12 @@
       "tenant_closing": "Bu çalışma alanı kapatılıyor.",
       "tenant_closingAction": "Verini dışa aktarman gerekiyorsa destekle iletişime geç.",
       "internal": "İşlem şu an tamamlanamadı.",
-      "internalAction": "Biraz sonra yeniden dene; sürerse destek koduyla yöneticine haber ver."
-    }
+      "internalAction": "Biraz sonra yeniden dene; sürerse destek koduyla yöneticine haber ver.",
+      "retry": "Yeniden dene",
+      "boundaryTitle": "Bir şeyler ters gitti",
+      "supportCode": "Destek kodu: {code}",
+      "tenantStatusTitle": "Çalışma alanı kullanılamıyor"
+    },
+    "demoLocked": "Demo hesabında bu işlem kapalı."
   }
 }
