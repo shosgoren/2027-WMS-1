@@ -292,6 +292,10 @@
     "unauthenticated_recent_auth_requiredAction": "Sign in again and repeat the action.",
     "validation_failed_code_taken": "This code is already in use.",
     "validation_failed_code_takenAction": "Enter a different code.",
+    "validation_failed_feature_disabled": "This feature is currently turned off.",
+    "validation_failed_feature_disabledAction": "Ask your administrator to enable it.",
+    "validation_failed_location_warehouse_mismatch": "All line locations must belong to the document's warehouse.",
+    "validation_failed_location_warehouse_mismatchAction": "Choose locations from the same warehouse; moving between warehouses needs a separate document.",
     "validation_failed_in_use": "This change is not possible because the record is in use.",
     "validation_failed_in_useAction": "Empty the stock or archive the linked records first, then try again.",
     "validation_failed_parent_invalid": "The selected parent location is not valid.",
@@ -534,6 +538,7 @@
       "changed": "You changed a handling unit."
     },
     "stock_document": {
+      "updated": "You updated a stock draft.",
       "created": "You created a stock document.",
       "approved": "You approved a stock document.",
       "posted": "You posted a stock document.",

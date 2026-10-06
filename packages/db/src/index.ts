@@ -42,6 +42,8 @@ export type {
   StockLockErrorCode,
   StockLockPlan,
 } from "./locking.ts";
+export { MAX_TIMEOUT_MS, setLocalTimeouts } from "./timeouts.ts";
+export type { LocalTimeouts } from "./timeouts.ts";
 export { MembershipError, lockOwners, withMembership, withInvitationTenant, withNewTenant, withSystemTenant, withUser } from "./with-membership.ts";
 export type {
   Membership,

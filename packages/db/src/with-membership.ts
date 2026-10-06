@@ -20,6 +20,7 @@ import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { isUuid, rawDb, type DbClient, type TenantTx } from "./client.ts";
 import type { RoleKey } from "./schema/tenancy.ts";
+import { assertValidTimeouts, setLocalTimeouts, type LocalTimeouts } from "./timeouts.ts";
 
 /** 15 §Hata kodları: üyelik/tenant reddi. */
 export type MembershipErrorCode =
@@ -62,6 +63,8 @@ export interface WithMembershipParams {
   readonly userId: string;
   readonly tenantId: string;
   readonly permission?: MembershipPermission;
+  /** İsteğe bağlı transaction-local zaman aşımları; tenant/üyelik `FOR SHARE` okumasından ÖNCE kurulur (bekleme sınırlı). Yoksa davranış değişmez. */
+  readonly timeouts?: LocalTimeouts;
 }
 
 function assertUuid(value: unknown, what: string): asserts value is string {
@@ -107,13 +110,15 @@ export async function withMembership<T>(
   params: WithMembershipParams,
   fn: (tx: TenantTx, membership: Membership) => Promise<T>,
 ): Promise<T> {
-  const { client, userId, tenantId, permission } = params ?? ({} as Partial<WithMembershipParams>);
+  const { client, userId, tenantId, permission, timeouts } = params ?? ({} as Partial<WithMembershipParams>);
   assertUuid(tenantId, "tenantId");
   assertUuid(userId, "userId");
+  if (timeouts !== undefined) assertValidTimeouts(timeouts);
   const db = rawDb(client as DbClient);
   return db.transaction(async (tx) => {
     await tx.execute(sql`SELECT set_config('app.current_tenant_id', ${tenantId}, true)`);
     await tx.execute(sql`SELECT set_config('app.current_user_id', ${userId}, true)`);
+    if (timeouts !== undefined) await setLocalTimeouts(tx, timeouts); // kilit okumalarından ÖNCE
     const tenantStatus = await lockTenantRow(tx, tenantId);
     const rows = await tx.execute<{ id: string; is_owner: boolean; status: string; roles_version: number }>(
       sql`SELECT id, is_owner, status, roles_version
