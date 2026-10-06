@@ -101,6 +101,7 @@ describe("listMyActionsToday", () => {
     await audit(fx, fx.owner, "gelecek.eylem");
     await audit(fy, fy.owner, "tenant.created");
     const page = await listMyActionsToday(acc(fx, fx.owner), { limit: 20 });
+    expect(page.timeZone).toBe("UTC");
     expect(page.items.map((i) => i.action).sort()).toEqual(["gelecek.eylem", "member.invited"]);
     expect(page.items.find((i) => i.action === "gelecek.eylem")?.summaryKey).toBe("audit.other");
     expect(page.items.find((i) => i.action === "member.invited")?.summaryKey).toBe("audit.member.invited");
@@ -133,6 +134,7 @@ describe("listMyActionsToday", () => {
     const minutesToMidnight = 24 * 60 - (local.getUTCHours() * 60 + local.getUTCMinutes());
     const before = new Date(t.getTime() + (minutesToMidnight - 1) * 60_000);
     const after = new Date(t.getTime() + (minutesToMidnight + 1) * 60_000);
+    expect((await listMyActionsToday(acc(fx, fx.owner), { now: before })).timeZone).toBe(tz);
     expect((await listMyActionsToday(acc(fx, fx.owner), { now: before })).items).toHaveLength(1);
     expect((await listMyActionsToday(acc(fx, fx.owner), { now: after })).items).toHaveLength(0);
     // Aynı an, farklı dilimde (UTC): sonuç o dilimin günüyle belirlenir

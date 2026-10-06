@@ -1,7 +1,7 @@
 // "Bugün yaptıkların" (T-122a; docs/spec/08-ux-i18n.md ana ekran): çağıranın KENDİ bugünkü audit satırları.
 // - Gün sınırı tenant saat diliminde (`tenant_settings.time_zone`), DST'ye dayanıklı (yerel gün başlangıcı + 1 gün).
 // - Yalnızca eylem, zaman ve i18n anahtarı döner; `change_summary`/`reason`/ip/user_agent/entity DÖNMEZ (G-09, en az veri).
-// - İzin: A-xx (rapor Bulgu) kendi satırların için `stock.view` (her rol); başkasının satırı sorguda zaten yok.
+// - İzin: A-65 — kendi satırların için `stock.view` (her rol); başkasının satırı sorguda zaten yok.
 // - Keyset: (occurred_at DESC, id ASC) — `audit_logs_tenant_occurred_idx` sırası. İmleç opak; mikrosaniye kaybolmasın
 //   diye zaman damgası metin olarak taşınır.
 import { sql } from "drizzle-orm";
@@ -27,6 +27,8 @@ export interface MyActionsCursor {
 }
 
 export interface MyActionsPage {
+  /** Tenant saat dilimi (IANA); `occurredAt` gösterimi için. Ayrı izin gerektirmez (gün sınırı için zaten okunur). */
+  readonly timeZone: string;
   readonly items: readonly MyActionRow[];
   readonly nextCursor: MyActionsCursor | null;
 }
@@ -87,6 +89,7 @@ export async function listMyActionsToday(
     const page = rows.slice(0, limit);
     const last = page[page.length - 1];
     return {
+      timeZone,
       items: page.map((r) => ({
         action: r.action,
         occurredAt: r.occurred_at instanceof Date ? r.occurred_at : new Date(r.occurred_at),
