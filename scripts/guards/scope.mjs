@@ -6,19 +6,7 @@
 // Kart listesi dalda değiştiyse `WARN SCOPE_CARD_CHANGED` (Supervisor §2 adım 4'te okur).
 import path from "node:path";
 import { CardError, parseCardFiles, resolveCards } from "./lib/cards.mjs";
-import {
-  allMergeSubjects,
-  changedFiles,
-  currentBranch,
-  DEFAULT_TARGET,
-  dropForeignChanges,
-  fileAtRef,
-  GitError,
-  mergeBase,
-  mergedTipSubjects,
-  mergeSubjects,
-  repoRoot,
-} from "./lib/git.mjs";
+import { changedFiles, currentBranch, DEFAULT_TARGET, fileAtRef, GitError, mergeBase, mergeSubjects, repoRoot } from "./lib/git.mjs";
 import { NO_FILE, UsageError } from "./lib/output.mjs";
 
 /**
@@ -126,13 +114,7 @@ export function run(ctx) {
     /** @type {{ kind: "work" | "int", cards: Card[] }} */
     let scope;
     try {
-      const b0 = () => mergeBase(root, args.base ?? DEFAULT_TARGET);
-      scope = resolveCards(
-        root,
-        branch,
-        () => [...mergeSubjects(root, b0()), ...allMergeSubjects(root, b0())],
-        () => mergedTipSubjects(root, b0()),
-      );
+      scope = resolveCards(root, branch, () => mergeSubjects(root, mergeBase(root, args.base ?? DEFAULT_TARGET)));
     } catch (e) {
       if (!(e instanceof CardError)) throw e;
       out.fail(e.code, e.file, e.message);
@@ -150,8 +132,7 @@ export function run(ctx) {
     const globs = scope.cards.flatMap((c) => c.globs);
     if (scope.kind === "int") globs.push(...SUPERVISOR_PATHS);
     const ids = scope.cards.map((c) => c.id).join(", ") || "birleştirilmiş kart yok";
-    // T-008l m2: hedefin/main'in zaten içerdiği (merge ile gelen) içerik bu dalın değişikliği değildir.
-    const changes = dropForeignChanges(root, base, changedFiles(root, base), [target, DEFAULT_TARGET]);
+    const changes = changedFiles(root, base);
     out.detail("changes", changes);
 
     /** @type {Set<string>} */

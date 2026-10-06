@@ -1265,7 +1265,7 @@ describe("check:protected", () => {
       expect(securityFreshness(r.dir, head(r), "origin/main")(reviewed)).toBeNull();
     });
 
-    it("T-008l madde 4: taban birleştirmeden sonra aynı dosyayı yeniden değiştirince ara durum bayat (muhafazakâr); tabanı yeniden birleştirmek taze yapar", () => {
+    it("T-008l madde 4: taban birleştirmeden sonra aynı dosyayı yeniden değiştirince ara durum bayat (muhafazakâr)", () => {
       const r = fixture();
       r.write("docs/INVARIANTS.md", "# I2\n").commit("PR");
       const reviewed = head(r);
@@ -1277,21 +1277,36 @@ describe("check:protected", () => {
       r.checkout("main").write(X, "export const v = 2;\n").commit("taban 2").publish("main");
       r.checkout("feat/T-100-x");
       expect(securityFreshness(r.dir, head(r), "origin/main")(reviewed)).toContain(X);
-      r.merge("main", "Merge main (2)");
-      expect(securityFreshness(r.dir, head(r), "origin/main")(reviewed)).toBeNull();
     });
 
-    it("T-008l madde 4 negatif: PR head'i rapordan sonra dosyayı eski taban sürümüne geri alırsa (taban sonradan ilerlemiş) bayat", () => {
+    it("T-008l madde 4: tabanın son hâlini birleştirmek (head == taban) taze yapar", () => {
       const r = fixture();
-      r.checkout("main").write(X, "export const v = 1;\n").commit("taban 1").publish("main");
-      r.checkout("feat/T-100-x").merge("main", "Merge main (1)");
       r.write("docs/INVARIANTS.md", "# I2\n").commit("PR");
       const reviewed = head(r);
       r.checkout("main").write(X, "export const v = 2;\n").commit("taban 2").publish("main");
-      r.checkout("feat/T-100-x").write(X, "export {};\n").commit("eski sürüme dön");
+      r.checkout("feat/T-100-x").merge("main", "Merge main (2)");
+      expect(securityFreshness(r.dir, head(r), "origin/main")(reviewed)).toBeNull();
+    });
+
+    /** PR X'i v1 yapar (rapor bu commit'e bağlı); taban X'i v2 yapar ve yayımlanır. */
+    const madde4Neg = () => {
+      const r = fixture();
+      r.write(X, "export const v = 1;\n").commit("PR: incelenen değişiklik");
+      const reviewed = head(r);
+      r.checkout("main").write(X, "export const v = 2;\n").commit("taban 2").publish("main");
+      r.checkout("feat/T-100-x");
+      return { r, reviewed };
+    };
+
+    it("T-008l madde 4 negatif: PR head'i rapordan sonra dosyayı eski taban sürümüne geri alırsa (taban sonradan ilerlemiş) bayat", () => {
+      const { r, reviewed } = madde4Neg();
+      r.write(X, "export {};\n").commit("eski sürüme dön");
       expect(securityFreshness(r.dir, head(r), "origin/main")(reviewed)).toContain(X);
-      // Karşılaştırma: aynı dosya rapor anındaki hâlinde kalırsa taze.
-      r.write(X, "export const v = 1;\n").commit("rapor sürümüne dön");
+    });
+
+    it("T-008l madde 4 karşılaştırma: aynı dosya rapor anındaki hâlinde kalırsa taze", () => {
+      const { r, reviewed } = madde4Neg();
+      r.write("docs/STATE.md", "# durum\n").commit("belge");
       expect(securityFreshness(r.dir, head(r), "origin/main")(reviewed)).toBeNull();
     });
 

@@ -68,26 +68,6 @@ export function mergedWorkBranches(subjects) {
   return out;
 }
 
-/** Dal ucu commit konusunun kart öneki: `fix(T-017): …` veya `T-017: …`. */
-const TIP_CARD_PREFIX = /^(?:[a-z]+\((T-\d{3}[a-z]?)\)!?|(T-\d{3}[a-z]?)):/;
-
-/**
- * Birleşen dalların ucu commit konularındaki `T-xxx` önekleri (tekil, ilk görülme sırası; T-008l m3).
- * Yalnızca `tür(T-xxx):` ve `T-xxx:` kalıpları; serbest metindeki anma sayılmaz.
- * @param {string[]} subjects
- * @returns {string[]}
- */
-export function cardIdsFromTipSubjects(subjects) {
-  /** @type {string[]} */
-  const ids = [];
-  for (const s of subjects) {
-    const m = TIP_CARD_PREFIX.exec(s);
-    const id = m?.[1] ?? m?.[2];
-    if (id !== undefined && !ids.includes(id)) ids.push(id);
-  }
-  return ids;
-}
-
 /**
  * Bir satırdaki backtick içi parçalar; parantez içindekiler (iç içe dahil) yok sayılır.
  * Backtick içindeki parantezler derinliği etkilemez.
@@ -192,12 +172,9 @@ export function cardIntTarget(text) {
  * @param {string} root
  * @param {string} branch
  * @param {() => string[]} mergedSubjects `int/*` için birleştirme konuları (tembel)
- * @param {() => string[]} [tipSubjects] birleşen dalların ucu commit konuları (tembel; T-008l m3).
- *   Bu kaynaktan gelen kimliğin kartı yoksa YOK SAYILIR (ek izin vermez; hata değil — başlık
- *   önekleri bir sezgidir, kesin kaynak birleştirme konularıdır).
  * @returns {{ kind: "work" | "int", cards: Card[] }}
  */
-export function resolveCards(root, branch, mergedSubjects, tipSubjects = () => []) {
+export function resolveCards(root, branch, mergedSubjects) {
   const id = cardIdFromBranch(branch);
   if (id !== null) return { kind: "work", cards: [loadCard(root, id)] };
   if (isIntBranch(branch)) {
@@ -206,10 +183,6 @@ export function resolveCards(root, branch, mergedSubjects, tipSubjects = () => [
     for (const b of mergedWorkBranches(mergedSubjects())) {
       const cid = /** @type {string} */ (cardIdFromBranch(b));
       if (!cards.some((c) => c.id === cid)) cards.push(loadCard(root, cid));
-    }
-    for (const cid of cardIdsFromTipSubjects(tipSubjects())) {
-      if (cards.some((c) => c.id === cid) || !existsSync(path.join(root, cardPath(cid)))) continue;
-      cards.push(loadCard(root, cid));
     }
     cards.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
     return { kind: "int", cards };

@@ -209,61 +209,6 @@ export function treeEntries(cwd, rev, files) {
 }
 
 /**
- * Bu dalın YAZMADIĞI değişiklikleri düşer (T-008l madde 2). `changes`, `base..çalışma ağacı`
- * farkıdır; hedef dalın (ya da `main`'in) içeriğini birleştiren bir merge commit'i, hedefte
- * olup `base`'de olmayan dosyaları da bu farka sokar (yerel `origin/<int>` bayat/`main` birleştirilmiş).
- * "Yabancı" commit'ler: `targets` uçları ∪ `base..HEAD` ilk-ebeveyn zincirindeki merge
- * commit'lerinin diğer ebeveynlerinden `targets` uçlarından birinin ATASI (veya kendisi) olanlar.
- * Bir değişiklik yalnızca şu koşulların HEPSİ doğruysa düşer: (1) dosya HEAD'de VAR ve HEAD
- * girdisi (mod, tür, blob) bir yabancı commit'teki girdiyle BİREBİR aynı (içerik zaten hedefte);
- * (2) yeniden adlandırma/kopyada eski yol yabancı commit'te de yok ve HEAD'de de yok (yeniden
- * adlandırma da oradan geldi); (3) yol indekste/çalışma ağacında HEAD'den farklı değil ve
- * izlenmeyen değil (yerel düzenleme = bu dalın yazdığı). Silmeler asla düşmez. Bu dalda yazılan,
- * yabancı commit'lerde birebir bulunmayan her değişiklik kalır.
- * @param {string} cwd depo kökü
- * @param {string} base `mergeBase(hedef)`
- * @param {Change[]} changes
- * @param {string[]} targets hedef ref'leri (örn. `origin/int/x`, `origin/main`); olmayanlar atlanır
- * @returns {Change[]}
- */
-export function dropForeignChanges(cwd, base, changes, targets) {
-  if (changes.length === 0) return changes;
-  const tips = [...new Set(targets)].filter((t) => refExists(cwd, t));
-  if (tips.length === 0) return changes;
-  /** @type {Set<string>} */
-  const foreign = new Set(tips.map((t) => git(cwd, ["rev-parse", "--verify", `${t}^{commit}`]).trim()));
-  const merges = git(cwd, ["rev-list", "--first-parent", "--merges", "--parents", `${base}..HEAD`]);
-  for (const line of merges.split("\n")) {
-    const [, , ...extra] = line.trim().split(/\s+/);
-    for (const o of extra) {
-      if (o === undefined || o === "" || foreign.has(o)) continue;
-      const contained = tips.some((t) => {
-        try {
-          git(cwd, ["merge-base", "--is-ancestor", o, t]);
-          return true;
-        } catch (e) {
-          if (!(e instanceof GitError)) throw e;
-          return false;
-        }
-      });
-      if (contained) foreign.add(o);
-    }
-  }
-  const dirty = new Set(touchedPaths(changedFiles(cwd, "HEAD")));
-  const candidates = touchedPaths(changes.filter((c) => c.status !== "D"));
-  const head = treeEntries(cwd, "HEAD", candidates);
-  const foreignTrees = [...foreign].map((rev) => treeEntries(cwd, rev, candidates));
-  return changes.filter((c) => {
-    if (c.status === "D") return true;
-    if (dirty.has(c.path) || (c.oldPath !== undefined && dirty.has(c.oldPath))) return true;
-    const h = head.get(c.path) ?? "";
-    if (h === "") return true;
-    if (c.oldPath !== undefined && (head.get(c.oldPath) ?? "") !== "") return true;
-    return !foreignTrees.some((t) => t.get(c.path) === h && (c.oldPath === undefined || (t.get(c.oldPath) ?? "") === ""));
-  });
-}
-
-/**
  * Değişikliklerin dokunduğu tüm yollar (ad değişikliğinde eski + yeni), tekil ve sıralı.
  * @param {Change[]} changes
  * @returns {string[]}
@@ -285,11 +230,20 @@ export function touchedPaths(changes) {
  * @returns {string | null}
  */
 export function fileAtRef(cwd, ref, file) {
+  // Tam commit SHA'sı içerik-adreslidir (değişmez; `--no-replace-objects`): bulunan içerik süreç
+  // içinde önbelleklenir (T-008l madde 1). `HEAD`/dal adları ASLA önbelleklenmez; "yok" (null) de değil.
+  const key = /^[0-9a-f]{40}$/.test(ref) ? `${cwd}\0${ref}\0${file}` : null;
+  if (key !== null) {
+    const hit = BLOB_CACHE.get(key);
+    if (hit !== undefined) return hit;
+  }
   const spec = `${ref}:${file}`;
-  // Tek alt süreç (T-008l madde 1): blob okunur; başarısızsa `cat-file -e` ile "yok" ile "okunamadı"
+  // Tek alt süreç: blob okunur; başarısızsa `cat-file -e` ile "yok" ile "okunamadı"
   // (ör. girdi blob değil, nesne bozuk) ayrılır — yoksa `null`, varsa asıl hata (fail-closed) fırlar.
   try {
-    return git(cwd, ["cat-file", "blob", spec]);
+    const content = git(cwd, ["cat-file", "blob", spec]);
+    if (key !== null) BLOB_CACHE.set(key, content);
+    return content;
   } catch (e) {
     try {
       git(cwd, ["cat-file", "-e", spec]);
@@ -300,6 +254,9 @@ export function fileAtRef(cwd, ref, file) {
   }
 }
 
+/** @type {Map<string, string>} */
+const BLOB_CACHE = new Map();
+
 /**
  * `base..HEAD` aralığındaki ilk-ebeveyn birleştirme commit'lerinin konu satırları.
  * @param {string} cwd
@@ -308,38 +265,5 @@ export function fileAtRef(cwd, ref, file) {
  */
 export function mergeSubjects(cwd, base) {
   const out = git(cwd, ["log", "--first-parent", "--merges", "--format=%s", `${base}..HEAD`]);
-  return out.split("\n").filter((l) => l !== "");
-}
-
-/**
- * `base..HEAD` aralığındaki TÜM birleştirme commit'lerinin konu satırları — ilk-ebeveyn olmayanlar
- * dahil (T-008l madde 3): birleşen bir dalın içinde birleşmiş çalışma dalları da görünür
- * (dolaylı gelen kart; boş merge commit'i geçici çözümü gerekmez).
- * @param {string} cwd
- * @param {string} base
- * @returns {string[]}
- */
-export function allMergeSubjects(cwd, base) {
-  const out = git(cwd, ["log", "--merges", "--format=%s", `${base}..HEAD`]);
-  return out.split("\n").filter((l) => l !== "");
-}
-
-/**
- * `base..HEAD` ilk-ebeveyn zincirindeki merge commit'lerinin BİRLEŞEN tarafı (birinci ebeveyn dışı)
- * uç commit'lerinin konu satırları (T-008l madde 3: kart kimliği `T-xxx` önekinden).
- * @param {string} cwd
- * @param {string} base
- * @returns {string[]}
- */
-export function mergedTipSubjects(cwd, base) {
-  const merges = git(cwd, ["rev-list", "--first-parent", "--merges", "--parents", `${base}..HEAD`]);
-  /** @type {string[]} */
-  const tips = [];
-  for (const line of merges.split("\n")) {
-    const [, , ...extra] = line.trim().split(/\s+/);
-    for (const t of extra) if (t !== undefined && t !== "" && !tips.includes(t)) tips.push(t);
-  }
-  if (tips.length === 0) return [];
-  const out = git(cwd, ["log", "--no-walk=unsorted", "--format=%s", ...tips, "--"]);
   return out.split("\n").filter((l) => l !== "");
 }
