@@ -284,6 +284,18 @@ export interface Principal {
   readonly authenticatedAt: Date;
   /** Oturum düzeyi MFA: `sessions.mfa_verified_at IS NOT NULL` (ADR-014 §12). */
   readonly mfaVerified: boolean;
+  /** Demo kullanıcısı (A-43; `isDemoEmail` tek kaynak). UI demo ekranlarını render etmez (M9). */
+  readonly isDemo: boolean;
+  /** Kullanıcıda 2FA etkin (kurulum tamamlanmış). */
+  readonly twoFactorEnabled: boolean;
+}
+
+/** `getPrincipal`'ın oturum okumasındaki kullanıcıdan türettiği alanlar (saf; birim testli). */
+export function principalIdentityFlags(
+  user: { readonly email?: string | null; readonly twoFactorEnabled?: boolean | null },
+  demoEmailDomain: string | null,
+): { readonly isDemo: boolean; readonly twoFactorEnabled: boolean } {
+  return { isDemo: isDemoEmail(user.email, demoEmailDomain), twoFactorEnabled: user.twoFactorEnabled === true };
 }
 
 export interface CreateInvitedAccountResult {
@@ -1254,7 +1266,7 @@ export function createAuth(params: CreateAuthParams): AuthService {
     async getPrincipal(headers) {
       const result = await masked(() => auth.api.getSession({ headers }));
       if (result === null || result === undefined) return null;
-      const { session } = result;
+      const { session, user } = result;
       // A-39: mutlak 7 gün sınırı (oturum oluşturmadan itibaren); aşıldıysa oturum iptal edilir.
       if (sessionAbsoluteExpired(new Date(session.createdAt))) {
         await masked(() => authDb.execute(sql`DELETE FROM public.sessions WHERE id = ${session.id}::uuid`));
@@ -1265,6 +1277,7 @@ export function createAuth(params: CreateAuthParams): AuthService {
         sessionId: session.id,
         authenticatedAt: new Date(session.createdAt),
         mfaVerified: session.mfaVerifiedAt !== null && session.mfaVerifiedAt !== undefined,
+        ...principalIdentityFlags(user, env.demoEmailDomain),
       };
     },
 

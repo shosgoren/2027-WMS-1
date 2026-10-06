@@ -4,6 +4,7 @@ import Link from "next/link";
 import { NextIntlClientProvider } from "next-intl";
 import { getLocale, getTranslations } from "next-intl/server";
 import type { ReactNode } from "react";
+import { SignOutButton } from "./auth-forms.tsx";
 import "./globals.css";
 
 // Uygulama kabuğu (T-109): üst bar, Akış/Kokpit görünüm anahtarı, kullanıcı çipi yer tutucusu,
@@ -33,7 +34,10 @@ const TOUCH = "min-h-12 min-w-12";
 export default async function RootLayout({ children }: Readonly<{ children: ReactNode }>) {
   const locale = await getLocale();
   const t = await getTranslations("shell");
-  const view = parseView((await cookies()).get(VIEW_COOKIE)?.value);
+  const cookieStore = await cookies();
+  const view = parseView(cookieStore.get(VIEW_COOKIE)?.value);
+  // İyimser: yalnızca oturum çerezinin varlığı (çıkış düğmesi gösterimi); yetki sunucuda (proxy.ts notu).
+  const hasSession = cookieStore.getAll().some((c) => /^(?:__Secure-)?better-auth\.session_token$/.test(c.name));
 
   return (
     <html lang={locale} data-view={view}>
@@ -96,6 +100,8 @@ export default async function RootLayout({ children }: Readonly<{ children: Reac
                 </span>
                 <span className="hidden text-sm font-semibold sm:inline">{t("userChip.placeholderName")}</span>
               </div>
+
+              {hasSession ? <SignOutButton /> : null}
 
               <Link
                 href="/help"
