@@ -50,7 +50,7 @@ export function Wizard({
         {templates.map((tpl) => (
           <label
             key={tpl.key}
-            className="flex min-h-12 min-w-0 cursor-pointer items-start gap-3 rounded-card border-2 border-border bg-surface p-4 has-[:checked]:border-accent has-[:checked]:bg-accent-soft has-[:focus-visible]:outline-3 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-focus"
+            className="flex min-h-12 min-w-0 cursor-pointer items-start gap-3 rounded-card border-2 border-border-strong bg-surface p-4 has-[:checked]:border-accent has-[:checked]:bg-accent-soft has-[:focus-visible]:outline-3 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-focus"
           >
             <input
               type="radio"
@@ -97,7 +97,7 @@ export function Wizard({
       <div className="flex flex-wrap gap-3">
         <Link
           href={backHref}
-          className="inline-flex min-h-12 min-w-12 items-center justify-center rounded-control border-2 border-border bg-surface px-6 text-base font-bold text-ink focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus"
+          className="inline-flex min-h-12 min-w-12 items-center justify-center rounded-control border-2 border-border-strong bg-surface px-6 text-base font-bold text-ink focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus"
         >
           {t("step2.back")}
         </Link>

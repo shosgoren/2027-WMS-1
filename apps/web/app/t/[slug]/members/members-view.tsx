@@ -38,7 +38,7 @@ interface Confirm {
 }
 
 const SELECT =
-  "min-h-12 w-full min-w-0 rounded-card border-2 border-border bg-surface px-3 text-base text-ink sm:w-auto focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus";
+  "min-h-12 w-full min-w-0 rounded-card border-2 border-border-strong bg-surface px-3 text-base text-ink sm:w-auto focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus";
 const BADGE = "inline-flex items-center rounded-full px-2 text-xs font-bold";
 
 const noopSubscribe = (): (() => void) => () => undefined;

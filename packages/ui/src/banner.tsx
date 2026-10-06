@@ -1,25 +1,26 @@
 import type { ReactNode } from "react";
-import { CircleAlert, Info, TriangleAlert } from "lucide-react";
+import { CircleAlert, CircleCheck, Info, TriangleAlert } from "lucide-react";
 
-export type BannerKind = "info" | "warning" | "error";
+export type BannerKind = "info" | "warning" | "error" | "success";
 
 export interface BannerProps {
   kind: BannerKind;
   children: ReactNode;
 }
 
-const KIND: Record<BannerKind, { cls: string; role: "status" | "alert"; Icon: typeof Info }> = {
-  info: { cls: "bg-accent-soft text-accent-ink", role: "status", Icon: Info },
-  warning: { cls: "bg-warning-bg text-warning-ink", role: "status", Icon: TriangleAlert },
-  error: { cls: "bg-undo-bg text-undo-ink", role: "alert", Icon: CircleAlert },
+const KIND: Record<BannerKind, { cls: string; iconCls: string; role: "status" | "alert"; Icon: typeof Info }> = {
+  info: { cls: "bg-info-bg text-info-ink", iconCls: "text-info", role: "status", Icon: Info },
+  warning: { cls: "bg-warning-bg text-warning-ink", iconCls: "text-warning", role: "status", Icon: TriangleAlert },
+  error: { cls: "bg-danger-bg text-danger-ink", iconCls: "text-danger", role: "alert", Icon: CircleAlert },
+  success: { cls: "bg-success-bg text-success-ink", iconCls: "text-success", role: "status", Icon: CircleCheck },
 };
 
 /** Uyarı bandı (örn. "Demo ortamı"). Metin çağırandan gelir. */
 export function Banner({ kind, children }: BannerProps) {
-  const { cls, role, Icon } = KIND[kind];
+  const { cls, iconCls, role, Icon } = KIND[kind];
   return (
     <div role={role} data-kind={kind} className={`flex min-h-12 items-start gap-3 rounded-card px-4 py-3 ${cls}`}>
-      <Icon aria-hidden="true" className="mt-0.5 size-5 shrink-0" />
+      <Icon aria-hidden="true" className={`mt-0.5 size-5 shrink-0 ${iconCls}`} />
       <div className="min-w-0 break-words text-base font-medium">{children}</div>
     </div>
   );
