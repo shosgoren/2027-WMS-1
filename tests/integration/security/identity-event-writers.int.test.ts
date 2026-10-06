@@ -1,6 +1,6 @@
 // 0007_identity_event_classes (T-112d): account.*, password_reset_link.*, demo.account_*, demo.password_* yalnızca wms_auth.
 // Gerçek roller (wms_app / wms_auth); `demo.action_forbidden` wms_app'e açık KALIR. İleri/geri/ileri ayrı veritabanında.
-import { cpSync, mkdtempSync, rmSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -22,13 +22,15 @@ const NEW_IDENTITY = [
   "demo.account_created",
   "demo.account_taken_over",
   "demo.password_reset",
+  "demo.account.x",
+  "demo.password.x",
 ];
 // Büyük harf: wms_auth için biçim CHECK'i reddeder (23514); wms_app için tetikleyici lower() ile 42501 verir.
 const UPPER = ["ACCOUNT.RECOVERED", "Demo.Account_Created"];
 // 0005 `password[_.]` zaten kapsıyordu (yeni migration gerektirmeden kapalı).
 const ALREADY_CLOSED = ["password_reset_link.consumed", "password_reset_link.inconsistent"];
 // Kapsam dışı kalmalı: wms_app yazmaya devam eder.
-const APP_OPEN = ["demo.action_forbidden", "demo.reseed", "demo.accounts", "accountant.x", "demo_account_x", "demox.account_y"];
+const APP_OPEN = ["demo.action_forbidden", "demo.reseed", "demo.accounts", "demo.passwords", "accountant.x", "demo_account_x", "demox.account_y"];
 
 const ins = (type: string): string => `INSERT INTO public.security_events (event_type, detail) VALUES ('${type}', '{"t":"t112d"}')`;
 
@@ -152,6 +154,18 @@ describe("0007 ileri/geri/ileri", () => {
       expect(Number(n.rows[0]?.n)).toBeGreaterThanOrEqual(2);
     } finally {
       await c2.end();
+    }
+
+    // Geri alma işlev gövdesi 0005 dosyasındaki gövdeyle birebir aynı olmalı.
+    const src005 = readFileSync(path.join(dir, "0005_security_event_writers.up.sql"), "utf8");
+    const body005 = /\$fn\$([\s\S]*?)\$fn\$/.exec(src005)?.[1];
+    expect(body005).toBeTruthy();
+    const cp = await connect(url);
+    try {
+      const r = await cp.query<{ prosrc: string }>("SELECT prosrc FROM pg_proc WHERE oid = 'public.security_events_restrict_identity_writers()'::regprocedure");
+      expect(r.rows[0]?.prosrc).toBe(body005);
+    } finally {
+      await cp.end();
     }
 
     expect((await migrateUp({ url, dir })).applied).toEqual(["0007"]);

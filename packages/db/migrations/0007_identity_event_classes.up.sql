@@ -1,7 +1,7 @@
 -- 0007_identity_event_classes (T-112d; T-117b inceleme MINOR-8; 0005 genişletmesi, genişlet–taşı–daralt: yalnızca işlev gövdesi):
 -- `wms_auth`'ın yazdığı hesap/sıfırlama bağlantısı/demo hesap olayları da kimlik sınıfına alınır; `wms_app` sahteleyemez.
--- Yeni önekler: `account[_.]`, `password_reset_link[_.]`, `demo.account_`, `demo.password_` (T-123a olayları: demo.account_created/
--- demo.account_taken_over/demo.password_reset; lower() ile). `demo.action_forbidden` bilerek DIŞARIDA: wms_app'e açık kalır (supervisor kararı).
+-- Yeni önekler: `account[_.]`, `password_reset_link[_.]`, `demo.(account|password)[_.]` (T-123a olayları: demo.account_created/
+-- demo.account_taken_over/demo.password_reset; nokta ve alt çizgi; lower() ile). `demo.action_forbidden` bilerek DIŞARIDA: wms_app'e açık kalır (supervisor kararı).
 -- NOT: `password_reset_link.*` 0005'teki `password[_.]` ile zaten kapsanıyordu; burada açıkça yazılarak niyet belgelenir.
 -- Doğrulama: `packages/auth` bu olayları yalnızca `wms_auth` bağlantısıyla yazar (emit → recordSecurityEvent); `wms_app` ile
 -- yazan üretim kodu YOKTUR (grep).
@@ -12,7 +12,7 @@ CREATE OR REPLACE FUNCTION public.security_events_restrict_identity_writers() RE
   SET search_path = pg_catalog, pg_temp
 AS $fn$
 BEGIN
-  IF pg_catalog.lower(NEW.event_type) ~ '^(login_|logout|password[_.]|two_factor_|reauth[_.]|session[_.]|mfa[_.]|account[_.]|password_reset_link[_.]|demo\.account_|demo\.password_)'
+  IF pg_catalog.lower(NEW.event_type) ~ '^(login_|logout|password[_.]|two_factor_|reauth[_.]|session[_.]|mfa[_.]|account[_.]|password_reset_link[_.]|demo\.(account|password)[_.])'
      AND current_user::text <> 'wms_auth' THEN
     RAISE EXCEPTION 'security_events: kimlik olayı (%) yalnızca wms_auth tarafından yazılabilir', NEW.event_type
       USING ERRCODE = 'insufficient_privilege';

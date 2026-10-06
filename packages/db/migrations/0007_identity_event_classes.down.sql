@@ -1,4 +1,4 @@
--- 0007_identity_event_classes geri alma: işlev gövdesi 0005 sürümüne döner (account/demo.account_/demo.password_ önekleri
+-- 0007_identity_event_classes geri alma: işlev gövdesi 0005 sürümüne döner (account[_.] ve demo.(account|password)[_.] önekleri
 -- artık wms_app'e kapalı değil; `password_reset_link.*` yine `password[_.]` ile kapalı kalır). VERİ KAYBETTİRMEZ:
 -- yalnızca işlev gövdesi; tablo ve satırlara dokunulmaz.
 CREATE OR REPLACE FUNCTION public.security_events_restrict_identity_writers() RETURNS trigger
