@@ -112,7 +112,9 @@ CREATE TABLE public.documents (
   CONSTRAINT documents_reversal_chk CHECK ((kind = 'REVERSAL') = (reversal_of_document_id IS NOT NULL)),
   CONSTRAINT documents_reversal_not_self_chk CHECK (reversal_of_document_id IS NULL OR reversal_of_document_id <> id),
   CONSTRAINT documents_posting_pair_chk CHECK ((posting_job_id IS NULL) = (posting_requested_by IS NULL)),
-  CONSTRAINT documents_posting_status_chk CHECK (posting_job_id IS NULL OR status = 'APPROVED')
+  CONSTRAINT documents_posting_status_chk CHECK (posting_job_id IS NULL OR status = 'APPROVED'),
+  -- 500: audit.ts appendAudit reason sınırı (optText(reason, 500)) emsali.
+  CONSTRAINT documents_reason_chk CHECK (reason IS NULL OR char_length(reason) <= 500)
 );
 CREATE INDEX documents_tenant_warehouse_idx ON public.documents (tenant_id, warehouse_id);
 CREATE INDEX documents_tenant_status_idx ON public.documents (tenant_id, status, business_date);
@@ -185,7 +187,8 @@ CREATE TABLE public.document_status_history (
   CONSTRAINT document_status_history_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants (id),
   CONSTRAINT document_status_history_document_fkey FOREIGN KEY (tenant_id, document_id) REFERENCES public.documents (tenant_id, id),
   CONSTRAINT document_status_history_from_chk CHECK (from_status IS NULL OR from_status IN ('DRAFT', 'APPROVED', 'POSTED', 'CANCELLED')),
-  CONSTRAINT document_status_history_to_chk CHECK (to_status IN ('DRAFT', 'APPROVED', 'POSTED', 'CANCELLED'))
+  CONSTRAINT document_status_history_to_chk CHECK (to_status IN ('DRAFT', 'APPROVED', 'POSTED', 'CANCELLED')),
+  CONSTRAINT document_status_history_reason_chk CHECK (reason IS NULL OR char_length(reason) <= 500)
 );
 CREATE INDEX document_status_history_tenant_document_idx ON public.document_status_history (tenant_id, document_id, occurred_at);
 
@@ -429,10 +432,10 @@ BEGIN
   VALUES (NEW.tenant_id, NEW.id,
           CASE WHEN TG_OP = 'UPDATE' THEN OLD.status ELSE NULL END,
           NEW.status,
-          -- Kullanıcı bağlamı yoksa (worker/sistem geçişi) işletmeyi isteyen kullanıcı: posting_requested_by POSTED'da temizlenir,
+          -- Kullanıcı bağlamı yoksa YALNIZCA POSTED geçişinde işletmeyi isteyen kullanıcı: posting_requested_by POSTED'da temizlenir,
           -- OLD değeri denetim izinde korunur. Gerekçe geçiş anındaki belge gerekçesidir (satır değişmez, sonraki geçiş etkilemez).
           COALESCE(NULLIF(pg_catalog.current_setting('app.current_user_id', true), '')::uuid,
-                   CASE WHEN TG_OP = 'UPDATE' THEN OLD.posting_requested_by ELSE NULL END),
+                   CASE WHEN TG_OP = 'UPDATE' AND NEW.status = 'POSTED' THEN OLD.posting_requested_by ELSE NULL END),
           NEW.reason);
   RETURN NULL;
 END
