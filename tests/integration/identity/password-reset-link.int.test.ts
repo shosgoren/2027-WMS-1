@@ -234,7 +234,7 @@ describe("issuePasswordResetLink — üretim denetimleri", () => {
     expect(evs).toContain("password_reset");
     expect(evs).toContain("password_reset_link.consumed");
     const cons = await adm.query("SELECT detail FROM public.security_events WHERE user_id = $1 AND event_type = 'password_reset_link.consumed'", [target.userId]);
-    expect(cons.rows[0].detail).toMatchObject({ issuing_tenant_id: fx.tenant });
+    expect(cons.rows[0].detail).toMatchObject({ issuing_tenant_id: fx.tenant, tenant_verified: true });
     // Tek kullanımlık.
     expect((await reset(auth, res.token)).status).toBeGreaterThanOrEqual(400);
   });
@@ -324,6 +324,19 @@ describe("issuePasswordResetLink — üretim denetimleri", () => {
     const au = await adm.query("SELECT change_summary->>'status' AS st FROM public.audit_logs WHERE tenant_id = $1 AND action = 'password_reset_link.issued' ORDER BY occurred_at, id", [fx.tenant]);
     expect(au.rows.map((r: { st: string }) => r.st)).toEqual(["issued", "revoked_before_delivery"]);
   });
+
+  it("olay yazılamaz VE belirteç silinemezse telafi audit durumu discard_failed; hata loglanır", async () => {
+    const fx = await mkTenant();
+    const target = await mkMember(fx.tenant, "PICKER");
+    const logs: Record<string, unknown>[] = [];
+    const failing: PasswordResetPort = { ...port, recordIssued: () => Promise.reject(new Error("injected")), discardToken: () => Promise.reject(new Error("injected")) };
+    await expect(issue(fx, fx.admin, target.membershipId, {}, { port: failing, log: (e) => logs.push(e) })).rejects.toBeInstanceOf(AppError);
+    const au = await adm.query("SELECT change_summary->>'status' AS st FROM public.audit_logs WHERE tenant_id = $1 AND action = 'password_reset_link.issued' ORDER BY occurred_at, id", [fx.tenant]);
+    expect(au.rows.map((r: { st: string }) => r.st)).toEqual(["issued", "discard_failed"]);
+    expect(logs.some((l) => l.msg === "password reset token cleanup failed")).toBe(true);
+    // Silinemeyen kayıt grant'siz değil ama bağlantı hiç dönmedi; temizlik (paylaşılan DB).
+    await adm.query("DELETE FROM public.verifications WHERE value = $1", [target.userId]);
+  });
 });
 
 describe("kullanım anı denetimi (before /reset-password)", () => {
@@ -349,6 +362,9 @@ describe("kullanım anı denetimi (before /reset-password)", () => {
     const res = await reset(auth, link.token);
     expect(res.status).toBe(403);
     expect(await pwHash(target.userId)).toBe(before);
+    const rej = await adm.query("SELECT detail FROM public.security_events WHERE event_type = 'password_reset_link.rejected' AND detail->>'claimed_tenant_id' = $1", [a.tenant]);
+    expect(rej.rows[0].detail).toMatchObject({ tenant_verified: false });
+    expect(rej.rows[0].detail).not.toHaveProperty("issuing_tenant_id");
   });
 
   it("grant'i elle silinmiş işaretli belirteç → FORBIDDEN, parola değişmez", async () => {
@@ -465,6 +481,29 @@ describe("B1: saklanan kimlik belirteç olarak gönderilemez; kısa parola bağl
     // Asıl bağlantı hâlâ çalışır.
     expect((await reset(auth, link.token)).status).toBe(200);
     expect(await pwHash(target.userId)).not.toBe(before);
+  });
+
+  it("GET /reset-password/:token: saklanan h.<özet> başarı yönlendirmesi vermez; geçerli belirteç yönlendirir; kayıt aranmaz", async () => {
+    const fx = await mkTenant();
+    const target = await mkMember(fx.tenant, "PICKER");
+    const link = await issue(fx, fx.admin, target.membershipId);
+    const stored = String(await scalar("SELECT identifier FROM public.verifications WHERE value = $1 AND identifier LIKE 'reset-password:%'", [target.userId]));
+    const digest = stored.slice("reset-password:".length);
+    const get = (t: string): Promise<Response> =>
+      auth.handler(
+        new Request(`${BASE}/api/auth/reset-password/${encodeURIComponent(t)}?callbackURL=${encodeURIComponent("/reset-password")}`, {
+          method: "GET",
+          headers: { origin: BASE, "fly-client-ip": nextIp(), "user-agent": "t117b-int" },
+          redirect: "manual",
+        }),
+      );
+    const bad = await get(digest);
+    expect(bad.status).toBe(403);
+    expect(bad.headers.get("location") ?? "").not.toMatch(/[?&]token=/);
+    const good = await get(link.token);
+    expect([301, 302, 303, 307]).toContain(good.status);
+    expect(good.headers.get("location") ?? "").toContain(`token=${link.token}`);
+    expect(await grantCount(target.userId)).toBe(1); // GET grant'i tüketmez
   });
 
   it("kısa parola ile kullanım bağlantıyı tüketmez", async () => {

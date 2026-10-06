@@ -913,7 +913,8 @@ export function createAuth(params: CreateAuthParams): AuthService {
         userId,
         source,
         options,
-        { verdict: verdict === "invalid" ? "invalid" : "absent", issuing_tenant_id: issuingTenant },
+        // Yalnızca belirteçteki (doğrulanmamış) iddia; doğrulanmış tenant yalnızca 'consumed' olayında yazılır.
+        { verdict: verdict === "invalid" ? "invalid" : "absent", claimed_tenant_id: issuingTenant, tenant_verified: false },
         true,
       );
       throw resetRejected();
@@ -953,7 +954,7 @@ export function createAuth(params: CreateAuthParams): AuthService {
     const returned = returnedValue as { status?: unknown } | undefined;
     if (returned === undefined || returned === null || typeof returned !== "object" || returned.status !== true) return;
     if (pending.marked) {
-      await emit("password_reset_link.consumed", pending.userId, source, options, { issuing_tenant_id: pending.issuingTenant }, true);
+      await emit("password_reset_link.consumed", pending.userId, source, options, { issuing_tenant_id: pending.issuingTenant, tenant_verified: true }, true);
       return;
     }
     if (!env.emailRecoveryEnabled) return; // A-55: bayrak kapalıyken kurtarma etkisi yok
@@ -1156,6 +1157,15 @@ export function createAuth(params: CreateAuthParams): AuthService {
           }
         }
         if (ctx.path === "/reset-password") await guardResetPassword(ctx);
+        if (ctx.path === "/reset-password/:token") {
+          // GET geri çağırması (password.mjs requestPasswordResetCallback) da aynı biçim denetiminden geçer: biçim dışı
+          // belirteç (saklanan `h.<özet>` dahil) için kayıt araması ve başarı yönlendirmesi yok → hata.
+          const t = (ctx.params as { token?: unknown } | undefined)?.token;
+          if (typeof t !== "string" || (!ADMIN_TOKEN_RE.test(t) && !SELF_SERVICE_TOKEN_RE.test(t))) {
+            await emit("password_reset_link.rejected", null, ctx.request ?? ctx.headers, ctx.context.options, { verdict: "malformed" }, true);
+            throw resetRejected();
+          }
+        }
         if (ctx.path === "/sign-out") {
           const current = await getSessionFromCtx(ctx);
           // M2: fail-open YALNIZCA çıkış için — denetim yazımı başarısızsa oturum yine silinir (kullanıcı çıkış
