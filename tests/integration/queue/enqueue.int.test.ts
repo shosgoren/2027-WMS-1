@@ -395,6 +395,23 @@ describe("kalıcı / geçici hata (T-116b)", () => {
     expect(calls).toHaveLength(1);
   });
 
+  it("bozuk zarf kalıcı hata: handler çağrılmaz, iş VALIDATION_FAILED ile failed olur", async () => {
+    const tenantId = randomUUID();
+    const producer = await startedQueue();
+    await withTenant(tenantCtx(tenantId), (tx) => producer.enqueue(tx, reseed()));
+    await admin.query(`UPDATE ${QUEUE_SCHEMA}.job SET data = data || '{"v": 9}'::jsonb WHERE data->>'tenantId' = $1`, [tenantId]);
+    let calls = 0;
+    const worker = failPathWorker();
+    await worker.work("demo.reseed", async () => {
+      calls += 1;
+    });
+    await waitFor(async () => (await stateOf(tenantId))[0]?.state === "failed", "bozuk zarf -> failed");
+    const row = (await stateOf(tenantId))[0];
+    expect(row?.retry_count).toBe(0);
+    expect(row?.output).toMatchObject({ permanent: true, code: "VALIDATION_FAILED" });
+    expect(calls).toBe(0);
+  });
+
   it("geçici hata yeniden denenir (state retry, tamamlanmış sayılmaz)", async () => {
     const tenantId = randomUUID();
     let calls = 0;

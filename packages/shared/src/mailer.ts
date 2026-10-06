@@ -34,6 +34,9 @@ export interface PermanentFailure {
   readonly permanent: true;
 }
 
+/** 4xx olduğu halde geçici sayılan durumlar: istek zaman aşımı, erken istek, hız sınırı. */
+const TRANSIENT_4XX: readonly number[] = [408, 425, 429];
+
 /** 15 §Hata kodlarına eklenmesi gereken kod için bkz. rapor bulgusu; T-112 aynı adı kullanır. */
 export class MailError extends Error {
   override name = "MailError";
@@ -53,7 +56,7 @@ export class MailError extends Error {
     this.status = options?.status ?? (parsed?.[1] === undefined ? undefined : Number(parsed[1]));
     this.permanent =
       code === "MAIL_SEND_FAILED"
-        ? this.status !== undefined && this.status >= 400 && this.status < 500 && this.status !== 429
+        ? this.status !== undefined && this.status >= 400 && this.status < 500 && !TRANSIENT_4XX.includes(this.status)
         : true;
   }
 }

@@ -63,6 +63,26 @@ export function isPermanentFailure(err: unknown): boolean {
   return typeof err === "object" && err !== null && (err as { permanent?: unknown }).permanent === true;
 }
 
+/** Ayrıştırma hatası: `VALIDATION_FAILED`, kalıcı. Zod mesajı yük değeri içerebilir; taşınmaz (G-09). */
+class JobParseError extends QueueError implements PermanentMarker {
+  readonly permanent = true as const;
+}
+interface PermanentMarker {
+  readonly permanent: true;
+}
+
+function parseEnvelope(data: unknown): Envelope {
+  const r = EnvelopeSchema.safeParse(data);
+  if (!r.success) throw new JobParseError("VALIDATION_FAILED", "job envelope is malformed");
+  return r.data;
+}
+
+function parsePayload<T extends JobType>(type: T, payload: unknown): ReturnType<(typeof JOB_PAYLOAD_SCHEMAS)[T]["parse"]> {
+  const r = JOB_PAYLOAD_SCHEMAS[type].safeParse(payload);
+  if (!r.success) throw new JobParseError("VALIDATION_FAILED", "job payload is malformed");
+  return r.data as ReturnType<(typeof JOB_PAYLOAD_SCHEMAS)[T]["parse"]>;
+}
+
 /** `failed` işin çıktısına yalnızca hata adı ve kodu yazılır (mesaj adres/bağlantı taşıyabilir, G-09). */
 function failureOutput(err: unknown): Record<string, unknown> {
   const code = (err as { code?: unknown } | null)?.code;
@@ -218,10 +238,11 @@ export function createJobQueue(options: JobQueueOptions): PgBossJobQueue {
       await boss.work<unknown>(type, { batchSize: 1, pollingIntervalSeconds, perJobResults: true }, async (jobs: BossJob<unknown>[]) => {
         const results: JobResult[] = [];
         for (const bossJob of jobs) {
-          const envelope = EnvelopeSchema.parse(bossJob.data);
-          const payload = JOB_PAYLOAD_SCHEMAS[type].parse(envelope.payload);
-          const { tenantId } = envelope;
           try {
+            // Zarf/yük ayrıştırma hataları da kalıcıdır: aynı veri yeniden denemede değişmez (ZodError).
+            const envelope = parseEnvelope(bossJob.data);
+            const payload = parsePayload(type, envelope.payload);
+            const { tenantId } = envelope;
             await handler({
               jobId: bossJob.id,
               type,

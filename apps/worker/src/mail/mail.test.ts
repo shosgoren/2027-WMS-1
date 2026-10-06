@@ -224,9 +224,9 @@ describe("hata sınıflaması (kalıcı / geçici)", () => {
         () => Promise.reject(new Error("hata bekleniyordu")),
         (e: unknown) => e as MailError,
       );
-  it("Resend 4xx (429 hariç) kalıcı; 429 ve 5xx geçici", async () => {
-    for (const status of [400, 401, 403, 404, 422]) expect((await resend(status)).permanent, String(status)).toBe(true);
-    for (const status of [429, 500, 502, 503]) expect((await resend(status)).permanent, String(status)).toBe(false);
+  it("Resend 4xx (408, 425, 429 hariç) kalıcı; 408, 425, 429 ve 5xx geçici", async () => {
+    for (const status of [400, 401, 403, 404, 410, 422]) expect((await resend(status)).permanent, String(status)).toBe(true);
+    for (const status of [408, 425, 429, 500, 502, 503]) expect((await resend(status)).permanent, String(status)).toBe(false);
   });
   it("ağ hatası geçici", async () => {
     const f = vi.fn<typeof fetch>().mockRejectedValue(new TypeError("fetch failed"));
