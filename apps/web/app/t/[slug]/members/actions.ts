@@ -16,7 +16,7 @@ import { ROLE_KEYS } from "@wms/domain/identity/permissions";
 import { loadMailConfig } from "@wms/shared/mailer";
 import { getAppDb } from "@wms/db";
 import { headers } from "next/headers";
-import { createProductionGuard } from "../../../../lib/action-guard.ts";
+import { createProductionGuard, limitVerifiedTenant } from "../../../../lib/action-guard.ts";
 import { getSenderQueue } from "../../../../lib/queue.ts";
 
 const slugSchema = z.string().min(1).max(63);
@@ -39,6 +39,7 @@ export async function inviteMemberAction(raw: unknown) {
   return guardedAction({ schema: inviteSchema }, async (input, ctx) => {
     const principal = ctx.principal;
     if (principal === null) throw new Error("unreachable: principal required");
+    await limitVerifiedTenant({ db: getAppDb(), principal, tenantSlug: input.slug, permission: "users.manage" }, ctx);
     const senderQueue = await getSenderQueue(); // transaction dışında başlatılır
     const result = await inviteMember(
       {
@@ -66,6 +67,7 @@ export async function revokeInvitationAction(raw: unknown) {
   return guardedAction({ schema: revokeSchema }, async (input, ctx) => {
     const principal = ctx.principal;
     if (principal === null) throw new Error("unreachable: principal required");
+    await limitVerifiedTenant({ db: getAppDb(), principal, tenantSlug: input.slug, permission: "users.manage" }, ctx);
     await revokeInvitation({
       db: getAppDb(),
       principal,
