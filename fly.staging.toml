@@ -25,6 +25,10 @@ kill_timeout = "15s"
   MAIL_MODE = "resend"
   # Alan adı doğrulanana kadar (U-03) Resend'in test gönderen adresi.
   MAIL_FROM = "onboarding@resend.dev"
+  # Demo ortamı (T-123, A-43). Sırsız: DEMO_PASSWORD yalnızca Fly sırrıdır, buraya yazılmaz (yoksa demo kapalı kalır).
+  WMS_ENV = "staging"
+  DEMO_MODE = "1"
+  DEMO_EMAIL_DOMAIN = "example.invalid"
 
 # Süreç komutu imajın CMD'sinin yerine geçer (ENTRYPOINT yok). Yollar imajda doğrulandı:
 # standalone izleme kökü depo kökü → /app/apps/web/server.js; worker → /app/apps/worker/dist/main.js.

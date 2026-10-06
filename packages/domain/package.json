@@ -10,7 +10,8 @@
     "./identity/memberships": "./src/identity/memberships.ts",
     "./identity/member-queries": "./src/identity/member-queries.ts",
     "./onboarding/workspace": "./src/onboarding/workspace.ts",
-    "./onboarding/templates": "./src/onboarding/templates.ts"
+    "./onboarding/templates": "./src/onboarding/templates.ts",
+    "./demo/seed": "./src/demo/seed.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"

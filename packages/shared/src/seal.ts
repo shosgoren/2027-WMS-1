@@ -1,6 +1,11 @@
 // Kuyruk yükü mührü (ADR-016 §12, T-116 M2): AES-256-GCM, `node:crypto`. Alıcı adresi ve bağlantı kuyruğa
-// yalnızca bu mühürle girer. Mühür `{ v, kid, iv, tag, ct }`; AAD = iş türü + şablon adı, bu yüzden başka işe
-// veya şablona taşınan mühür açılmaz. Anahtar: `QUEUE_SEAL_KEY` (32 bayt; 64 hex karakter veya base64).
+// yalnızca bu mühürle girer. Mühür `{ v, kid, iv, tag, ct }`; AAD = iş türü + şablon adı + tenant kimliği
+// (platform işinde sabit `platform`), bu yüzden başka işe, şablona veya tenant'a taşınan mühür açılmaz.
+//
+// Sürüm 2 (T-116b): AAD'ye tenant eklendi. Sürüm 1 mühürler (AAD'de tenant yok) AÇILMAZ: v1'i kabul etmek,
+// tenant bağlamsız AAD ile açmak demektir ve taşıma açığını yeniden açar. Kuyrukta bekleyen v1 `email.send`
+// işi yoktur (üretici henüz yoktu; yalnızca testler mühür üretiyordu); olsaydı `SealOpenError` ile kalıcı
+// `failed` olur (sessiz kayıp/sahte başarı değil) ve yeniden kuyruğa yazılır. Anahtar: `QUEUE_SEAL_KEY` (32 bayt; 64 hex karakter veya base64).
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 
 /** `.env.example` yer tutucusu. Bu değerle (veya eksik/kısa anahtarla) çalışılmaz, yerel dahil. */
@@ -18,20 +23,26 @@ export class SealConfigError extends Error {
 /** Mühür açılamadı (yanlış anahtar, kurcalanmış veri, farklı AAD, bozuk biçim). Ayrıntı sızdırmaz. */
 export class SealOpenError extends Error {
   override name = "SealOpenError";
+  /** Aynı mühür tekrar denemede açılmaz: kuyruk yeniden denemez (`PermanentFailure`). */
+  readonly permanent = true as const;
 }
 
+/** Platform işlerinde (tenant yok) AAD'deki sabit kapsam; tenant kimlikleri UUID olduğundan çakışmaz. */
+export const PLATFORM_SEAL_SCOPE = "platform";
+
 export interface SealedBox {
-  readonly v: 1;
+  readonly v: 2;
   readonly kid: string;
   readonly iv: string;
   readonly tag: string;
   readonly ct: string;
 }
 
-/** AAD bileşenleri: `email.send` işi için iş türü + şablon adı. */
+/** AAD bileşenleri: iş türü + şablon adı + tenant kimliği (platform işinde `PLATFORM_SEAL_SCOPE`). */
 export interface SealContext {
   readonly jobType: string;
   readonly template: string;
+  readonly tenantId: string;
 }
 
 export interface Sealer {
@@ -62,7 +73,7 @@ export function createSealer(rawKey: string | undefined): Sealer {
     throw new SealConfigError("QUEUE_SEAL_KEY tek bayt tekrarından oluşuyor; gerçek rastgele anahtar gerekir (openssl rand -hex 32)");
   }
   const kid = createHash("sha256").update(key).digest("hex").slice(0, 8);
-  const aadOf = (c: SealContext): Buffer => Buffer.from(`${c.jobType}\u0000${c.template}`, "utf8");
+  const aadOf = (c: SealContext): Buffer => Buffer.from(`${c.jobType}\u0000${c.template}\u0000${c.tenantId}`, "utf8");
 
   return {
     seal(plaintext, context) {
@@ -71,7 +82,7 @@ export function createSealer(rawKey: string | undefined): Sealer {
       cipher.setAAD(aadOf(context));
       const ct = Buffer.concat([cipher.update(JSON.stringify(plaintext), "utf8"), cipher.final()]);
       return {
-        v: 1,
+        v: 2,
         kid,
         iv: iv.toString("base64"),
         tag: cipher.getAuthTag().toString("base64"),
@@ -81,7 +92,7 @@ export function createSealer(rawKey: string | undefined): Sealer {
     open(sealed, context) {
       if (typeof sealed !== "object" || sealed === null) throw new SealOpenError("sealed box is malformed");
       const box = sealed as Record<string, unknown>;
-      if (box.v !== 1 || box.kid !== kid) throw new SealOpenError("sealed box version or key id mismatch");
+      if (box.v !== 2 || box.kid !== kid) throw new SealOpenError("sealed box version or key id mismatch");
       if (typeof box.iv !== "string" || typeof box.tag !== "string" || typeof box.ct !== "string") {
         throw new SealOpenError("sealed box is malformed");
       }

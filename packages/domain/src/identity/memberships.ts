@@ -478,15 +478,17 @@ export async function issuePasswordResetLink(
       issuingMembershipId: issued.membershipId,
     });
   } catch (e) {
+    let discarded = createdVerificationId === undefined;
     if (createdVerificationId !== undefined) {
       try {
         await port.discardToken(createdVerificationId);
+        discarded = true;
       } catch (cleanup) {
         const c = cleanup as { name?: unknown } | null;
         deps.log?.({ level: "error", msg: "password reset token cleanup failed", error: typeof c?.name === "string" ? c.name : "unknown" });
       }
     }
-    // Audit commit edildi ama olay yazılamadı: kayıt "üretildi" diyor → telafi satırı (best-effort, yutulmaz: loglanır).
+    // Audit commit edildi ama olay yazılamadı: kayıt "üretildi" diyor → telafi satırı: durum silmenin sonucuna göre (best-effort; hatalar yapılandırılmış loglanır, G-07).
     if (issued !== undefined && tenantIdForCleanup !== undefined) {
       const done = issued;
       try {
@@ -500,7 +502,7 @@ export async function issuePasswordResetLink(
             entityType: "membership",
             entityId: done.targetMembershipId,
             requestId: requestId ?? null,
-            changeSummary: { status: "revoked_before_delivery" },
+            changeSummary: { status: discarded ? "revoked_before_delivery" : "discard_failed" },
           }),
         );
       } catch (comp) {
@@ -534,7 +536,7 @@ export function createResetMailPort(deps: ResetMailPortDeps): {
     canDeliver: (recipient) => canDeliver(deps.mailConfig, recipient),
     async sendResetLink(input) {
       if (!canDeliver(deps.mailConfig, input.to)) throw new AppError("VALIDATION_FAILED");
-      const payload = buildEmailSendPayload(deps.sealKey, { template: "password_reset", locale: input.locale, to: input.to, link: input.link });
+      const payload = buildEmailSendPayload(deps.sealKey, { template: "password_reset", tenantId: null, locale: input.locale, to: input.to, link: input.link });
       await deps.queue.enqueuePlatform({ type: "email.send", payload: { ...payload, sealed: { ...payload.sealed } } });
     },
   };
