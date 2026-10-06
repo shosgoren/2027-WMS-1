@@ -1,11 +1,13 @@
 // Ağsız unit testler (T-125): anahtar normalizasyonu, önek reddi, bağlam markası, bayrak, önbellek anahtarı.
 // SDK istemcisi kullanıcıdan gelen istek sayacını tutan sahte `send` ile verilir: reddedilen çağrılar `send`'e ulaşmaz.
+import { readFileSync } from "node:fs";
 import type { S3Client } from "@aws-sdk/client-s3";
 import { describe, expect, it } from "vitest";
-import { AppError } from "../../shared/src/errors.ts";
-import { tenantCacheKey } from "../../shared/src/cache-key.ts";
-import { assertOwnedKey, issueStorageContextFromVerifiedTenant, normalizeRelativeKey, type StorageContext } from "../../shared/src/storage.ts";
-import { StorageConfigError, createStorageContext, type StorageTx, StorageDisabledError, createObjectStorage, createObjectStorageFromEnv } from "./index.ts";
+import { AppError } from "@wms/shared/errors";
+import * as sharedStorage from "@wms/shared/storage";
+import { assertOwnedKey, normalizeRelativeKey, type StorageContext } from "@wms/shared/storage";
+import { issueStorageContextFromVerifiedTenant } from "./context.ts";
+import { StorageConfigError, createStorageContext, type StorageTx, StorageDisabledError, tenantCacheKey, isIssuedStorageContext, createObjectStorage, createObjectStorageFromEnv } from "./index.ts";
 
 const A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -49,7 +51,7 @@ describe("normalizeRelativeKey", () => {
     ["satır sonu", "a\nb"],
     ["tam genişlikli nokta", "．．/x"],
     ["tam genişlikli eğik çizgi", "a／b／．．"],
-    ["bidi geçersiz kılma", "a‮b"],
+    ["bidi geçersiz kılma", "a\u202eb"],
     ["eşleşmemiş vekil", "a\ud800b"],
     ["çok uzun", "a".repeat(1000)],
     ["NFKC≠NFC tam genişlikli eğik çizgi", "a\uff0fb"],
@@ -101,6 +103,12 @@ describe("StorageContext markası", () => {
     expect(await asyncCodeOf(() => storage.get(forged, `tenants/${A}/x`))).toBe("FORBIDDEN");
     expect(await asyncCodeOf(() => storage.put(A as unknown as StorageContext, "x", new Uint8Array(), { contentType: "application/octet-stream" }))).toBe("FORBIDDEN");
     expect(sent).toBe(0);
+  });
+  it("@wms/shared/storage bağlam üreticisi/marka denetimi AÇMAZ; context.ts exports'ta yok", () => {
+    expect(Object.keys(sharedStorage).filter((k) => /issue|isIssued/i.test(k))).toEqual([]);
+    const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { exports: Record<string, string> };
+    expect(Object.keys(pkg.exports)).toEqual(["."]);
+    expect(isIssuedStorageContext({ tenantId: A })).toBe(false);
   });
   it("geçersiz tenant kimliği FORBIDDEN", () => {
     expect(codeOf(() => issueStorageContextFromVerifiedTenant("not-a-uuid"))).toBe("FORBIDDEN");
@@ -154,6 +162,29 @@ describe("içerik türü ve boyut (ağsız)", () => {
   it("bilinmeyen ifNoneMatch değeri reddedilir", async () => {
     const storage = createObjectStorage({ ...cfg(), client: fakeClient(() => undefined) });
     expect(await asyncCodeOf(() => storage.put(ctxOf(A), "x", new Uint8Array(1), { contentType: "application/pdf", ifNoneMatch: "abc" as never }))).toBe("VALIDATION_FAILED");
+  });
+});
+
+describe("get boyut sınırı (ContentLength yok)", () => {
+  it("akış sayılarak okunur; sınır aşılınca VALIDATION_FAILED ve akış kesilir", async () => {
+    let destroyed = false;
+    async function* big(): AsyncGenerator<Uint8Array> {
+      for (let i = 0; i < 60; i++) yield new Uint8Array(1024 * 1024);
+    }
+    const body = Object.assign(big(), { destroy: () => { destroyed = true; } });
+    const client = { send: () => Promise.resolve({ Body: body }) } as unknown as S3Client;
+    const storage = createObjectStorage({ ...cfg(), client });
+    expect(await asyncCodeOf(() => storage.get(ctxOf(A), `tenants/${A}/big.bin`))).toBe("VALIDATION_FAILED");
+    expect(destroyed).toBe(true);
+  });
+  it("sınır altındaki akış okunur", async () => {
+    async function* small(): AsyncGenerator<Uint8Array> {
+      yield new Uint8Array([1, 2]);
+      yield new Uint8Array([3]);
+    }
+    const client = { send: () => Promise.resolve({ Body: small(), ContentType: "application/pdf" }) } as unknown as S3Client;
+    const out = await createObjectStorage({ ...cfg(), client }).get(ctxOf(A), `tenants/${A}/s.bin`);
+    expect([...out.body]).toEqual([1, 2, 3]);
   });
 });
 

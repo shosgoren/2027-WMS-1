@@ -3,8 +3,10 @@
 // anahtar normalizasyonu ve tenant önek denetimi saf işlevlerdir (ağsız unit test edilir).
 //
 // Anahtar = `tenants/<tenantId>/<relativeKey>`. Tenant kimliği ASLA çağıran dizgisinden alınmaz:
-// `StorageContext` markalıdır ve yalnızca `@wms/storage` `createStorageContext(tx)` ile, tenant kimliği tx'in DB oturum
-// ayarından okunarak üretilir; çalışma anında da WeakSet ile denetlenir.
+// `StorageContext` yalnızca TİPTİR (marka). Üretici ve çalışma anı marka denetimi (WeakSet) bu pakette YOKTUR:
+// `packages/storage/src/context.ts` içindedir ve package.json exports'ta açık değildir; bağlamı yalnızca
+// `@wms/storage` `createStorageContext(tx)` üretir (tenant kimliği tx'in DB oturum ayarından okunur).
+// Bu dosyadaki saf işlevler markaya bakmaz; marka denetimini bağdaştırıcı (`@wms/storage`) yapar.
 import { AppError } from "./errors.ts";
 
 declare const storageContextBrand: unique symbol;
@@ -13,26 +15,6 @@ declare const storageContextBrand: unique symbol;
 export interface StorageContext {
   readonly [storageContextBrand]: true;
   readonly tenantId: string;
-}
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const issued = new WeakSet<object>();
-
-/**
- * İÇ KULLANIM (yalnızca `@wms/storage`'ın `createStorageContext(tx)`'i ve unit testler): tenant kimliğini
- * ÇAĞIRANDAN değil, `withMembership`/`withTenant` transaction'ının `app.current_tenant_id` ayarından okunmuş
- * değerden alır. Uygulama kodu bunu doğrudan çağırmaz; bağlamı `createStorageContext(tx)` üretir.
- */
-export function issueStorageContextFromVerifiedTenant(verifiedTenantId: unknown): StorageContext {
-  if (typeof verifiedTenantId !== "string" || !UUID_RE.test(verifiedTenantId)) throw new AppError("FORBIDDEN");
-  const ctx = Object.freeze({ tenantId: verifiedTenantId.toLowerCase() }) as unknown as StorageContext;
-  issued.add(ctx);
-  return ctx;
-}
-
-/** `issueStorageContextFromVerifiedTenant` ürünü mü (çalışma anı marka denetimi). */
-export function isIssuedStorageContext(ctx: unknown): ctx is StorageContext {
-  return typeof ctx === "object" && ctx !== null && issued.has(ctx);
 }
 
 export interface PutMeta {
@@ -95,7 +77,6 @@ export function normalizeRelativeKey(relativeKey: unknown): string {
 
 /** Tenant önekinin tek kaynağı. */
 export function tenantKeyPrefix(ctx: StorageContext): string {
-  if (!isIssuedStorageContext(ctx)) throw new AppError("FORBIDDEN");
   return `tenants/${ctx.tenantId}/`;
 }
 

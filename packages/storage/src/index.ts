@@ -8,6 +8,8 @@ import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client, S3Se
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { currentTenantId, type withTenant } from "@wms/db";
 import { AppError } from "@wms/shared/errors";
+import { formatTenantCacheKey } from "@wms/shared/cache-key";
+import { isIssuedStorageContext, issueStorageContextFromVerifiedTenant } from "./context.ts";
 import {
   MAX_OBJECT_BYTES,
   assertBodySize,
@@ -15,8 +17,6 @@ import {
   assertOwnedKey,
   assertSignedUrlTtl,
   buildTenantKey,
-  isIssuedStorageContext,
-  issueStorageContextFromVerifiedTenant,
   type ObjectStorage,
   type PutMeta,
   type StorageContext,
@@ -154,7 +154,19 @@ export function createObjectStorage(config: ObjectStorageConfig): ObjectStorage 
           stream.destroy?.();
           throw new AppError("VALIDATION_FAILED");
         }
-        return { body: await out.Body.transformToByteArray(), contentType: out.ContentType };
+        // ContentLength yoksa/yalansa da sınır korunur: akış sayılarak okunur, aşınca kesilir.
+        const stream = out.Body as AsyncIterable<Uint8Array> & { destroy?: () => void };
+        const chunks: Uint8Array[] = [];
+        let total = 0;
+        for await (const chunk of stream) {
+          total += chunk.byteLength;
+          if (total > MAX_OBJECT_BYTES) {
+            stream.destroy?.();
+            throw new AppError("VALIDATION_FAILED");
+          }
+          chunks.push(chunk);
+        }
+        return { body: new Uint8Array(Buffer.concat(chunks)), contentType: out.ContentType };
       } catch (e) {
         if (e instanceof AppError) throw e;
         if (errName(e) === "NoSuchKey") throw new AppError("NOT_FOUND");
@@ -183,4 +195,13 @@ export function createObjectStorage(config: ObjectStorageConfig): ObjectStorage 
       }
     },
   };
+}
+
+export { isIssuedStorageContext };
+export type { StorageContext };
+
+/** Tenant kapsamlı önbellek anahtarı (marka denetimli): `t:<tenantId>:<namespace>:…`. */
+export function tenantCacheKey(ctx: StorageContext, namespace: string, ...parts: readonly string[]): string {
+  if (!isIssuedStorageContext(ctx)) throw new AppError("FORBIDDEN");
+  return formatTenantCacheKey(ctx, namespace, ...parts);
 }
