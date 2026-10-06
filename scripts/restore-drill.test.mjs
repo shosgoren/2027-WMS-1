@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { createDbFacade, cleanupBranch, computeRpoRto, drillBranchName, isDrillBranchName, latestCommitAt, main, runDrill, writeSummary, SCOPE_NOTE } from "./restore-drill.mjs";
+import { MAIN_WRITES_NOTE, createDbFacade, cleanupBranch, computeRpoRto, drillBranchName, isDrillBranchName, latestCommitAt, main, runDrill, writeSummary, SCOPE_NOTE } from "./restore-drill.mjs";
 import { createRedactor, maskSecret } from "./neon-spike.mjs";
 
 
@@ -105,7 +105,8 @@ describe("runDrill", () => {
     expect(s.table_counts_equal).toBe(true);
     expect(s.digests_equal).toBe(true);
     expect(s.restored_not_after_t).toBe(true);
-    expect(s.main_writes).toBe(0);
+    expect(s.main_writes).toBe(MAIN_WRITES_NOTE);
+    expect(typeof s.main_writes).toBe("string");
     expect(s.restored_branch_deleted).toBe(true);
     expect(s.point_in_time).toBe("2026-10-06T10:00:00.000000Z");
     expect(s.rpo_seconds).toBe(2); // T 10:00:00 − son commit 09:59:58
@@ -239,6 +240,25 @@ describe("dal adı", () => {
       expect(r.error).toContain("default/primary/protected");
       expect(h.log.some((l) => l[0] === "delete")).toBe(false);
     }
+  });
+  it("kimlik biliniyorken dal bilgisi yoksa temizlik KIRMIZI (fail-closed), silme çağrılmaz", async () => {
+    const h = harness();
+    // branchId bilinen ama listede olmayan dal
+    const known = await cleanupBranch(h.deps.neon, { name: NAME, branchId: "br-gone", mainId: "br-main" });
+    expect(known.deleted).toBe(false);
+    expect(known.error).toContain("doğrulanamadı");
+    // --cleanup yolu: adla bulunan kimlik için bilgi yok (yarış)
+    h.deps.neon.findBranchIdByName = async () => "br-race";
+    const byName = await cleanupBranch(h.deps.neon, { name: NAME, branchId: null, mainId: null });
+    expect(byName.error).toContain("doğrulanamadı");
+    expect(h.log.some((l) => l[0] === "delete")).toBe(false);
+  });
+  it("runDrill: dal bilgisi alınamazsa sonuç fail", async () => {
+    const h = harness();
+    h.deps.neon.getBranchInfo = async () => null;
+    const s = await runDrill(h.deps, { runId: RUN, branchName: NAME });
+    expect(s.result).toBe("fail");
+    expect(s.cleanup_error).toContain("doğrulanamadı");
   });
   it("--cleanup: bayraksız artık dal silinir; dal yoksa sorun yok", async () => {
     const h = harness();
