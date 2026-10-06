@@ -41,6 +41,11 @@ export const APP_ROLES = Object.freeze([
   { role: "wms_auth", secret: "AUTH_DATABASE_URL" },
   { role: "wms_worker", secret: "DATABASE_URL_WORKER" },
 ]);
+/**
+ * Operasyon rolü (T-105c, A-80): staging'de NOLOGIN ve PAROLASIZ yaratılır; APP_ROLES'a GİRMEZ (Fly'a URL/sır yazılmaz).
+ * Geçici LOGIN + kısa ömürlü parola ayrı iş akışının işidir (T-105d).
+ */
+export const OPS_ROLE = "wms_ops";
 /** Fly'da bulunmaması gereken sır (sahip/migration URI'si uygulama süreçlerine verilmez; Supervisor eki (e)). */
 export const FORBIDDEN_FLY_SECRETS = Object.freeze(["DATABASE_URL_DIRECT", "STAGING_DATABASE_URL_DIRECT"]);
 export const MIN_DEMO_PASSWORD_LENGTH = 16;
@@ -136,6 +141,62 @@ export function appRolesCheckSql() {
  (SELECT count(*) FROM pg_roles g WHERE g.oid <> r.oid AND pg_has_role(r.oid, g.oid, 'MEMBER')),
  (SELECT count(*) FROM pg_shdepend d WHERE d.refclassid = 'pg_authid'::regclass AND d.refobjid = r.oid AND d.deptype = 'o')
 FROM pg_roles r WHERE r.rolname IN (${names}) ORDER BY r.rolname;`;
+}
+
+/** Operasyon rolü katalog sorgusu (parseAppRoles biçimi). */
+export function opsRoleCheckSql() {
+  return `SELECT 'role', r.rolname, r.rolcanlogin, r.rolsuper, r.rolbypassrls, r.rolcreatedb, r.rolcreaterole, r.rolreplication,
+ (SELECT count(*) FROM pg_roles g WHERE g.oid <> r.oid AND pg_has_role(r.oid, g.oid, 'MEMBER')),
+ (SELECT count(*) FROM pg_shdepend d WHERE d.refclassid = 'pg_authid'::regclass AND d.refobjid = r.oid AND d.deptype = 'o')
+FROM pg_roles r WHERE r.rolname = '${OPS_ROLE}';`;
+}
+
+/**
+ * Operasyon rolü beklentisi: NOLOGIN (LOGIN → sapma), diğer nitelikler yok, üyelik 0, sahip olunan nesne 0.
+ * @param {ReturnType<typeof parseAppRoles>[number] | undefined} r
+ * @returns {string[]}
+ */
+export function opsRoleDeviations(r) {
+  if (!r) return ["missing"];
+  return appRoleDeviations({ ...r, login: true }).concat(r.login ? ["login"] : []);
+}
+
+/**
+ * wms_ops yoksa NOLOGIN/parolasız yaratır (tek transaction); varsa yalnızca denetler (LOGIN dahil sapma → BLOCKED,
+ * hiçbir şey değiştirilmez). Fly'a hiçbir şey yazılmaz. Her zaman SQL ile (A-80; parola yok, A-56 riski yok).
+ * @param {{ psql: PsqlFn }} o
+ * @returns {{ status: "OK" | "BLOCKED" | "RED", lines: string[], created: boolean }}
+ */
+export function ensureOpsRole(o) {
+  /** @type {string[]} */
+  const lines = [];
+  const read = () => {
+    const r = o.psql(opsRoleCheckSql());
+    return r.ok ? parseAppRoles(r.stdout).find((x) => x.role === OPS_ROLE) : null;
+  };
+  const before = read();
+  if (before === null) return { status: "RED", lines: [`${OPS_ROLE}: FAIL (rol katalog sorgusu başarısız)`], created: false };
+  let created = false;
+  if (before !== undefined) {
+    const d = opsRoleDeviations(before);
+    if (d.length > 0) {
+      lines.push(`${OPS_ROLE}: BLOCKED (mevcut rol sapması: ${d.join(", ")}; hiçbir şey değiştirilmedi)`);
+      return { status: "BLOCKED", lines, created: false };
+    }
+  } else {
+    const c = o.psql(`BEGIN;\nCREATE ROLE ${quoteIdent(OPS_ROLE)} NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION;\nCOMMIT;`);
+    if (!c.ok) return { status: "RED", lines: [`${OPS_ROLE}: FAIL (rol yaratılamadı, SQLSTATE ${c.sqlstate ?? "?"})`], created: false };
+    created = true;
+    const after = read();
+    const d = after === null ? ["unreadable"] : opsRoleDeviations(after);
+    if (d.length > 0) {
+      const del = o.psql(`DROP ROLE ${quoteIdent(OPS_ROLE)};`);
+      lines.push(`${OPS_ROLE}: BLOCKED (yaratılan rol sapıyor: ${d.join(", ")}; ${del.ok ? "silindi" : "silinemedi, elle silinmeli"})`);
+      return { status: "BLOCKED", lines, created: false };
+    }
+  }
+  lines.push(`${OPS_ROLE}: OK (nologin, nosuperuser, nobypassrls, parolasız${created ? ", bu koşuda yaratıldı" : ""})`);
+  return { status: "OK", lines, created };
 }
 
 /** Probe rolü + üyelikler + m1 + sahip rol bilgisi. */
@@ -810,6 +871,15 @@ export async function main(o = {}) {
     }
     if (roles.status !== "OK") {
       status = "RED";
+      notes.push("Fly'a hiçbir sır yazılmadı");
+      return finish();
+    }
+
+    const ops = ensureOpsRole({ psql });
+    lines.push(...ops.lines);
+    if (ops.created) notes.push(`bu koşuda yaratılan roller: ${OPS_ROLE} (NOLOGIN, parolasız)`);
+    if (ops.status !== "OK") {
+      status = ops.status;
       notes.push("Fly'a hiçbir sır yazılmadı");
       return finish();
     }
