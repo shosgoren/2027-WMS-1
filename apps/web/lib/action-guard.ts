@@ -219,7 +219,7 @@ export function createProductionGuard(getHeaders: GuardDeps["getHeaders"], limit
     getHeaders,
     limiter,
     resolvePrincipal: async (headers) => {
-      const { getAuthService } = await import("@wms/auth");
+      const { getAuthService } = await import("./auth-service.ts");
       const p = await getAuthService().getPrincipal(headers);
       return p === null ? null : { userId: p.userId, mfaVerified: p.mfaVerified };
     },

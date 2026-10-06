@@ -22,7 +22,7 @@ export async function generateMetadata(): Promise<Metadata> {
 // çocuk çizilmez, bu yüzden "üyelik yok" durumunda sayfa sessizce boş döner (kendi 404'ünü üretmez).
 export default async function TenantHomePage({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
-  const { getAuthService } = await import("@wms/auth");
+  const { getAuthService } = await import("../../../lib/auth-service.ts");
   const principal = await getAuthService().getPrincipal(await headers());
   if (principal === null) redirect(`/login?next=${encodeURIComponent(`/t/${slug}`)}`);
   const summary = await getMembershipSummary({ db: getAppDb(), principal });

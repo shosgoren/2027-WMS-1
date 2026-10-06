@@ -44,7 +44,7 @@ export default async function InvitePage({ params }: { params: Promise<{ token: 
   if (preview === null) return notFound;
   const tRoot = await getTranslations();
   const hoursLeft = Math.ceil((preview.expiresAt.getTime() - Date.now()) / 3_600_000);
-  const { getAuthService } = await import("@wms/auth");
+  const { getAuthService } = await import("../../../lib/auth-service.ts");
   const principal = await getAuthService().getPrincipal(requestHeaders);
   return (
     <>

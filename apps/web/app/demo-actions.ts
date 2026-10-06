@@ -6,7 +6,7 @@
 // dahil yalnızca genel kod döner). Eylem `action-guard` ile sarılır (Origin, IP/kullanıcı hız sınırı, hata maskeleme).
 import { cookies, headers } from "next/headers";
 import { z } from "zod";
-import { getAuthService } from "@wms/auth";
+import { getAuthService } from "../lib/auth-service.ts";
 import { DEMO_ROLES } from "@wms/domain/demo/seed";
 import { ROLE_KEYS } from "@wms/domain/identity/permissions";
 import { AppError } from "@wms/shared/errors";

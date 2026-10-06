@@ -2,7 +2,7 @@
 // Üye davet (T-117) ve üyelik (T-117b) eylemleri. İnce giriş: doğrulama + sarmalayıcı `guardedAction`; iş kuralı
 // `@wms/domain`. Tenant erişimi yalnızca domain komutları (`runTenantCommand`) üzerinden; bu dosyada DB bağlantısı açılmaz.
 import { z } from "zod";
-import { createPasswordResetToken, discardPasswordResetToken, ensureRecentAuth, recordPasswordResetLinkIssued } from "@wms/auth";
+import { createPasswordResetToken, discardPasswordResetToken, ensureRecentAuth, recordPasswordResetLinkIssued } from "../../../../lib/auth-service.ts";
 import {
   changeRole,
   issuePasswordResetLink,

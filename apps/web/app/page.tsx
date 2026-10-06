@@ -42,7 +42,7 @@ async function demoEnter(formData: FormData): Promise<void> {
 }
 
 export default async function HomePage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
-  const { getAuthService } = await import("@wms/auth");
+  const { getAuthService } = await import("../lib/auth-service.ts");
   const principal = await getAuthService().getPrincipal(await headers());
   if (principal !== null) {
     // "Son çalışma alanı" kaydı yok (kart dışı); ada göre ilk aktif üyelik. Üyelik yoksa kurulum sihirbazı.
