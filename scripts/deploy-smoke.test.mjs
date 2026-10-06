@@ -5,7 +5,7 @@ import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ALLOWED_MSGS, classifyHidden, checkHealth, checkProcessGroup, allowLine, describeStoppedMachines, evaluateHealth, maskLogs, parseArgs, summaryLine } from "./deploy-smoke.mjs";
+import { ALLOWED_MSGS, checkWorkerStability, evaluateWorker, classifyHidden, checkHealth, checkProcessGroup, allowLine, describeStoppedMachines, evaluateHealth, maskLogs, parseArgs, summaryLine } from "./deploy-smoke.mjs";
 
 const URL_OK = "https://etkin-wms-staging.fly.dev/api/health";
 
@@ -569,5 +569,68 @@ describe("worker-stopped-ids (T-106c faz 2)", () => {
     const r = spawnSync(process.execPath, [fileURLToPath(new URL("./deploy-smoke.mjs", import.meta.url)), "worker-stopped-ids", "--status-file", file], { encoding: "utf8", env: { PATH: process.env["PATH"] ?? "" } });
     expect(r.status).toBe(0);
     expect(r.stdout).toBe("8d96110c222578\n");
+  });
+});
+
+describe("checkWorkerStability (T-106c yanlış yeşil önleme)", () => {
+  const ev = (/** @type {string} */ type, /** @type {number} */ ts, status = "x") => ({ type, status, timestamp: ts });
+  const snap = (/** @type {string} */ state, /** @type {any[]} */ events) =>
+    JSON.stringify({ Machines: [{ id: "8d96110c222578", state, config: { metadata: { fly_process_group: "worker" } }, events }] });
+  const old = [ev("launch", 1000, "created"), ev("update", 2000, "stopped")];
+  const before = snap("stopped", old);
+  const withStart = [ev("start", 3000, "started"), ...old];
+
+  it("tek start, exit yok, iki örnekte started → OK", () => {
+    expect(checkWorkerStability(before, snap("started", withStart), snap("started", withStart)).ok).toBe(true);
+  });
+
+  it("başlatmadan sonra exit olayı → FAIL (recheck'te started görünse bile)", () => {
+    const crashed = [ev("exit", 3500, "stopped"), ...withStart];
+    const r = checkWorkerStability(before, snap("started", withStart), snap("started", crashed));
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/exit\/restart/);
+  });
+
+  it("iki start (çökme döngüsü) → FAIL", () => {
+    const loop = [ev("start", 4000, "started"), ev("exit", 3500, "stopped"), ...withStart];
+    const r = checkWorkerStability(before, snap("started", loop), snap("started", loop));
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/2 start|çökme döngüsü/);
+  });
+
+  it("started ama örnekler arasında yeni start/restart → FAIL", () => {
+    const again = [ev("start", 5000, "started"), ...withStart];
+    const r = checkWorkerStability(before, snap("started", withStart), snap("started", [ev("restart", 4500), ...again]));
+    expect(r.ok).toBe(false);
+  });
+
+  it("ikinci örnekte durmuş → FAIL; okunamayan dosya → FAIL", () => {
+    expect(checkWorkerStability(before, snap("started", withStart), snap("stopped", withStart)).ok).toBe(false);
+    expect(checkWorkerStability(before, "{", snap("started", withStart)).ok).toBe(false);
+  });
+
+  it("parseArgs + evaluateWorker: kararsız worker FAIL", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "smoke-"));
+    const f = (/** @type {string} */ n, /** @type {string} */ c) => {
+      writeFileSync(path.join(dir, n), c);
+      return path.join(dir, n);
+    };
+    expect(parseArgs(["--url", URL_OK, "--status-file", "s", "--before-file", "b", "--recheck-file", "r"])).toMatchObject({ beforeFile: "b", recheckFile: "r" });
+    expect(() => parseArgs(["--url", URL_OK, "--status-file", "s", "--before-file", "b"])).toThrow(/birlikte/);
+    const crashed = [ev("exit", 3500, "stopped"), ...withStart];
+    const sFile = f("s.json", snap("started", withStart));
+    const ok = { statusFile: sFile, group: "worker", beforeFile: f("b.json", before), recheckFile: f("r.json", snap("started", withStart)) };
+    expect(evaluateWorker(ok).ok).toBe(true);
+    expect(evaluateWorker({ ...ok, recheckFile: f("r2.json", snap("started", crashed)) })).toMatchObject({ ok: false, reason: expect.stringContaining('"worker" kararsız') });
+    expect(evaluateWorker({ ...ok, recheckFile: path.join(dir, "yok.json") }).ok).toBe(false);
+    expect(evaluateWorker({ statusFile: sFile, group: "worker" }).ok).toBe(true); // geriye uyumlu: dosyalar yoksa yalnız started
+  });
+});
+
+describe("worker-ids --all (T-106c)", () => {
+  it("started makineleri de listeler (çökme döngüsü logları için)", () => {
+    const st = JSON.stringify({ Machines: [{ id: "aaaa1111bbbb22", state: "started", config: { metadata: { fly_process_group: "worker" } } }] });
+    expect(describeStoppedMachines(st)).toEqual([]);
+    expect(describeStoppedMachines(st, "worker", undefined, true).map((m) => m.id)).toEqual(["aaaa1111bbbb22"]);
   });
 });
