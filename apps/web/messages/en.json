@@ -743,8 +743,8 @@
       "validation_failed_code_takenAction": "Enter a different value.",
       "validation_failed_in_use": "This product has stock or an open reservation.",
       "validation_failed_in_useAction": "Clear the stock and close reservations first, then try again.",
-      "validation_failed_unit_conversion_invalid": "A conversion cannot be set for the base unit.",
-      "validation_failed_unit_conversion_invalidAction": "Choose a unit other than the base unit.",
+      "validation_failed_unit_conversion_invalid": "A conversion cannot be set for the base unit, or the factor is invalid: it must be greater than zero, with at most 6 decimals and 14 integer digits.",
+      "validation_failed_unit_conversion_invalidAction": "Choose a unit other than the base unit and re-enter the factor within these limits (e.g. 12 or 0.5).",
       "version_conflict": "The record was changed by another action at the same time.",
       "version_conflictAction": "Refresh the page and try again.",
       "rate_limited": "Too many actions.",
@@ -755,6 +755,8 @@
       "tenant_closingAction": "Contact your manager.",
       "internal": "Something went wrong.",
       "internalAction": "Try again shortly; if it continues, send the error code to support."
-    }
+    },
+    "locked": "You do not have permission to view products.",
+    "lockedAction": "Ask your workspace manager."
   }
 }

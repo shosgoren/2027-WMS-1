@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { headers } from "next/headers";
 import { notFound, redirect } from "next/navigation";
 import { getTranslations } from "next-intl/server";
+import { Banner } from "@wms/ui";
 import { getAppDb } from "@wms/db";
 import { searchItems } from "@wms/domain/catalog";
 import { listUnits } from "@wms/domain/catalog/units";
@@ -22,6 +23,19 @@ export async function generateMetadata(): Promise<Metadata> {
 
 function first(v: string | string[] | undefined): string | undefined {
   return Array.isArray(v) ? v[0] : v;
+}
+
+async function LockedItems() {
+  const t = await getTranslations("items");
+  return (
+    <main className="mx-auto flex w-full max-w-3xl min-w-0 flex-col gap-4 px-4 py-6">
+      <h1 className="break-words text-2xl font-extrabold text-ink">{t("title")}</h1>
+      <Banner kind="warning">
+        <p>{t("locked")}</p>
+        <p className="mt-1">{t("lockedAction")}</p>
+      </Banner>
+    </main>
+  );
 }
 
 // Ürün listesi (T-216): sunucu bileşeni; veri T-240 okuyucularından (keyset, OFFSET yok). Sayfa kendi kararını verir: üye değil → 404;
@@ -68,6 +82,8 @@ export default async function ItemsPage({ params, searchParams }: { params: Prom
       if (e.code === "UNAUTHENTICATED") redirect(`/login?next=${encodeURIComponent(returnTo)}`);
       // Geçersiz imleç (`after`) kullanıcı hatasıdır: boş liste yerine 404.
       if (e.code === "VALIDATION_FAILED") notFound();
+      // `stock.view` izni olmayan üye: hata sayfası değil, neden + sonraki eylemle kilitli görünüm (audit/members deseni).
+      if (e.code === "FORBIDDEN") return <LockedItems />;
     }
     throw e;
   }

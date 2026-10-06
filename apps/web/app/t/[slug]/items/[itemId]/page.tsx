@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { headers } from "next/headers";
 import { notFound, redirect } from "next/navigation";
 import { getTranslations } from "next-intl/server";
+import { Banner } from "@wms/ui";
 import { getAppDb } from "@wms/db";
 import { getItem, itemInUse, listItemBarcodes, listItemConversions } from "@wms/domain/catalog";
 import { listUnits } from "@wms/domain/catalog/units";
@@ -17,6 +18,19 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 export async function generateMetadata(): Promise<Metadata> {
   const t = await getTranslations("items");
   return { title: t("detail.title") };
+}
+
+async function LockedItem() {
+  const t = await getTranslations("items");
+  return (
+    <main className="mx-auto flex w-full max-w-3xl min-w-0 flex-col gap-4 px-4 py-6">
+      <h1 className="break-words text-2xl font-extrabold text-ink">{t("detail.title")}</h1>
+      <Banner kind="warning">
+        <p>{t("locked")}</p>
+        <p className="mt-1">{t("lockedAction")}</p>
+      </Banner>
+    </main>
+  );
 }
 
 // Ürün ayrıntısı (T-216): sunucu bileşeni. Ürün bulunamaz/başka tenant/geçersiz kimlik → 404 (varlık sızdırılmaz). Her okuma tek ürün
@@ -72,6 +86,8 @@ export default async function ItemDetailPage({ params }: { params: Promise<{ slu
       if (e.code === "NOT_FOUND") notFound();
       if (e.code === "FORBIDDEN" && e.detail === "MFA_REQUIRED") redirect(`/mfa?next=${encodeURIComponent(returnTo)}`);
       if (e.code === "UNAUTHENTICATED") redirect(`/login?next=${encodeURIComponent(returnTo)}`);
+      // `stock.view` izni olmayan üye: hata sayfası değil, neden + sonraki eylemle kilitli görünüm (audit/members deseni).
+      if (e.code === "FORBIDDEN") return <LockedItem />;
     }
     throw e;
   }

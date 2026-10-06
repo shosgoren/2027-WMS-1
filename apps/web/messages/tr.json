@@ -743,8 +743,8 @@
       "validation_failed_code_takenAction": "Farklı bir değer gir.",
       "validation_failed_in_use": "Bu üründe stok veya açık rezervasyon var.",
       "validation_failed_in_useAction": "Önce stoku boşalt ve rezervasyonları kapat, sonra yeniden dene.",
-      "validation_failed_unit_conversion_invalid": "Temel birim için dönüşüm girilemez.",
-      "validation_failed_unit_conversion_invalidAction": "Temel birimden farklı bir birim seç.",
+      "validation_failed_unit_conversion_invalid": "Temel birim için dönüşüm girilemez ya da katsayı geçersiz: sıfırdan büyük olmalı, en çok 6 ondalık ve 14 tam hane içermeli.",
+      "validation_failed_unit_conversion_invalidAction": "Temel birimden farklı bir birim seç ve katsayıyı bu sınırlara göre yeniden yaz (ör. 12 ya da 0.5).",
       "version_conflict": "Kayıt aynı anda başka bir işlemle değişti.",
       "version_conflictAction": "Sayfayı yenileyip yeniden dene.",
       "rate_limited": "Çok fazla işlem yapıldı.",
@@ -755,6 +755,8 @@
       "tenant_closingAction": "Sorumluna başvur.",
       "internal": "Bir sorun oluştu.",
       "internalAction": "Biraz sonra yeniden dene; sürerse hata kodunu destek ekibine ilet."
-    }
+    },
+    "locked": "Ürünleri görme yetkin yok.",
+    "lockedAction": "Çalışma alanı yöneticine sor."
   }
 }
