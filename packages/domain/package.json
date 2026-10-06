@@ -15,7 +15,8 @@
     "./audit/audit-query": "./src/audit/audit-query.ts",
     "./onboarding/templates": "./src/onboarding/templates.ts",
     "./demo/seed": "./src/demo/seed.ts",
-    "./warehouse": "./src/warehouse/index.ts"
+    "./warehouse": "./src/warehouse/index.ts",
+    "./stock": "./src/stock/index.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
