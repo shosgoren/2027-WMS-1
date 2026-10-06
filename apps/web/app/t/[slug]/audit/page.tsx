@@ -31,7 +31,7 @@ export default async function AuditPage({ params, searchParams }: { params: Prom
   const { slug } = await params;
   const query = await searchParams;
   const here = `/t/${encodeURIComponent(slug)}/audit`;
-  const { getAuthService } = await import("@wms/auth");
+  const { getAuthService } = await import("../../../../lib/auth-service.ts");
   const principal = await getAuthService().getPrincipal(await headers());
   if (principal === null) redirect(`/login?next=${encodeURIComponent(here)}`);
   const t = await getTranslations("auditLog");

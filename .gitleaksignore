@@ -14,3 +14,5 @@ f1b688fc552a658fde3a9b4581b16cbbacbee5fb:tests/integration/auth/auth-core.int.te
 099a6d4c58e122e008ae4d2efe9ae7af48c36970:packages/db/src/audit.test.ts:generic-api-key:282
 # Sentetik test değeri: önceki sürümdeki muafiyet gerekçe yorumu (commit 65a3320), .gitleaksignore:13
 65a33202f2e406d06833952233be91f08980f7ea:.gitleaksignore:generic-api-key:13
+# Sentetik test değeri, tests/integration/audit/audit-export.int.test.ts:122 (T-126)
+e6545f08a95a654e3155632f9eee87ae38b8dbf9:tests/integration/audit/audit-export.int.test.ts:generic-api-key:122
