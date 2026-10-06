@@ -16,6 +16,9 @@ export interface TenantWorld {
   memberUserId: string;
   memberMembershipId: string;
   invitationId: string;
+  warehouseId: string;
+  rootLocationId: string;
+  childLocationId: string;
 }
 
 export interface WorldRegistry {
@@ -94,6 +97,25 @@ export async function seedWorld(
      VALUES ($1, 'tr-TR', 'Europe/Istanbul', 'PENDING')`,
     [tenantId],
   );
+  // T-202: depo + kök/çocuk lokasyon (kilit satırı tetikleyiciyle doğar) + sahip üyeliği için depo kapsamı.
+  const warehouseId = randomUUID();
+  const rootLocationId = randomUUID();
+  const childLocationId = randomUUID();
+  await c.query("INSERT INTO public.warehouses (tenant_id, id, code, name) VALUES ($1, $2, 'D1', $3)", [
+    tenantId,
+    warehouseId,
+    `T202 Depo ${label}`,
+  ]);
+  await c.query(
+    `INSERT INTO public.locations (tenant_id, id, warehouse_id, parent_id, code, name, depth, kind)
+     VALUES ($1, $2, $3, NULL, 'Z1', 'Bolge 1', 0, 'STORAGE'), ($1, $4, $3, $2, 'Z1-R1', 'Raf 1', 1, 'STORAGE')`,
+    [tenantId, rootLocationId, warehouseId, childLocationId],
+  );
+  await c.query("INSERT INTO public.membership_warehouse_scopes (tenant_id, membership_id, warehouse_id) VALUES ($1, $2, $3)", [
+    tenantId,
+    ownerMembershipId,
+    warehouseId,
+  ]);
   const world: TenantWorld = {
     label,
     tenantId,
@@ -103,6 +125,9 @@ export async function seedWorld(
     memberUserId,
     memberMembershipId,
     invitationId,
+    warehouseId,
+    rootLocationId,
+    childLocationId,
   };
   reg.worlds.push(world);
   return world;
@@ -113,6 +138,11 @@ export async function cleanupRegistry(c: pg.Client, reg: WorldRegistry): Promise
   const tenantIds = reg.worlds.map((w) => w.tenantId);
   const userIds = [...reg.worlds.flatMap((w) => [w.ownerUserId, w.memberUserId]), ...reg.extraUsers];
   if (tenantIds.length > 0) {
+    // T-202 tabloları (FK sırası: kapsam → kilit → lokasyon [tek ifade; NO ACTION FK ifade sonunda denetlenir] → depo).
+    await c.query("DELETE FROM public.membership_warehouse_scopes WHERE tenant_id = ANY($1::uuid[])", [tenantIds]);
+    await c.query("DELETE FROM public.location_count_locks WHERE tenant_id = ANY($1::uuid[])", [tenantIds]);
+    await c.query("DELETE FROM public.locations WHERE tenant_id = ANY($1::uuid[])", [tenantIds]);
+    await c.query("DELETE FROM public.warehouses WHERE tenant_id = ANY($1::uuid[])", [tenantIds]);
     await c.query("DELETE FROM public.invitations WHERE tenant_id = ANY($1::uuid[])", [tenantIds]);
     await c.query("DELETE FROM public.membership_roles WHERE tenant_id = ANY($1::uuid[])", [tenantIds]);
     await c.query("DELETE FROM public.tenant_memberships WHERE tenant_id = ANY($1::uuid[])", [tenantIds]);
