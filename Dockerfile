@@ -20,12 +20,19 @@ RUN corepack enable
 COPY . .
 RUN pnpm install --frozen-lockfile --ignore-scripts
 # web: Next standalone (`apps/web/.next/standalone`, izleme kökü depo kökü → `apps/web/server.js`).
-# worker: tsconfig.build.json (test dosyaları hariç) → `apps/worker/dist`.
+# worker: tsc tür denetimi (tsconfig.build.json, noEmit) + esbuild tek dosya paketi → `apps/worker/dist/main.js`
+# (workspace .ts paketleri ve pg-boss pakete gömülür; çalışma zamanında node_modules ve kaynak .ts gerekmez).
+# Son adım: DB ortamı olmadan (ve migrate argümanlarıyla) çalıştırılan worker kendi yapılandırma hatasını verir;
+# çıktıda `MIGRATION_` yoksa migration CLI paketlenmemiş/koşmuyor demektir (T-115 Supervisor eki 3).
 RUN pnpm --filter @wms/web build \
  && pnpm --filter @wms/worker build \
  && test -f apps/web/.next/standalone/apps/web/server.js \
  && test -f apps/worker/dist/main.js \
- && test ! -e apps/worker/dist/lifecycle.test.js
+ && test "$(ls apps/worker/dist | wc -l)" = 1 \
+ && ! grep -q 'workspace:' apps/worker/dist/main.js \
+ && out="$(env -u DATABASE_URL -u DATABASE_URL_DIRECT node apps/worker/dist/main.js down --to 0000 2>&1 || true)" \
+ && printf '%s' "$out" | grep -q 'invalid configuration' \
+ && ! printf '%s' "$out" | grep -q 'MIGRATION_'
 
 # ---------------------------------------------------------------------------------------------
 FROM ${NODE_IMAGE} AS runtime
@@ -38,7 +45,7 @@ WORKDIR /app
 COPY --from=build /repo/apps/web/.next/standalone/ ./
 COPY --from=build /repo/apps/web/.next/static ./apps/web/.next/static
 COPY --from=build /repo/apps/worker/package.json ./apps/worker/package.json
-COPY --from=build /repo/apps/worker/dist ./apps/worker/dist
+COPY --from=build /repo/apps/worker/dist/main.js ./apps/worker/dist/main.js
 # Next çalışma zamanı önbelleği için yazılabilir tek dizin.
 RUN mkdir -p apps/web/.next/cache && chown node:node apps/web/.next/cache
 # Taban imajdaki root olmayan `node` kullanıcısı (uid 1000).
