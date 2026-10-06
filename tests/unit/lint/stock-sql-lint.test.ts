@@ -156,3 +156,80 @@ describe("(d) locking.ts dışa aktarımı", () => {
     expect(await hits("export const X = 1;\n", "packages/db/src/other.ts")).toEqual([]);
   });
 });
+
+describe("inceleme MAJOR-1: MERGE INTO", () => {
+  it.each([
+    ["MERGE INTO stock_balances", q('"MERGE INTO stock_balances b USING x ON (b.id = x.id) WHEN MATCHED THEN UPDATE SET quantity = 0"')],
+    ["merge into public.reservations", q('"merge into public.reservations r using x on (true) when matched then delete"')],
+    ["MERGE INTO stock_ledger (şablon)", q("`MERGE INTO stock_ledger l USING x ON (${1} = 1) WHEN NOT MATCHED THEN INSERT DEFAULT VALUES`")],
+  ])("%s consistency.ts içinde → ihlal", async (_n, code) => {
+    expect(await hits(code, CONSISTENCY)).toHaveLength(1);
+  });
+  it("izinli yazma dosyasında MERGE temiz", async () => {
+    expect(await hits(q('"MERGE INTO stock_balances b USING x ON (true) WHEN MATCHED THEN DELETE"'), POSTING)).toEqual([]);
+  });
+});
+
+describe("inceleme MAJOR-2: Drizzle ile atlatma", () => {
+  it.each([
+    ["sql.identifier", 'import { sql } from "drizzle-orm";\nexport const q = sql`SELECT 1 FROM ${sql.identifier("stock_balances")}`;\n'],
+    ["sql.identifier (public.)", 'import { sql } from "drizzle-orm";\nexport const q = sql.identifier("stock_ledger");\n'],
+    ["pgTable", 'import { pgTable, uuid } from "drizzle-orm/pg-core";\nexport const t = pgTable("stock_balances", { id: uuid("id") });\n'],
+    ["pgTable (reservations)", 'import { pgTable, uuid } from "drizzle-orm/pg-core";\nexport const t = pgTable("reservations", { id: uuid("id") });\n'],
+  ])("%s consistency.ts içinde → ihlal", async (_n, code) => {
+    expect(await hits(code, CONSISTENCY)).toHaveLength(1);
+  });
+  it("sql.identifier ve pgTable izinli yazma dosyasında temiz; pgTable şema tanım dosyasında temiz", async () => {
+    expect(await hits('import { sql } from "drizzle-orm";\nexport const q = sql.identifier("stock_balances");\n', POSTING)).toEqual([]);
+    const def = 'import { pgTable, uuid } from "drizzle-orm/pg-core";\nexport const t = pgTable("stock_balances", { id: uuid("id") });\n';
+    expect(await hits(def, "packages/db/src/schema/stock.ts")).toEqual([]);
+    expect(await hits(def, "packages/db/src/schema/other.ts")).toHaveLength(1);
+  });
+  it("sql.identifier stok olmayan tabloda serbest", async () => {
+    expect(await hits('import { sql } from "drizzle-orm";\nexport const q = sql.identifier("users");\n', CONSISTENCY)).toEqual([]);
+  });
+  it.each([
+    ["update", 'export const f = (qb: any) => qb.for("update");\n'],
+    ["share", 'export const f = (qb: any) => qb.for("share", { of: null });\n'],
+    ["no key update", 'export const f = (qb: any) => qb.for("no key update");\n'],
+    ["key share", 'export const f = (qb: any) => qb.for("key share");\n'],
+    ["büyük harf", 'export const f = (qb: any) => qb.for("UPDATE");\n'],
+    ["değişkenli mod", "export const f = (qb: any, m: string) => qb.for(m);\n"],
+  ])(".for(%s) locking.ts dışında → ihlal", async (_n, code) => {
+    expect(await hits(code, CONSISTENCY)).toHaveLength(1);
+  });
+  it(".for(...) locking.ts içinde temiz; Symbol.for her yerde serbest", async () => {
+    expect(await hits('const f = (qb: any) => qb.for("update");\nvoid f;\n', LOCKING)).toEqual([]);
+    expect(await hits('export const k = Symbol.for("@wms/x");\n', CONSISTENCY)).toEqual([]);
+  });
+  it.each([
+    ["değişkenle tablo + yazma fiili (şablon)", 'import { sql } from "drizzle-orm";\nconst t = "stock_balances";\nexport const q = (x: number) => sql`UPDATE ${sql.raw(t)} SET quantity = ${x}`;\n'],
+    ["değişkenle birleştirme", 'const t = "stock_ledger";\nexport const q = (tbl: string) => "INSERT INTO " + tbl + " (a) VALUES (1)";\nexport const r = t;\n'],
+    ["şablonda tablo değişkeni, kilit", 'const t = "stock_balances";\nexport const q = (tbl: string) => `SELECT 1 FROM ${tbl} FOR UPDATE`;\nexport const r = t;\n'],
+    ["MERGE değişkenli", 'const t = "reservations";\nexport const q = (tbl: string) => `MERGE INTO ${tbl} USING x ON true WHEN MATCHED THEN DELETE`;\nexport const r = t;\n'],
+  ])("%s → ihlal", async (_n, code) => {
+    expect((await hits(code, CONSISTENCY)).length).toBeGreaterThanOrEqual(1);
+  });
+  it("dinamik şablon ama dosyada stok tablosu adı yok → temiz (bilinen sınır: ad başka dosyadan gelirse yakalanmaz)", async () => {
+    expect(await hits('export const q = (tbl: string) => `UPDATE ${tbl} SET a = 1`;\n', CONSISTENCY)).toEqual([]);
+  });
+  it("dinamik yazma izinli dosyada temiz", async () => {
+    expect(await hits('const t = "stock_balances";\nexport const q = (tbl: string) => `UPDATE ${tbl} SET a = 1`;\nexport const r = t;\n', POSTING)).toEqual([]);
+  });
+});
+
+describe("inceleme MINOR-1: auth ad alanı üye erişimi", () => {
+  const NS = 'import * as schema from "@wms/db/internal/schema";\n';
+  it.each([
+    ["schema.stockBalances", `${NS}export const t = schema.stockBalances;\n`],
+    ['schema["stockLedger"]', `${NS}export const t = schema["stockLedger"];\n`],
+    ["schema[dinamik]", `${NS}export const t = (k: string) => (schema as Record<string, unknown>)[k];\n`],
+    ["yapı bozma", `${NS}export const { reservations } = schema;\n`],
+    ["yapı bozma + rest", `${NS}export const { users, ...rest } = schema;\nexport const r = rest;\n`],
+  ])("auth/src/index.ts içinde %s → ihlal", async (_n, code) => {
+    expect((await hits(code, AUTH_INDEX)).length).toBeGreaterThanOrEqual(1);
+  });
+  it("kimlik tablosu üye erişimi temiz", async () => {
+    expect(await hits(`${NS}export const t = schema.users;\nexport const { sessions } = schema;\n`, AUTH_INDEX)).toEqual([]);
+  });
+});
