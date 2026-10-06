@@ -1,7 +1,7 @@
 // T-008a `check:scope` + `cli.mjs` + `lib/cards.mjs` + `lib/output.mjs` testleri.
 // Fixture depolar `lib/testkit.mjs` ile geçici dizinde gerçek git ile kurulur.
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -466,6 +466,7 @@ describe("T-242 çakışmalı birleştirme (MERGE_HEAD) farkındalığı", () =>
     r.branch("feat/T-100-x").write("src/a.mjs", "a2\n").commit("iş");
     r.checkout("main").write("README.md", "r2\n").commit("main").publish("main");
     r.checkout("feat/T-100-x").write("README.md", "r2\n").write("src/c.mjs", "evil\n");
+    r.git("add", "README.md");
     writeFileSync(path.join(r.dir, ".git/MERGE_HEAD"), `${r.git("rev-parse", "origin/main").trim()}\n`);
     const res = await check(r.dir);
     expect(res.lines).toEqual([
@@ -524,6 +525,175 @@ describe("T-242 çakışmalı birleştirme (MERGE_HEAD) farkındalığı", () =>
     const res = await check(r.dir);
     expect(res.code).toBe(1);
     expect(res.text).toContain("FAIL OUT_OF_SCOPE src/c.mjs");
+  });
+});
+
+describe("T-242 MERGE_HEAD muafiyeti: indeks/ağaç ayrışması ve özel girdiler fail-closed", () => {
+  /**
+   * Kart dalı eski tabanda; main `mainSide` ile ilerler; `git merge --no-commit origin/main`
+   * (çakışmasız) ile MERGE_HEAD'li durum. `branchWork` kart içi dal işidir.
+   * @param {(r: ReturnType<typeof fixture>) => unknown} mainSide main'de yapılacak değişiklikler (commit'ten önce)
+   */
+  function pendingMerge(mainSide) {
+    const r = fixture();
+    r.branch("feat/T-100-x").write("src/a.mjs", "a-branch\n").commit("dal işi");
+    r.checkout("main");
+    if (mainSide(r) !== "committed") r.commit("main ilerledi");
+    r.publish("main");
+    r.checkout("feat/T-100-x");
+    r.git("merge", "--no-ff", "--no-commit", "origin/main");
+    return r;
+  }
+  const brings = (/** @type {ReturnType<typeof fixture>} */ r) => r.write("README.md", "r2\n").write("src/new.mjs", "n\n");
+
+  it("temel: çakışmasız --no-commit birleştirme → OK", async () => {
+    const r = pendingMerge(brings);
+    expect((await check(r.dir)).lines).toEqual(["check:scope OK"]);
+  });
+
+  it("MINOR-1: indekse kart dışı EVIL eklenip ağaç main içeriğine geri yazılırsa (ayrışma) → FAIL", async () => {
+    const r = pendingMerge(brings);
+    r.write("README.md", "EVIL\n");
+    r.git("add", "README.md");
+    r.write("README.md", "r2\n");
+    expect(r.git("show", ":README.md")).toBe("EVIL\n");
+    const res = await check(r.dir);
+    expect(res.code).toBe(1);
+    expect(res.text).toContain("FAIL OUT_OF_SCOPE README.md");
+    expect(res.text).not.toContain("src/new.mjs");
+  });
+
+  it("indeks main ile aynı, yalnız ağaç ayrışmışsa → FAIL", async () => {
+    const r = pendingMerge(brings);
+    r.write("README.md", "EVIL\n");
+    const res = await check(r.dir);
+    expect(res.lines).toContainEqual(expect.stringMatching(/FAIL OUT_OF_SCOPE README\.md/));
+    expect(res.code).toBe(1);
+  });
+
+  it("symlink: M'de düz dosya, ağaçta symlink → FAIL", async () => {
+    const r = pendingMerge(brings);
+    unlinkSync(path.join(r.dir, "src/new.mjs"));
+    symlinkSync("../README.md", path.join(r.dir, "src/new.mjs"));
+    const res = await check(r.dir);
+    expect(res.code).toBe(1);
+    expect(res.text).toContain("FAIL OUT_OF_SCOPE src/new.mjs");
+  });
+
+  it("symlink: M'de symlink, ağaçta aynı hedef metniyle düz dosya → FAIL", async () => {
+    const r = pendingMerge((m) => {
+      m.write("README.md", "r2\n");
+      symlinkSync("README.md", path.join(m.dir, "lnk"));
+    });
+    expect(r.git("ls-files", "-s", "lnk")).toMatch(/^120000 /);
+    unlinkSync(path.join(r.dir, "lnk"));
+    writeFileSync(path.join(r.dir, "lnk"), "README.md");
+    const res = await check(r.dir);
+    expect(res.code).toBe(1);
+    expect(res.text).toContain("FAIL OUT_OF_SCOPE lnk");
+  });
+
+  it("silme: M'de var olan dosya ağaçtan silinmiş → FAIL", async () => {
+    const r = pendingMerge(brings);
+    unlinkSync(path.join(r.dir, "src/new.mjs"));
+    const res = await check(r.dir);
+    expect(res.code).toBe(1);
+    expect(res.text).toContain("FAIL OUT_OF_SCOPE src/new.mjs");
+  });
+
+  it("silme: tabanda olan ve main'in değiştirdiği dosya ağaçtan silinmiş → FAIL", async () => {
+    const r = pendingMerge(brings);
+    unlinkSync(path.join(r.dir, "README.md"));
+    const res = await check(r.dir);
+    expect(res.code).toBe(1);
+    expect(res.text).toContain("FAIL OUT_OF_SCOPE README.md");
+  });
+
+  it("yeniden adlandırma: M'nin getirdiği dosya kart dışına taşınmış → FAIL", async () => {
+    const r = pendingMerge(brings);
+    r.rename("src/new.mjs", "elsewhere/new.mjs");
+    const res = await check(r.dir);
+    expect(res.code).toBe(1);
+    expect(res.text).toContain("FAIL OUT_OF_SCOPE elsewhere/new.mjs");
+  });
+
+  it("dizin: M'deki dosyanın yerine ağaçta dizin → FAIL", async () => {
+    const r = pendingMerge(brings);
+    unlinkSync(path.join(r.dir, "src/new.mjs"));
+    mkdirSync(path.join(r.dir, "src/new.mjs"));
+    writeFileSync(path.join(r.dir, "src/new.mjs/in.txt"), "x\n");
+    const res = await check(r.dir);
+    expect(res.code).toBe(1);
+    expect(res.text).toContain("FAIL OUT_OF_SCOPE");
+  });
+
+  it("özel dosya (FIFO): M'deki dosyanın yerine → FAIL", async () => {
+    const r = pendingMerge(brings);
+    unlinkSync(path.join(r.dir, "src/new.mjs"));
+    execFileSync("mkfifo", [path.join(r.dir, "src/new.mjs")]);
+    const res = await check(r.dir);
+    expect(res.code).toBe(1);
+    expect(res.text).toContain("FAIL OUT_OF_SCOPE src/new.mjs");
+  });
+
+  it("alt modül (gitlink): main gitlink getirir; ağaçta dizin → FAIL", async () => {
+    const r = pendingMerge((m) => {
+      m.write("README.md", "r2\n").git("add", "README.md");
+      m.git("update-index", "--add", "--cacheinfo", `160000,${"1".repeat(40)},vendor/sub`);
+      m.git("commit", "--quiet", "-m", "gitlink");
+      return "committed";
+    });
+    mkdirSync(path.join(r.dir, "vendor/sub"), { recursive: true });
+    const res = await check(r.dir);
+    expect(res.code).toBe(1);
+    expect(res.text).toContain("FAIL OUT_OF_SCOPE vendor/sub");
+  });
+
+  it("mod biti: git kuralı yalnız sahip x biti — 0654 dosya 100644'tür, M 100644 ise → OK", async () => {
+    const r = pendingMerge(brings);
+    chmodSync(path.join(r.dir, "src/new.mjs"), 0o654);
+    const res = await check(r.dir);
+    expect(res.lines).toEqual(["check:scope OK"]);
+  });
+
+  it("mod biti: M 100755, ağaçta 0654 (sahip x yok → 100644) → FAIL", async () => {
+    const r = pendingMerge((m) => {
+      m.write("README.md", "r2\n").write("src/tool.sh", "#!/bin/sh\n");
+      chmodSync(path.join(m.dir, "src/tool.sh"), 0o755);
+    });
+    expect(r.git("ls-files", "-s", "src/tool.sh")).toMatch(/^100755 /);
+    chmodSync(path.join(r.dir, "src/tool.sh"), 0o654);
+    const res = await check(r.dir);
+    expect(res.code).toBe(1);
+    expect(res.text).toContain("FAIL OUT_OF_SCOPE src/tool.sh");
+  });
+
+  it("`.git` dosyalı gerçek worktree: birleştirme muafiyeti çalışır; ek kart dışı dosya ve indeks ayrışması FAIL", async () => {
+    const r = fixture();
+    r.branch("feat/T-100-x").write("src/a.mjs", "a-branch\n").commit("dal işi");
+    r.checkout("main");
+    brings(r).commit("main ilerledi").publish("main");
+    const wt = path.join(mkdtempSync(path.join(os.tmpdir(), "guards-wt-")), "wt");
+    cleanups.push(() => rmSync(path.dirname(wt), { recursive: true, force: true }));
+    r.git("worktree", "add", "--quiet", wt, "feat/T-100-x");
+    expect(readFileSync(path.join(wt, ".git"), "utf8")).toMatch(/^gitdir: /);
+    r.git("-C", wt, "merge", "--no-ff", "--no-commit", "origin/main");
+    expect((await check(wt)).lines).toEqual(["check:scope OK"]);
+
+    writeFileSync(path.join(wt, "src/c.mjs"), "evil\n");
+    const extra = await check(wt);
+    expect(extra.lines).toEqual([
+      "[check:scope] FAIL OUT_OF_SCOPE src/c.mjs — kart dosya listesinde yok (T-100; durum M)",
+      "check:scope FAIL (1)",
+    ]);
+    r.git("-C", wt, "checkout", "--quiet", "--", "src/c.mjs");
+
+    writeFileSync(path.join(wt, "README.md"), "EVIL\n");
+    r.git("-C", wt, "add", "README.md");
+    writeFileSync(path.join(wt, "README.md"), "r2\n");
+    const split = await check(wt);
+    expect(split.code).toBe(1);
+    expect(split.text).toContain("FAIL OUT_OF_SCOPE README.md");
   });
 });
 
