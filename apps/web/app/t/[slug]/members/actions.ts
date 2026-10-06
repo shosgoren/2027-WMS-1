@@ -3,7 +3,7 @@
 import { z } from "zod";
 import { inviteMember, revokeInvitation, type InvitationDeps } from "@wms/domain/identity/invitations";
 import { ROLE_KEYS } from "@wms/domain/identity/permissions";
-import { loadMailConfig } from "@wms/shared/mailer";
+import { assertMailModeAllowed, loadMailConfig } from "@wms/shared/mailer";
 import { getAppDb } from "@wms/db";
 import { headers } from "next/headers";
 import { createProductionGuard } from "../../../../lib/action-guard.ts";
@@ -25,10 +25,18 @@ const logInvitation: NonNullable<InvitationDeps["log"]> = (entry) => {
 
 const guardedAction = createProductionGuard(() => headers());
 
+/** Mail yapılandırmasını yükler ve kipi ortama göre doğrular (staging/prod'da mailpit reddedilir; iş kuyruğa yazılmaz). */
+function loadCheckedMailConfig() {
+  const config = loadMailConfig(process.env);
+  assertMailModeAllowed(config, process.env.WMS_ENV?.trim());
+  return config;
+}
+
 export async function inviteMemberAction(raw: unknown) {
   return guardedAction({ schema: inviteSchema }, async (input, ctx) => {
     const principal = ctx.principal;
     if (principal === null) throw new Error("unreachable: principal required");
+    const mailConfig = loadCheckedMailConfig(); // kuyruk/DB'den önce: hata durumunda hiçbir şey yazılmaz
     const senderQueue = await getSenderQueue(); // transaction dışında başlatılır
     const result = await inviteMember(
       {
@@ -39,7 +47,7 @@ export async function inviteMemberAction(raw: unknown) {
         roleKey: input.roleKey,
         requestId: ctx.requestId,
       },
-      { mailConfig: loadMailConfig(process.env), queue: senderQueue ?? unavailableQueue, log: logInvitation },
+      { mailConfig, queue: senderQueue ?? unavailableQueue, log: logInvitation },
     );
     return {
       invitationId: result.invitationId,

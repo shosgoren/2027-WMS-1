@@ -41,7 +41,7 @@ const TRANSIENT_4XX: readonly number[] = [408, 425, 429];
 export class MailError extends Error {
   override name = "MailError";
   readonly code: "MAIL_DELIVERY_DISABLED" | "MAIL_SEND_FAILED" | "MAIL_RECIPIENT_INVALID";
-  /** Sağlayıcı HTTP durumu (yalnızca `MAIL_SEND_FAILED`; mesajdaki `status NNN` kalıbından da okunur). */
+  /** Sağlayıcı HTTP durumu: yalnızca `options.status` ile verilir (mesaj metni ayrıştırılmaz); ağ hatasında tanımsız. */
   readonly status: number | undefined;
   /**
    * Yeniden denemenin sonucu değiştirmeyeceği hata: kip kapalı, alıcı geçersiz, sağlayıcı 4xx (429 hariç).
@@ -51,9 +51,7 @@ export class MailError extends Error {
   constructor(code: MailError["code"], message: string, options?: { readonly status?: number }) {
     super(message);
     this.code = code;
-    // Sağlayıcı gerçeklemeleri (resend/mailpit) durumu mesajda taşır: "... responded with status 422".
-    const parsed = /\bstatus (\d{3})\b/.exec(message);
-    this.status = options?.status ?? (parsed?.[1] === undefined ? undefined : Number(parsed[1]));
+    this.status = options?.status;
     this.permanent =
       code === "MAIL_SEND_FAILED"
         ? this.status !== undefined && this.status >= 400 && this.status < 500 && !TRANSIENT_4XX.includes(this.status)

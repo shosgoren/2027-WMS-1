@@ -60,7 +60,8 @@ export function createSendEmailHandler(deps: SendEmailDeps): JobHandler<"email.s
     try {
       let sealTenant: string = PLATFORM_SEAL_SCOPE;
       if (ctx.hasTenant) {
-        // Tenant ACTIVE değilse withSystemTenant reddeder; iş hata ile döner. Kimlik transaction-local ayardan
+        // Tenant ACTIVE değilse withSystemTenant reddeder; hata `permanent` taşımaz, yani geçici sayılır ve kuyruk
+        // yeniden dener (tenant yeniden ACTIVE olursa iş tamamlanır; olmazsa deneme sınırında `failed`). Kimlik transaction-local ayardan
         // okunur (zarftan değil): mühür, işin gerçekten çalıştığı tenant'a bağlıdır.
         const read = deps.readTenantId ?? ((tx: unknown) => currentTenantId(tx as Parameters<typeof currentTenantId>[0]));
         const tenantId = await ctx.inTenant((tx) => read(tx));

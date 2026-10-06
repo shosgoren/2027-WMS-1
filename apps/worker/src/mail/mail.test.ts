@@ -245,6 +245,19 @@ describe("hata sınıflaması (kalıcı / geçici)", () => {
     expect(new MailError("MAIL_SEND_FAILED", "request failed").permanent).toBe(false);
     expect(new MailError("MAIL_SEND_FAILED", "x", { status: 404 }).permanent).toBe(true);
   });
+  it("MailError durumu yalnızca seçenekten gelir; mesajdaki 'status NNN' metni sınıflamayı etkilemez", () => {
+    const e = new MailError("MAIL_SEND_FAILED", "provider said status 422 somewhere");
+    expect(e.status).toBeUndefined();
+    expect(e.permanent).toBe(false);
+    expect(new MailError("MAIL_SEND_FAILED", "x", { status: 422 }).status).toBe(422);
+  });
+  it("sağlayıcılar gerçek HTTP durumunu seçenekle taşır", async () => {
+    expect((await resend(422)).status).toBe(422);
+    const mp = await createMailpitMailer({ baseUrl: "http://x", from: "n@e.local", fetch: vi.fn<typeof fetch>().mockResolvedValue(new Response("{}", { status: 503 })) })
+      .send({ to: RECIPIENT, subject: "S", text: "T", html: "H", idempotencyKey: "k" })
+      .then(() => Promise.reject(new Error("hata bekleniyordu")), (e: unknown) => e as MailError);
+    expect(mp.status).toBe(503);
+  });
 });
 
 describe("alıcı adresi (yerel kısım)", () => {
