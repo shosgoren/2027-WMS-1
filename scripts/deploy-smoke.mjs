@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Dağıtım sonrası duman testi (T-010 / ADR-013). `deploy-staging.yml` dağıtımdan sonra koşar:
 //   node scripts/deploy-smoke.mjs --url https://etkin-wms-staging.fly.dev/api/health \
-//     --status-file "$RUNNER_TEMP/fly-status.json"
+//     --status-file "$RUNNER_TEMP/fly-status.json" --before-file "$RUNNER_TEMP/fly-status-before.json" \
+//     --recheck-file "$RUNNER_TEMP/fly-status-recheck.json"   (iki bayrak ZORUNLU: kararlılık denetimi atlanamaz)
 // 1) web: URL → HTTP 200 ve gövde `{"status":"ok"}` (varsa `db` alanı da `ok`, T-106); yeniden deneme + istek başına zaman aşımı
 //    (web makinesi `auto_stop_machines` ile durmuş olabilir; ilk istek onu başlatır).
 // 2) worker: `flyctl status --json` çıktısında (dosya) `worker` süreç grubunda en az bir makine
@@ -119,6 +120,17 @@ function processGroupOf(machine) {
   return typeof group === "string" ? group : "";
 }
 
+/** Çıktıya yazılan makine kimliği/durumu: dar desene uymazsa `?` (iş akışı komutu `::` enjeksiyonunu önler). */
+const RE_MACHINE_ID = /^[a-z0-9]{8,20}$/;
+/** @param {unknown} v */
+function safeId(v) {
+  return typeof v === "string" && RE_MACHINE_ID.test(v) ? v : "?";
+}
+/** @param {unknown} v */
+function safeState(v) {
+  return typeof v === "string" && /^[a-z_-]{1,20}$/.test(v) ? v : "?";
+}
+
 /**
  * `flyctl status --json` çıktısında süreç grubunun tüm makineleri `started` mı.
  * @param {string} statusJson
@@ -143,7 +155,7 @@ export function checkProcessGroup(statusJson, group = DEFAULTS.group) {
   }
   const states = inGroup.map((m) => {
     const s = /** @type {{ state?: unknown, id?: unknown }} */ (m);
-    return { id: typeof s.id === "string" ? s.id : "?", state: typeof s.state === "string" ? s.state : "?" };
+    return { id: safeId(s.id), state: safeState(s.state) };
   });
   const notStarted = states.filter((s) => s.state !== "started");
   if (notStarted.length > 0) {
@@ -372,14 +384,14 @@ export function describeStoppedMachines(statusJson, group = DEFAULTS.group, only
 
 /**
  * @param {unknown} machine
- * @returns {{ type: string, status: string, timestamp: number }[]}
+ * @returns {{ type: string, status: string, timestamp: number }[]}  (geçersiz/pozitif olmayan zaman damgası → 0)
  */
 function eventsOf(machine) {
   const ev = /** @type {{ events?: unknown } | null} */ (machine)?.events;
   if (!Array.isArray(ev)) return [];
   return ev.map((e) => {
     const x = /** @type {{ type?: unknown, status?: unknown, timestamp?: unknown }} */ (e ?? {});
-    return { type: String(x.type), status: String(x.status), timestamp: typeof x.timestamp === "number" ? x.timestamp : 0 };
+    return { type: String(x.type), status: String(x.status), timestamp: typeof x.timestamp === "number" && Number.isFinite(x.timestamp) && x.timestamp > 0 ? x.timestamp : 0 };
   });
 }
 
@@ -394,8 +406,10 @@ function newEvents(later, earlier) {
   /** @type {Map<string, number>} */
   const seen = new Map();
   const key = (/** @type {{ type: string, status: string, timestamp: number }} */ e) => `${e.type}|${e.status}|${e.timestamp}`;
-  for (const e of earlier) seen.set(key(e), (seen.get(key(e)) ?? 0) + 1);
+  // Zaman damgası geçersiz/pozitif değilse (0) olay HER ZAMAN yeni sayılır (güvenli taraf).
+  for (const e of earlier) if (e.timestamp > 0) seen.set(key(e), (seen.get(key(e)) ?? 0) + 1);
   return later.filter((e) => {
+    if (e.timestamp <= 0) return true;
     const n = seen.get(key(e)) ?? 0;
     if (n > 0) {
       seen.set(key(e), n - 1);
@@ -433,21 +447,39 @@ export function checkWorkerStability(beforeJson, afterJson, recheckJson, group =
   if (before === null || after === null || recheck === null) return { ok: false, reason: "kararlılık denetimi: durum dosyası okunamadı" };
   /** @param {unknown[]} ms @param {string} id */
   const find = (ms, id) => ms.find((m) => /** @type {{ id?: unknown }} */ (m).id === id);
+  /** @type {string[]} */
   const problems = [];
-  for (const m of after) {
-    const id = String(/** @type {{ id?: unknown }} */ (m).id);
-    const r = find(recheck, id);
-    if (r === undefined || /** @type {{ state?: unknown }} */ (r).state !== "started") {
+  const idsOf = (/** @type {unknown[]} */ ms) => ms.map((m) => String(/** @type {{ id?: unknown }} */ (m).id)).sort();
+  const afterIds = idsOf(after);
+  const recheckIds = idsOf(recheck);
+  if (afterIds.length === 0) problems.push("worker makinesi yok");
+  if (afterIds.join(",") !== recheckIds.join(",")) {
+    problems.push(`makine kümesi örnekler arasında farklı (${afterIds.map(safeId).join(",")} ≠ ${recheckIds.map(safeId).join(",")})`);
+  }
+  // Hem after hem recheck makineleri taranır (küme farkı varsa da her biri denetlenir).
+  for (const r of recheck) {
+    const rawId = String(/** @type {{ id?: unknown }} */ (r).id);
+    const id = safeId(rawId);
+    const m = find(after, rawId);
+    if (/** @type {{ state?: unknown }} */ (r).state !== "started") {
       problems.push(`${id}: ikinci örnekte started değil`);
       continue;
     }
-    const base = eventsOf(find(before, id));
-    const sinceBefore = newEvents(eventsOf(r), base);
+    if (m === undefined) continue; // küme farkı yukarıda raporlandı
+    if (!Array.isArray(/** @type {{ events?: unknown }} */ (m).events) || !Array.isArray(/** @type {{ events?: unknown }} */ (r).events)) {
+      problems.push(`${id}: olay listesi (events) yok`);
+      continue;
+    }
+    const prior = find(before, rawId);
+    const sinceBefore = newEvents(eventsOf(r), eventsOf(prior));
     const bad = sinceBefore.filter((e) => e.type === "exit" || e.type === "restart").length;
     const starts = sinceBefore.filter((e) => e.type === "start").length;
     const between = newEvents(eventsOf(r), eventsOf(m)).filter((e) => ["start", "exit", "restart"].includes(e.type)).length;
     if (bad > 0) problems.push(`${id}: başlatmadan sonra ${bad} exit/restart olayı`);
     if (starts > 1) problems.push(`${id}: ${starts} start olayı (çökme döngüsü)`);
+    if (prior !== undefined && /** @type {{ state?: unknown }} */ (prior).state !== "started" && /** @type {{ state?: unknown }} */ (m).state === "started" && starts < 1) {
+      problems.push(`${id}: önce durmuş, sonra started ama yeni start olayı yok`);
+    }
     if (between > 0) problems.push(`${id}: örnekler arasında ${between} yeni start/exit/restart olayı`);
   }
   if (problems.length > 0) return { ok: false, reason: `"${group}" kararsız: ${problems.join("; ")}` };
@@ -456,7 +488,7 @@ export function checkWorkerStability(beforeJson, afterJson, recheckJson, group =
 
 /**
  * @param {string[]} argv
- * @returns {{ url: string, statusFile: string, group: string, beforeFile?: string, recheckFile?: string }}
+ * @returns {{ url: string, statusFile: string, group: string, beforeFile: string, recheckFile: string }}
  */
 export function parseArgs(argv) {
   /** @type {Record<string, string>} */
@@ -473,17 +505,20 @@ export function parseArgs(argv) {
   const url = out["url"];
   const statusFile = out["status-file"];
   if (url === undefined || statusFile === undefined) {
-    throw new Error("kullanım: deploy-smoke.mjs --url <health-url> --status-file <flyctl-status.json> [--group worker]");
+    throw new Error("kullanım: deploy-smoke.mjs --url <health-url> --status-file <flyctl-status.json> --before-file <json> --recheck-file <json> [--group worker]");
   }
   if (!/^https:\/\//.test(url)) throw new Error(`--url https olmalı: ${url}`);
   const before = out["before-file"];
   const recheck = out["recheck-file"];
-  if ((before === undefined) !== (recheck === undefined)) throw new Error("--before-file ve --recheck-file birlikte verilmeli");
+  if (before === undefined || recheck === undefined) {
+    throw new Error("--before-file ve --recheck-file zorunlu (kararlılık denetimi atlanamaz)");
+  }
   return {
     url,
     statusFile,
     group: out["group"] ?? DEFAULTS.group,
-    ...(before !== undefined && recheck !== undefined ? { beforeFile: before, recheckFile: recheck } : {}),
+    beforeFile: before,
+    recheckFile: recheck,
   };
 }
 
@@ -504,7 +539,10 @@ export function summaryLine(web, worker) {
 export function evaluateWorker(args) {
   try {
     const worker = checkProcessGroup(readFileSync(args.statusFile, "utf8"), args.group);
-    if (!worker.ok || args.beforeFile === undefined || args.recheckFile === undefined) return worker;
+    if (!worker.ok) return worker;
+    if (args.beforeFile === undefined || args.recheckFile === undefined) {
+      return { ok: false, reason: "kararlılık denetimi için --before-file/--recheck-file verilmedi (atlanamaz)" };
+    }
     const stable = checkWorkerStability(
       readFileSync(args.beforeFile, "utf8"),
       readFileSync(args.statusFile, "utf8"),
