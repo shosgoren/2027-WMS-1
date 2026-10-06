@@ -8,11 +8,11 @@
 //   `requireRecentAuth`, `revokeUserSessions`.
 // - Ortam doğrulaması tembeldir (ilk kullanımda): `next build` bu değişkenler olmadan geçer (G-07: eksikse
 //   çalışma anında açık hata, değer asla yazılmaz — G-09).
-import { createHash } from "node:crypto";
-import { isIP } from "node:net";
+import { createHash, randomUUID } from "node:crypto";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { APIError, createAuthMiddleware, getIP, getSessionFromCtx, isAPIError } from "better-auth/api";
 import { betterAuth } from "better-auth";
+import type { BetterAuthOptions } from "better-auth";
 import { nextCookies } from "better-auth/next-js";
 import { twoFactor } from "better-auth/plugins/two-factor";
 import { sql } from "drizzle-orm";
@@ -21,8 +21,26 @@ import type { DbClient } from "@wms/db/internal";
 import * as schema from "@wms/db/internal/schema";
 import { recordSecurityEvent } from "@wms/db";
 import { hashPassword, verifyPassword } from "./password.ts";
+import {
+  DEMO_FORBIDDEN_PATHS,
+  DISABLED_PATHS,
+  EMAIL_RATE_RULES,
+  InvitedAccountError,
+  SESSION_ADDITIONAL_FIELDS,
+  USER_ADDITIONAL_FIELDS,
+  createInvitedAccountWith,
+  emailRateKey,
+  isDemoEmail,
+  parseDemoDomain,
+  resolveClientIp,
+  sessionAbsoluteExpired,
+  signupAllowed,
+} from "./policy.ts";
+import type { CreateInvitedAccountInput } from "./policy.ts";
 
 export { ARGON2_PARAMS, hashPassword, verifyPassword } from "./password.ts";
+export { InvitedAccountError } from "./policy.ts";
+export type { CreateInvitedAccountInput } from "./policy.ts";
 
 // ---------------------------------------------------------------------------------------------
 // Hatalar
@@ -71,6 +89,10 @@ export interface AuthEnv {
   readonly production: boolean;
   readonly socialEnabled: boolean;
   readonly requireEmailVerification: boolean;
+  /** `SIGNUP_ENABLED=true` ve `WMS_ENV` local|ci (A-50). */
+  readonly signupEnabled: boolean;
+  /** `DEMO_EMAIL_DOMAIN` (A-43); tanımsızsa `null` (demo kısıtı yok). */
+  readonly demoEmailDomain: string | null;
   readonly google: { readonly clientId: string; readonly clientSecret: string } | null;
   readonly microsoft: { readonly clientId: string; readonly clientSecret: string } | null;
 }
@@ -140,6 +162,15 @@ export function readAuthEnv(env: EnvSource): AuthEnv {
   if (dbUser(databaseUrl) === dbUser(authDatabaseUrl)) {
     throw new AuthConfigError("DATABASE_URL and AUTH_DATABASE_URL must use different database roles (ADR-014 section 10)");
   }
+  // A-50: self-servis kayıt yalnızca local/ci'da açılabilir; başka ortamda bayrak = yapılandırma hatası.
+  if (flag(env, "SIGNUP_ENABLED") && !signupAllowed(env.WMS_ENV, env.SIGNUP_ENABLED)) {
+    throw new AuthConfigError("SIGNUP_ENABLED=true is only allowed when WMS_ENV is local or ci (A-50)");
+  }
+  const demoRaw = nonEmpty(env, "DEMO_EMAIL_DOMAIN");
+  const demoEmailDomain = parseDemoDomain(demoRaw);
+  if (demoRaw !== undefined && demoEmailDomain === null) {
+    throw new AuthConfigError("DEMO_EMAIL_DOMAIN is not a valid domain name");
+  }
   return {
     secret,
     baseUrl,
@@ -148,6 +179,8 @@ export function readAuthEnv(env: EnvSource): AuthEnv {
     production,
     socialEnabled,
     requireEmailVerification: flag(env, "AUTH_REQUIRE_EMAIL_VERIFICATION"),
+    signupEnabled: signupAllowed(env.WMS_ENV, env.SIGNUP_ENABLED),
+    demoEmailDomain,
     google,
     microsoft,
   };
@@ -181,7 +214,7 @@ export const PASSWORD_MIN_LENGTH = 12; // A-41
 export const PASSWORD_MAX_LENGTH = 128; // A-41
 export const REAUTH_WINDOW_SEC = 10 * 60; // A-39: hassas işlem yeniden doğrulama penceresi
 
-/** Hız sınırı kuralları (A-41); anahtar = IP + yol. E-posta başına ve 2FA kilidi T-112b'dir. */
+/** Hız sınırı kuralları (A-41); anahtar = IP + yol. E-posta başına kurallar `EMAIL_RATE_RULES` (policy.ts). */
 export const RATE_LIMIT_RULES = Object.freeze({
   general: { window: 60, max: 300 },
   signIn: { window: 10 * 60, max: 10 },
@@ -211,10 +244,16 @@ const SECURITY_EVENT = Object.freeze({
 export interface Principal {
   readonly userId: string;
   readonly sessionId: string;
-  /** Oturum oluşturma zamanı (son kimlik doğrulama; yeniden doğrulama kaydı T-112b). */
+  /** Oturum oluşturma zamanı (son kimlik doğrulama; yeniden doğrulama kaydı T-112c). */
   readonly authenticatedAt: Date;
   /** Oturum düzeyi MFA: `sessions.mfa_verified_at IS NOT NULL` (ADR-014 §12). */
   readonly mfaVerified: boolean;
+}
+
+export interface CreateInvitedAccountResult {
+  readonly userId: string;
+  /** Aynı `claimId` ile daha önce açılmış hesap yeniden kullanıldı. */
+  readonly reused: boolean;
 }
 
 export interface AuthService {
@@ -226,6 +265,8 @@ export interface AuthService {
   requireRecentAuth(principal: Principal, maxAgeSec: number): Promise<void>;
   /** Kullanıcının tüm oturumlarını siler. */
   revokeUserSessions(userId: string): Promise<void>;
+  /** Davetle hesap açar (T-117 çağırır). E-posta/doğrulama durumu parametre değildir; bkz. policy.ts. */
+  createInvitedAccount(input: CreateInvitedAccountInput): Promise<CreateInvitedAccountResult>;
 }
 
 export interface CreateAuthParams {
@@ -330,15 +371,35 @@ function createRateLimitStorage(client: DbClient) {
       const last = Number(current[0]?.last_request ?? now);
       return { allowed: false, retryAfter: Math.max(1, Math.ceil((last + windowMs - now) / 1000)) };
     },
+    /**
+     * Rezervasyonu geri alır (başarılı giriş): sayaç 1 azalır (0'ın altına inmez). SIFIRLAMAZ: önceki başarısızlıklar
+     * (rezerve edilmiş, geri alınmamış) pencerede kalır → A-41 "5 BAŞARISIZ deneme" anlamı korunur.
+     */
+    async refund(key: string): Promise<void> {
+      await db.execute(
+        sql`UPDATE public.auth_rate_limits SET count = GREATEST(count - 1, 0) WHERE key_hash = ${sha256Hex(key)}`,
+      );
+    },
   };
 }
 
 /** A-37: bayrak kapalıyken `undefined` — `socialProviders` anahtarı yapılandırmaya hiç eklenmez. */
-export function socialProvidersFor(
-  env: AuthEnv,
-): { google: { clientId: string; clientSecret: string }; microsoft: { clientId: string; clientSecret: string } } | undefined {
+export function socialProvidersFor(env: AuthEnv):
+  | { google: SocialProviderConfig; microsoft: SocialProviderConfig }
+  | undefined {
   if (!env.socialEnabled || env.google === null || env.microsoft === null) return undefined;
-  return { google: { ...env.google }, microsoft: { ...env.microsoft } };
+  // MAJOR-2: örtük kayıt kapalı. `disableImplicitSignUp` tek başına YETMEZ: istemci `requestSignUp: true` göndererek
+  // aşar (api/routes/sign-in.mjs:197, callback.mjs:181: `disableImplicitSignUp && !requestSignUp`). `disableSignUp`
+  // (oauth-provider.d.mts:232/333; link-account.mjs:256) istemciden aşılamaz → kayıt kapısı (SIGNUP_ENABLED) ile aynı.
+  const gate = { disableImplicitSignUp: true, disableSignUp: !env.signupEnabled } as const;
+  return { google: { ...env.google, ...gate }, microsoft: { ...env.microsoft, ...gate } };
+}
+
+interface SocialProviderConfig {
+  readonly clientId: string;
+  readonly clientSecret: string;
+  readonly disableImplicitSignUp: true;
+  readonly disableSignUp: boolean;
 }
 
 // Sızıntıyı KAYNAĞINDA kesme: drizzle-orm 0.45.3 her sorgu hatasını `DrizzleQueryError` (mesaj: "Failed query:
@@ -458,10 +519,75 @@ async function masked<T>(fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
   } catch (error) {
-    if (error instanceof AuthError || error instanceof AuthConfigError) throw error;
+    if (error instanceof AuthError || error instanceof AuthConfigError || error instanceof InvitedAccountError) throw error;
     // Servis sınırında APIError dahil her hata tekdüze, parametresiz AuthStoreError olur.
     throw toStoreError(error, true);
   }
+}
+
+const authOptionsByService = new WeakMap<AuthService, BetterAuthOptions>();
+
+/** `inspectAuthOptions` anlık görüntüsü: gizsiz, derin dondurulmuş; canlı yapılandırmayla bağı yoktur. */
+export interface AuthOptionsSnapshot {
+  readonly session?: { readonly additionalFields?: Readonly<Record<string, { readonly input?: boolean }>> };
+  readonly user?: { readonly additionalFields?: Readonly<Record<string, { readonly input?: boolean }>> };
+  readonly disabledPaths?: readonly string[];
+  readonly account?: { readonly accountLinking?: { readonly enabled?: boolean } };
+  readonly advanced?: {
+    readonly disableOriginCheck?: boolean;
+    readonly disableCSRFCheck?: boolean;
+    readonly ipAddress?: { readonly ipAddressHeaders?: readonly string[] };
+  };
+  readonly rateLimit?: { readonly enabled?: boolean };
+  readonly emailAndPassword?: { readonly disableSignUp?: boolean; readonly revokeSessionsOnPasswordReset?: boolean };
+  readonly socialProviders?: Readonly<Record<string, { readonly disableSignUp?: boolean; readonly disableImplicitSignUp?: boolean }>>;
+}
+
+function deepFreeze<T>(value: T): T {
+  if (typeof value === "object" && value !== null && !Object.isFrozen(value)) {
+    for (const v of Object.values(value)) deepFreeze(v);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+/**
+ * YALNIZCA test/inceleme: etkin Better Auth seçeneklerinin (`auth.options`) politika alanlarının ANLIK GÖRÜNTÜSÜ.
+ * Canlı nesne dışarı çıkmaz: seçilen alanlar açıkça kopyalanır (secret, clientId/clientSecret, adaptör, depolama,
+ * kancalar yok), `structuredClone` ile ayrıştırılır ve derin dondurulur → çağıran canlı yapılandırmayı değiştiremez.
+ */
+export function inspectAuthOptions(service: AuthService): AuthOptionsSnapshot {
+  const live = authOptionsByService.get(service);
+  if (live === undefined) throw new AuthConfigError("inspectAuthOptions: service was not created by createAuth");
+  const fieldInputs = (fields: unknown): Record<string, { input?: boolean }> | undefined => {
+    if (typeof fields !== "object" || fields === null) return undefined;
+    return Object.fromEntries(
+      Object.entries(fields as Record<string, { input?: boolean }>).map(([k, v]) => [k, { input: v.input }]),
+    );
+  };
+  const social: Record<string, { disableSignUp?: boolean; disableImplicitSignUp?: boolean }> = {};
+  for (const [name, cfg] of Object.entries(live.socialProviders ?? {})) {
+    const c = cfg as { disableSignUp?: boolean; disableImplicitSignUp?: boolean };
+    social[name] = { disableSignUp: c.disableSignUp, disableImplicitSignUp: c.disableImplicitSignUp };
+  }
+  const picked = {
+    session: { additionalFields: fieldInputs(live.session?.additionalFields) },
+    user: { additionalFields: fieldInputs(live.user?.additionalFields) },
+    disabledPaths: [...(live.disabledPaths ?? [])],
+    account: { accountLinking: { enabled: live.account?.accountLinking?.enabled } },
+    advanced: {
+      disableOriginCheck: live.advanced?.disableOriginCheck,
+      disableCSRFCheck: live.advanced?.disableCSRFCheck,
+      ipAddress: { ipAddressHeaders: [...(live.advanced?.ipAddress?.ipAddressHeaders ?? [])] },
+    },
+    rateLimit: { enabled: live.rateLimit?.enabled },
+    emailAndPassword: {
+      disableSignUp: live.emailAndPassword?.disableSignUp,
+      revokeSessionsOnPasswordReset: live.emailAndPassword?.revokeSessionsOnPasswordReset,
+    },
+    ...(live.socialProviders === undefined ? {} : { socialProviders: social }),
+  };
+  return deepFreeze(structuredClone(picked)) as AuthOptionsSnapshot;
 }
 
 /** Better Auth yapılandırmasını kurar ve dar yüzeyi döndürür. */
@@ -469,6 +595,7 @@ export function createAuth(params: CreateAuthParams): AuthService {
   const { client, eventClient, env } = params;
   const baseOrigin = new URL(env.baseUrl).origin;
   const authDb = maskedDb(rawDb(client));
+  const rateStore = createRateLimitStorage(client);
 
   async function emit(
     type: string,
@@ -477,6 +604,7 @@ export function createAuth(params: CreateAuthParams): AuthService {
     options: Parameters<typeof getIP>[1],
     detail: Record<string, unknown> = {},
     failOpen = false,
+    suppressNetworkMeta = false,
   ): Promise<void> {
     try {
       const headers = headersOf(source);
@@ -488,6 +616,7 @@ export function createAuth(params: CreateAuthParams): AuthService {
         ip,
         userAgent: ua === null || ua === "" ? null : ua.slice(0, EVENT_UA_MAX),
         detail,
+        suppressNetworkMeta,
       });
     } catch (error) {
       // Hata maskeli günlüğe (parametre/e-posta/IP yok). Varsayılan fail-closed: istek 500 olur.
@@ -499,6 +628,81 @@ export function createAuth(params: CreateAuthParams): AuthService {
   }
 
   let warnedNoIp = false;
+
+  /**
+   * Oturum politikası yazımı (mfa_verified_at); başarısızsa oturum iptal edilir ve istek hata verir (fail-closed,
+   * ADR-014 3. tur m6). Yazım istemci girdisi yolundan değil, `wms_auth` bağlantısıyla sunucuda yapılır.
+   */
+  async function sessionWriteOrRevoke(token: string, write: () => Promise<unknown>): Promise<void> {
+    try {
+      await write();
+    } catch (error) {
+      logMasked("error", "session policy write failed; session revoked", error);
+      try {
+        await authDb.execute(sql`DELETE FROM public.sessions WHERE token = ${token}`);
+      } catch (inner) {
+        logMasked("error", "session revoke after failed policy write failed", inner);
+      }
+      throw new APIError("INTERNAL_SERVER_ERROR", { message: "SESSION_POLICY_FAILED", code: "SESSION_POLICY_FAILED" });
+    }
+  }
+
+  /** `keepToken` dışındaki tüm oturumlar iptal (`null`: kullanıcının tüm oturumları). */
+  async function revokeOtherSessions(userId: string, keepToken: string | null): Promise<void> {
+    await authDb.execute(
+      keepToken === null
+        ? sql`DELETE FROM public.sessions WHERE user_id = ${userId}::uuid`
+        : sql`DELETE FROM public.sessions WHERE user_id = ${userId}::uuid AND token <> ${keepToken}`,
+    );
+  }
+
+  /**
+   * Fail-closed iptal (MINOR-1/2): `keepToken` dışındaki oturumlar silinemezse sırayla (2) kullanıcının TÜM oturumları
+   * (mevcut dahil; yeniden giriş gerekir), (3) mevcut/yeni oturum belirteçleri silinir ve istek HATA ile biter.
+   * Eski `mfa_verified_at`'lı oturum sağ kalmasın diye başarı yanıtı asla dönmez.
+   */
+  async function revokeFailClosed(userId: string, keepToken: string | null, selfTokens: readonly (string | undefined)[]): Promise<void> {
+    try {
+      await revokeOtherSessions(userId, keepToken);
+      return;
+    } catch (error) {
+      logMasked("error", "revoke other sessions failed; failing closed", error);
+    }
+    if (keepToken !== null) {
+      try {
+        await revokeOtherSessions(userId, null);
+      } catch (error) {
+        logMasked("error", "revoke all sessions failed; deleting current session only", error);
+        for (const token of selfTokens) {
+          if (token === undefined) continue;
+          try {
+            await authDb.execute(sql`DELETE FROM public.sessions WHERE token = ${token}`);
+          } catch (inner) {
+            logMasked("error", "current session delete failed", inner);
+          }
+        }
+      }
+    } else {
+      for (const token of selfTokens) {
+        if (token === undefined) continue;
+        try {
+          await authDb.execute(sql`DELETE FROM public.sessions WHERE token = ${token}`);
+        } catch (inner) {
+          logMasked("error", "current session delete failed", inner);
+        }
+      }
+    }
+    throw new APIError("INTERNAL_SERVER_ERROR", { message: "SESSION_POLICY_FAILED", code: "SESSION_POLICY_FAILED" });
+  }
+
+  /** İsteği yapan oturumun belirteci (kancalarda `ctx.context.session` yoksa çerezden). */
+  async function currentTokenOf(ctx: Parameters<typeof getSessionFromCtx>[0]): Promise<string | undefined> {
+    try {
+      return (ctx.context.session ?? (await getSessionFromCtx(ctx)))?.session.token;
+    } catch {
+      return undefined;
+    }
+  }
 
   const auth = betterAuth({
     appName: "Etkin WMS",
@@ -536,8 +740,9 @@ export function createAuth(params: CreateAuthParams): AuthService {
     },
     emailAndPassword: {
       enabled: true,
-      // Güvenli varsayılan: kayıt kapalı; T-112b koşullu açar (A-50). Test kullanıcıları fikstürle açılır.
-      disableSignUp: true,
+      // A-50: kayıt yalnızca SIGNUP_ENABLED=true ve WMS_ENV local|ci iken açık (readAuthEnv zorlar); aksi halde
+      // hesaplar yalnızca `createInvitedAccount` ile (davet) açılır.
+      disableSignUp: !env.signupEnabled,
       minPasswordLength: PASSWORD_MIN_LENGTH,
       maxPasswordLength: PASSWORD_MAX_LENGTH,
       requireEmailVerification: env.requireEmailVerification,
@@ -560,17 +765,13 @@ export function createAuth(params: CreateAuthParams): AuthService {
       updateAge: SESSION_UPDATE_AGE_SEC,
       // ADR-014 §2: çerez önbelleği kapalı → her istekte DB doğrulaması (çıkış/iptal anında etkili).
       cookieCache: { enabled: false },
-      additionalFields: {
-        // ADR-014 §12 / 4. tur BLOCKER-1: istemci yazamaz (`input: false`: db/schema.mjs:63-70) ve
-        // `/update-session` kapalı (`disabledPaths`). Yalnızca sunucu kancaları yazar (T-112b).
-        mfaVerifiedAt: { type: "date", required: false, input: false },
-      },
+      // ADR-014 §12 / 4. tur BLOCKER-1: istemci yazamaz (`input: false`: db/schema.mjs:63-75) ve
+      // `/update-session` kapalı (`disabledPaths`). Yalnızca sunucu `after` kancaları yazar.
+      additionalFields: { ...SESSION_ADDITIONAL_FIELDS },
     },
     user: {
-      additionalFields: {
-        // ADR-016 4. tur MAJOR-1: istemci yazamaz; yalnızca iç adaptörle (T-112b `createInvitedAccount`).
-        invitationClaimId: { type: "string", required: false, input: false },
-      },
+      // ADR-016 4. tur MAJOR-1: istemci yazamaz; yalnızca iç adaptörle (`createInvitedAccount`).
+      additionalFields: { ...USER_ADDITIONAL_FIELDS },
     },
     // Doğrulama belirteçlerinin DB'de özetle saklanması (verification-token-storage.mjs; init-options.d.mts:1210).
     verification: { storeIdentifier: "hashed" },
@@ -580,7 +781,7 @@ export function createAuth(params: CreateAuthParams): AuthService {
       // Yerleşik "database" modelinin yerine (anahtar özeti için) özel depolama; tablo adı yine eşlenir.
       modelName: "authRateLimit",
       fields: { key: "keyHash" },
-      customStorage: createRateLimitStorage(client),
+      customStorage: { consume: rateStore.consume },
       customRules: {
         "/sign-in/email": RATE_LIMIT_RULES.signIn,
         "/request-password-reset": RATE_LIMIT_RULES.passwordReset,
@@ -589,13 +790,13 @@ export function createAuth(params: CreateAuthParams): AuthService {
     },
     // ADR-014 4. tur BLOCKER-1 (b): `/update-session` ucu kapalı (api/index.mjs:166-168 → 404).
     // M3: `/verify-password` HTTP'den kapalı (parola doğrulama oracle'ı); sunucu tarafı `auth.api` ile sürer.
-    disabledPaths: ["/update-session", "/verify-password"],
+    disabledPaths: [...DISABLED_PATHS],
     hooks: {
       before: createAuthMiddleware(async (ctx) => {
         // MINOR-2: üretimde güvenilir istemci IP'si (Fly-Client-IP) yoksa istek reddedilir; yerelde
         // Better Auth ortak yerel kovayı kullanır (ilk seferde açık uyarı).
         // Başlık doğrudan okunur (Better Auth test/dev ortamında yerel adrese düşer; getIP bunu gizlerdi).
-        if (ctx.request !== undefined && isIP((ctx.request.headers.get("fly-client-ip") ?? "").trim()) === 0) {
+        if (ctx.request !== undefined && resolveClientIp(ctx.request.headers) === null) {
           if (env.production) {
             throw new APIError("BAD_REQUEST", { message: "CLIENT_IP_REQUIRED", code: "CLIENT_IP_REQUIRED" });
           }
@@ -611,7 +812,30 @@ export function createAuth(params: CreateAuthParams): AuthService {
         ) {
           throw new APIError("BAD_REQUEST", { message: "TRUST_DEVICE_DISABLED", code: "TRUST_DEVICE_DISABLED" });
         }
+        // M9 (A-43): demo kullanıcısı için hesap/oturum yönetimi uçları kapalı; olayda IP/UA saklanmaz.
+        if (env.demoEmailDomain !== null && DEMO_FORBIDDEN_PATHS.includes(ctx.path)) {
+          const current = await getSessionFromCtx(ctx);
+          if (current !== null && isDemoEmail(current.user.email, env.demoEmailDomain)) {
+            await emit("demo.action_forbidden", current.user.id, ctx.request ?? ctx.headers, ctx.context.options, { path: ctx.path }, true, true);
+            throw new APIError("FORBIDDEN", { message: "DEMO_FORBIDDEN", code: "DEMO_FORBIDDEN" });
+          }
+        }
+        // A-41 / MAJOR-1: e-posta başına başarısız giriş kilidi, IP'den bağımsız. Denetim ve ayırma TEK atomik adım
+        // (kütüphanenin kendi sınırlayıcısı gibi: rate-limiter/index.mjs:281-297 tek ifade): her deneme Argon2'den ÖNCE
+        // rezerve edilir (sayaç artar; eşik aşıldıysa 429). Böylece paralel istekler denetim–artırma arasındaki
+        // boşluktan geçemez (eşik+1'den fazlası parola doğrulamasına ulaşamaz). Başarılı girişte rezerv geri alınır
+        // (after: sayaç -1, sıfırlama değil) → yalnızca BAŞARISIZ denemeler pencerede kalır. Bayrak gerekmez: after
+        // yalnızca before geçildiyse çalışır.
+        if (ctx.path === "/sign-in/email" && typeof ctx.body?.email === "string") {
+          const verdict = await rateStore.consume(emailRateKey("signin-fail", ctx.body.email), EMAIL_RATE_RULES.failedSignIn);
+          if (!verdict.allowed) throw new APIError("TOO_MANY_REQUESTS", { message: "RATE_LIMITED", code: "RATE_LIMITED" });
+        }
         if (ctx.path === "/request-password-reset") {
+          // A-41: e-posta başına sıfırlama talebi sınırı (kullanıcı var/yok ayrımı yok: her e-posta aynı kurala tabi).
+          if (typeof ctx.body?.email === "string") {
+            const verdict = await rateStore.consume(emailRateKey("pwd-reset", ctx.body.email), EMAIL_RATE_RULES.passwordReset);
+            if (!verdict.allowed) throw new APIError("TOO_MANY_REQUESTS", { message: "RATE_LIMITED", code: "RATE_LIMITED" });
+          }
           // Kullanıcı var/yok ayrımı sızmaması için arama yapılmadan, her istek aynı yanıtla reddedilir.
           throw new APIError("SERVICE_UNAVAILABLE", {
             message: "MAIL_DELIVERY_DISABLED",
@@ -640,6 +864,8 @@ export function createAuth(params: CreateAuthParams): AuthService {
               });
               return;
             }
+            // Başarılı giriş: rezervasyon geri alınır (başarısız denemeler sayılmaya devam eder).
+            if (typeof ctx.body?.email === "string") await rateStore.refund(emailRateKey("signin-fail", ctx.body.email));
             const created = ctx.context.newSession;
             if (!created) return;
             // 2FA'lı kullanıcıda oturum, eklentinin kancasında (bu kancadan sonra) silinir; giriş tamamlanmadı.
@@ -660,12 +886,35 @@ export function createAuth(params: CreateAuthParams): AuthService {
               return;
             }
             const created = ctx.context.newSession;
-            if (created) await emit(SECURITY_EVENT.loginSucceeded, created.user.id, source, options, { mfa: true });
+            if (created) {
+              // M5/m7: oturum düzeyi MFA yalnızca burada (başarılı TOTP/yedek kod) ve yalnızca bu oturuma yazılır.
+              await sessionWriteOrRevoke(created.session.token, () =>
+                authDb.execute(sql`UPDATE public.sessions SET mfa_verified_at = now() WHERE token = ${created.session.token}`),
+              );
+              await emit(SECURITY_EVENT.loginSucceeded, created.user.id, source, options, { mfa: true });
+            }
+            return;
+          }
+          case "/two-factor/disable": {
+            if (failed) return;
+            // m6: eklenti yeni oturumu eskisinin alanlarıyla açar (internal-adapter.mjs:254 `...rest`) → eski
+            // `mfa_verified_at` taşınır; kapatmada NULL'lanır (türetilmiş formül seçilmedi: ADR-014 3. tur).
+            const created = ctx.context.newSession;
+            if (created) {
+              await sessionWriteOrRevoke(created.session.token, () =>
+                authDb.execute(sql`UPDATE public.sessions SET mfa_verified_at = NULL WHERE token = ${created.session.token}`),
+              );
+            }
             return;
           }
           case "/change-password": {
             if (failed) return;
-            const current = await getSessionFromCtx(ctx);
+            // M5: parola değişiminde diğer tüm oturumlar iptal (istemci `revokeOtherSessions` göndermese de).
+            const fresh = ctx.context.newSession;
+            const current = fresh ?? (await getSessionFromCtx(ctx));
+            if (current !== null && current !== undefined) {
+              await revokeFailClosed(current.user.id, current.session.token, [current.session.token, fresh?.session.token]);
+            }
             await emit(SECURITY_EVENT.passwordChanged, current?.user.id ?? null, source, options);
             return;
           }
@@ -683,8 +932,12 @@ export function createAuth(params: CreateAuthParams): AuthService {
             if (ctx === null) return;
             const enabling = ctx.path === "/two-factor/verify-totp" || ctx.path === "/two-factor/enable";
             if (enabling && user.twoFactorEnabled === true) {
+              // M5: 2FA etkinleştirmede tüm eski oturumlar iptal; eklenti hemen ardından yeni oturum açar.
+              await revokeFailClosed(user.id, null, [await currentTokenOf(ctx)]);
               await emit(SECURITY_EVENT.twoFactorEnabled, user.id, ctx.request ?? ctx.headers, ctx.context.options);
             } else if (ctx.path === "/two-factor/disable" && user.twoFactorEnabled === false) {
+              // M5: devre dışı bırakmada tüm eski oturumlar iptal; yeni oturum eklentinin ardından açılır.
+              await revokeFailClosed(user.id, null, [await currentTokenOf(ctx)]);
               await emit(SECURITY_EVENT.twoFactorDisabled, user.id, ctx.request ?? ctx.headers, ctx.context.options);
             }
           },
@@ -703,7 +956,7 @@ export function createAuth(params: CreateAuthParams): AuthService {
     ],
   });
 
-  return {
+  const service: AuthService = {
     async handler(request) {
       try {
         return await auth.handler(request);
@@ -717,6 +970,11 @@ export function createAuth(params: CreateAuthParams): AuthService {
       const result = await masked(() => auth.api.getSession({ headers }));
       if (result === null || result === undefined) return null;
       const { session } = result;
+      // A-39: mutlak 7 gün sınırı (oturum oluşturmadan itibaren); aşıldıysa oturum iptal edilir.
+      if (sessionAbsoluteExpired(new Date(session.createdAt))) {
+        await masked(() => authDb.execute(sql`DELETE FROM public.sessions WHERE id = ${session.id}::uuid`));
+        return null;
+      }
       return {
         userId: session.userId,
         sessionId: session.id,
@@ -725,9 +983,9 @@ export function createAuth(params: CreateAuthParams): AuthService {
       };
     },
 
-    // M5 / T-112b kapısı: bu kontrol `security_events` olaylarına (`reauth.succeeded`) DAYANMAZ; yalnızca
+    // M5 / T-112c kapısı: bu kontrol `security_events` olaylarına (`reauth.succeeded`) DAYANMAZ; yalnızca
     // oturum `createdAt` ve DB `now()` kullanır. `reauth.*` yazımının `wms_auth`'a kısıtlanması migration
-    // ister (tetikleyici) ve bu kartta yoktur → olay tabanlı yeniden doğrulama T-112b'ye kadar KAPALI;
+    // ister (tetikleyici) ve bu kartta yoktur → olay tabanlı yeniden doğrulama T-112c'ye kadar KAPALI;
     // `wms_app` ile `reauth.*` sahteciliği DB'de engellenmemiştir (T-112c).
     async requireRecentAuth(principal, maxAgeSec) {
       if (!Number.isFinite(maxAgeSec) || maxAgeSec < 0) {
@@ -743,6 +1001,40 @@ export function createAuth(params: CreateAuthParams): AuthService {
       if (!Number.isFinite(age) || age > maxAgeSec) throw new AuthError("REAUTH_REQUIRED");
     },
 
+    async createInvitedAccount(input) {
+      return masked(async () => {
+        const context = await auth.$context;
+        return createInvitedAccountWith(
+          {
+            db: authDb,
+            passwordMinLength: PASSWORD_MIN_LENGTH,
+            passwordMaxLength: PASSWORD_MAX_LENGTH,
+            hashPassword,
+            newId: randomUUID,
+            // Kurulu 1.7.7 `internalAdapter.createOAuthUser` kullanıcı + hesap yazımını `runWithTransaction` ile tek
+            // transaction'da yapar (db/internal-adapter.mjs:119-139); `runWithTransaction` paketin genel
+            // yüzeyinde (better-auth export'ları) yoktur. `id` ve `forceAllowId` (with-hooks.mjs:26-30).
+            createUserWithPassword: async (d) => {
+              const user = {
+                id: d.id,
+                name: d.name,
+                email: d.email,
+                emailVerified: d.emailVerified,
+                image: null,
+                invitationClaimId: d.invitationClaimId,
+              };
+              await context.internalAdapter.createOAuthUser(user, {
+                accountId: d.id,
+                providerId: "credential",
+                password: d.passwordHash,
+              });
+            },
+          },
+          input,
+        );
+      });
+    },
+
     async revokeUserSessions(userId) {
       await masked(async () => {
         const context = await auth.$context;
@@ -750,6 +1042,8 @@ export function createAuth(params: CreateAuthParams): AuthService {
       });
     },
   };
+  authOptionsByService.set(service, auth.options);
+  return service;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -769,6 +1063,11 @@ export function getAuthService(env: EnvSource = process.env): AuthService {
     });
   }
   return instance;
+}
+
+/** Davetle hesap açma (T-117): bkz. `AuthService.createInvitedAccount`. */
+export function createInvitedAccount(input: CreateInvitedAccountInput): Promise<CreateInvitedAccountResult> {
+  return getAuthService().createInvitedAccount(input);
 }
 
 /** `apps/web/app/api/auth/[...all]/route.ts` için: ilk istekte örneği kurar. */
