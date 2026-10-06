@@ -153,3 +153,6 @@ A-94 | `wms_ops` belge tablolarında yetki almaz (0010/0011 deseni; kartın "yal
 A-95 | Belge `reason` (ve kopyalandığı silinemeyen `document_status_history.reason`) serbest metnine kişisel veri girilmez: UI alanında uyarı (T-216/T-226), ≤500 karakter CHECK; KVKK silme yükümlülüğü append-only geçmişle çakışacağından 4P saklama/silme kartı bu sütunu kapsar (anonimleştirme yolu) | 4P saklama kartında karar | T-206 inceleme
 A-96 | CONSUMED/RELEASED rezervasyon sonlanmıştır, değiştirilemez; INSERT yalnızca ACTIVE açar | — | T-232
 A-97 | Seri boyutu yoksa `stock_balances.serial_key` sıfır UUID sentinelidir (tekillik ve CHECK bunun üzerine); gerçek serial_id ile çakışma pratikte imkânsız | — | T-232
+A-104 | `processed_events.event_id` tipi uuid (pg-boss iş kimliği); T-214 metin anahtar isterse küçük migration | T-214 tüketici anahtarı | T-211
+A-105 | `stock_consistency_runs.findings` jsonb NOT NULL DEFAULT '[]', şekil kısıtı DB'de yok; ADR-019 "≤100 bulgu" sınırı T-225 uygulamasında | T-225 | T-211
+A-106 | wms_ops yalnızca `stock_consistency_signals` SELECT alır (0009 RESTRICTIVE denetimli oturum zorunluluğuyla); diğer tenant tablolarında yetkisiz (A-94) | — | T-211
