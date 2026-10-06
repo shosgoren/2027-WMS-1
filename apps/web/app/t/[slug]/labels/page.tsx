@@ -4,29 +4,19 @@ import { notFound, redirect } from "next/navigation";
 import { getTranslations } from "next-intl/server";
 import { Banner } from "@wms/ui";
 import { getAppDb } from "@wms/db";
-import { getItem, listItemBarcodes } from "@wms/domain/catalog";
-import { listUnits } from "@wms/domain/catalog/units";
-import { getLocationTree } from "@wms/domain/warehouse";
-import type { LocationRow } from "@wms/domain/warehouse";
 import { AppError } from "@wms/shared/errors";
-// `@wms/domain/labels` dışa aktarımı kart dosya listesinde olmayan packages/domain/package.json'a ihtiyaç duyar (Bulgu); o zamana dek göreli içe aktarım.
 import {
   LABEL_TEMPLATE_VERSION,
   LabelCharsetError,
   LabelTooLongError,
   MAX_LABELS_PER_DOCUMENT,
+  loadLabelSource,
   toSvgPages,
   toZplDocument,
-  type LabelData,
-  type LabelTemplate,
-} from "../../../../../../packages/domain/src/labels/index.ts";
+} from "@wms/domain/labels";
 import { LabelPreview } from "./label-preview.tsx";
 
 export const dynamic = "force-dynamic";
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const TREE_PAGE = 200;
-const TREE_MAX_PAGES = 20;
 
 export async function generateMetadata(): Promise<Metadata> {
   const t = await getTranslations("labels");
@@ -36,60 +26,6 @@ export async function generateMetadata(): Promise<Metadata> {
 type Search = Record<string, string | string[] | undefined>;
 function one(v: string | string[] | undefined): string | undefined {
   return typeof v === "string" && v !== "" ? v : undefined;
-}
-
-interface Source {
-  readonly template: LabelTemplate;
-  readonly datas: readonly LabelData[];
-  readonly name: string;
-}
-
-/** Kaynak seçimi: `?item=<id>` ya da `?warehouse=<id>&location=<id>[&subtree=1]` (kök olmadan: depodaki tüm lokasyonlar). A-T312-5. */
-async function loadSource(call: { db: ReturnType<typeof getAppDb>; principal: never; tenantSlug: string }, sp: Search): Promise<Source | null> {
-  const itemId = one(sp.item);
-  const warehouseId = one(sp.warehouse);
-  const locationId = one(sp.location);
-  if (itemId !== undefined) {
-    if (!UUID_RE.test(itemId)) notFound();
-    const item = await getItem(call, { itemId });
-    const [barcodes, units] = await Promise.all([listItemBarcodes(call, item.id), listUnits(call)]);
-    const base = units.find((u) => u.id === item.baseUnitId);
-    // Birincil barkod (A-T312-6): temel birimde, okutma başına 1 olan ilk barkod; yoksa ilk barkod; hiç yoksa ürün kodu basılır.
-    const primary = barcodes.find((b) => b.unitId === item.baseUnitId && b.quantity === "1") ?? barcodes[0];
-    return { template: "product", name: `urun-${item.code}`, datas: [{ code: item.code, name: item.name, unit: base?.code ?? "", barcode: primary?.barcode ?? null }] };
-  }
-  if (warehouseId !== undefined) {
-    if (!UUID_RE.test(warehouseId) || (locationId !== undefined && !UUID_RE.test(locationId))) notFound();
-    const all: LocationRow[] = [];
-    let after: { depth: number; code: string; id: string } | undefined;
-    for (let p = 0; p < TREE_MAX_PAGES; p++) {
-      const page = await getLocationTree(call, { warehouseId, limit: TREE_PAGE, ...(after === undefined ? {} : { after }) });
-      all.push(...page.items);
-      if (page.next === null) break;
-      after = page.next;
-    }
-    let chosen: readonly LocationRow[] = all;
-    if (locationId !== undefined) {
-      const root = all.find((l) => l.id === locationId);
-      if (root === undefined) notFound();
-      if (one(sp.subtree) === "1") {
-        const ids = new Set([root.id]);
-        // Ağaç derinlik sıralıdır: ebeveyn her zaman çocuktan önce gelir.
-        const sub = all.filter((l) => {
-          if (l.id === root.id) return true;
-          if (l.parentId !== null && ids.has(l.parentId)) {
-            ids.add(l.id);
-            return true;
-          }
-          return false;
-        });
-        chosen = sub;
-      } else chosen = [root];
-    }
-    if (chosen.length === 0) notFound();
-    return { template: "location", name: `lokasyon-${chosen[0]?.code ?? "etiket"}`, datas: chosen.map((l) => ({ code: l.code, name: l.name })) };
-  }
-  return null;
 }
 
 export default async function LabelsPage({ params, searchParams }: { params: Promise<{ slug: string }>; searchParams: Promise<Search> }) {
@@ -114,7 +50,7 @@ export default async function LabelsPage({ params, searchParams }: { params: Pro
 
   try {
     if (copies < 1) return shell(<Banner kind="error"><p>{t("errors.copies", { max: MAX_LABELS_PER_DOCUMENT })}</p></Banner>);
-    const source = await loadSource(call as never, sp);
+    const source = await loadLabelSource(call, { itemId: one(sp.item), warehouseId: one(sp.warehouse), locationId: one(sp.location), subtree: one(sp.subtree) === "1" });
     if (source === null) {
       return shell(
         <Banner kind="info">
