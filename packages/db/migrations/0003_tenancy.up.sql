@@ -64,8 +64,15 @@ BEGIN
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members WHERE roleid = r.oid AND member = me.oid AND inherit_option) THEN
     RAISE EXCEPTION '0003_tenancy: migration rolünün wms_identity_probe üyeliğinde INHERIT olamaz (yetki devralınmaz; yalnızca SET)';
   END IF;
+  -- A-67 (T-105e): Neon'da probe'u yaratan dal sahibi (NOSUPERUSER, CREATEROLE + BYPASSRLS) örtük ADMIN taşır ve
+  -- bu kaldırılamaz (42501). Yalnızca migration rolü süper kullanıcı DEĞİL VE rolbypassrls VE rolcreaterole ise
+  -- (ADMIN yeni yetenek kazandırmaz) NOTICE; aksi hâlde RAISE aynen. Diğer üyelik denetimleri değişmez.
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members WHERE roleid = r.oid AND member = me.oid AND admin_option) THEN
-    RAISE EXCEPTION '0003_tenancy: migration rolünün wms_identity_probe üyeliğinde ADMIN OPTION olamaz (altyapı adımı; migration REVOKE çalıştırmaz)';
+    IF NOT me.rolsuper AND me.rolbypassrls AND me.rolcreaterole THEN
+      RAISE NOTICE '0003_tenancy: A-67 — migration rolü wms_identity_probe üzerinde ADMIN OPTION taşıyor (rol zaten BYPASSRLS + CREATEROLE; kabul edildi)';
+    ELSE
+      RAISE EXCEPTION '0003_tenancy: migration rolünün wms_identity_probe üyeliğinde ADMIN OPTION olamaz (altyapı adımı; migration REVOKE çalıştırmaz)';
+    END IF;
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members WHERE roleid = r.oid AND member = me.oid AND set_option) THEN
     RAISE EXCEPTION '0003_tenancy: migration rolünün wms_identity_probe üyeliğinde SET seçeneği yok (SET ROLE kalıbı için gerekli)';
@@ -90,8 +97,13 @@ BEGIN
 
   -- Supervisor m1: dolaylı ADMIN üyeliği (başka bir rol üzerinden). Süper kullanıcıda pg_has_role daima
   -- true döner, bu yüzden yalnızca süper kullanıcı olmayan migration rolünde denetlenir.
+  -- A-67 (T-105e): aynı koşulda (süper kullanıcı değil, BYPASSRLS + CREATEROLE) NOTICE; aksi hâlde RAISE.
   IF NOT me.rolsuper AND pg_catalog.pg_has_role(current_user, 'wms_identity_probe', 'MEMBER WITH ADMIN OPTION') THEN
-    RAISE EXCEPTION '0003_tenancy: migration rolü wms_identity_probe üzerinde (dolaylı olarak da) ADMIN OPTION taşıyamaz';
+    IF me.rolbypassrls AND me.rolcreaterole THEN
+      RAISE NOTICE '0003_tenancy: A-67 — migration rolü wms_identity_probe üzerinde ADMIN OPTION taşıyor (örtük/dolaylı; rol zaten BYPASSRLS + CREATEROLE; kabul edildi)';
+    ELSE
+      RAISE EXCEPTION '0003_tenancy: migration rolü wms_identity_probe üzerinde (dolaylı olarak da) ADMIN OPTION taşıyamaz';
+    END IF;
   END IF;
 END
 $pre$;
