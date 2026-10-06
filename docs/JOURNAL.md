@@ -166,3 +166,26 @@
 - 12:45Z int/faz2-sema 353d0b5 push → paket incelemesi. T-204 (0011 katalog) başladı (taban int/faz2-sema; bekçi test genişletmeleri önceden onaylı).
 - 11:45Z deploy-staging #23: migrate YEŞİL (Neon'da tüm migration'lar), deploy YEŞİL, smoke web OK {status:ok, db:ok}; worker makinesi stopped → kart T-106c (fix/T-106c-worker-diag ce970d6, devops ajanı: maskeli worker logu + kök neden). faz2-sema inceleme @353d0b5 0·1·7: MAJOR-1 locations depth tetikleyicisi ebeveyn yoksa atlıyor (çok satırlı INSERT ile döngü) → T-202 ajanı (+MINOR 1-5); MINOR 6-7 (COUNT_LOCK_ROW_MISSING metni, NOT_FOUND öncelik kuralı) → T-203 ajanı.
 - 11:50Z #51 int/faz1-ops MERGED → main 60c2c74 (0009 ops rolü + T-130). provision-staging yeniden tetiklendi (wms_ops NOLOGIN yaratmak için); otomatik deploy 0009'da düşebilir → provizyon sonrası deploy yeniden + restore-drill ilk koşu (11:55Z kontrol).
+
+### 2026-10-06 12:50Z Supervisor turu
+- 11:55Z provision-staging #2 FAIL: özet sızıntı bekçisi (büyük olasılıkla wms_ops yalnız-ADMIN satırı Neon sahip rol adını yazıyor) → T-105g (fix/T-105g-provision-summary, T-105c ajanı). T-106c dc32ec7 (Worker diagnostics masked adımı; olası nedenler: env eksik / queue start / 256MB OOM) → güvenlik incelemesi.
+- 12:00Z T-106c inceleme @dc32ec7 0·1·5: MAJOR kalıp tabanlı log maskeleme tamamlanamaz → Supervisor kararı: izin listesi (yalnız güvenli JSON alanları, hata sınıfı/kodu, Fly sistem satırları; diğerleri sayılır, yazılmaz) → ajan. restore-drill ilk gerçek koşusu tetiklendi (11:57Z kontrol).
+- 12:05Z T-105g dcea6de @0·0·3 → PR açıldı. Takip MINOR: deleteRole e.message redact edilmeden özete (eski), probe adminOnly tekilleştirme, diğer-rol ipucu.
+- 12:10Z int/faz2-sema f6d2db1 (T-202 5223d16 MAJOR-1 depth/döngü fail-closed + tenant uyuşmazlığında 42501; MINOR testleri; T-203 6ee8a21; A-86) → yeniden inceleme. T-106c acd57e6 izin listesi (+ RE_MISSING_ENV kabul) → yeniden inceleme. #52 CI bekleniyor.
+- 12:15Z **restore-drill #1 (main 60c2c74) PASS**: RTO 11.808 sn, parmak izi eşit, geçici dal silindi, artık dal yok; RPO '-' (staging'de henüz audit/occurred_at verisi yok — worker kapalı, demo tohumlanmadı) → worker düzelince yeniden koş (RPO ölçümü için). Kanıt: https://github.com/shosgoren/2027-WMS-1/actions/runs/37458855398 (artifact restore-drill-summary, 90 gün).
+- 12:20Z int/faz2-sema @f6d2db1 0·0·1 HAZIR (MAJOR kapandı; tenant uyuşmazlığı 42501 denetimi güvenli, oracle yok). Takip MINOR: ac-04 locations INSERT beklentisi artık RLS yerine tetikleyiciyi sınıyor → ayırt edici ileti/DETAIL ya da ac-04'te belge. PR Faz 1 kapısından sonra; T-204 bu dilime eklenecek.
+- 12:20Z #52 T-105g MERGED → main d3c00d3; provision-staging #3 tetiklendi (12:03Z kontrol) → sonra deploy-staging dispatch.
+- 12:25Z T-106c @acd57e6 0·1·2: güvenlik kapandı; MAJOR işlevsel (flyctl log öneki yüzünden izin listesi hiç eşleşmiyor) + RE_MSG hex belirteç + worker-ids alanları → ajan.
+- 12:03Z int/faz2-sema ← T-204 (0011 katalog) birleşti @ff125fa; kart eki + Q-47, A-87, A-88. check:all/verify(2124)/gitleaks OK; test:int tam koşu ve yeniden inceleme sürüyor.
+- 12:04Z provision #3 yeşil (T-105g doğrulandı); deploy-staging main'de tetiklendi (0009 uygulanacak; worker T-106c'ye kadar kırmızı beklenir).
+- T-106c @462800b: flyctl önek ayrıştırma + MINOR-1/2 düzeltildi; security-reviewer incelemede.
+- T-206 (0012 belgeler) db-engineer'a verildi (taban int/faz2-sema @ff125fa).
+- faz2-sema inceleme @ff125fa: 0·0·5. MINOR 1-3 (catalog-schema test sertleştirme) db-engineer'da. MINOR-4 → A-89 eklenecek (test-fix ajanı bitince, aynı worktree): "wms_app handling_units.location_id/parent_id UPDATE yetkisi yalnızca domain stok komutları içindir (ADR-011 defter çifti); DB tutarlılığı zorlamaz; T-232/stok kartlarında bekçi + Faz 3'te sütun yetkisi daraltma değerlendirilir". MINOR-5 (0010 tenant uyuşmazlığı ac-04'ü politikadan önce karşılıyor) zaten takipte.
+- T-106c inceleme @462800b 0·0·5 (MAJOR kapandı); sızıntı MINOR 1-3 + state sabit küme + negatif testler ajana geri verildi.
+- int/faz2-sema @ff125fa test:int tam koşu: 46 dosya, 795/795 yeşil.
+- T-106c @fea2df9 inceleme 0·0·3 (güvenlik kapalı). MINOR-1 kabul (RE_CODE alt çizgili büyük harf; staging, err.code/name). MINOR-2 (çökme iletileri + error nesnesi) ve MINOR-3 (ALLOWED_MSGS senkron bekçisi) ajanda.
+- deploy-staging #26 (main @d3c00d3): migrate yeşil (0009 uygulandı), deploy yeşil, Smoke FAIL (worker; T-106c bekleniyor).
+- Konteyner yeniden başladı (~12:30Z); dockerd elle başlatıldı (test:int ilk deneme "container runtime" hatası).
+- T-106c inceleme 0·1·3 → 0·0·5 → 0·0·3 → 0·0·2 @fe79271 → PR #53 açıldı (abonelik açık). Kalan MINOR'lar takipte: senkron bekçisi kör noktaları, RE_CODE sabit kümeye (prod öncesi).
+- int/faz2-sema: 0256a52 (T-204 test sertleştirme), T-206 birleşti (9133852, 0012 belgeler, test:int 816/816 ajanda), docs 47ae89a: T-206 kart eki, A-89…A-94, Q-48/49. check:all/verify/gitleaks OK. Yeniden inceleme + test:int sürüyor.
+- int/faz2-stok-sema dalı açıldı @47ae89a. T-232 (0013 defter/bakiye) db-engineer'da; T-209 (QA şema) qa-verifier'da.
