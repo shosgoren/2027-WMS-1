@@ -652,9 +652,26 @@ const STOCK_WRITE_SQL_RE = new RegExp(
  * Değer parametresi (`VALUES (${a})`, `WHERE id = ${y}`) tablo konumunu dinamik yapmaz; önceki (iv) bu yüzden stok tablosu okuyan her dosyada
  * başka tabloya yazmayı yanlış pozitif sayıyordu (katalog/depo dalları).
  */
-const DYN_TABLE_POS = `(?:ONLY\\s+)?(?:"?public"?\\s*\\.\\s*)?\u0000`;
-const STOCK_WRITE_DYN_RE = new RegExp(`(?<![\\w])(?:INSERT\\s+INTO|UPDATE|DELETE\\s+FROM|MERGE\\s+INTO|TRUNCATE(?:\\s+TABLE)?)\\s+${DYN_TABLE_POS}`, "i");
-const STOCK_FROM_DYN_RE = new RegExp(`(?<![\\w])(?:FROM|JOIN)\\s+${DYN_TABLE_POS}`, "i");
+/** Tablo adı belirteci: harf/rakam/`_`/`.`/`"` dizisi; içinde ifade (`\u0000`) varsa tablo konumu dinamiktir (`"${t}"`, `public."${t}"`, `stock_${t}`). */
+const DYN_TABLE_TOKEN = `(?:ONLY\\s+)?[\\w."]*\u0000`;
+const STOCK_WRITE_DYN_RE = new RegExp(`(?<![\\w])(?:INSERT\\s+INTO|UPDATE|DELETE\\s+FROM|MERGE\\s+INTO|TRUNCATE(?:\\s+TABLE)?)\\s+${DYN_TABLE_TOKEN}`, "i");
+const STOCK_FROM_START_RE = /(?<![\w])(?:FROM|JOIN)\s+/gi;
+/** `FROM`/`JOIN` listesinin bittiği yer (değer parametreleri bu anahtar sözcüklerden sonra gelir; tablo konumu sayılmaz). */
+const STOCK_FROM_END_RE = /(?<![\w])(?:WHERE|ON|SET|VALUES|GROUP|ORDER|HAVING|LIMIT|OFFSET|FOR|USING|RETURNING|SELECT|WINDOW|UNION|INTERSECT|EXCEPT)(?![\w])|\)/i;
+const DYN_FIRST_RE = new RegExp(`^${DYN_TABLE_TOKEN}`, "i");
+const DYN_COMMA_RE = new RegExp(`,\\s*${DYN_TABLE_TOKEN}`, "i");
+/** `FROM a, ${t} b` / `JOIN ${t}` / `FROM "${t}"`: FROM/JOIN listesinde tablo konumu dinamik mi (kilit için). @param {string} t */
+const fromListDynamic = (t) => {
+  for (const m of t.matchAll(STOCK_FROM_START_RE)) {
+    const rest = t.slice((m.index ?? 0) + m[0].length);
+    const end = rest.search(STOCK_FROM_END_RE);
+    const seg = end === -1 ? rest : rest.slice(0, end);
+    if (DYN_FIRST_RE.test(seg) || DYN_COMMA_RE.test(seg)) return true;
+  }
+  return false;
+};
+/** @param {string} t */
+const fromListDynamicSql = (t) => fromListDynamic(t) || fromListDynamic(stripSqlComments(t));
 const STOCK_WRITE_TABLE_ANY_RE = new RegExp(`(?<![\\w])${tableRe(STOCK_WRITE_TABLES)}`, "i");
 const STOCK_WRITE_TABLE_EXACT_RE = new RegExp(`^\\s*${tableRe(STOCK_WRITE_TABLES)}\\s*$`, "i");
 const STOCK_FOR_MODE_RE = /^\s*(?:no\s+key\s+update|update|share|key\s+share)\s*$/i;
@@ -734,6 +751,15 @@ const stockSqlGuard = {
       while (x && (x.type === "TSAsExpression" || x.type === "TSNonNullExpression" || x.type === "TSSatisfiesExpression" || x.type === "TSTypeAssertion")) x = x.expression;
       return x;
     };
+    /** T-238: `pgTable`a bağlanan yerel adlar (`import … as`, `const x = pgTable`, `x = pgTable`); çağrıları Program:exit'te denetlenir. @type {Set<string>} */
+    const pgTableAliases = new Set();
+    /** @type {{ n: any, name: string, text: string | null }[]} */
+    const aliasCalls = [];
+    /** @param {any} e */
+    const isPgTableRef = (e) => {
+      const x = unwrap(e);
+      return (x?.type === "Identifier" && x.name === "pgTable") || (x?.type === "MemberExpression" && !x.computed && x.property.name === "pgTable");
+    };
     /** `sql.identifier("…")`/`pgTable("…")` zaten raporlanan ilk argüman düğümleri (tek ihlal = tek rapor). @type {Set<any>} */
     const coveredArgs = new Set();
     /** (iv) dosya düzeyi: stok tablosu adı bir dizede geçiyor mu; ifadeli şablon/birleştirmede yazma/kilit fiili var mı. */
@@ -772,7 +798,7 @@ const stockSqlGuard = {
       if (testSql(STOCK_LOCK_TABLE_RE, text)) seen.lockTable = true;
       if (text.includes("\u0000")) {
         if (!writeAllowed && testSql(STOCK_WRITE_DYN_RE, text)) dynamicVerbs.push({ node, kind: "write" });
-        if (!isLockFile && testSql(STOCK_LOCK_SQL_RE, text) && testSql(STOCK_FROM_DYN_RE, text)) dynamicVerbs.push({ node, kind: "lock" });
+        if (!isLockFile && testSql(STOCK_LOCK_SQL_RE, text) && fromListDynamicSql(text)) dynamicVerbs.push({ node, kind: "lock" });
       }
       if (!isLockFile && testSql(STOCK_LOCK_SQL_RE, text) && testSql(STOCK_LOCK_TABLE_RE, text)) report(node, "lock");
       if (!writeAllowed && testSql(STOCK_WRITE_SQL_RE, text)) report(node, "write");
@@ -867,6 +893,7 @@ const stockSqlGuard = {
       BinaryExpression: checkText,
       ImportSpecifier: (/** @type {any} */ n) => {
         // T-238: `import { pgTable as tbl }` — takma adla tablo tanımı. Tanım dosyaları/izinli dosyalar hariç.
+        if (importedName(n) === "pgTable" && n.local?.name !== "pgTable") pgTableAliases.add(n.local.name);
         if (!writeAllowed && !definesTables && importedName(n) === "pgTable" && n.local?.name !== "pgTable") report(n, "write");
       },
       ImportDeclaration: (/** @type {any} */ n) => {
@@ -929,6 +956,7 @@ const stockSqlGuard = {
           report(n, "write");
         }
         // (ii) pgTable("<stok tablosu>")
+        if (c.type === "Identifier" && c.name !== "pgTable") aliasCalls.push({ n, name: c.name, text: firstText });
         const isPgTable = (c.type === "Identifier" && c.name === "pgTable") || prop === "pgTable";
         if (!writeAllowed && !STOCK_SCHEMA_DEFINITION_FILES.includes(rel) && isPgTable && firstText !== null && STOCK_WRITE_TABLE_EXACT_RE.test(firstText)) {
           coveredArgs.add(first);
@@ -955,6 +983,7 @@ const stockSqlGuard = {
             n.id.type === "ObjectPattern" && n.id.properties.some((/** @type {any} */ p) => p.type === "Property" && !p.computed && (p.key.name ?? p.key.value) === "pgTable" && p.value?.name !== "pgTable");
           if (destructuresPgTable) report(n, "write");
         }
+        if (n.id.type === "Identifier" && isPgTableRef(n.init)) pgTableAliases.add(n.id.name);
         // T-238: ad alanı nesnesi başka değişkene atanamaz (`const s = schema; s.stockBalances`). Yapı bozma aşağıda anahtar anahtar denetlenir.
         if (n.id.type !== "ObjectPattern" && refsNamespace(n.init)) report(n, "schema");
         const init = unwrap(n.init);
@@ -965,9 +994,14 @@ const stockSqlGuard = {
         }
       },
       AssignmentExpression: (/** @type {any} */ n) => {
+        if (n.left.type === "Identifier" && isPgTableRef(n.right)) pgTableAliases.add(n.left.name);
         if (refsNamespace(n.right)) report(n, "schema");
       },
       "Program:exit": () => {
+        // T-238: takma adla `pgTable` çağrısı (`const tbl = pgTable; tbl("stock_balances")`). `const t = pgTable` yalnızca atama olarak serbesttir (AC-28).
+        if (!writeAllowed && !STOCK_SCHEMA_DEFINITION_FILES.includes(rel)) {
+          for (const { n, name, text } of aliasCalls) if (pgTableAliases.has(name) && text !== null && STOCK_WRITE_TABLE_EXACT_RE.test(text)) report(n, "write");
+        }
         for (const { node, kind } of dynamicVerbs) {
           if (kind === "write" && seen.writeTable) report(node, "write");
           if (kind === "lock" && seen.lockTable) report(node, "lock");

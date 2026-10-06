@@ -306,9 +306,14 @@ describe("T-238: pgTable takma adı", () => {
   it("yanlış pozitif yok: takmasız pgTable (stok olmayan), diğer içe aktarımlar takma adlı olabilir", async () => {
     expect(await hits('import { pgTable, uuid } from "drizzle-orm/pg-core";\nexport const t = pgTable("widgets", { id: uuid("id") });\n', CONSISTENCY)).toEqual([]);
     expect(await hits('import { uuid as u, text as tx } from "drizzle-orm/pg-core";\nexport const c = [u, tx];\n', CONSISTENCY)).toEqual([]);
-    // Bilinen sınır: `const tbl = pgTable` tek başına ihlal değildir (AC-28 örneği); `const tbl = pgTable` sonrası `tbl("…")` bilinen sınırdır (kural yorumu).
+    // Bilinen sınır: `const tbl = pgTable` tek başına ihlal değildir (AC-28 örneği); `const tbl = pgTable` tek başına serbesttir; takma adla çağrı tablo adıyla ihlaldir.
     expect(await hits('import { pgTable } from "drizzle-orm/pg-core";\nexport const t = pgTable;\n', CONSISTENCY)).toEqual([]);
-    // (`const tbl = pgTable; tbl("stock_balances")` kural yorumundaki bilinen sınırlardandır: tam-ad kuralı yalnızca SQL'e ulaşan bağlamlarda çalışır.)
+    expect((await hits('import { pgTable } from "drizzle-orm/pg-core";\nconst tbl = pgTable;\nexport const t = tbl("stock_balances", {});\n', CONSISTENCY)).length).toBeGreaterThanOrEqual(1);
+    expect((await hits('import { pgTable } from "drizzle-orm/pg-core";\nlet tbl: typeof pgTable;\ntbl = pgTable;\nexport const t = tbl("reservations", {});\n', CONSISTENCY)).length).toBeGreaterThanOrEqual(1);
+    expect((await hits('import * as pg from "drizzle-orm/pg-core";\nconst tbl = pg.pgTable;\nexport const t = tbl("stock_ledger", {});\n', CONSISTENCY)).length).toBeGreaterThanOrEqual(1);
+    expect((await hits('import { pgTable } from "drizzle-orm/pg-core";\nexport const t = () => tbl("stock_ledger", {});\nconst tbl = pgTable;\n', CONSISTENCY)).length).toBeGreaterThanOrEqual(1);
+    // Takma ad stok olmayan tabloda ve başka çağrılarda temiz.
+    expect(await hits('import { pgTable } from "drizzle-orm/pg-core";\nconst tbl = pgTable;\nexport const t = tbl("widgets", {});\nexport const u = other("stock_ledger");\ndeclare function other(x: string): void;\n', CONSISTENCY)).toEqual([]);
   });
   it("şema tanım dosyası ve izinli dosyada takma ad serbest", async () => {
     const code = 'import { pgTable as tbl, uuid } from "drizzle-orm/pg-core";\nexport const t = tbl("x", { id: uuid("id") });\n';
@@ -406,5 +411,25 @@ describe("T-238: (iv) yalnızca tablo konumu dinamik olan şablonlar", () => {
     ["JOIN ${T} FOR UPDATE", 'const T = "stock_dimensions";\nexport const q = `SELECT 1 FROM x JOIN ${T} ON true FOR UPDATE`;\n'],
   ])("consistency.ts içinde %s → ihlal", async (_n, code) => {
     expect((await hits(code, CONSISTENCY)).length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("T-238: (iv) main'deki dinamik biçimler korunur (inceleme BLOCKER; tablodaki her satır)", () => {
+  const READ = 'export const r = (a: string) => `SELECT quantity FROM public.stock_balances WHERE tenant_id = ${a}`;\n';
+  it.each([
+    ['UPDATE "${t}"', `${READ}export const q = (t: string) => \`UPDATE "\${t}" SET a = 1\`;\n`],
+    ["FROM documents d, ${t} b FOR UPDATE", `${READ}export const q = (t: string) => \`SELECT 1 FROM documents d, \${t} b FOR UPDATE\`;\n`],
+    ['UPDATE public."${t}"', `${READ}export const q = (t: string) => \`UPDATE public."\${t}" SET a = 1\`;\n`],
+    ['UPDATE "${…}" + { table: "stock_balances" }', 'export const m = { table: "stock_balances" };\nexport const q = (t: string) => `UPDATE "${t}" SET a = 1`;\n'],
+    ['["stock_balances"] (join edilmemiş) + UPDATE "${…}"', 'export const m = ["stock_balances"];\nexport const q = (t: string) => `UPDATE "${t}" SET a = 1`;\n'],
+    ["FROM a, ${…} FOR UPDATE + { table: ... }", 'export const m = { table: "reservations" };\nexport const q = (t: string) => `SELECT 1 FROM a, ${t} FOR UPDATE`;\n'],
+    ["UPDATE stock_${t} (ad parçası)", `${READ}export const q = (t: string) => \`UPDATE stock_\${t} SET a = 1\`;\n`],
+    ["FROM \"${t}\" FOR SHARE", `${READ}export const q = (t: string) => \`SELECT 1 FROM "\${t}" FOR SHARE\`;\n`],
+  ])("%s → ihlal", async (_n, code) => {
+    expect((await hits(code, CONSISTENCY)).length).toBeGreaterThanOrEqual(1);
+  });
+  it("değer parametreleri tablo konumu değildir: VALUES/WHERE/SET/ON sonrası ${} temiz", async () => {
+    const code = `${READ}export const q = (a: string, b: string) => \`SELECT 1 FROM public.lots l JOIN public.items i ON i.id = \${a} WHERE l.id = \${b}, \${a} FOR SHARE\`;\nexport const w = (a: string, b: string) => \`INSERT INTO public.warehouses (c, n) VALUES (\${a}, \${b})\`;\n`;
+    expect(await hits(code, CONSISTENCY)).toEqual([]);
   });
 });

@@ -315,6 +315,8 @@ describe("eşzamanlı ters sıralı planlar: deadlock yok (bariyerli, olasılık
       return work(tx);
     });
 
+  /** Yalnızca bu koşu tetikleyiciyi/fonksiyonu OLUŞTURDUYSA afterAll siler; artık-bulundu hatasında başkasının (ya da önceki koşunun) nesnesi silinmez. */
+  let ownsBarrier = false;
   beforeAll(async () => {
     // Mevcut boyuta 3 ek ACTIVE rezervasyon (rezerve toplamı bakiyede aynı transaction'da güncellenir; mutlak denetim ertelenmiş).
     await adminTx(A.tenantId, async (q) => {
@@ -366,11 +368,13 @@ describe("eşzamanlı ters sıralı planlar: deadlock yok (bariyerli, olasılık
         RETURN NEW;
       END
       $fn$`);
+    ownsBarrier = true;
     await admin.query("REVOKE ALL ON FUNCTION public.t238_dimension_barrier() FROM PUBLIC");
     await admin.query("CREATE TRIGGER zz_t238_dimension_barrier BEFORE INSERT ON public.stock_dimensions FOR EACH ROW EXECUTE FUNCTION public.t238_dimension_barrier()");
   }, 60_000);
 
   afterAll(async () => {
+    if (!ownsBarrier) return; // artık hatasında nesneler bu koşunun değildir: elle temizlik gerekir (hata iletisi komutları verir)
     await admin.query("DROP TRIGGER IF EXISTS zz_t238_dimension_barrier ON public.stock_dimensions");
     await admin.query("DROP FUNCTION IF EXISTS public.t238_dimension_barrier()");
   }, 60_000);
