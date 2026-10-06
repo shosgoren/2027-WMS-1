@@ -58,6 +58,8 @@ async function verifyDemoPassword(hash: string, password: string): Promise<boole
 export const DEMO_ACCOUNT_EVENT = Object.freeze({
   created: "demo.account_created",
   passwordReset: "demo.password_reset",
+  /** Yalnızca MFA temizlenerek devralındı (parola değişmedi). */
+  takenOver: "demo.account_taken_over",
 });
 
 /** Kod `docs/spec/15-engineering.md` listesindendir. Mesaj sabittir (değer içermez). */
@@ -201,6 +203,10 @@ export function createDemoAccountPort(options: DemoAccountPortOptions): DemoAcco
       return { userId: seen.user.id, created: false, passwordUpdated: false };
     }
     const newHash = seen.user === undefined || !matches ? await hashDemoPassword(password) : undefined;
+    const hashToWrite = (): string => {
+      if (newHash === undefined) throw new DemoAccountError("INTERNAL"); // mantık hatası: özet gerekli ama üretilmedi
+      return newHash;
+    };
 
     return db.transaction(async (tx) => {
       const event = async (type: string, userId: string): Promise<void> => {
@@ -219,7 +225,7 @@ export function createDemoAccountPort(options: DemoAccountPortOptions): DemoAcco
         if (id === undefined) throw new Retry(); // eşzamanlı oluşturma: kazananın satırı yeniden gözlenir
         await tx.execute(
           sql`INSERT INTO public.accounts (account_id, provider_id, user_id, password)
-              VALUES (${id}::text, 'credential', ${id}::uuid, ${newHash ?? ""})`,
+              VALUES (${id}::text, 'credential', ${id}::uuid, ${hashToWrite()})`,
         );
         await event(DEMO_ACCOUNT_EVENT.created, id);
         return { userId: id, created: true, passwordUpdated: false };
@@ -242,10 +248,10 @@ export function createDemoAccountPort(options: DemoAccountPortOptions): DemoAcco
         if (a === undefined) {
           await tx.execute(
             sql`INSERT INTO public.accounts (account_id, provider_id, user_id, password)
-                VALUES (${userId}::text, 'credential', ${userId}::uuid, ${newHash ?? ""})`,
+                VALUES (${userId}::text, 'credential', ${userId}::uuid, ${hashToWrite()})`,
           );
         } else {
-          await tx.execute(sql`UPDATE public.accounts SET password = ${newHash ?? ""}, updated_at = now() WHERE id = ${a.id}::uuid`);
+          await tx.execute(sql`UPDATE public.accounts SET password = ${hashToWrite()}, updated_at = now() WHERE id = ${a.id}::uuid`);
         }
         passwordUpdated = true;
       }
@@ -260,7 +266,7 @@ export function createDemoAccountPort(options: DemoAccountPortOptions): DemoAcco
       if (passwordUpdated || hadMfa) {
         // Eski parola/faktörle açılmış oturumlar kapanır.
         await tx.execute(sql`DELETE FROM public.sessions WHERE user_id = ${userId}::uuid`);
-        await event(DEMO_ACCOUNT_EVENT.passwordReset, userId);
+        await event(passwordUpdated ? DEMO_ACCOUNT_EVENT.passwordReset : DEMO_ACCOUNT_EVENT.takenOver, userId);
       }
       return { userId, created: false, passwordUpdated };
     });

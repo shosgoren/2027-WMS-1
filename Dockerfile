@@ -22,7 +22,7 @@ RUN pnpm install --frozen-lockfile --ignore-scripts
 # web: Next standalone (`apps/web/.next/standalone`, izleme kökü depo kökü → `apps/web/server.js`).
 # worker: tsc tür denetimi (tsconfig.build.json, noEmit) + esbuild tek dosya paketi → `apps/worker/dist/main.js`
 # (workspace .ts paketleri ve pg-boss pakete gömülür; çalışma zamanında node_modules ve kaynak .ts gerekmez).
-# `@node-rs/argon2` YEREL ikili olduğu için pakete GÖMÜLMEZ (esbuild `--external`); demo hesap bağdaştırıcısı onu yalnızca
+# `@node-rs/argon2` YEREL ikili olduğu için pakete GÖMÜLMEZ (esbuild `--external`; pakette yalnızca `requireModule("@node-rs/argon2")` biçiminde geçer, aşağıda denetlenir; duman testi /smoke'ta node_modules OLMADAN prod açılışını dener); demo hesap bağdaştırıcısı onu yalnızca
 # demo açıkken dinamik yükler (T-123a). Aşağıda pnpm sembolik bağlarından çözülmüş kopyası (`cp -rL`; derleme aşaması
 # çalışma zamanıyla aynı taban imaj/libc, yalnızca eşleşen platform ikilileri kurulur) /argon-modules'e alınır.
 # Son adım: DB ortamı olmadan (ve migrate argümanlarıyla) çalıştırılan worker kendi yapılandırma hatasını verir;
@@ -36,9 +36,16 @@ RUN pnpm --filter @wms/web build \
  && out="$(env -u DATABASE_URL -u DATABASE_URL_DIRECT node apps/worker/dist/main.js down --to 0000 2>&1 || true)" \
  && printf '%s' "$out" | grep -q 'invalid configuration' \
  && ! printf '%s' "$out" | grep -q 'MIGRATION_' \
- && ! grep -Eq '^import .*"@node-rs/argon2"' apps/worker/dist/main.js \
- && mkdir -p /argon-modules/@node-rs \
- && cp -rL node_modules/.pnpm/@node-rs+argon2@*/node_modules/@node-rs/. /argon-modules/@node-rs/
+ && test "$(grep -c '@node-rs/argon2' apps/worker/dist/main.js)" -ge 1 \
+ && test "$(grep -c '@node-rs/argon2' apps/worker/dist/main.js)" = "$(grep -c 'requireModule("@node-rs/argon2")' apps/worker/dist/main.js)" \
+ && mkdir -p /argon-modules/@node-rs /smoke \
+ && A=node_modules/.pnpm/@node-rs+argon2@2.2.1/node_modules/@node-rs \
+ && cp -rL "$A/argon2" /argon-modules/@node-rs/argon2 \
+ && for d in "$A"/argon2-*-gnu; do cp -rL "$d" /argon-modules/@node-rs/; done \
+ && cp apps/worker/dist/main.js /smoke/main.js \
+ && smoke="$(cd /smoke && env -i PATH="$PATH" WMS_ENV=production DATABASE_URL=postgresql://u:p@127.0.0.1:1/x DATABASE_URL_WORKER=postgresql://u:p@127.0.0.1:1/x MAIL_MODE=disabled QUEUE_SEAL_KEY=ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12 timeout 10 node main.js 2>&1 || true)" \
+ && printf '%s' "$smoke" | grep -q '"reason":"ENV_NOT_ALLOWED"' \
+ && ! printf '%s' "$smoke" | grep -q 'ERR_MODULE_NOT_FOUND\|Cannot find'
 
 # ---------------------------------------------------------------------------------------------
 FROM ${NODE_IMAGE} AS runtime

@@ -1,6 +1,7 @@
 // T-123a: demo hesap bağdaştırıcısı (createDemoAccountPort), gerçek roller: wms_auth (AUTH_DATABASE_URL) yazar, migration
 // rolü yalnızca doğrulama için okur. Parolalar çalışma anında üretilir (G-09). Better Auth ile gerçek giriş denenir.
 import { randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DEMO_ACCOUNT_EVENT, DemoAccountError, createDemoAccountPort } from "../../../packages/auth/src/demo-accounts.ts";
@@ -171,7 +172,8 @@ describe("demo hesap bağdaştırıcısı", () => {
     expect(await q("SELECT 1 FROM public.two_factors WHERE user_id = $1", [first.userId])).toHaveLength(0);
     expect(await q("SELECT 1 FROM public.sessions WHERE user_id = $1", [first.userId])).toHaveLength(0);
     const ev = await q<{ event_type: string }>("SELECT event_type FROM public.security_events WHERE user_id = $1", [first.userId]);
-    expect(ev.map((x) => x.event_type)).toContain(DEMO_ACCOUNT_EVENT.passwordReset);
+    expect(ev.map((x) => x.event_type)).toContain(DEMO_ACCOUNT_EVENT.takenOver);
+    expect(ev.map((x) => x.event_type)).not.toContain(DEMO_ACCOUNT_EVENT.passwordReset);
   });
 
   it("rol doğrulaması: wms_auth dışı bağlantı FORBIDDEN, hiçbir şey yazılmaz", async () => {
@@ -201,6 +203,25 @@ describe("demo hesap bağdaştırıcısı", () => {
         "provider_id", "refresh_token", "refresh_token_expires_at", "scope", "updated_at", "user_id",
       ].sort(),
     );
+    // Better Auth'un KURULU modeli (1.7.7 `better-auth/db` getSchema): her alanın DB'de sütunu olmalı; DB'deki fazla sütunlar
+    // yalnızca bilinen eklerdir (id, MFA eklentisi, davet kanıtı). Sürüm sabit: yükseltme bu testi bilerek kırar.
+    const baDir = new URL("../../../packages/auth/node_modules/better-auth/", import.meta.url);
+    const pkg = JSON.parse(readFileSync(new URL("package.json", baDir), "utf8")) as { version: string };
+    expect(pkg.version).toBe("1.7.7");
+    const { getSchema } = (await import(new URL("dist/db/index.mjs", baDir).href)) as {
+      getSchema: (o: object) => Record<string, { fields: Record<string, unknown> }>;
+    };
+    const model = getSchema({});
+    const snake = (f: string): string => f.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+    for (const [table, baTable, extras] of [
+      ["users", "user", ["id", "two_factor_enabled", "invitation_claim_id"]],
+      ["accounts", "account", ["id"]],
+    ] as const) {
+      const baCols = Object.keys(model[baTable]!.fields).map(snake);
+      const dbCols = await cols(table);
+      for (const c of baCols) expect(dbCols, `${table}.${c}`).toContain(c);
+      expect(dbCols.filter((c) => !baCols.includes(c)).sort()).toEqual([...extras].sort());
+    }
     // Bağdaştırıcının yazdığı sütunlar zorunlu (NOT NULL, varsayılansız) tüm sütunları kapsamalı.
     const required = async (t: string): Promise<string[]> =>
       (await q<{ column_name: string }>(
