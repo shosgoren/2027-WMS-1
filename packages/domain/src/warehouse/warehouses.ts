@@ -6,14 +6,15 @@
 //   ham INSERT kullanılır (varsayılan sütunlar listeye girmez).
 // - Kod: kırp + yalnızca ASCII a-z büyütülür (yerel ayar yok; `ı`/`İ`/`ß` gibi karakterler ham saklanır, karşılaştırma tam
 //   eşleşme). `code` oluşturulduktan sonra değişmez (A-83).
-// - Arşiv: hedef satır `FOR NO KEY UPDATE` (createLocation `FOR SHARE` okur → arşiv/oluşturma yarışı serileşir); aktif lokasyon veya pozitif `stock_balances.quantity` → `IN_USE` (bakiye okuması salt SELECT; arşivle eşzamanlı stok girişi
+// - Arşiv: hedef satır `FOR NO KEY UPDATE` (createLocation `FOR SHARE` okur → arşiv/oluşturma yarışı serileşir); aktif lokasyon veya pozitif pozitif bakiye → `IN_USE` (bakiye okuması salt SELECT; arşivle eşzamanlı stok girişi
 //   yarışı lokasyon arşivinde çözülür, arşivli lokasyona stok komutu T-217'de reddedilir).
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { appendAudit } from "@wms/db";
 import { AppError } from "@wms/shared/errors";
-import { runTenantCommand, runTenantQuery, type AccessTx, type TenantAccessParams } from "../identity/access.ts";
+import { runTenantCommand, runTenantQuery, type TenantAccessParams } from "../identity/access.ts";
 import { assertWarehouseVisible, pgUuidArray, resolveWarehouseScope } from "./scope.ts";
+import { hasPositiveBalance } from "./stock-usage.ts";
 
 /** Çağıran bağlamı (izin komuta bağlıdır; çağıran veremez). */
 export type WarehouseCallParams = Omit<TenantAccessParams, "permission" | "recentAuth">;
@@ -53,30 +54,6 @@ export function codeTaken(): AppError {
 }
 export function inUse(): AppError {
   return new AppError("VALIDATION_FAILED", { detail: "IN_USE" });
-}
-
-/** Lokasyonda (verilirse) ya da depoda pozitif bakiye var mı (salt SELECT). */
-export async function hasPositiveBalance(
-  tx: AccessTx,
-  tenantId: string,
-  where: { readonly locationId: string } | { readonly warehouseId: string },
-): Promise<boolean> {
-  const rows =
-    "locationId" in where
-      ? await tx.execute<{ used: boolean }>(
-          sql`SELECT EXISTS (
-                SELECT 1 FROM public.stock_balances b
-                  JOIN public.stock_dimensions d ON d.tenant_id = b.tenant_id AND d.id = b.stock_dimension_id
-                 WHERE b.tenant_id = ${tenantId}::uuid AND d.location_id = ${where.locationId}::uuid AND b.quantity > 0) AS used`,
-        )
-      : await tx.execute<{ used: boolean }>(
-          sql`SELECT EXISTS (
-                SELECT 1 FROM public.stock_balances b
-                  JOIN public.stock_dimensions d ON d.tenant_id = b.tenant_id AND d.id = b.stock_dimension_id
-                  JOIN public.locations l ON l.tenant_id = d.tenant_id AND l.id = d.location_id
-                 WHERE b.tenant_id = ${tenantId}::uuid AND l.warehouse_id = ${where.warehouseId}::uuid AND b.quantity > 0) AS used`,
-        );
-  return rows[0]?.used === true;
 }
 
 export interface WarehouseRow {

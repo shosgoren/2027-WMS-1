@@ -336,6 +336,38 @@ describe("review fixes (T-205 inceleme)", () => {
     }
   });
 
+  it("T-243: race archiveLocation vs count start (COUNTING): archive waits at the count lock (acquireStockLocks), then IN_USE and the location stays ACTIVE", async () => {
+    const { warehouseId } = await createWarehouse(admin(A), { code: uniq("r3-"), name: "R" });
+    for (let i = 0; i < 3; i++) {
+      const loc = await createLocation(admin(A), { warehouseId, code: `k${i}`, name: "K", kind: "STORAGE" });
+      // Kapı = sayım başlatan transaction: kilit satırını COUNTING'e geçirir, henüz COMMIT etmemiştir.
+      const res = await gated(
+        "UPDATE public.location_count_locks SET status = 'COUNTING', count_session_id = gen_random_uuid(), locked_at = now(), locked_by = $2 WHERE location_id = $1",
+        [loc.locationId, A.ownerMembershipId],
+        1,
+        () => Promise.allSettled([archiveLocation(admin(A), { locationId: loc.locationId })]),
+      );
+      expect(res[0]!.status).toBe("rejected");
+      expect(((res[0] as PromiseRejectedResult).reason as AppError).detail).toBe("IN_USE");
+      const st = await adm.query<{ status: string }>("SELECT status FROM public.locations WHERE id = $1", [loc.locationId]);
+      expect(st.rows[0]?.status).toBe("ACTIVE");
+      const cl = await adm.query<{ status: string }>("SELECT status FROM public.location_count_locks WHERE location_id = $1", [loc.locationId]);
+      expect(cl.rows[0]?.status).toBe("COUNTING");
+    }
+  });
+
+  it("T-243: archiveLocation waits for an in-flight lock-row writer that leaves the location IDLE, then archives (no lost update)", async () => {
+    const { warehouseId } = await createWarehouse(admin(A), { code: uniq("r4-"), name: "R" });
+    const loc = await createLocation(admin(A), { warehouseId, code: "k-idle", name: "K", kind: "STORAGE" });
+    const res = await gated(
+      "UPDATE public.location_count_locks SET status = status WHERE location_id = $1",
+      [loc.locationId],
+      1,
+      () => archiveLocation(admin(A), { locationId: loc.locationId }),
+    );
+    expect(res).toEqual({ archived: true });
+  });
+
   it("race archiveWarehouse vs createLocation: both blocked at the gate, exactly one wins, no active location in an archived warehouse", async () => {
     for (let i = 0; i < 6; i++) {
       const { warehouseId } = await createWarehouse(admin(A), { code: uniq("r2-"), name: "R" });

@@ -2,7 +2,7 @@
 //
 // - Eşzamanlılık (READ COMMITTED): `createLocation` depo ve ebeveyn satırını `FOR SHARE` okur; `archiveLocation`/`archiveWarehouse`
 //   hedef satırı `FOR NO KEY UPDATE` okur (stok komutlarının FK KEY SHARE'iyle çakışmaz, `FOR SHARE` ile çakışır); `archiveLocation`
-//   önce sayım kilidi satırını (I-15: sayım kilidi önce), sonra lokasyon satırını kilitler; değişiklik komutları (`loadActive`,
+//   önce sayım kilidini `acquireStockLocks` ile (I-15: sayım kilidi önce; tek kilit yolu, FOR SHARE → COUNTING ise `IN_USE`), sonra lokasyon satırını kilitler; değişiklik komutları (`loadActive`,
 //   `renameWarehouse`) da satırı kilitleyerek okur (arşivli kayıt güncellenemez) ve kontrolleri kilitten SONRA yapar →
 //   arşivli ebeveyn/depo altında aktif lokasyon oluşamaz (FK KEY SHARE tek başına NO KEY UPDATE ile çakışmaz).
 // - Kapsam dışı depo/lokasyon `NOT_FOUND` (varlık sızmaz); stok komutları `assertWarehouseInScope` ile `FORBIDDEN` verir.
@@ -13,13 +13,12 @@
 // - `pick_blocked` değişimi bu kartta yok (3A). Ağaçta taşıma, import ve sayım kilidi alma kapsam dışı.
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
-import { appendAudit } from "@wms/db";
+import { acquireStockLocks, appendAudit, type StockLockError } from "@wms/db";
 import { AppError } from "@wms/shared/errors";
 import { runTenantCommand, runTenantQuery, type AccessTx, type Membership } from "../identity/access.ts";
 import {
   CODE_MAX,
   codeTaken,
-  hasPositiveBalance,
   inUse,
   normalizeCode,
   normalizeName,
@@ -28,6 +27,7 @@ import {
   type WarehouseCallParams,
 } from "./warehouses.ts";
 import { assertWarehouseVisible, pgUuidArray, resolveWarehouseScope } from "./scope.ts";
+import { countLockRowExists, hasPositiveBalance } from "./stock-usage.ts";
 
 export const LOCATION_KIND_LIST = ["RECEIVING", "STORAGE", "STAGING", "TRANSIT"] as const;
 export type LocationKindValue = (typeof LOCATION_KIND_LIST)[number];
@@ -127,10 +127,7 @@ export async function createLocation(params: WarehouseCallParams, input: CreateL
           RETURNING id`,
     );
     if (ins[0] === undefined) throw codeTaken();
-    const lock = await tx.execute<{ location_id: string }>(
-      sql`SELECT location_id FROM public.location_count_locks WHERE tenant_id = ${m.tenantId}::uuid AND location_id = ${id}::uuid`,
-    );
-    if (lock[0] === undefined) throw new AppError("COUNT_LOCK_ROW_MISSING");
+    if (!(await countLockRowExists(tx, m.tenantId, id))) throw new AppError("COUNT_LOCK_ROW_MISSING");
     await appendAudit(tx, {
       action: "location.created",
       actorUserId: m.userId,
@@ -213,6 +210,15 @@ export interface ArchiveLocationInput {
   readonly requestId?: string | null;
 }
 
+/** `acquireStockLocks` hatasını alan hatasına eşler: açık sayım → `IN_USE`; diğer bilinen kodlar aynı adla; bilinmeyen olduğu gibi yeniden fırlar. */
+function mapStockLockError(e: unknown): unknown {
+  if (!(e instanceof Error) || e.name !== "StockLockError") return e;
+  const code = (e as StockLockError).code;
+  if (code === "LOCATION_LOCKED") return inUse();
+  if (code === "NOT_FOUND" || code === "COUNT_LOCK_ROW_MISSING") return new AppError(code);
+  return e;
+}
+
 /** Aktif alt lokasyon, pozitif bakiye veya açık sayım (COUNTING) → `IN_USE`. Sayım kilidi satırı kalır. Arşivli lokasyon no-op. */
 export async function archiveLocation(params: WarehouseCallParams, input: ArchiveLocationInput): Promise<{ readonly archived: boolean }> {
   const locationId = parseUuid(input.locationId);
@@ -223,11 +229,11 @@ export async function archiveLocation(params: WarehouseCallParams, input: Archiv
     );
     if (pre[0] === undefined) throw new AppError("NOT_FOUND");
     await assertWarehouseVisible(tx, m, [pre[0].warehouse_id]);
-    const lock = await tx.execute<{ location_id: string }>(
-      sql`SELECT location_id FROM public.location_count_locks
-           WHERE tenant_id = ${m.tenantId}::uuid AND location_id = ${locationId}::uuid FOR NO KEY UPDATE`,
-    );
-    if (lock[0] === undefined) throw new AppError("COUNT_LOCK_ROW_MISSING");
+    try {
+      await acquireStockLocks(tx, m.tenantId, { locationIds: [locationId], dimensions: [], reservationIds: [], serialIds: [] });
+    } catch (e) {
+      throw mapStockLockError(e);
+    }
     const rows = await tx.execute<LocationDbRow>(
       sql`SELECT ${COLS} FROM public.locations WHERE tenant_id = ${m.tenantId}::uuid AND id = ${locationId}::uuid FOR NO KEY UPDATE`,
     );
@@ -239,11 +245,6 @@ export async function archiveLocation(params: WarehouseCallParams, input: Archiv
                           WHERE tenant_id = ${m.tenantId}::uuid AND parent_id = ${locationId}::uuid AND status = 'ACTIVE') AS used`,
     );
     if (child[0]?.used === true) throw inUse();
-    const counting = await tx.execute<{ used: boolean }>(
-      sql`SELECT EXISTS (SELECT 1 FROM public.location_count_locks
-                          WHERE tenant_id = ${m.tenantId}::uuid AND location_id = ${locationId}::uuid AND status = 'COUNTING') AS used`,
-    );
-    if (counting[0]?.used === true) throw inUse();
     if (await hasPositiveBalance(tx, m.tenantId, { locationId })) throw inUse();
     await tx.execute(
       sql`UPDATE public.locations SET status = 'ARCHIVED', archived_at = now()
