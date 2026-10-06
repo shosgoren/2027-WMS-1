@@ -250,5 +250,145 @@
       "tenantStatusTitle": "Çalışma alanı kullanılamıyor"
     },
     "demoLocked": "Demo hesabında bu işlem kapalı."
+  },
+  "serverErrors": {
+    "code": "Hata kodu: {code}",
+    "supportCode": "Destek kodu: {code}",
+    "forbidden": "Bu işlem yapılamadı.",
+    "forbiddenAction": "Yetkini kontrol et; gerekirse çalışma alanı yöneticine sor.",
+    "unauthenticated": "Oturumun yok ya da sona erdi.",
+    "unauthenticatedAction": "Giriş yapıp yeniden dene.",
+    "validation_failed": "Girilen bilgiler geçersiz.",
+    "validation_failedAction": "Alanları kontrol edip yeniden dene. Çalışma alanı adresi başkasında olabilir; adı biraz değiştir.",
+    "rate_limited": "Çok fazla deneme yapıldı.",
+    "rate_limitedAction": "Biraz bekleyip yeniden dene.",
+    "not_found": "Kayıt bulunamadı.",
+    "not_foundAction": "Sayfayı yenileyip yeniden dene.",
+    "tenant_suspended": "Bu çalışma alanı askıda.",
+    "tenant_suspendedAction": "Destekle iletişime geç.",
+    "tenant_closing": "Bu çalışma alanı kapatılıyor.",
+    "tenant_closingAction": "Destekle iletişime geç.",
+    "internal": "İşlem şu an tamamlanamadı.",
+    "internalAction": "Biraz sonra yeniden dene; sürerse destek koduyla yöneticine haber ver.",
+    "unknown": "İşlem tamamlanamadı.",
+    "unknownAction": "Biraz sonra yeniden dene."
+  },
+  "landing": {
+    "valueProp": "Deponuzdaki malı, kimin ne zaman ne yaptığıyla birlikte, adım adım ve yanlışsız takip edin.",
+    "signIn": "Giriş yap",
+    "createWorkspace": "Çalışma alanı oluştur",
+    "actions": "Başlangıç",
+    "demo": {
+      "heading": "Demo olarak dene",
+      "intro": "Bir rol seç; parola istemeden o rolün ekranını gör.",
+      "enter": "{role} olarak gir",
+      "entering": "Giriliyor…",
+      "failed": "Demo girişi yapılamadı.",
+      "failedAction": "Demo hesapları henüz hazır olmayabilir. Biraz sonra yeniden dene; sürerse yöneticine haber ver."
+    }
+  },
+  "help": {
+    "title": "Yardım",
+    "intro": "Takıldığında yapabileceklerin:",
+    "items": {
+      "sign": "Giriş yapamıyorsan: Giriş ekranındaki \"Parolamı unuttum\" bağlantısını kullan.",
+      "access": "Bir işe erişemiyorsan: Kartta \"Bu iş için yetkin yok\" yazıyorsa çalışma alanı yöneticine (sorumlun) sor.",
+      "support": "Hata kodu ya da destek kodu gördüysen: Kodu yöneticine ilet; kodla kaydı hızlıca bulabiliriz."
+    },
+    "back": "Ana sayfaya dön"
+  },
+  "onboarding": {
+    "title": "Çalışma alanını kuralım",
+    "intro": "Bir dakikada hazır: iki kısa adım.",
+    "stepOf": "Adım {current} / {total}",
+    "step1": {
+      "title": "Çalışma alanının adı ne?",
+      "label": "Çalışma alanı adı",
+      "hint": "Firma ya da depo adın; sonra değiştirebilirsin.",
+      "slugPreview": "Adresin: {slug}",
+      "slugEmpty": "Adres, ad yazınca burada görünür.",
+      "next": "Devam",
+      "slugNote": "Bu ad başka bir çalışma alanında kullanılıyorsa adresin sonuna kısa bir kod eklenir."
+    },
+    "step2": {
+      "title": "Ne iş yapıyorsun?",
+      "legend": "Sektör",
+      "back": "Geri",
+      "options": {
+        "PACKAGING_SUPPLIES": "Ambalaj ve sarf toptancısı",
+        "GENERIC": "Genel depo"
+      },
+      "optionHints": {
+        "PACKAGING_SUPPLIES": "Koli, bant, poşet gibi ürünler için hazır terimler.",
+        "GENERIC": "Sektöre özel terim olmadan, sade başlangıç."
+      },
+      "previewTitle": "Bu şablon şunları yükler",
+      "previewTerms": "Kullanacağın terimler",
+      "previewTermRow": "{key}: {label}",
+      "terms": {
+        "unit_carton": "Koli birimi",
+        "location_zone": "Bölge düzeyi",
+        "location_rack": "Raf düzeyi",
+        "location_bin": "Alt göz düzeyi"
+      },
+      "laterNote": "Birimler ve depo yerleşimi (lokasyonlar) depo kurulumu aşamasında eklenecek; şimdi bir şey girmen gerekmiyor.",
+      "create": "Oluştur",
+      "creating": "Oluşturuluyor…"
+    },
+    "closed": {
+      "title": "Yeni çalışma alanı şu an açılamıyor",
+      "body": "Bu ortamda kendi kendine çalışma alanı oluşturma kapalı.",
+      "action": "Çalışma alanına katılmak için yöneticinden davet iste.",
+      "signIn": "Giriş ekranına dön"
+    },
+    "draftRestored": "Kaldığın yerden devam ediyorsun."
+  },
+  "home": {
+    "greeting": "Merhaba {name},",
+    "title": "Ne yapmak istiyorsun?",
+    "intro": "Yapmak istediğin işe dokun. Seni adım adım götüreceğim; yanlış bir şey yapmana izin vermem.",
+    "tasksLabel": "İşler",
+    "lockedReason": "Bu iş için yetkin yok. Sorumluna sorabilirsin.",
+    "soonLabel": "Yakında",
+    "soonWarehouse": "Bu iş depo kurulumundan sonra açılacak.",
+    "soonScreen": "Bu ekran yakında açılacak.",
+    "tasks": {
+      "members": {
+        "title": "Ekibimi yönet",
+        "description": "Kimin hangi işi yapabileceğini belirle"
+      },
+      "settings": {
+        "title": "Çalışma alanı ayarları",
+        "description": "Ad, dil ve saat dilimi"
+      },
+      "audit": {
+        "title": "Kim ne yaptı?",
+        "description": "Denetim kaydı"
+      },
+      "receive": {
+        "title": "Depoya mal geldi",
+        "description": "Gelen malı kaydet"
+      },
+      "issue": {
+        "title": "Depodan mal çıkacak",
+        "description": "Çıkan malı kaydet"
+      },
+      "transfer": {
+        "title": "Malı başka depoya taşıyacağım",
+        "description": "Depolar arası taşıma"
+      },
+      "count": {
+        "title": "Rafı sayacağım",
+        "description": "Raftaki ürünleri tek tek say"
+      },
+      "lookup": {
+        "title": "Bir ürün nerede, kaç tane var?",
+        "description": "Stok ve raf bilgisini gör"
+      },
+      "undo": {
+        "title": "Yanlış bir şey yaptım",
+        "description": "Hatalı kaydı birlikte düzeltelim"
+      }
+    }
   }
 }

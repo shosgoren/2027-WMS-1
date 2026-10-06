@@ -250,5 +250,145 @@
       "tenantStatusTitle": "Workspace unavailable"
     },
     "demoLocked": "This action is disabled for the demo account."
+  },
+  "serverErrors": {
+    "code": "Error code: {code}",
+    "supportCode": "Support code: {code}",
+    "forbidden": "This action could not be done.",
+    "forbiddenAction": "Check your permissions; ask your workspace administrator if needed.",
+    "unauthenticated": "You are not signed in or your session ended.",
+    "unauthenticatedAction": "Sign in and try again.",
+    "validation_failed": "The information entered is not valid.",
+    "validation_failedAction": "Check the fields and try again. The workspace address may already be taken; change the name slightly.",
+    "rate_limited": "Too many attempts.",
+    "rate_limitedAction": "Wait a moment and try again.",
+    "not_found": "Record not found.",
+    "not_foundAction": "Reload the page and try again.",
+    "tenant_suspended": "This workspace is suspended.",
+    "tenant_suspendedAction": "Contact support.",
+    "tenant_closing": "This workspace is being closed.",
+    "tenant_closingAction": "Contact support.",
+    "internal": "The action could not be completed right now.",
+    "internalAction": "Try again shortly; if it continues, tell your administrator the support code.",
+    "unknown": "The action could not be completed.",
+    "unknownAction": "Try again shortly."
+  },
+  "landing": {
+    "valueProp": "Track the goods in your warehouse step by step, with a record of who did what and when.",
+    "signIn": "Sign in",
+    "createWorkspace": "Create workspace",
+    "actions": "Get started",
+    "demo": {
+      "heading": "Try it as a demo",
+      "intro": "Pick a role to see that role's screens without a password.",
+      "enter": "Enter as {role}",
+      "entering": "Entering…",
+      "failed": "Demo sign-in failed.",
+      "failedAction": "Demo accounts may not be ready yet. Try again shortly; if it continues, tell your administrator."
+    }
+  },
+  "help": {
+    "title": "Help",
+    "intro": "What you can do when you are stuck:",
+    "items": {
+      "sign": "Cannot sign in: use the \"Forgot my password\" link on the sign-in screen.",
+      "access": "Cannot reach a task: if the card says \"You are not allowed to do this\", ask your workspace administrator.",
+      "support": "Saw an error or support code: pass the code to your administrator so the record can be found quickly."
+    },
+    "back": "Back to home"
+  },
+  "onboarding": {
+    "title": "Let's set up your workspace",
+    "intro": "Ready in a minute: two short steps.",
+    "stepOf": "Step {current} of {total}",
+    "step1": {
+      "title": "What is your workspace called?",
+      "label": "Workspace name",
+      "hint": "Your company or warehouse name; you can change it later.",
+      "slugPreview": "Your address: {slug}",
+      "slugEmpty": "The address appears here as you type a name.",
+      "next": "Continue",
+      "slugNote": "If this name is used by another workspace, a short code is added to the end of the address."
+    },
+    "step2": {
+      "title": "What kind of business do you run?",
+      "legend": "Sector",
+      "back": "Back",
+      "options": {
+        "PACKAGING_SUPPLIES": "Packaging and supplies wholesaler",
+        "GENERIC": "General warehouse"
+      },
+      "optionHints": {
+        "PACKAGING_SUPPLIES": "Ready-made terms for cartons, tape, bags and similar items.",
+        "GENERIC": "A plain start without sector-specific terms."
+      },
+      "previewTitle": "This template will load",
+      "previewTerms": "Terms you will use",
+      "previewTermRow": "{key}: {label}",
+      "terms": {
+        "unit_carton": "Carton unit",
+        "location_zone": "Zone level",
+        "location_rack": "Rack level",
+        "location_bin": "Bin level"
+      },
+      "laterNote": "Units and the warehouse layout (locations) will be added during warehouse setup; you do not need to enter anything now.",
+      "create": "Create",
+      "creating": "Creating…"
+    },
+    "closed": {
+      "title": "A new workspace cannot be opened right now",
+      "body": "Self-service workspace creation is turned off in this environment.",
+      "action": "Ask your administrator for an invitation to join a workspace.",
+      "signIn": "Back to sign in"
+    },
+    "draftRestored": "You are continuing where you left off."
+  },
+  "home": {
+    "greeting": "Hello {name},",
+    "title": "What do you want to do?",
+    "intro": "Tap the task you want. I will guide you step by step and will not let you do something wrong.",
+    "tasksLabel": "Tasks",
+    "lockedReason": "You are not allowed to do this. Ask your manager.",
+    "soonLabel": "Coming soon",
+    "soonWarehouse": "This task will open after warehouse setup.",
+    "soonScreen": "This screen will open soon.",
+    "tasks": {
+      "members": {
+        "title": "Manage my team",
+        "description": "Decide who can do which tasks"
+      },
+      "settings": {
+        "title": "Workspace settings",
+        "description": "Name, language and time zone"
+      },
+      "audit": {
+        "title": "Who did what?",
+        "description": "Audit log"
+      },
+      "receive": {
+        "title": "Goods arrived",
+        "description": "Record incoming goods"
+      },
+      "issue": {
+        "title": "Goods are going out",
+        "description": "Record outgoing goods"
+      },
+      "transfer": {
+        "title": "Move goods to another warehouse",
+        "description": "Transfer between warehouses"
+      },
+      "count": {
+        "title": "Count a shelf",
+        "description": "Count the items on a shelf one by one"
+      },
+      "lookup": {
+        "title": "Where is a product, how many?",
+        "description": "See stock and shelf information"
+      },
+      "undo": {
+        "title": "I made a mistake",
+        "description": "Let's fix the wrong record together"
+      }
+    }
   }
 }
