@@ -1069,7 +1069,8 @@ describe("AC-28 lint (T-127b): yönerge ve belirteç biçimleri", () => {
 // ulaşan her yol zincirle raporlanır. Doğrudan ihlali lint yakalar; bu test yönergesiz ara modül üzerinden dolaylı yolu yakalar.
 const GRAPH_SPEC_RE = /^@wms\/(?:db|domain|auth|storage|queue-adapter)(?:[/?#]|$)/;
 const GRAPH_FILE_RE = /^(?:apps\/web\/lib\/(?:action-guard|rate-limit|queue)\.[cm]?[jt]sx?|packages\/(?:db|domain|auth|storage|queue-adapter)\/)/;
-const GRAPH_EXTS = [".ts", ".tsx", ".mts", ".js", ".jsx", ".mjs"];
+const GRAPH_EXTS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"];
+const GRAPH_CODE_RE = /\.[cm]?[jt]sx?$/;
 const toPosix = (p: string): string => p.split(path.sep).join("/");
 
 function readIfFile(file: string): string | null {
@@ -1081,26 +1082,58 @@ function readIfFile(file: string): string | null {
 }
 
 function resolveWithExt(base: string): string | null {
-  const swapped = /\.(?:m?js)$/.test(base) ? [base.replace(/\.mjs$/, ".mts").replace(/\.js$/, ".ts"), base.replace(/\.js$/, ".tsx")] : [];
+  const swapped = /\.[cm]?js$/.test(base) ? [base.replace(/\.mjs$/, ".mts").replace(/\.cjs$/, ".cts").replace(/\.js$/, ".ts"), base.replace(/\.js$/, ".tsx")] : [];
   const candidates = [base, ...swapped, ...GRAPH_EXTS.map((e) => base + e), ...GRAPH_EXTS.map((e) => path.join(base, `index${e}`))];
   return candidates.find((c) => readIfFile(c) !== null) ?? null;
 }
 
-/** `@wms/<paket>[/alt]` → package.json `exports` ile kaynak dosya (iş alanı paketi değilse null). */
+/** `exports` değeri → kaynak yol: dize, ya da koşullu nesne (`import`, `default`, `types`, `require` sırasıyla). */
+function exportTarget(value: unknown, star: string | null): string | null {
+  if (typeof value === "string") return star === null ? value : value.replaceAll("*", star);
+  if (value !== null && typeof value === "object") {
+    for (const cond of ["import", "default", "types", "require"]) {
+      const inner = (value as Record<string, unknown>)[cond];
+      if (inner !== undefined) {
+        const t = exportTarget(inner, star);
+        if (t !== null) return t;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * `@wms/<paket>[/alt]` → package.json `exports` ile kaynak dosya. İş alanı paketi değilse null; `packages/` yok ya da
+ * paket dizini bulunamazsa HATA fırlatır (sessiz atlama yok). Paket bulunup alt yol çözülemezse null (çağıran FAIL eder).
+ */
 function resolveWorkspace(root: string, spec: string): string | null {
   const m = /^(@wms\/[^/]+)(\/.*)?$/.exec(spec);
   if (!m) return null;
   const pkgsDir = path.join(root, "packages");
-  if (!fs.existsSync(pkgsDir)) return null;
+  if (!fs.existsSync(pkgsDir)) throw new Error(`packages/ dizini yok: ${pkgsDir}`);
   for (const dir of fs.readdirSync(pkgsDir)) {
     const raw = readIfFile(path.join(pkgsDir, dir, "package.json"));
     if (raw === null) continue;
     const pkg = JSON.parse(raw) as { name?: string; exports?: Record<string, unknown> };
     if (pkg.name !== m[1]) continue;
-    const target = pkg.exports?.[`.${m[2] ?? ""}`];
-    return typeof target === "string" ? resolveWithExt(path.join(pkgsDir, dir, target)) : null;
+    const key = `.${m[2] ?? ""}`;
+    const exp = pkg.exports ?? {};
+    let target = exportTarget(exp[key], null);
+    if (target === null) {
+      for (const [pattern, value] of Object.entries(exp)) {
+        const star = pattern.indexOf("*");
+        if (star < 0) continue;
+        const pre = pattern.slice(0, star);
+        const post = pattern.slice(star + 1);
+        if (key.startsWith(pre) && key.endsWith(post) && key.length >= pre.length + post.length) {
+          target = exportTarget(value, key.slice(pre.length, key.length - post.length));
+          if (target !== null) break;
+        }
+      }
+    }
+    return target === null ? null : resolveWithExt(path.join(pkgsDir, dir, target));
   }
-  return null;
+  throw new Error(`iş alanı paketi bulunamadı: ${m[1]}`);
 }
 
 function parseModule(file: string, text: string): { imports: string[]; useServer: boolean; useClient: boolean } {
@@ -1126,7 +1159,7 @@ function listSources(dir: string, out: string[] = []): string[] {
 }
 
 /** Yasaklı kümeye ulaşan zincirler: ["apps/web/…/a.tsx", "apps/web/lib/x.ts", "@wms/db"]. */
-function clientGraphViolations(root: string): string[] {
+function clientGraph(root: string): { roots: string[]; violations: string[] } {
   const rel = (f: string): string => toPosix(path.relative(root, f));
   const roots = [...listSources(path.join(root, "apps/web")), ...listSources(path.join(root, "packages/ui"))].filter((f) => {
     const text = readIfFile(f);
@@ -1147,8 +1180,16 @@ function clientGraphViolations(root: string): string[] {
           violations.push([...item.chain, spec].join(" -> "));
           continue;
         }
-        const target = bare.startsWith(".") || path.isAbsolute(bare) ? resolveWithExt(path.resolve(path.dirname(item.file), bare)) : resolveWorkspace(root, bare);
-        if (target === null) continue;
+        const local = bare.startsWith(".") || path.isAbsolute(bare);
+        const workspace = /^@wms\//.test(bare);
+        if (!local && !workspace) continue; // üçüncü taraf paket
+        const target = local ? resolveWithExt(path.resolve(path.dirname(item.file), bare)) : resolveWorkspace(root, bare);
+        if (target === null) {
+          // Çözülemeyen yerel/iş alanı belirteci güvenli tarafta ihlaldir (fail-closed).
+          violations.push([...item.chain, `${spec} (ÇÖZÜLEMEDİ)`].join(" -> "));
+          continue;
+        }
+        if (!GRAPH_CODE_RE.test(target)) continue; // css/json gibi kod olmayan varlık
         if (GRAPH_FILE_RE.test(rel(target))) {
           violations.push([...item.chain, rel(target)].join(" -> "));
           continue;
@@ -1159,8 +1200,9 @@ function clientGraphViolations(root: string): string[] {
       }
     }
   }
-  return violations;
+  return { roots: roots.map(rel), violations };
 }
+const clientGraphViolations = (root: string): string[] => clientGraph(root).violations;
 
 describe("AC-28 lint (T-127b): istemci içe aktarım grafı", () => {
   const roots: string[] = [];
@@ -1220,7 +1262,51 @@ describe("AC-28 lint (T-127b): istemci içe aktarım grafı", () => {
     expect(clientGraphViolations(root)).toEqual([]);
   });
 
+  it("@AC-28 çözülemeyen göreli içe aktarım FAIL (fail-closed)", () => {
+    const root = fixture({ "apps/web/app/c.tsx": '"use client";\nimport { x } from "./yok.ts";\nexport const c = x;\n' });
+    expect(clientGraphViolations(root)).toEqual(["apps/web/app/c.tsx -> ./yok.ts (ÇÖZÜLEMEDİ)"]);
+  });
+
+  it("@AC-28 exports'ta olmayan alt yol ve çözülemeyen koşullu nesne FAIL; çözülebilir koşullu/joker exports izlenir", () => {
+    const root = fixture({
+      "packages/cond/package.json": JSON.stringify({ name: "@wms/cond", exports: { ".": { types: "./src/t.ts", import: "./src/i.ts" }, "./x/*": "./src/x/*.ts", "./bad": { node: "./nope.js" } } }),
+      "packages/cond/src/i.ts": 'import { db } from "@wms/db";\nexport const i = db;\n',
+      "packages/cond/src/t.ts": "export const t = 1;\n",
+      "packages/cond/src/x/a.ts": 'import { db } from "@wms/db";\nexport const a = db;\n',
+      "apps/web/app/a.tsx": '"use client";\nimport { i } from "@wms/cond";\nexport const c = i;\n',
+      "apps/web/app/b.tsx": '"use client";\nimport { a } from "@wms/cond/x/a";\nexport const c = a;\n',
+      "apps/web/app/c.tsx": '"use client";\nimport { m } from "@wms/cond/missing";\nexport const c = m;\n',
+      "apps/web/app/d.tsx": '"use client";\nimport { m } from "@wms/cond/bad";\nexport const c = m;\n',
+    });
+    expect(clientGraphViolations(root).sort()).toEqual([
+      "apps/web/app/a.tsx -> packages/cond/src/i.ts -> @wms/db",
+      "apps/web/app/b.tsx -> packages/cond/src/x/a.ts -> @wms/db",
+      "apps/web/app/c.tsx -> @wms/cond/missing (ÇÖZÜLEMEDİ)",
+      "apps/web/app/d.tsx -> @wms/cond/bad (ÇÖZÜLEMEDİ)",
+    ]);
+  });
+
+  it("@AC-28 .cts/.cjs modülleri çözülür; olmayan iş alanı paketi ve packages/ yokluğu hata fırlatır", () => {
+    const root = fixture({
+      "apps/web/app/c.tsx": '"use client";\nimport { x } from "../lib/legacy.cjs";\nexport const c = x;\n',
+      "apps/web/lib/legacy.cjs": 'const d = require("@wms/db");\nmodule.exports = { x: d };\n',
+    });
+    expect(clientGraphViolations(root)).toEqual(["apps/web/app/c.tsx -> apps/web/lib/legacy.cjs -> @wms/db"]);
+    const ghost = fixture({ "apps/web/app/g.tsx": '"use client";\nimport { x } from "@wms/ghost";\nexport const c = x;\n' });
+    expect(() => clientGraphViolations(ghost)).toThrow(/@wms\/ghost/);
+    const bare = fs.mkdtempSync(path.join(os.tmpdir(), "ac28-graph-"));
+    roots.push(bare);
+    fs.mkdirSync(path.join(bare, "apps/web"), { recursive: true });
+    fs.writeFileSync(path.join(bare, "apps/web/g.tsx"), '"use client";\nimport { x } from "@wms/ui";\nexport const c = x;\n');
+    expect(() => clientGraphViolations(bare)).toThrow(/packages/);
+  });
+
   it("@AC-28 gerçek depoda hiçbir \"use client\" dosyası (apps/web, packages/ui) yasaklı kümeye ulaşmaz", () => {
-    expect(clientGraphViolations(REPO_ROOT)).toEqual([]);
+    const { roots, violations } = clientGraph(REPO_ROOT);
+    // Boş kök kümesi sahte başarıdır: bilinen istemci dosyaları bulunmalı.
+    expect(roots.length).toBeGreaterThan(0);
+    expect(roots).toContain("apps/web/app/t/[slug]/members/members-view.tsx");
+    expect(roots).toContain("packages/ui/src/controls.tsx");
+    expect(violations).toEqual([]);
   });
 });

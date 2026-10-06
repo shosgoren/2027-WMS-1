@@ -3,7 +3,7 @@
     "AC-04": 28,
     "AC-05": 2,
     "AC-18": 9,
-    "AC-28": 56,
+    "AC-28": 59,
     "AC-37": 14,
     "AC-43": 12,
     "AC-44": 11
@@ -17,6 +17,6 @@
     "tests/integration/ac/ac-18-membership-db.int.test.ts": 21,
     "tests/integration/ac/ac-28-runtime.int.test.ts": 16,
     "tests/integration/audit-immutability.int.test.ts": 43,
-    "tests/unit/ac/ac-28-lint.test.ts": 111
+    "tests/unit/ac/ac-28-lint.test.ts": 119
   }
 }
