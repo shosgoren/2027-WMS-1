@@ -268,7 +268,7 @@ describe("audit_logs izolasyon ve yetkiler (wms_app, süper kullanıcı değil)"
       "SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE oid = 'public.audit_logs'::regclass",
     );
     expect(cls.rows[0]).toEqual({ relrowsecurity: true, relforcerowsecurity: true });
-    const pol = await admRaw.query<{ cmd: string; qual: string; with_check: string }>("SELECT cmd, qual, with_check FROM pg_policies WHERE tablename = 'audit_logs'");
+    const pol = await admRaw.query<{ cmd: string; qual: string; with_check: string }>("SELECT cmd, qual, with_check FROM pg_policies WHERE tablename = 'audit_logs' AND permissive = 'PERMISSIVE'"); // RESTRICTIVE wms_ops politikaları (0009) ops-role.int.test.ts'te sınanır
     expect(pol.rows).toHaveLength(1);
     expect(pol.rows[0]?.cmd).toBe("ALL");
     expect(pol.rows[0]?.qual).toContain("app.current_tenant_id");
