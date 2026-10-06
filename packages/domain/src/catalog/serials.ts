@@ -3,9 +3,11 @@
 // - Stok DEĞİŞTİRMEZ (G-01). Seri kimliği (`item_id`, `serial_no`, `lot_id`) değişmez (A-87); kullanılmış serinin `lot_id`'si
 //   0013 tetikleyicisiyle ayrıca reddedilir.
 // - Kapsam A-72: ürün içi (`UNIQUE (tenant_id, item_id, serial_no)`). Tenant geneli tekillik `SERIAL_SCOPE_TENANT_ENABLED`
-//   bayrağıyla kapalıdır: bayrak değeri çağıran tarafından `options.serialScopeTenant` ile verilir (varsayılan kapalı);
-//   açıkken tenant+seri no için `pg_advisory_xact_lock` ile yarış serileşir ve ürünler arası tekrar komutta denetlenir.
-//   Açılırsa DB'de kısmi/tekil indeks genişletme migration'ı gerekir (Q-39); komut denetimi tek başına son savunma değildir.
+//   bayrağıyla kapalıdır. Bayrak YALNIZCA sunucu ortamından (`process.env.SERIAL_SCOPE_TENANT_ENABLED === "true"`) okunur;
+//   istemci/çağıran imzası bayrak taşımaz (denetim atlatılamaz). Açıkken tenant+seri no için `pg_advisory_xact_lock` ile
+//   yarış serileşir ve ürünler arası tekrar komutta denetlenir.
+//   ŞART: bayrak açılmadan önce DB'de tenant geneli kısmi tekil indeks migration'ı eklenmelidir (Q-39/Q-59); komut denetimi
+//   tek başına son savunma değildir (advisory kilit yalnızca bu komutu kapsar).
 // - `SERIAL`: lot verilmez; `LOT_AND_SERIAL`: lot zorunlu ve aynı ürünün lotu. Tekrar → `TRACKING_VIOLATION`.
 import { sql } from "drizzle-orm";
 import { appendAudit } from "@wms/db";
@@ -19,20 +21,19 @@ export interface RegisterSerialInput {
   readonly serialNo: string;
   readonly lotId?: string;
 }
-export interface RegisterSerialOptions {
-  /** `SERIAL_SCOPE_TENANT_ENABLED` bayrağının değeri; varsayılan `false` (A-72). */
-  readonly serialScopeTenant?: boolean;
+/** Kapalı bayrak deseni: yalnızca tam `"true"` açar; çağrı anında okunur (A-72). */
+function serialScopeTenantEnabled(): boolean {
+  return process.env["SERIAL_SCOPE_TENANT_ENABLED"] === "true";
 }
 
 export async function registerSerial(
   params: CatalogCommandParams,
   input: RegisterSerialInput,
-  options: RegisterSerialOptions = {},
 ): Promise<{ readonly serialId: string }> {
   const itemId = parseUuid(input.itemId);
   const serialNo = parseNfcText(input.serialNo, 128);
   const lotId = input.lotId === undefined ? undefined : parseUuid(input.lotId);
-  const tenantScope = options.serialScopeTenant === true;
+  const tenantScope = serialScopeTenantEnabled();
   const { requestId, ...access } = params;
   return runTenantCommand({ ...access, permission: "document.create" }, async (tx, actor) => {
     const item = await loadItemForTraceability(tx, actor.tenantId, itemId);

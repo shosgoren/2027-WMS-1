@@ -2,9 +2,10 @@
 // Audit append-only: audit yazan tenant'lar kısa ömürlü ortamda kalır (catalog-commands.int.test.ts ile aynı politika).
 import { randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
+import { sql } from "../../../packages/db/node_modules/drizzle-orm/index.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createDbClient } from "../../../packages/db/src/index.ts";
-import { DB_CLIENT_SETTINGS, type DbClient } from "../../../packages/db/src/client.ts";
+import { createDbClient, withTenant } from "../../../packages/db/src/index.ts";
+import { createTenantContext, DB_CLIENT_SETTINGS, type DbClient } from "../../../packages/db/src/client.ts";
 import { AppError } from "../../../packages/shared/src/errors.ts";
 import { archiveItem, createItem } from "../../../packages/domain/src/catalog/items.ts";
 import { createLot, findLot, listLots } from "../../../packages/domain/src/catalog/lots.ts";
@@ -15,6 +16,7 @@ import { readIntEnv, redactErrorChain } from "../harness/env.ts";
 
 const env = readIntEnv(process.env);
 const reg = newRegistry();
+const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 const rnd = (): string => randomBytes(4).toString("hex");
 
 let app: DbClient;
@@ -61,6 +63,35 @@ const expectFail = async (p: Promise<unknown>, code: string, detail?: string): P
   expect(e.code).toBe(code);
   expect(e.detail).toBe(detail);
 };
+
+/** Arşiv sürerken (ürün satırı adm ile FOR UPDATE kilitli) komut bekler; arşiv commit olunca ACTIVE denetimi kilitten SONRA reddeder. */
+async function archivedWhileWaiting(itemId: string, run: () => Promise<unknown>): Promise<AppError> {
+  await adm.query("BEGIN");
+  try {
+    await adm.query("SELECT 1 FROM public.items WHERE id = $1 FOR UPDATE", [itemId]);
+    let settled = false;
+    const p = run().then(
+      () => {
+        settled = true;
+        return undefined;
+      },
+      (e: unknown) => {
+        settled = true;
+        return e;
+      },
+    );
+    await delay(500);
+    expect(settled).toBe(false); // komut ürün satırında bekliyor (FOR SHARE)
+    await adm.query("UPDATE public.items SET status = 'ARCHIVED', archived_at = now() WHERE id = $1", [itemId]);
+    await adm.query("COMMIT");
+    const err = await p;
+    expect(err).toBeInstanceOf(AppError);
+    return err as AppError;
+  } catch (e) {
+    await adm.query("ROLLBACK");
+    throw e;
+  }
+}
 
 async function mkItem(w: TenantWorld, trackingMode: "NONE" | "LOT" | "SERIAL" | "LOT_AND_SERIAL"): Promise<string> {
   return (await createItem(admin(w), { code: `T${rnd()}`, name: "İzlenebilirlik", baseUnitId: w.unitId, trackingMode })).itemId;
@@ -124,18 +155,21 @@ describe("lot", () => {
     expect((await listLots(readOnly(), { itemId: lotItem })).items).toEqual([]); // okuma stock.view
   });
 
-  it("arşiv ile lot oluşturma yarışı: kilitlenme yok; arşivli ürüne lot açılmaz", async () => {
+  it("lot ↔ archiveItem: arşiv commit olmadan createLot bekler, sonra reddedilir; lot satırı oluşmaz", async () => {
+    const item = await mkItem(A, "LOT");
+    const code = `R${rnd()}`;
+    const err = await archivedWhileWaiting(item, () => createLot(admin(A), { itemId: item, lotCode: code }));
+    expect(err).toMatchObject({ code: "VALIDATION_FAILED" });
+    expect((await adm.query("SELECT 1 FROM public.lots WHERE item_id = $1", [item])).rowCount).toBe(0);
+  });
+
+  it("paralel createLot ∥ archiveItem: kilitlenme/INTERNAL yok; hata yalnızca VALIDATION_FAILED", async () => {
+    // Bu test FOR SHARE'i ayırt etmez; ayırt edici kanıt yukarıdaki kapılı testtir.
     for (let i = 0; i < 5; i++) {
       const item = await mkItem(A, "LOT");
       const [lot, arch] = await Promise.allSettled([createLot(admin(A), { itemId: item, lotCode: `R${rnd()}` }), archiveItem(admin(A), { itemId: item })]);
       expect(arch.status).toBe("fulfilled");
-      if (lot.status === "rejected") {
-        expect(lot.reason).toBeInstanceOf(AppError);
-        expect((lot.reason as AppError).code).toBe("VALIDATION_FAILED");
-      }
-      const n = await adm.query("SELECT count(*)::int AS n FROM public.lots WHERE item_id = $1", [item]);
-      expect((n.rows[0] as { n: number }).n).toBe(lot.status === "fulfilled" ? 1 : 0);
-      await expectFail(createLot(admin(A), { itemId: item, lotCode: `R${rnd()}` }), "VALIDATION_FAILED");
+      if (lot.status === "rejected") expect((lot.reason as AppError).code).toBe("VALIDATION_FAILED");
     }
   });
 });
@@ -174,12 +208,76 @@ describe("seri", () => {
     expect((rej.reason as AppError).code).toBe("TRACKING_VIOLATION");
   });
 
-  it("tenant geneli kapsam bayrağı açıkken ürünler arası tekrar reddedilir (Q-39)", async () => {
-    const s1 = await mkItem(A, "SERIAL");
-    const s2 = await mkItem(A, "SERIAL");
-    const no = `S${rnd()}`;
-    await registerSerial(admin(A), { itemId: s1, serialNo: no }, { serialScopeTenant: true });
-    await expectFail(registerSerial(admin(A), { itemId: s2, serialNo: no }, { serialScopeTenant: true }), "TRACKING_VIOLATION");
+  it("registerSerial ↔ archiveItem: arşiv commit olmadan bekler, sonra reddedilir; seri oluşmaz", async () => {
+    const item = await mkItem(A, "SERIAL");
+    const err = await archivedWhileWaiting(item, () => registerSerial(admin(A), { itemId: item, serialNo: `S${rnd()}` }));
+    expect(err).toMatchObject({ code: "VALIDATION_FAILED" });
+    expect((await adm.query("SELECT 1 FROM public.serials WHERE item_id = $1", [item])).rowCount).toBe(0);
+  });
+
+  describe("tenant geneli kapsam bayrağı (SERIAL_SCOPE_TENANT_ENABLED, yalnızca sunucu env; Q-39)", () => {
+    const prev = process.env["SERIAL_SCOPE_TENANT_ENABLED"];
+    afterAll(() => {
+      if (prev === undefined) delete process.env["SERIAL_SCOPE_TENANT_ENABLED"];
+      else process.env["SERIAL_SCOPE_TENANT_ENABLED"] = prev;
+    });
+
+    it("kapalıyken ürünler arası aynı seri serbest; 'false'/'1' da kapalı", async () => {
+      const s1 = await mkItem(A, "SERIAL");
+      const s2 = await mkItem(A, "SERIAL");
+      const no = `S${rnd()}`;
+      process.env["SERIAL_SCOPE_TENANT_ENABLED"] = "1";
+      await registerSerial(admin(A), { itemId: s1, serialNo: no });
+      await registerSerial(admin(A), { itemId: s2, serialNo: no });
+    });
+
+    it("açıkken ardışık ürünler arası tekrar TRACKING_VIOLATION", async () => {
+      const s1 = await mkItem(A, "SERIAL");
+      const s2 = await mkItem(A, "SERIAL");
+      const no = `S${rnd()}`;
+      process.env["SERIAL_SCOPE_TENANT_ENABLED"] = "true";
+      await registerSerial(admin(A), { itemId: s1, serialNo: no });
+      await expectFail(registerSerial(admin(A), { itemId: s2, serialNo: no }), "TRACKING_VIOLATION");
+    });
+
+    it("açıkken iki farklı ürün için aynı serialNo eşzamanlı: yalnızca biri başarılı", async () => {
+      process.env["SERIAL_SCOPE_TENANT_ENABLED"] = "true";
+      for (let i = 0; i < 8; i++) {
+        const s1 = await mkItem(A, "SERIAL");
+        const s2 = await mkItem(A, "SERIAL");
+        const no = `S${rnd()}`;
+        const res = await Promise.allSettled([registerSerial(admin(A), { itemId: s1, serialNo: no }), registerSerial(admin(A), { itemId: s2, serialNo: no })]);
+        expect(res.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+        const rej = res.find((r) => r.status === "rejected") as PromiseRejectedResult;
+        expect((rej.reason as AppError).code).toBe("TRACKING_VIOLATION");
+      }
+    });
+
+    it("kapılı: advisory kilit tutulurken registerSerial bekler (kilit kaldırılırsa kırmızı)", async () => {
+      process.env["SERIAL_SCOPE_TENANT_ENABLED"] = "true";
+      const item = await mkItem(A, "SERIAL");
+      const no = `S${rnd()}`;
+      await adm.query("BEGIN");
+      try {
+        await adm.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`serial:${A.tenantId}:${no}`]);
+        let settled = false;
+        const p = registerSerial(admin(A), { itemId: item, serialNo: no }).then(
+          () => {
+            settled = true;
+          },
+          () => {
+            settled = true;
+          },
+        );
+        await delay(500);
+        expect(settled).toBe(false);
+        await adm.query("COMMIT");
+        await p;
+      } catch (e) {
+        await adm.query("ROLLBACK");
+        throw e;
+      }
+    });
   });
 });
 
@@ -199,6 +297,14 @@ describe("taşıma birimi", () => {
       "VALIDATION_FAILED",
       "PARENT_INVALID",
     );
+    // Ebeveynin konumu yoksa çocuğa konum verilemez; kapalı/boşaltılmış ebeveyn reddedilir.
+    const noLoc = await createHandlingUnit(admin(A), { kind: "PALET", code: `P${rnd()}` });
+    await expectFail(createHandlingUnit(admin(A), { kind: "KOLI", code: `K${rnd()}`, parentId: noLoc.handlingUnitId, locationId: A.rootLocationId }), "VALIDATION_FAILED", "PARENT_INVALID");
+    await createHandlingUnit(admin(A), { kind: "KOLI", code: `K${rnd()}`, parentId: noLoc.handlingUnitId }); // konumsuz çocuk serbest
+    for (const st of ["CLOSED", "EMPTIED"]) {
+      await adm.query("UPDATE public.handling_units SET status = $1 WHERE id = $2", [st, noLoc.handlingUnitId]);
+      await expectFail(createHandlingUnit(admin(A), { kind: "KOLI", code: `K${rnd()}`, parentId: noLoc.handlingUnitId }), "VALIDATION_FAILED", "PARENT_INVALID");
+    }
     // @ts-expect-error geçersiz tür çalışma zamanında reddedilir
     await expectFail(createHandlingUnit(admin(A), { kind: "SEPET", code: `K${rnd()}` }), "VALIDATION_FAILED");
     await expectFail(createHandlingUnit(admin(A), { kind: "KOLI", code: `K${rnd()}`, parentId: B.handlingUnitId }), "NOT_FOUND");
@@ -214,6 +320,34 @@ describe("taşıma birimi", () => {
     const p = await createHandlingUnit(admin(A), { kind: "PALET", code: `P${rnd()}` });
     const k = await createHandlingUnit(admin(A), { kind: "KOLI", code: `K${rnd()}`, parentId: p.handlingUnitId });
     await expect(adm.query("UPDATE public.handling_units SET parent_id = $1 WHERE id = $2", [k.handlingUnitId, p.handlingUnitId])).rejects.toThrow(/HANDLING_UNIT_CYCLE/);
+    const after = await adm.query("SELECT parent_id FROM public.handling_units WHERE id = $1", [p.handlingUnitId]);
+    expect((after.rows[0] as { parent_id: string | null }).parent_id).toBeNull();
+  });
+
+  it("döngü wms_app + withTenant (RLS altında) bağlamında da HANDLING_UNIT_CYCLE ile reddedilir; kendi-kendine ve 3 halka dahil", async () => {
+    const p = await createHandlingUnit(admin(A), { kind: "PALET", code: `P${rnd()}` });
+    const k = await createHandlingUnit(admin(A), { kind: "KOLI", code: `K${rnd()}`, parentId: p.handlingUnitId });
+    const k2 = await createHandlingUnit(admin(A), { kind: "KOLI", code: `K${rnd()}`, parentId: k.handlingUnitId });
+    const chain = (e: unknown): string => {
+      const out: string[] = [];
+      for (let c: unknown = e, i = 0; c !== undefined && c !== null && i < 6; i++, c = (c as { cause?: unknown }).cause) out.push(String((c as { message?: unknown }).message));
+      return out.join(" | ");
+    };
+    const upd = (id: string, parent: string): Promise<unknown> =>
+      withTenant(createTenantContext(app, A.tenantId), (tx) =>
+        tx.execute(sql`UPDATE public.handling_units SET parent_id = ${parent}::uuid WHERE tenant_id = ${A.tenantId}::uuid AND id = ${id}::uuid`),
+      );
+    for (const [id, parent] of [
+      [p.handlingUnitId, k.handlingUnitId],
+      [p.handlingUnitId, k2.handlingUnitId],
+    ] as const) {
+      const err = await upd(id, parent).then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+      expect(err).toBeDefined();
+      expect(chain(err)).toMatch(/HANDLING_UNIT_CYCLE/);
+    }
     const after = await adm.query("SELECT parent_id FROM public.handling_units WHERE id = $1", [p.handlingUnitId]);
     expect((after.rows[0] as { parent_id: string | null }).parent_id).toBeNull();
   });

@@ -6,7 +6,8 @@
 //   `createHandlingUnit` ebeveyni yalnızca INSERT anında bağlar (yeni satır: döngü ve içerik hareketi imkânsız;
 //   DB döngü tetikleyicisi yine de çalışır).
 // - `kind` ve `code` değişmez (A-87). Konum ve ebeveyn tutarlılığı (A-89: DB zorlamaz) komutta denetlenir:
-//   ebeveynin konumu varsa çocuğunki aynı olmalı; çocuk konum vermezse ebeveynin konumunu devralır.
+//   ebeveynin konumu varsa çocuğunki aynı olmalı (vermezse devralır); ebeveynin konumu yoksa çocuğa konum verilmez;
+//   ebeveyn OPEN değilse (CLOSED/EMPTIED) reddedilir — hepsi `PARENT_INVALID` (Q-58 ihtiyatlı varsayılanı).
 import { sql } from "drizzle-orm";
 import type { HandlingUnitKind } from "@wms/db";
 import { appendAudit } from "@wms/db";
@@ -49,12 +50,17 @@ export async function createHandlingUnit(params: CatalogCommandParams, input: Cr
   const { requestId, ...access } = params;
   return runTenantCommand({ ...access, permission: "document.create" }, async (tx, actor) => {
     if (parentId !== undefined) {
-      const parent = await tx.execute<{ location_id: string | null }>(
-        sql`SELECT location_id FROM public.handling_units WHERE tenant_id = ${actor.tenantId}::uuid AND id = ${parentId}::uuid FOR SHARE`,
+      const parent = await tx.execute<{ location_id: string | null; status: string }>(
+        sql`SELECT location_id, status FROM public.handling_units WHERE tenant_id = ${actor.tenantId}::uuid AND id = ${parentId}::uuid FOR SHARE`,
       );
       if (parent[0] === undefined) throw new AppError("NOT_FOUND");
+      // Kapalı/boşaltılmış ebeveynin altına yeni birim bağlanmaz (Q-58 ihtiyatlı varsayılanı).
+      if (parent[0].status !== "OPEN") throw new AppError("VALIDATION_FAILED", { detail: "PARENT_INVALID" });
       const parentLoc = parent[0].location_id;
-      if (parentLoc !== null) {
+      // Ebeveynin konumu yoksa çocuğa konum verilmez; varsa aynı olmalı, verilmezse devralınır.
+      if (parentLoc === null) {
+        if (locationId !== undefined) throw new AppError("VALIDATION_FAILED", { detail: "PARENT_INVALID" });
+      } else {
         if (locationId !== undefined && locationId !== parentLoc) throw new AppError("VALIDATION_FAILED", { detail: "PARENT_INVALID" });
         locationId = parentLoc;
       }
