@@ -1,9 +1,10 @@
 // T-257: kod değiştirme arayüzü (ürün / depo / lokasyon) 375 px mobil görünümde. Akış: kayıt oluştur → "Kodu değiştir" penceresi
 // (eski → yeni önizleme, "geçmiş hareketler etkilenmez" açıklaması) → değişti bildirimi + "Geri al" → sunucu reddi (CODE_TAKEN) neden +
 // sonraki eylemle pencerede kalır → ürün için ESKİ kodla arama yeni karta yönlenir ve "Bu kod X olarak değişti" der.
-// Ortak demo tenant'a yalnızca mobile projesinde yazar (bkz. aşağıdaki not), ama kayıtlar kendi rastgele kodlarını taşır ve test sonunda arşivlenir (kolay kurulum rehberi etkin kayıt
-// sayar: z-easy-setup boş tenant varsayımı bozulmaz; arşivli kodlar DEPO-/URN- öneri sayacını etkilemez). Ekran görüntüleri
-// `.artifacts/t-257/` altına yazılır (git'e girmez).
+// Ortak demo tenant'a yalnızca mobile projesinde yazar (bkz. aşağıdaki not): kayıtlar kendi rastgele kodlarını taşır ve test sonunda arşivlenir
+// (arşivli kodlar DEPO-/URN- öneri sayacını etkilemez). Masaüstü projesi yazmaz: mobile-shell.spec.ts (Durum=Arşivli filtresi) bu dosyadan ÖNCE koşar ve
+// demo'da arşivli ürün beklemez. T-279: demo tenant T-223'ten beri dolu açılır; boş tenant akışları (rehber, S-01) empty-tenant.spec.ts / z-easy-setup.spec.ts'te.
+// Ekran görüntüleri `.artifacts/t-257/` altına yazılır (git'e girmez).
 import { randomBytes } from "node:crypto";
 import { expect, test } from "@playwright/test";
 import type { Locator, Page } from "@playwright/test";
@@ -62,8 +63,7 @@ test("kod değiştir: depo, lokasyon, ürün; eski kodla arama yeni karta yönle
   await page.setViewportSize({ width: 375, height: 812 });
   await login(page);
 
-  // Ortak demo tenant'ı yalnızca SON proje (mobile) yazar (z-easy-setup ile aynı kural): ADET birimi gibi kalıcı kayıtlar, boş tenant
-  // bekleyen z-easy-setup'ın mobile koşusunu bozar. Masaüstü koşusu yazmaz; yalnızca ilgili ekranların taşmadığını ölçer.
+  // Ortak demo tenant'ı yalnızca SON proje (mobile) yazar: masaüstü koşusu yazmaz; yalnızca ilgili ekranların taşmadığını ölçer.
   if (tag !== "mobile") {
     for (const route of ["/t/demo/warehouses", "/t/demo/items"]) {
       await page.goto(route);
@@ -230,6 +230,51 @@ test("kod değiştir: depo, lokasyon, ürün; eski kodla arama yeni karta yönle
         await page.getByRole("dialog").getByRole("button", { name: "Arşivle" }).click();
         await expect(page.getByText("Depo arşivlendi.")).toBeVisible();
       }
+    }
+  }
+});
+
+// T-279 (Seçenek 4): demo kataloğu dolu (T-223) iken yazdıkça arama: test KENDİ oluşturduğu benzersiz adlı ürünü arar; ilk öneri o ürün olmalı.
+// Not: ilk `option` önceden Durum seçicisinin "Hepsi" seçeneğiydi (gizli `<select>`, değer boş); öneri listesi artık `listbox` rolüyle sınırlandırılır
+// ve ürün eşleşmesi sayısı da doğrulanır. Mobile projesi yazar (yukarıdaki kural); masaüstü demo kataloğundaki hazır ürünü aynı biçimde arar.
+test("demo kataloğunda yazdıkça arama: kendi ürünün ilk öneri (375 px)", async ({ page }, testInfo) => {
+  test.setTimeout(120_000);
+  await page.setViewportSize({ width: 375, height: 812 });
+  await login(page);
+  const write = testInfo.project.name === "mobile";
+  const id = rnd();
+  const token = `Zxq${id}`;
+  const itemName = `${token} arama denemesi`; // ad ÖNEKİ ile aranır (katalog araması kod/ad önek eşleşmesidir, reads.ts:116)
+  const itemCode = `KAI-${id}`;
+  let itemUrl: string | null = null;
+  try {
+    if (write) {
+      await page.goto("/t/demo/items?new=1");
+      const ic = page.getByRole("dialog");
+      await ic.locator('input[name="name"]').fill(itemName);
+      await ic.locator('input[name="code"]').fill(itemCode);
+      await ic.getByRole("button", { name: "Kaydet" }).click();
+      await expect(page).toHaveURL(/\/items\/[0-9a-f-]{36}$/);
+      itemUrl = new URL(page.url()).pathname;
+    }
+    await page.goto("/t/demo/items");
+    const search = page.getByRole("searchbox", { name: "Ürün ara" });
+    await search.fill(write ? token : "KRT-4030");
+    const list = page.getByRole("listbox");
+    const option = list.getByRole("option").first();
+    await expect(option).toContainText(write ? itemName : "Karton kutu 40x30x25");
+    await expect(list.getByRole("option"), "tek eşleşme: demo ürünleri benzersiz adı içermez").toHaveCount(1);
+    await touchTarget(option, "öneri satırı (demo kataloğu)");
+    await noHorizontalOverflow(page, "demo kataloğunda arama önerisi");
+    await option.click();
+    await expect(page).toHaveURL(/\/items\/[0-9a-f-]{36}$/);
+    await expect(page.getByRole("heading", { level: 1, name: write ? itemName : "Karton kutu 40x30x25" })).toBeVisible();
+  } finally {
+    if (itemUrl !== null) {
+      await page.goto(itemUrl);
+      await page.getByRole("button", { name: "Ürünü arşivle" }).or(page.getByRole("button", { name: "Arşivle" })).first().click();
+      await page.getByRole("dialog").getByRole("button", { name: "Arşivle" }).click();
+      await expect(page.getByText("Ürün arşivlendi.")).toBeVisible();
     }
   }
 });
