@@ -6,7 +6,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDbClient } from "../../../packages/db/src/index.ts";
 import { DB_CLIENT_SETTINGS, type DbClient } from "../../../packages/db/src/client.ts";
 import { AppError } from "../../../packages/shared/src/errors.ts";
-import { archiveItem, createItem, createUnit, createWithSuggestedCode, ensureDefaultUnit, suggestCode } from "../../../packages/domain/src/catalog/index.ts";
+import { PgDialect } from "../../../packages/db/node_modules/drizzle-orm/pg-core/index.js";
+import type { SQL } from "../../../packages/db/node_modules/drizzle-orm/index.js";
+import { archiveItem, createItem, createItemWithDefaultUnit, createUnit, createWithSuggestedCode, suggestCode, suggestedCodePrefix } from "../../../packages/domain/src/catalog/index.ts";
 import {
   BULK_LOCATIONS_MAX,
   archiveWarehouse,
@@ -19,6 +21,8 @@ import {
   previewBulkLocations,
   searchLocations,
 } from "../../../packages/domain/src/warehouse/index.ts";
+import { WAREHOUSE_LOCATIONS_MAX, bulkRefLookupSql } from "../../../packages/domain/src/warehouse/bulk-locations.ts";
+import { locationSearchSql } from "../../../packages/domain/src/warehouse/setup-queries.ts";
 import { mkMembership, mkUser, newRegistry, seedWorld, type TenantWorld } from "../fixtures/tenants.ts";
 import { readIntEnv } from "../harness/env.ts";
 
@@ -112,9 +116,10 @@ describe("kod önerisi (görev 1)", () => {
     const p = pfx();
     const make = (name: string) =>
       createWithSuggestedCode({
+        kind: "item",
         code: `${p}-0001`, // ikisi de aynı öneriyi görmüş gibi başlar
         auto: true,
-        suggest: () => suggestCode(admin(A), { kind: "item", prefix: p }),
+        suggest: (prefix) => suggestCode(admin(A), { kind: "item", prefix }),
         create: async (code) => {
           await createItem(admin(A), { code, name, baseUnitId: A.unitId });
           return code;
@@ -134,30 +139,14 @@ describe("kod önerisi (görev 1)", () => {
     await createItem(admin(A), { code: `${p}-0001`, name: "Var", baseUnitId: A.unitId });
     const e = await failure(
       createWithSuggestedCode({
+        kind: "item",
         code: `${p}-0001`,
         auto: false,
-        suggest: () => suggestCode(admin(A), { kind: "item", prefix: p }),
+        suggest: (prefix) => suggestCode(admin(A), { kind: "item", prefix }),
         create: (code) => createItem(admin(A), { code, name: "Yeni", baseUnitId: A.unitId }),
       }),
     );
     expect(e).toMatchObject({ code: "VALIDATION_FAILED", detail: "CODE_TAKEN" });
-  });
-});
-
-describe("akıllı varsayılan birim (görev 3)", () => {
-  it("birimi olmayan tenant'ta ADET oluşturulur; eşzamanlı iki çağrı tek birim üretir; sonraki çağrı mevcut olanı kullanır", async () => {
-    const tenantId = randomUUID();
-    const slug = `t250-unit-${randomUUID().slice(0, 8)}`;
-    const owner = await mkUser(adm, reg, "U250 owner");
-    await adm.query("INSERT INTO public.tenants (id, slug, name, status) VALUES ($1, $2, $3, 'ACTIVE')", [tenantId, slug, "T250 birim"]);
-    await mkMembership(adm, tenantId, owner, { isOwner: true, roles: ["TENANT_ADMIN"] });
-    const w = { slug, ownerUserId: owner };
-    const [a, b] = await Promise.all([ensureDefaultUnit(admin(w)), ensureDefaultUnit(admin(w))]);
-    expect(a.unitId).toBe(b.unitId);
-    expect([a.created, b.created].filter(Boolean)).toHaveLength(1);
-    const rows = await adm.query<{ code: string }>("SELECT code FROM public.units WHERE tenant_id = $1", [tenantId]);
-    expect(rows.rows.map((r) => r.code)).toEqual(["ADET"]);
-    expect(await ensureDefaultUnit(admin(w))).toEqual({ unitId: a.unitId, created: false });
   });
 });
 
@@ -348,4 +337,303 @@ describe("rehber ilerlemesi ve lokasyon araması (görev 4, 5)", () => {
     expect((await failure(searchLocations(admin(A), { warehouseId: B.warehouseId, q: "A" }))).code).toBe("NOT_FOUND");
     expect((await failure(searchLocations(admin(A), { warehouseId, q: "A", limit: 500 }))).code).toBe("VALIDATION_FAILED");
   });
+});
+
+// ---------------------------------------------------------------------------------------------------------------------------
+// T-259 (T-250 inceleme MINOR-1…7). Madde → test eşlemesi raporda; her madde için mutasyon kanıtı raporda.
+// ---------------------------------------------------------------------------------------------------------------------------
+async function newTenant(tag: string): Promise<{ tenantId: string; slug: string; ownerUserId: string }> {
+  const tenantId = randomUUID();
+  const slug = `t259-${tag}-${randomUUID().slice(0, 8)}`;
+  const ownerUserId = await mkUser(adm, reg, `${tag} 259 owner`);
+  await adm.query("INSERT INTO public.tenants (id, slug, name, status) VALUES ($1, $2, $3, 'ACTIVE')", [tenantId, slug, `T259 ${tag}`]);
+  await mkMembership(adm, tenantId, ownerUserId, { isOwner: true, roles: ["TENANT_ADMIN"] });
+  return { tenantId, slug, ownerUserId };
+}
+async function unitCodes(tenantId: string): Promise<string[]> {
+  return (await adm.query<{ code: string }>("SELECT code FROM public.units WHERE tenant_id = $1 ORDER BY code", [tenantId])).rows.map((r) => r.code);
+}
+async function itemCount(tenantId: string, code?: string): Promise<number> {
+  const r = code === undefined
+    ? await adm.query<{ n: string }>("SELECT count(*) AS n FROM public.items WHERE tenant_id = $1", [tenantId])
+    : await adm.query<{ n: string }>("SELECT count(*) AS n FROM public.items WHERE tenant_id = $1 AND code = $2", [tenantId, code]);
+  return Number(r.rows[0]?.n);
+}
+/** Üretim SQL'ini wms_app + tenant bağlamıyla (RLS açık) EXPLAIN eder; plan metni döner. */
+async function explain(tenantId: string, query: SQL): Promise<string> {
+  const q = new PgDialect().sqlToQuery(query);
+  await adm.query("BEGIN");
+  try {
+    await adm.query("SET LOCAL ROLE wms_app");
+    await adm.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+    const r = await adm.query<Record<string, string>>(`EXPLAIN ${q.sql}`, q.params as unknown[]);
+    return r.rows.map((x) => Object.values(x)[0]).join("\n");
+  } finally {
+    await adm.query("ROLLBACK");
+  }
+}
+
+describe("T-259 MINOR-1: sunucu autoCode bayrağına güvenmez", () => {
+  it("suggestedCodePrefix: yalnızca sunucunun üreteceği biçim (kanonik dolgu, büyük harf) eşleşir", () => {
+    expect(suggestedCodePrefix("item", "URN-0042")).toBe("URN");
+    expect(suggestedCodePrefix("item", "MYPFX-0001")).toBe("MYPFX");
+    expect(suggestedCodePrefix("warehouse", "DEPO-02")).toBe("DEPO");
+    expect(suggestedCodePrefix("item", "urn-0042")).toBeNull(); // küçük harf: kullanıcı yazmış
+    expect(suggestedCodePrefix("item", "URN-42")).toBeNull(); // dolgusuz
+    expect(suggestedCodePrefix("item", "URN-0042-X")).toBeNull();
+    expect(suggestedCodePrefix("item", "VIDA")).toBeNull();
+    expect(suggestedCodePrefix("warehouse", "DEPO-0002")).toBeNull(); // depo için genişlik 2: 4 basamaklı dolgu kanonik değil
+  });
+
+  it("autoCode:true ama kod önerilen biçimde DEĞİL (elle yazılmış): çakışma CODE_TAKEN, öneri sorgulanmaz, ek kayıt yok", async () => {
+    const p = pfx();
+    await createItem(admin(A), { code: `${p}-1`, name: "Elle yazılmış", baseUnitId: A.unitId });
+    let suggestCalls = 0;
+    const e = await failure(
+      createWithSuggestedCode({
+        kind: "item",
+        code: `${p}-1`, // kullanıcı "-1" yazdı (kanonik "-0001" değil); istemci yine de autoCode:true gönderdi
+        auto: true,
+        suggest: (prefix) => {
+          suggestCalls++;
+          return suggestCode(admin(A), { kind: "item", prefix });
+        },
+        create: (code) => createItem(admin(A), { code, name: "Yeni", baseUnitId: A.unitId }),
+      }),
+    );
+    expect(e).toMatchObject({ code: "VALIDATION_FAILED", detail: "CODE_TAKEN" });
+    expect(suggestCalls).toBe(0);
+    expect(await itemCount(A.tenantId, `${p}-2`)).toBe(0);
+    expect(await itemCount(A.tenantId, `${p}-0002`)).toBe(0);
+  });
+
+  it("önerilen biçimde ve çakışırsa: yeniden deneme GÖNDERİLEN önekle yapılır (varsayılan URN ile değil)", async () => {
+    const p = pfx();
+    await createItem(admin(A), { code: `${p}-0001`, name: "Var", baseUnitId: A.unitId });
+    const seen: string[] = [];
+    const code = await createWithSuggestedCode({
+      kind: "item",
+      code: `${p}-0001`,
+      auto: true,
+      suggest: (prefix) => {
+        seen.push(prefix);
+        return suggestCode(admin(A), { kind: "item", prefix });
+      },
+      create: async (c) => {
+        await createItem(admin(A), { code: c, name: "Yeni", baseUnitId: A.unitId });
+        return c;
+      },
+    });
+    expect(seen).toEqual([p]);
+    expect(code).toBe(`${p}-0002`);
+  });
+});
+
+describe("T-259 MINOR-3/4: varsayılan birim + ürün tek transaction; sessiz birim seçimi yok", () => {
+  it("birimi olmayan tenant: ADET + ürün birlikte oluşur; eşzamanlı iki oluşturma tek ADET üretir; sonraki mevcut ADET'i kullanır", async () => {
+    const w = await newTenant("unit");
+    const [a, b] = await Promise.all([
+      createItemWithDefaultUnit(admin(w), { code: "K-1", name: "Bir" }),
+      createItemWithDefaultUnit(admin(w), { code: "K-2", name: "İki" }),
+    ]);
+    expect(a.unitId).toBe(b.unitId);
+    expect([a.unitCreated, b.unitCreated].filter(Boolean)).toHaveLength(1);
+    expect(await unitCodes(w.tenantId)).toEqual(["ADET"]);
+    expect(await itemCount(w.tenantId)).toBe(2);
+    const c = await createItemWithDefaultUnit(admin(w), { code: "K-3", name: "Üç" });
+    expect(c).toMatchObject({ unitId: a.unitId, unitCreated: false });
+    const audits = await adm.query<{ n: string }>("SELECT count(*) AS n FROM public.audit_logs WHERE tenant_id = $1 AND action = 'unit.created'", [w.tenantId]);
+    expect(Number(audits.rows[0]?.n)).toBe(1);
+  });
+
+  it("ürün reddedilirse (CODE_TAKEN) yeni açılan ADET de geri alınır: yetim birim kalmaz", async () => {
+    const w = await newTenant("atomic");
+    const { unitId } = await createUnit(admin(w), { code: "ESKI", name: "Eski birim" });
+    await createItem(admin(w), { code: "VAR-1", name: "Var", baseUnitId: unitId });
+    await adm.query("UPDATE public.units SET status = 'ARCHIVED', archived_at = now() WHERE tenant_id = $1 AND id = $2", [w.tenantId, unitId]); // aktif birim kalmadı
+    const e = await failure(createItemWithDefaultUnit(admin(w), { code: "VAR-1", name: "Aynı kod" }));
+    expect(e).toMatchObject({ code: "VALIDATION_FAILED", detail: "CODE_TAKEN" });
+    expect(await unitCodes(w.tenantId)).toEqual(["ESKI"]); // ADET yok
+    const audits = await adm.query<{ n: string }>("SELECT count(*) AS n FROM public.audit_logs WHERE tenant_id = $1 AND action = 'unit.created' AND change_summary->>'code' = 'ADET'", [w.tenantId]);
+    expect(Number(audits.rows[0]?.n)).toBe(0);
+    expect(await itemCount(w.tenantId)).toBe(1);
+  });
+
+  it("aktif birim var ama ADET yok: sessiz seçim yok → VALIDATION_FAILED, ne ürün ne birim yazılır", async () => {
+    const w = await newTenant("nosilent");
+    await createUnit(admin(w), { code: "KG", name: "Kilogram" });
+    await createUnit(admin(w), { code: "LT", name: "Litre" });
+    const e = await failure(createItemWithDefaultUnit(admin(w), { code: "X-1", name: "Birim seçilmedi" }));
+    expect(e.code).toBe("VALIDATION_FAILED");
+    expect(e.detail).toBeUndefined();
+    expect(await itemCount(w.tenantId)).toBe(0);
+    expect(await unitCodes(w.tenantId)).toEqual(["KG", "LT"]);
+  });
+
+  it("ADET arşivliyse ve aktif birim yoksa VALIDATION_FAILED (arşivli birim sessizce açılmaz); açık birim verilince çalışır", async () => {
+    const w = await newTenant("archived");
+    const { unitId } = await createUnit(admin(w), { code: "ADET", name: "Adet" });
+    await adm.query("UPDATE public.units SET status = 'ARCHIVED', archived_at = now() WHERE tenant_id = $1 AND id = $2", [w.tenantId, unitId]);
+    expect((await failure(createItemWithDefaultUnit(admin(w), { code: "Y-1", name: "Arşivli ADET" }))).code).toBe("VALIDATION_FAILED");
+    expect(await itemCount(w.tenantId)).toBe(0);
+    const k = await createUnit(admin(w), { code: "KOLI", name: "Koli" });
+    expect(await createItemWithDefaultUnit(admin(w), { code: "Y-2", name: "Açık birim", baseUnitId: k.unitId })).toMatchObject({ unitId: k.unitId, unitCreated: false });
+  });
+
+  it("aktif ADET varsa o kullanılır; yetkisiz üye oluşturamaz", async () => {
+    const r = await createItemWithDefaultUnit(admin(A), { code: `Z-${pfx()}`, name: "ADET'li tenant" });
+    const u = await adm.query<{ code: string }>("SELECT code FROM public.units WHERE tenant_id = $1 AND id = $2", [A.tenantId, r.unitId]);
+    expect(r.unitCreated).toBe(false);
+    expect(u.rows[0]).toBeDefined();
+    expect((await failure(createItemWithDefaultUnit(picker(A), { code: `Z-${pfx()}`, name: "Yetkisiz" }))).code).toBe("FORBIDDEN");
+  });
+});
+
+describe("T-259 MINOR-5/6/7: indeksler ve depo başına lokasyon sınırı", () => {
+  let big: { tenantId: string; slug: string; ownerUserId: string };
+  let bigWh: string;
+  const BASE = WAREHOUSE_LOCATIONS_MAX - 10;
+
+  beforeAll(async () => {
+    big = await newTenant("big");
+    bigWh = (await createWarehouse(admin(big), { code: "BUYUK", name: "Büyük depo" })).warehouseId;
+    await adm.query(
+      `INSERT INTO public.locations (tenant_id, id, warehouse_id, parent_id, code, name, depth, kind)
+       SELECT $1::uuid, gen_random_uuid(), $2::uuid, NULL, 'R-' || lpad(n::text, 6, '0'), 'R-' || lpad(n::text, 6, '0'), 0, 'STORAGE'
+         FROM generate_series(1, $3::int) AS n`,
+      [big.tenantId, bigWh, BASE],
+    );
+    // audit_logs: indeks ölçeği için aynı tenant'a bulk_ref'siz çok satır + az sayıda bulk_ref'li satır (satırlar değişmez; geçici ortamda kalır).
+    await adm.query(
+      `INSERT INTO public.audit_logs (tenant_id, action, entity_type, change_summary)
+       SELECT $1::uuid, 'location.created', 'location', jsonb_build_object('n', n) FROM generate_series(1, 30000) AS n`,
+      [big.tenantId],
+    );
+    await adm.query(
+      `INSERT INTO public.audit_logs (tenant_id, action, entity_type, change_summary)
+       SELECT $1::uuid, 'location.created', 'location_batch', jsonb_build_object('bulk_ref', md5(n::text), 'spec_fp', 'x', 'created', 1) FROM generate_series(1, 5) AS n`,
+      [big.tenantId],
+    );
+    await adm.query("ANALYZE public.locations");
+    await adm.query("ANALYZE public.audit_logs");
+  }, 300_000);
+
+  it("MINOR-5: idempotency araması kısmi indeksi wms_app+RLS altında kullanır (EXPLAIN) ve replay doğru çalışır", async () => {
+    const plan = await explain(big.tenantId, bulkRefLookupSql(big.tenantId, "00000000-0000-0000-0000-000000000000"));
+    expect(plan).toMatch(/Index Scan|Bitmap (Heap|Index) Scan/);
+    expect(plan).toContain("audit_logs_tenant_bulk_ref_idx");
+    const def = await adm.query<{ indexdef: string }>("SELECT indexdef FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'audit_logs_tenant_bulk_ref_idx'");
+    expect(def.rows[0]?.indexdef).toMatch(/\(tenant_id, entity_id\) WHERE \(entity_type = 'location_batch'::text\)/);
+    // Gerçek anahtar: indeksli sorgu hâlâ doğru satırı döner (replay yolu).
+    const k = key();
+    const idxWh = (await createWarehouse(admin(big), { code: "IDXDEPO", name: "Idx depo" })).warehouseId;
+    const spec = { warehouseId: idxWh, zone: "IDX", rackFrom: 1, rackTo: 1, levelFrom: 1, levelTo: 1 };
+    await createBulkLocations(admin(big), { ...spec, idempotencyKey: k });
+    expect((await createBulkLocations(admin(big), { ...spec, idempotencyKey: k })).replayed).toBe(true);
+  });
+
+  it("MINOR-7: lokasyon typeahead kod kolu `locations_search_code_idx` indeksini wms_app+RLS altında kullanır (EXPLAIN); joker yok; ad kolu korunur", async () => {
+    const plan = await explain(big.tenantId, locationSearchSql(big.tenantId, bigWh, "r-0499", 8));
+    expect(plan).toMatch(/(Index Scan|Bitmap Index Scan) using locations_search_code_idx on locations/); // kod kolu: indeksli
+    // Ad kolu (lower(name)) RLS altında indekslenemez (leakproof değil; 0021 başlığı): bilinen, depo başına sınırla (A-259-1) sınırlı bacak.
+    const hit = await searchLocations(admin(big), { warehouseId: bigWh, q: "R-0499", limit: 20 });
+    expect(hit.length).toBe(20);
+    expect(hit.every((l) => l.code.startsWith("R-0499"))).toBe(true);
+    expect(await searchLocations(admin(big), { warehouseId: bigWh, q: "r-%", limit: 5 })).toHaveLength(0); // % joker değil
+    expect(await searchLocations(admin(big), { warehouseId: bigWh, q: "R_", limit: 5 })).toHaveLength(0);
+    expect(await searchLocations(admin(big), { warehouseId: bigWh, q: "R\\", limit: 5 })).toHaveLength(0);
+    expect(await searchLocations(admin(big), { warehouseId: bigWh, q: "R-000001" })).toHaveLength(1);
+    // Ad kolu (indekssiz bacak) ve ASCII dışı kod girdisi eski büyük/küçük harf duyarsız anlamını korur.
+    const wh = await newWarehouse(A);
+    await createLocation(admin(A), { warehouseId: wh, code: "XYZ-1", name: "Soğuk Oda", kind: "STORAGE" });
+    await createLocation(admin(A), { warehouseId: wh, code: "ÇELIK-1", name: "Çelik raf", kind: "STORAGE" });
+    expect((await searchLocations(admin(A), { warehouseId: wh, q: "soğ" })).map((l) => l.code)).toEqual(["XYZ-1"]);
+    expect((await searchLocations(admin(A), { warehouseId: wh, q: "SOĞUK" })).map((l) => l.code)).toEqual(["XYZ-1"]);
+    expect((await searchLocations(admin(A), { warehouseId: wh, q: "xyz" })).map((l) => l.code)).toEqual(["XYZ-1"]);
+    expect((await searchLocations(admin(A), { warehouseId: wh, q: "çelik" })).map((l) => l.code)).toEqual(["ÇELIK-1"]);
+    expect((await failure(searchLocations(admin(A), { warehouseId: wh, q: "a\u0000b" }))).code).toBe("VALIDATION_FAILED");
+  });
+
+  it("MINOR-6: depo başına toplam sınır: eşzamanlı iki komut sınırı birlikte aşamaz; sınırda 50.000 oluşur, +1 DOCUMENT_TOO_LARGE ve yazım yok", async () => {
+    const tooBig = { warehouseId: bigWh, zone: "ZA", rackFrom: 1, rackTo: 1, levelFrom: 1, levelTo: 11 }; // 49.990 + 11 > 50.000
+    const e = await failure(createBulkLocations(admin(big), { ...tooBig, idempotencyKey: key() }));
+    expect(e).toMatchObject({ code: "VALIDATION_FAILED", detail: "DOCUMENT_TOO_LARGE" });
+    expect(await countLocations(big.tenantId, bigWh, "ZA-%")).toBe(0);
+    expect(await previewBulkLocations(admin(big), { ...tooBig, levelTo: 10 })).toMatchObject({ count: 10 }); // tam sığıyor
+    expect((await failure(previewBulkLocations(admin(big), tooBig))).detail).toBe("DOCUMENT_TOO_LARGE"); // önizleme de reddeder
+
+    // Eşzamanlı: her biri 6 (toplam 12 > 10 boş yer): tam biri yazar (kilit yoksa ikisi de sayımı 49.990 görüp geçerdi).
+    const six = (zone: string) => createBulkLocations(admin(big), { warehouseId: bigWh, zone, rackFrom: 1, rackTo: 1, levelFrom: 1, levelTo: 6, idempotencyKey: key() });
+    const results = await Promise.allSettled([six("ZB"), six("ZC")]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect((results.find((r) => r.status === "rejected") as PromiseRejectedResult).reason).toMatchObject({ code: "VALIDATION_FAILED", detail: "DOCUMENT_TOO_LARGE" });
+    const total = async () => Number((await adm.query<{ n: string }>("SELECT count(*) AS n FROM public.locations WHERE tenant_id = $1 AND warehouse_id = $2", [big.tenantId, bigWh])).rows[0]?.n);
+    expect(await total()).toBe(BASE + 6);
+
+    const rest = await createBulkLocations(admin(big), { warehouseId: bigWh, zone: "ZD", rackFrom: 1, rackTo: 1, levelFrom: 1, levelTo: 4, idempotencyKey: key() });
+    expect(rest.created).toBe(4);
+    expect(await total()).toBe(WAREHOUSE_LOCATIONS_MAX);
+    const over = await failure(createBulkLocations(admin(big), { warehouseId: bigWh, zone: "ZE", rackFrom: 1, rackTo: 1, levelFrom: 1, levelTo: 1, idempotencyKey: key() }));
+    expect(over).toMatchObject({ code: "VALIDATION_FAILED", detail: "DOCUMENT_TOO_LARGE" });
+    expect(await total()).toBe(WAREHOUSE_LOCATIONS_MAX);
+    // Başka depo etkilenmez (sınır depo başınadır).
+    const other = await createWarehouse(admin(big), { code: "DIGER", name: "Diğer" });
+    expect((await createBulkLocations(admin(big), { warehouseId: other.warehouseId, zone: "ZF", rackFrom: 1, rackTo: 1, levelFrom: 1, levelTo: 2, idempotencyKey: key() })).created).toBe(2);
+  }, 120_000);
+
+  it("MINOR-6: sınır denetimi depo başına advisory kilitle serileşir (kilit tutulurken komut bekler, bırakılınca tamamlanır)", async () => {
+    const wh = await newWarehouse(A);
+    const lockKey = `${A.tenantId}:warehouse-locations-cap:${wh}`;
+    await adm.query("SELECT pg_advisory_lock(hashtextextended($1, 0))", [lockKey]);
+    let released = false;
+    try {
+      const p = createBulkLocations(admin(A), { warehouseId: wh, zone: "LK", rackFrom: 1, rackTo: 1, levelFrom: 1, levelTo: 1, idempotencyKey: key() });
+      const state = await Promise.race([p.then(() => "done"), new Promise<string>((r) => setTimeout(() => r("blocked"), 1000))]);
+      expect(state).toBe("blocked");
+      expect(await countLocations(A.tenantId, wh, "LK-%")).toBe(0);
+      await adm.query("SELECT pg_advisory_unlock(hashtextextended($1, 0))", [lockKey]);
+      released = true;
+      expect((await p).created).toBe(1);
+    } finally {
+      if (!released) await adm.query("SELECT pg_advisory_unlock(hashtextextended($1, 0))", [lockKey]);
+    }
+  });
+
+  it("MINOR-6 (güvenlik incelemesi): tekli createLocation da sınırı denetler: dolu depoda VALIDATION_FAILED, yazım yok", async () => {
+    const e = await failure(createLocation(admin(big), { warehouseId: bigWh, code: "TEKLI-1", name: "Sınır üstü", kind: "STORAGE" }));
+    expect(e).toMatchObject({ code: "VALIDATION_FAILED", detail: "DOCUMENT_TOO_LARGE" });
+    expect(await countLocations(big.tenantId, bigWh, "TEKLI-%")).toBe(0);
+  });
+
+  it("MINOR-6 (güvenlik incelemesi): sınırda 49.999 iken tekli + toplu yarışı: kilit bariyeriyle ikisi birlikte aşamaz (toplam ≤ 50.000)", async () => {
+    const wh = await newWarehouse(A);
+    await adm.query(
+      `INSERT INTO public.locations (tenant_id, id, warehouse_id, parent_id, code, name, depth, kind)
+       SELECT $1::uuid, gen_random_uuid(), $2::uuid, NULL, 'Q-' || lpad(n::text, 6, '0'), 'Q-' || lpad(n::text, 6, '0'), 0, 'STORAGE'
+         FROM generate_series(1, $3::int) AS n`,
+      [A.tenantId, wh, WAREHOUSE_LOCATIONS_MAX - 1],
+    );
+    const total = async () => Number((await adm.query<{ n: string }>("SELECT count(*) AS n FROM public.locations WHERE tenant_id = $1 AND warehouse_id = $2", [A.tenantId, wh])).rows[0]?.n);
+    const lockKey = `${A.tenantId}:warehouse-locations-cap:${wh}`;
+    // Bariyer: kilit adm oturumunda tutulur; iki komut da sayımdan ÖNCE aynı kilitte bekler (kilitsiz tekli komut burada geçip yazardı).
+    await adm.query("SELECT pg_advisory_lock(hashtextextended($1, 0))", [lockKey]);
+    let released = false;
+    try {
+      const single = createLocation(admin(A), { warehouseId: wh, code: "RACE-S", name: "tekli", kind: "STORAGE" });
+      const bulk = createBulkLocations(admin(A), { warehouseId: wh, zone: "RB", rackFrom: 1, rackTo: 1, levelFrom: 1, levelTo: 1, idempotencyKey: key() });
+      const settled = Promise.allSettled([single, bulk]);
+      const state = await Promise.race([settled.then(() => "done"), new Promise<string>((r) => setTimeout(() => r("blocked"), 1500))]);
+      expect(state).toBe("blocked");
+      expect(await total()).toBe(WAREHOUSE_LOCATIONS_MAX - 1);
+      await adm.query("SELECT pg_advisory_unlock(hashtextextended($1, 0))", [lockKey]);
+      released = true;
+      const [rs, rb] = await settled;
+      expect([rs, rb].filter((r) => r.status === "fulfilled")).toHaveLength(1);
+      const rej = [rs, rb].find((r) => r.status === "rejected") as PromiseRejectedResult;
+      expect(rej.reason).toMatchObject({ code: "VALIDATION_FAILED", detail: "DOCUMENT_TOO_LARGE" });
+      expect(await total()).toBe(WAREHOUSE_LOCATIONS_MAX);
+    } finally {
+      if (!released) await adm.query("SELECT pg_advisory_unlock(hashtextextended($1, 0))", [lockKey]);
+    }
+  }, 120_000);
 });

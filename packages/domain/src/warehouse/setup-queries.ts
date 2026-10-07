@@ -1,6 +1,6 @@
 // Kolay kurulum okuyucuları (T-250): boş ekran rehberi ilerlemesi ve lokasyon seçici araması. Yalnızca SELECT (kilit/yazma yok).
 // Okuma izni `stock.view`; depo kapsamı (`resolveWarehouseScope`) uygulanır: kapsam dışı depo ve lokasyon sonuçta yoktur.
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import { AppError } from "@wms/shared/errors";
 import { runTenantQuery } from "../identity/access.ts";
 import { parseUuid, type WarehouseCallParams } from "./warehouses.ts";
@@ -57,6 +57,38 @@ export interface SearchLocationsInput {
 }
 
 /**
+ * Typeahead sorgusu (T-259 MINOR-7). wms_app FORCE RLS altında çalışır; kullanıcı koşulunun indeks koşulu olabilmesi için işlevlerinin
+ * LEAKPROOF olması gerekir: `starts_with`/`texteq` öyledir, `lower()`/`LIKE` değildir (0021 başlığı). Bu yüzden:
+ * - KOD kolu: kodlar yazımda ASCII büyük harfe normalize edilir (A-98) → ASCII girdide `starts_with(code, <BÜYÜK>)` ve `locations_search_code_idx`
+ *   (`text_pattern_ops`, kısmi `status = 'ACTIVE'`) kullanılır. ASCII dışı girdide (ör. `İ`) eski büyük/küçük harf duyarsız karşılaştırma
+ *   (`starts_with(lower(code), lower(q))`, indekssiz) korunur.
+ * - AD kolu: `starts_with(lower(name), lower(q))`; indekslenemez, maliyet depo başına lokasyon sınırıyla (A-259-1) sınırlı. Ad kolu ayrı bacaktır
+ *   (UNION) ki kod kolunun indeksi OR yüzünden devre dışı kalmasın. Her bacak `LIMIT` ile sınırlıdır; joker karakter yoktur.
+ * Test aynı SQL'i wms_app + RLS ile EXPLAIN eder (biçim kayması indeks kullanımını sessizce bozamaz).
+ */
+export function locationSearchSql(tenantId: string, warehouseId: string, q: string, limit: number): SQL {
+  const base = sql`SELECT id, code, name, depth FROM public.locations
+           WHERE tenant_id = ${tenantId}::uuid AND warehouse_id = ${warehouseId}::uuid AND status = 'ACTIVE'`;
+  if (q === "") return sql`${base} ORDER BY code COLLATE "C", id LIMIT ${limit}`;
+  const codeCond = isAscii(q) ? sql`starts_with(code, ${asciiUpper(q)}::text)` : sql`starts_with(lower(code), lower(${q}::text))`;
+  return sql`SELECT id, code, name, depth FROM (
+           (${base} AND ${codeCond} ORDER BY code COLLATE "C", id LIMIT ${limit})
+           UNION
+           (${base} AND starts_with(lower(name), lower(${q}::text)) ORDER BY code COLLATE "C", id LIMIT ${limit})
+         ) AS s
+         ORDER BY code COLLATE "C", id
+         LIMIT ${limit}`;
+}
+
+function isAscii(v: string): boolean {
+  return /^[\u0000-\u007f]*$/.test(v);
+}
+/** `normalizeCode` (A-98) ile aynı: yalnızca ASCII a-z büyütülür. */
+function asciiUpper(v: string): string {
+  return v.replace(/[a-z]/g, (c) => c.toUpperCase());
+}
+
+/**
  * Yazdıkça arama: kod ya da adın ÖN eki (büyük/küçük harf duyarsız; joker yok) + kod tam eşleşmesi (barkod okutma: lokasyon etiketi koddur).
  * Yalnızca aktif lokasyonlar; sıra `(kod, id)`; sonuç `limit` ile sınırlı. Kapsam dışı/yok depo `NOT_FOUND`.
  */
@@ -64,20 +96,14 @@ export async function searchLocations(params: WarehouseCallParams, input: Search
   const warehouseId = parseUuid(input.warehouseId);
   if (typeof input.q !== "string") throw new AppError("VALIDATION_FAILED");
   const q = input.q.trim();
-  if (Array.from(q).length > 128) throw new AppError("VALIDATION_FAILED");
+  if (Array.from(q).length > 128 || q.includes("\u0000")) throw new AppError("VALIDATION_FAILED");
   const limit = input.limit ?? 8;
   if (!Number.isInteger(limit) || limit < 1 || limit > LOCATION_SEARCH_MAX) throw new AppError("VALIDATION_FAILED");
   return runTenantQuery({ ...params, permission: "stock.view" }, async (tx, m) => {
     const wh = await tx.execute<{ id: string }>(sql`SELECT id FROM public.warehouses WHERE tenant_id = ${m.tenantId}::uuid AND id = ${warehouseId}::uuid`);
     if (wh[0] === undefined) throw new AppError("NOT_FOUND");
     await assertWarehouseVisible(tx, m, [warehouseId]);
-    const rows = await tx.execute<{ id: string; code: string; name: string; depth: number | string }>(
-      sql`SELECT id, code, name, depth FROM public.locations
-           WHERE tenant_id = ${m.tenantId}::uuid AND warehouse_id = ${warehouseId}::uuid AND status = 'ACTIVE'
-             AND (${q === ""}::boolean OR starts_with(lower(code), lower(${q})) OR starts_with(lower(name), lower(${q})))
-           ORDER BY code COLLATE "C", id
-           LIMIT ${limit}`,
-    );
+    const rows = await tx.execute<{ id: string; code: string; name: string; depth: number | string }>(locationSearchSql(m.tenantId, warehouseId, q, limit));
     return rows.map((r) => ({ id: r.id, code: r.code, name: r.name, depth: Number(r.depth) }));
   });
 }

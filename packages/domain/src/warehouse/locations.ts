@@ -87,6 +87,22 @@ const toRow = (r: LocationDbRow): LocationRow => ({
 const COLS = sql`id, warehouse_id, parent_id, code, name, depth, kind, pick_blocked, status`;
 const COLS_L = "l.id, l.warehouse_id, l.parent_id, l.code, l.name, l.depth, l.kind, l.pick_blocked, l.status";
 
+/** A-259-1: depo başına toplam lokasyon üst sınırı (arşivliler dahil: satır arşivde de durur). Aşım `DOCUMENT_TOO_LARGE` (A-259-2). */
+export const WAREHOUSE_LOCATIONS_MAX = 50_000;
+
+/**
+ * Depo başına toplam lokasyon sınırı (T-259 MINOR-6): mevcut + planlanan > {@link WAREHOUSE_LOCATIONS_MAX} ise `DOCUMENT_TOO_LARGE`.
+ * Eşzamanlı iki komutun (tekli `createLocation` ve toplu dahil; aynı anahtar, aynı kilit sırası: depo `FOR SHARE` → bu kilit) ikisi de sınırın altında görüp aşmasın diye (yalnız yazımda) depo başına transaction-düzeyi advisory
+ * kilit alınır; sayım `(tenant_id, warehouse_id, code)` benzersiz indeksinden yapılır.
+ */
+export async function assertWarehouseCapacity(tx: AccessTx, tenantId: string, warehouseId: string, adding: number, serialize: boolean): Promise<void> {
+  if (serialize) await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`${tenantId}:warehouse-locations-cap:${warehouseId}`}, 0))`);
+  const r = await tx.execute<{ n: string | number }>(
+    sql`SELECT count(*) AS n FROM public.locations WHERE tenant_id = ${tenantId}::uuid AND warehouse_id = ${warehouseId}::uuid`,
+  );
+  if (Number(r[0]?.n ?? 0) + adding > WAREHOUSE_LOCATIONS_MAX) throw new AppError("VALIDATION_FAILED", { detail: "DOCUMENT_TOO_LARGE" });
+}
+
 export interface CreateLocationInput {
   readonly warehouseId: string;
   readonly parentId?: string | null;
@@ -122,6 +138,7 @@ export async function createLocation(params: WarehouseCallParams, input: CreateL
       parentDepth = Number(parent.depth);
     }
     const depth = childDepth(parentDepth);
+    await assertWarehouseCapacity(tx, m.tenantId, warehouseId, 1, true);
     const id = randomUUID();
     const ins = await tx.execute<{ id: string }>(
       sql`INSERT INTO public.locations (tenant_id, id, warehouse_id, parent_id, code, name, depth, kind)

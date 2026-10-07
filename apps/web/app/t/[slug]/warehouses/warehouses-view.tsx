@@ -5,7 +5,7 @@
 import { useTranslations } from "next-intl";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { Banner, Button, ConfirmDialog, EmptyState, TextField } from "@wms/ui";
 import { PageBody, Sheet } from "../easy-setup/sheet.tsx";
@@ -51,6 +51,8 @@ export function errorKey(error: Pick<ServerError, "code" | "detail">, scope: "wa
   return key;
 }
 
+/** Kod önerisi yanıt süresi sınırı; aşılırsa kod alanı açılır (T-259). */
+const SUGGEST_TIMEOUT_MS = 5000;
 const LINK_CLS =
   "inline-flex min-h-12 min-w-12 items-center justify-center rounded-control px-2 text-base font-semibold text-accent-ink underline focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus";
 const BADGE = "inline-flex items-center rounded-full px-2 text-xs font-bold";
@@ -132,6 +134,8 @@ export function CreateDialog({
   const [code, setCode] = useState("");
   const [kind, setKind] = useState("STORAGE");
   const [touched, setTouched] = useState(false);
+  // Gecikmeli öneri yanıtı kapanışın (closure) bayat `touched` değerini görmesin diye ref (T-259 MINOR-2).
+  const touchedRef = useRef(false);
   const [codeState, setCodeState] = useState<"loading" | "ready" | "failed">("loading");
 
   useEffect(() => {
@@ -141,19 +145,31 @@ export function CreateDialog({
     setName(defaultName);
     setKind("STORAGE");
     setTouched(false);
+    touchedRef.current = false;
     setCode("");
     setCodeState("loading");
+    // Öneri hiç dönmezse alan sonsuza dek salt okunur kalmasın: süre dolunca "failed" (kullanıcı kodu kendisi yazar).
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (live && !settled) {
+        settled = true;
+        setCodeState("failed");
+      }
+    }, SUGGEST_TIMEOUT_MS);
     void suggest().then((c) => {
-      if (!live) return;
+      if (!live || settled) return;
+      settled = true;
+      clearTimeout(timer);
       if (c === null) setCodeState("failed");
       else {
-        // Kullanıcı öneri gelmeden yazmaya başladıysa yazdığı ezilmez (N-14: sessiz değişiklik yok).
-        setCode((cur) => (cur === "" ? c : cur));
+        // Kullanıcı kodu değiştirdiyse (`touched`; silip boş bırakmak dahil) öneri uygulanmaz (N-14: sessiz değişiklik yok).
+        if (!touchedRef.current) setCode(c);
         setCodeState("ready");
       }
     });
     return () => {
       live = false;
+      clearTimeout(timer);
     };
     // `suggest`/`defaultName` her açılışta okunur; kimlikleri değişse de form yeniden başlamaz.
   }, [open]);
@@ -196,7 +212,10 @@ export function CreateDialog({
         hint={codeState === "loading" ? te("loading") : codeState === "failed" ? te("failed") : touched ? `${te("custom")} ${t("codeHint")}` : `${te("suggested")} ${t("codeHint")}`}
         name="code"
         value={code}
+        readOnly={codeState === "loading"}
+        aria-busy={codeState === "loading"}
         onChange={(e) => {
+          touchedRef.current = true;
           setTouched(true);
           setCode(e.target.value);
         }}

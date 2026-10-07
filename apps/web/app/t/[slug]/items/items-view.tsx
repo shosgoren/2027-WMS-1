@@ -5,7 +5,7 @@
 import { useTranslations } from "next-intl";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { Banner, Button, EmptyState, TextField } from "@wms/ui";
 import { PageBody, Sheet } from "../easy-setup/sheet.tsx";
@@ -98,13 +98,15 @@ export interface ItemListView {
   readonly baseUnitCode: string;
 }
 
+/** Kod önerisi yanıt süresi sınırı; aşılırsa kod alanı açılır (T-259). */
+const SUGGEST_TIMEOUT_MS = 5000;
 const TRACKING = ["NONE", "LOT", "SERIAL", "LOT_AND_SERIAL"] as const;
 const PICK = ["FIFO", "FEFO"] as const;
 const SCALES = [0, 1, 2, 3, 4, 5, 6] as const;
 
-/** Akıllı varsayılan (A-250-5): birim ADET (sektör şablonları temel birim olarak ADET önerir), yoksa listedeki ilk birim. */
+/** Akıllı varsayılan (A-250-5): birim ADET (sektör şablonları temel birim olarak ADET önerir). ADET yoksa SESSİZ SEÇİM YOK (T-259): boş kalır, kullanıcı seçer. */
 function defaultUnitId(units: readonly UnitOption[]): string {
-  return (units.find((u) => u.code.toUpperCase() === "ADET") ?? units[0])?.id ?? "";
+  return units.find((u) => u.code.toUpperCase() === "ADET")?.id ?? "";
 }
 
 /** Sunucunun `renamedFrom` bilgisini sonuç satırlarına işler; birden çok aday varsa hepsi listelenir (sessiz seçim yok, N-14). */
@@ -129,6 +131,8 @@ function CreateItemDialog({ open, slug, units, returnTo, onClose, onDone }: { op
   const [name, setName] = useState("");
   const [code, setCode] = useState("");
   const [touched, setTouched] = useState(false);
+  // Gecikmeli öneri yanıtı kapanışın (closure) bayat `touched` değerini görmesin diye ref (T-259 MINOR-2).
+  const touchedRef = useRef(false);
   const [codeState, setCodeState] = useState<"loading" | "ready" | "failed">("loading");
   const [unitId, setUnitId] = useState(() => defaultUnitId(units));
   const [scale, setScale] = useState("0");
@@ -143,21 +147,33 @@ function CreateItemDialog({ open, slug, units, returnTo, onClose, onDone }: { op
     setName("");
     setCode("");
     setTouched(false);
+    touchedRef.current = false;
     setCodeState("loading");
     setUnitId(defaultUnitId(units));
     setScale("0");
     setTracking("NONE");
     setPick("FIFO");
+    // Öneri hiç dönmezse alan sonsuza dek salt okunur kalmasın: süre dolunca "failed" (kullanıcı kodu kendisi yazar).
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (live && !settled) {
+        settled = true;
+        setCodeState("failed");
+      }
+    }, SUGGEST_TIMEOUT_MS);
     void suggestItemCodeAction({ slug }).then((r) => {
-      if (!live) return;
+      if (!live || settled) return;
+      settled = true;
+      clearTimeout(timer);
       if (r.ok) {
-        // Kullanıcı öneri gelmeden yazmaya başladıysa yazdığı ezilmez (N-14: sessiz değişiklik yok).
-        setCode((cur) => (cur === "" ? r.data.code : cur));
+        // Kullanıcı kodu değiştirdiyse (`touched`; silip boş bırakmak dahil) öneri uygulanmaz (N-14: sessiz değişiklik yok).
+        if (!touchedRef.current) setCode(r.data.code);
         setCodeState("ready");
       } else setCodeState("failed");
     });
     return () => {
       live = false;
+      clearTimeout(timer);
     };
     // units yalnızca açılışta okunur.
   }, [open, slug]);
@@ -208,7 +224,10 @@ function CreateItemDialog({ open, slug, units, returnTo, onClose, onDone }: { op
         hint={codeState === "loading" ? te("code.loading") : codeState === "failed" ? te("code.failed") : touched ? `${te("code.custom")} ${t("codeHint")}` : `${te("code.suggested")} ${t("codeHint")}`}
         name="code"
         value={code}
+        readOnly={codeState === "loading"}
+        aria-busy={codeState === "loading"}
         onChange={(e) => {
+          touchedRef.current = true;
           setTouched(true);
           setCode(e.target.value);
         }}
@@ -222,8 +241,10 @@ function CreateItemDialog({ open, slug, units, returnTo, onClose, onDone }: { op
           {t("baseUnit")}
         </label>
         <span className="text-sm text-ink-muted">{t("baseUnitHint")}</span>
+        {units.length > 0 && !units.some((u) => u.code.toUpperCase() === "ADET") ? <span className="text-sm font-semibold text-ink">{t("baseUnitChoose")}</span> : null}
         <select id="create-base-unit" name="baseUnitId" required={units.length > 0} disabled={units.length === 0} value={unitId} onChange={(e) => setUnitId(e.target.value)} className={SELECT_CLS}>
           {units.length === 0 ? <option value="">{te("items.unitDefaultOption")}</option> : null}
+          {units.length > 0 && unitId === "" ? <option value="">{t("baseUnitPlaceholder")}</option> : null}
           {units.map((u) => (
             <option key={u.id} value={u.id}>
               {u.code} · {u.name}
