@@ -292,13 +292,22 @@ describe("export route (GET)", () => {
   };
 
   it("Sec-Fetch-Site same-origin/none dışı → 403 ve sayaç tüketmez (sonra 2 export 200, 3. 429)", async () => {
-    for (const site of ["cross-site", "same-site", null]) expect((await call(A, A.manager.userId, site)).status).toBe(403);
-    for (const site of ["same-origin", "none"]) {
-      const r = await call(A, A.manager.userId, site);
-      expect(r.status).toBe(200);
-      await r.body?.cancel();
+    // Hız sınırı sabit duvar-saati penceresidir (packages/db/src/rate-limit.ts): çağrılar dakika sınırını aşarsa sayaç
+    // sıfırlanır ve 3. çağrı 200 döner (T-288, aralıklı kırmızı). Yalnız Date, pencerenin 30. saniyesine sabitlenir;
+    // zamanlayıcılar ve pg sürücüsü gerçek kalır. Sınır değerleri (2/dk) ve beklenen durumlar değişmez.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Math.floor(Date.now() / 60_000) * 60_000 + 30_000);
+      for (const site of ["cross-site", "same-site", null]) expect((await call(A, A.manager.userId, site)).status).toBe(403);
+      for (const site of ["same-origin", "none"]) {
+        const r = await call(A, A.manager.userId, site);
+        expect(r.status).toBe(200);
+        await r.body?.cancel();
+      }
+      expect((await call(A, A.manager.userId, "same-origin")).status).toBe(429);
+    } finally {
+      vi.useRealTimers();
     }
-    expect((await call(A, A.manager.userId, "same-origin")).status).toBe(429);
   }, 60_000);
 
   it("akış ortasında oturum düşerse akış hata ile biter; günlük maskeli (yalnızca ad/kod)", async () => {
