@@ -297,8 +297,8 @@ export async function failPostingInTx(
          WHERE tenant_id = ${f.tenantId}::uuid AND id = ${f.documentId}::uuid`,
   );
   // Kayıt kimliği belgedeki kayıtla eşleşmiyorsa (yük/belge uyuşmazlığı) başka bir isteğin kaydı FAILED yapılmaz; belge yine serbest bırakılır.
-  // NULL: 0023 öncesi kilitlenmiş belge (eski satır) — kimlik bilinmediği için yük kimliği kabul edilir.
-  if (row.posting_idempotency_record_id !== null && row.posting_idempotency_record_id.toLowerCase() !== f.recordId.toLowerCase()) return true;
+  // NULL da uyuşmazlıktır (0023 sonrası her işleme kilidi kayıt kimliğiyle yazılır; kimliksiz kilit güvenilmez).
+  if (row.posting_idempotency_record_id === null || row.posting_idempotency_record_id.toLowerCase() !== f.recordId.toLowerCase()) return true;
   await tx.execute(
     sql`UPDATE public.idempotency_records
            SET status = 'FAILED', error_code = ${encodeErrorCode(f.err.code, f.err.detail)}, http_status = ${f.err.httpStatus},
@@ -433,8 +433,10 @@ export async function finalizeFailedPostingJobs(deps: PostingSweepDeps): Promise
         finalized += 1;
       } catch (err) {
         const code = (err as { code?: unknown } | null)?.code;
-        if (code === "TENANT_CLOSING" || code === "FORBIDDEN") {
-          // Kapanan/kapanmış ya da bulunamayan kiracı: belge artık yazılamaz; kalıcı atla (bir kez log).
+        // Kalıcı atlama YALNIZCA kiracı yoksa (satır silinmiş; `withSystemTenant` FORBIDDEN). SUSPENDED ve CLOSING geri alınabilirdir (kapanış 30 gün içinde
+        // geri alınır, spec 12): ikisi de üstel geri çekilmeyle ertelenir ve kiracı açılınca sonlandırılır.
+        if (code === "FORBIDDEN") {
+          // Bulunamayan kiracı: belge artık yazılamaz; kalıcı atla (bir kez log).
           await deps.runOnWorker((tx) => markPostingJobFinalized(tx, j.id, String(code)));
           deps.logger.error("stock.async_post.finalize_skipped", { jobId: j.id, tenantId, reason: String(code) });
           continue;

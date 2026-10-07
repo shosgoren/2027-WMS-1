@@ -251,7 +251,7 @@ export function buildPostCommand(o: PostCommandOptions): Pick<StockCommandParams
     },
     apply: async (tx, locked, ctx): Promise<StockCommandApplied> => {
       if (locked.document === undefined) throw new AppError("INTERNAL");
-      return postApprovedDocumentInTx(tx, locked, ctx, documentId, {
+      return postCore(tx, locked, ctx, documentId, {
         moves,
         requestId: o.requestId ?? null,
         worker: o.worker,
@@ -358,7 +358,7 @@ export async function getPostingStatus(params: Omit<StockDocCallParams, "clientK
  * belge kilidi yoktur. Kayıt `tx` nesnesine bağlıdır (WeakMap): başka transaction'a ya da çağıranın uydurduğu kimliğe taşınamaz.
  */
 const createdInTx = new WeakMap<object, Set<string>>();
-/** İÇ (yalnızca saha komutları; apps/** import edemez — eslint `no-restricted-imports`): belge bu `tx`'te yaratıldı. */
+/** İÇ (domain içi saha komutları): belge bu `tx`'te yaratıldı. `apps/web` bu adı (ve `postApprovedDocumentInTx`'i) import edemez: eslint `WEB_STOCK_CORE_NAMES` (`no-restricted-imports`); `apps/worker` yalnızca `@wms/domain/stock/jobs` kullanır. */
 export function registerTxCreatedDocument(tx: AccessTx, documentId: string): void {
   const set = createdInTx.get(tx) ?? new Set<string>();
   set.add(documentId.toLowerCase());
@@ -369,9 +369,16 @@ export interface PostInTxOptions {
   /** Yalnızca `STOCK_MOVE`: satır → taşınacak rezervasyonlar (normalize edilmiş). */
   readonly moves?: readonly ReservationMoveInput[] | undefined;
   readonly requestId: string | null;
-  /** T-222 worker yolu: işleme kilidi (`posting_job_id`) beklenen durumdur (jobs.ts işi doğrular) ve eşik üstü belge (≤ 2.000) burada işlenir. */
+}
+
+/**
+ * İÇ seçenekler (index.ts'ten dışa AÇILMAZ): `worker` yalnızca jobs.ts'in `buildPostCommand({ worker: true })` yolundan gelir; genel
+ * `postApprovedDocumentInTx` bu alanları kabul etmez (T-222 inceleme MINOR-1).
+ */
+interface InternalPostOptions extends PostInTxOptions {
+  /** Worker yolu: işleme kilidi (`posting_job_id`) beklenen durumdur (jobs.ts işi doğrular) ve eşik üstü belge (≤ 2.000) burada işlenir. */
   readonly worker?: boolean;
-  /** T-222 istek yolu: eşik üstü belgeyi işlemek yerine kuyruğa bırakır. Verilmezse eşik üstü belge `DOCUMENT_STATE` (saha komutları). */
+  /** İstek yolu: eşik üstü belgeyi işlemek yerine kuyruğa bırakır. Verilmezse eşik üstü belge `DOCUMENT_STATE` (saha komutları). */
   readonly defer?: (header: DocumentHeader) => Promise<StockCommandApplied>;
 }
 
@@ -381,12 +388,23 @@ export interface PostInTxOptions {
  * belgeyi plan ile kilitler; saha komutları belgeyi aynı transaction'da kendileri oluşturur (başka transaction göremez), bu yüzden kilit gerekmez.
  * Tek yazım yolu korunur (G-01): defter/bakiye yazımı yalnızca bu dosyadadır.
  */
-export async function postApprovedDocumentInTx(
+export function postApprovedDocumentInTx(
   tx: AccessTx,
   locked: LockedState,
   ctx: StockCommandContext,
   documentId: string,
   opts: PostInTxOptions,
+): Promise<StockCommandApplied> {
+  // Yalnızca genel alanlar taşınır: çağıran `worker`/`defer` uydurup işleme kilidini atlayamaz.
+  return postCore(tx, locked, ctx, documentId, { moves: opts.moves, requestId: opts.requestId });
+}
+
+async function postCore(
+  tx: AccessTx,
+  locked: LockedState,
+  ctx: StockCommandContext,
+  documentId: string,
+  opts: InternalPostOptions,
 ): Promise<StockCommandApplied> {
   const moves = opts.moves;
   // Kilit/sahiplik koruması: belge ya bu komutun planıyla KİLİTLENMİŞ (`locked.document`) ya da bu transaction'da oluşturulmuş olmalı; aksi

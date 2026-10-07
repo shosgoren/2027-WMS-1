@@ -118,12 +118,19 @@ describe("başarısız işlerin belge sonlandırması (MAJOR-2, bakım taraması
     expect(await finalizeFailedPostingJobs(deps)).toEqual({ finalized: 0, deferred: 1 });
     expect(logs).toEqual([{ msg: "stock.async_post.finalize_deferred", fields: { jobId: job.id, tenantId: tenant, attempts: 1, reason: "TENANT_SUSPENDED" } }]);
   });
-  it("kapanan kiracı (TENANT_CLOSING) kalıcı atlanır: bir log, ertelenmez", async () => {
+  it("kiracı yoksa (FORBIDDEN) kalıcı atlanır: bir log, ertelenmez", async () => {
     const { deps, logs } = mkDeps(async () => {
-      throw Object.assign(new Error("x"), { code: "TENANT_CLOSING" });
+      throw Object.assign(new Error("x"), { code: "FORBIDDEN" });
     }, [[job], [], []]);
     expect(await finalizeFailedPostingJobs(deps)).toEqual({ finalized: 0, deferred: 0 });
     expect(logs.map((l) => l.msg)).toEqual(["stock.async_post.finalize_skipped"]);
+  });
+  it("kapanan kiracı (TENANT_CLOSING) geri alınabilir: kalıcı atlanmaz, geri çekilmeyle ertelenir", async () => {
+    const { deps, logs } = mkDeps(async () => {
+      throw Object.assign(new Error("x"), { code: "TENANT_CLOSING" });
+    }, [[job], [{ attempts: 1 }], []]);
+    expect(await finalizeFailedPostingJobs(deps)).toEqual({ finalized: 0, deferred: 1 });
+    expect(logs.map((l) => l.msg)).toEqual(["stock.async_post.finalize_deferred"]);
   });
   it("yazım başarılıysa iş sonlandırılır", async () => {
     const { deps, logs } = mkDeps(async () => true, [[job], [], []]);

@@ -135,13 +135,21 @@ const physical = async (item: string): Promise<string> =>
     [A.tenantId, item]))[0]?.s).toFixed(6);
 const statusOf = (docId: string) => getPostingStatus({ db: app, principal: { userId: A.ownerUserId, mfaVerified: true }, tenantSlug: A.slug }, docId);
 
-function newWorker(consume: ConsumeOnceFn = consumeOnce as unknown as ConsumeOnceFn): Promise<PgBossJobQueue> {
+function newWorker(
+  consume: ConsumeOnceFn = consumeOnce as unknown as ConsumeOnceFn,
+  /** Test kancası: `ctx.inTenant` çağrılarından HEMEN ÖNCE (1'den başlayan sıra numarasıyla) çalışır. */
+  beforeInTenant?: (nth: number) => Promise<void>,
+): Promise<PgBossJobQueue> {
+  let nth = 0;
   const w = createJobQueue({
     connectionString: workerUrl,
     max: 3,
     pollingIntervalSeconds: 0.5,
     stopTimeoutMs: 20_000,
-    runInTenant: (tenantId, reason, fn) => withSystemTenant(app, tenantId, `queue.${reason}`, fn),
+    runInTenant: async (tenantId, reason, fn) => {
+      if (beforeInTenant !== undefined) await beforeInTenant(++nth);
+      return withSystemTenant(app, tenantId, `queue.${reason}`, fn);
+    },
   });
   workers.push(w);
   return w.start().then(async () => {
@@ -634,6 +642,32 @@ describe("MAJOR-1: MFA (TENANT_ADMIN istek sahibi) — worker MFA'yı yalnızca 
     expect(await ledgerOf(d.id)).toHaveLength(0);
     expect((await idemOf(key))[0]).toMatchObject({ status: "IN_PROGRESS" }); // başka isteğin kaydı olabilir: dokunulmaz
   }, 120_000);
+
+  it("belgedeki kayıt kimliği NULL ise uyuşmazlık sayılır: iş reddedilir, belge serbest kalır, kayıt FAILED yapılmaz (MINOR-2)", async () => {
+    const x = await mkItem();
+    const loc = await mkLoc();
+    const d = await mkApproved("STOCK_IN", many(250, () => ln(x, { targetLocationId: loc })));
+    const key = uuid();
+    await requestPost(d, pickerP(key));
+    await q("UPDATE public.documents SET posting_idempotency_record_id = NULL WHERE id = $1", [d.id]);
+    await newWorker();
+    await waitFor(async () => (await docRow(d.id)).posting_job_id === null, "document released");
+    await waitFor(async () => (await jobsOf(d.id))[0]?.state === "failed", "job failed (kalıcı)");
+    expect(await ledgerOf(d.id)).toHaveLength(0);
+    expect((await idemOf(key))[0]).toMatchObject({ status: "IN_PROGRESS" });
+  }, 120_000);
+
+  it("iş satırı okunamıyorsa (pencere hesaplanamaz) MFA tanınmaz: TENANT_ADMIN kalıcı FORBIDDEN/MFA_REQUIRED (fail-closed, MINOR-3)", async () => {
+    const { d, key } = await adminRequest(true);
+    // MFA kararı için ikinci ctx.inTenant çağrısından önce iş satırının zarf kiracısı değiştirilir: wms_app RLS'i satırı görmez (LEFT JOIN boş).
+    await newWorker(undefined, async (nth) => {
+      if (nth === 2) await q("UPDATE pgboss.job SET data = jsonb_set(data, '{tenantId}', to_jsonb($2::text)) WHERE data->'payload'->>'documentId' = $1", [d.id, uuid()]);
+    });
+    await waitFor(async () => (await docRow(d.id)).posting_job_id === null, "failure recorded");
+    expect((await idemOf(key))[0]).toMatchObject({ status: "FAILED", error_code: "FORBIDDEN/MFA_REQUIRED" });
+    expect(await ledgerOf(d.id)).toHaveLength(0);
+    expect(await docRow(d.id)).toMatchObject({ status: "APPROVED" });
+  }, 120_000);
 });
 
 describe("bakım taraması açlık önlemi (doğrulama incelemesi MAJOR-1)", () => {
@@ -693,22 +727,46 @@ describe("bakım taraması açlık önlemi (doğrulama incelemesi MAJOR-1)", () 
     }
   }, 180_000);
 
-  it("kapanan kiracının (CLOSING) başarısız işleri kalıcı atlanır: bir kez log, yeniden denenmez", async () => {
-    const C = await seedWorld(adm, reg, "C222");
-    const ids = await insertFailedJobs(C.tenantId, 3, "1 hour");
-    await q("UPDATE public.tenants SET status = 'CLOSING' WHERE id = $1", [C.tenantId]);
+  it("CLOSING kiracı geri alınabilir (spec 12): ertelenir; kiracı yeniden açılınca (geri çekilme dolunca) belge FAILED(INTERNAL) olarak sonlandırılır", async () => {
+    const x = await mkItem();
+    const loc = await mkLoc();
+    const d = await mkApproved("STOCK_IN", many(250, () => ln(x, { targetLocationId: loc })));
+    const key = uuid();
+    await requestPost(d, pickerP(key));
+    const jobId = (await jobsOf(d.id))[0]?.id;
+    await q("UPDATE pgboss.job SET state = 'failed', completed_on = now() WHERE id = $1", [jobId]);
+    const logs: string[] = [];
+    const logger = { info: () => undefined, error: (msg: string) => logs.push(msg) };
+    await q("UPDATE public.tenants SET status = 'CLOSING' WHERE id = $1", [A.tenantId]);
+    try {
+      await sweepExpiredPostingJobsOnWorker({ workerDb, db: app, logger });
+      expect(logs).toEqual(["stock.async_post.finalize_deferred"]); // kalıcı atlama YOK
+      expect((await docRow(d.id)).posting_job_id).not.toBeNull();
+      expect((await outputOf(jobId as string))?.finalized).toBeUndefined();
+    } finally {
+      await q("UPDATE public.tenants SET status = 'ACTIVE' WHERE id = $1", [A.tenantId]); // kapanış geri alındı
+    }
+    await q("UPDATE pgboss.job SET output = jsonb_set(output, '{nextFinalizeAt}', to_jsonb(now() - interval '1 minute')) WHERE id = $1", [jobId]);
+    await sweepExpiredPostingJobsOnWorker({ workerDb, db: app, logger });
+    expect(await docRow(d.id)).toMatchObject({ status: "APPROVED", posting_job_id: null });
+    expect((await idemOf(key))[0]).toMatchObject({ status: "FAILED", error_code: "INTERNAL" });
+    expect((await outputOf(jobId as string))?.finalized).toBe(true);
+  }, 90_000);
+
+  it("kiracı satırı yoksa (silinmiş) başarısız işler kalıcı atlanır: bir kez log, yeniden denenmez", async () => {
+    const ghost = uuid(); // var olmayan kiracı
+    const ids = await insertFailedJobs(ghost, 3, "1 hour");
     const logs: string[] = [];
     const logger = { info: () => undefined, error: (msg: string) => logs.push(msg) };
     try {
       await sweepExpiredPostingJobsOnWorker({ workerDb, db: app, logger });
-      for (const id of ids) expect(await outputOf(id)).toMatchObject({ finalized: true, skipped: "TENANT_CLOSING" });
+      for (const id of ids) expect(await outputOf(id)).toMatchObject({ finalized: true, skipped: "FORBIDDEN" });
       expect(logs.filter((m) => m === "stock.async_post.finalize_skipped")).toHaveLength(3);
       logs.length = 0;
       await sweepExpiredPostingJobsOnWorker({ workerDb, db: app, logger });
       expect(logs).toHaveLength(0);
     } finally {
-      await q("UPDATE public.tenants SET status = 'ACTIVE' WHERE id = $1", [C.tenantId]);
-      await q("DELETE FROM pgboss.job WHERE name = 'stock.document.post' AND data->>'tenantId' = $1", [C.tenantId]);
+      await q("DELETE FROM pgboss.job WHERE name = 'stock.document.post' AND data->>'tenantId' = $1", [ghost]);
     }
   }, 60_000);
 });
