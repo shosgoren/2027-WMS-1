@@ -9,11 +9,15 @@ import { execFileSync } from "node:child_process";
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
+// T-278: yerel TLS vekili `x-e2e-client-ip` ile bu dosyaya ayrı istemci kovası verir (demo girişi hız sınırı kovası); uzak (staging) koşuda başlık eklenmez.
+if (!process.env.E2E_BASE_URL?.trim()) test.use({ extraHTTPHeaders: { "x-e2e-client-ip": "198.51.100.211" } });
+
 const OUT = process.env.T313_OUT ?? path.resolve(import.meta.dirname, "../../.artifacts/t-313");
 const SIZES = [
   { name: "360", width: 360, height: 740 },
   { name: "390", width: 390, height: 844 },
   { name: "430", width: 430, height: 932 },
+  { name: "390s", width: 390, height: 664 }, // kısa ekran (Safari araç çubukları açık): D-09 riskli boyut
 ] as const;
 // Her test kendi fikstürünü kurar (`seed` adları yeniler); testler sırayla koşar (tek işçi).
 const names = (r: string) => ({
@@ -26,6 +30,8 @@ let CODES = names("").codes;
 let BARCODE = names("").barcode;
 
 interface Fx {
+  /** Bu spec depoyu kendisi oluşturduysa true (temizlikte arşivlenir). */
+  createdWarehouse: boolean;
   tenantId: string;
   warehouseId: string;
   unitId: string;
@@ -85,6 +91,29 @@ async function db<T = Row>(text: string, params: unknown[] = [], url: string | u
   }
 }
 
+const fixtures: Fx[] = [];
+
+/**
+ * Temizlik: bu spec'in ürün/birim/lokasyon/depo fikstürleri ARŞİVLENİR (silme yok: defter değişmezdir). Aynı veritabanında sonraki proje/spec'ler (T-274 boş durum,
+ * kolay kurulum rehberi) etkin kayıt görmemeli; zz-code-edit de aynı yolu izler.
+ */
+async function cleanup(): Promise<void> {
+  for (const f of fixtures.splice(0)) {
+    // Kalite kontrolü varsayılana (açık, A-06) döner: bu spec'in sonunda kapatılır; sonraki koşu/proje aynı varsayımla başlamalı.
+    await db("UPDATE public.tenant_settings SET receiving_qc_enabled = true WHERE tenant_id = $1", [f.tenantId]);
+    // Açık/atanmış PUTAWAY görevleri iptal edilir: sonraki koşu "ilk görev" olarak bu koşunun görevini seçmemeli.
+    await db("UPDATE public.warehouse_tasks SET status = 'CANCELLED', version = version + 1 WHERE tenant_id = $1 AND item_id IN ($2, $3) AND status IN ('OPEN', 'ASSIGNED')", [f.tenantId, f.itemId, f.otherItemId]);
+    await db("UPDATE public.locations SET status = 'ARCHIVED', archived_at = now() WHERE tenant_id = $1 AND id IN ($2, $3, $4, $5)", [f.tenantId, f.kabulId, f.raf1Id, f.raf2Id, f.kilitId]);
+    await db("UPDATE public.items SET status = 'ARCHIVED', archived_at = now() WHERE tenant_id = $1 AND id IN ($2, $3)", [f.tenantId, f.itemId, f.otherItemId]);
+    await db("UPDATE public.units SET status = 'ARCHIVED', archived_at = now() WHERE tenant_id = $1 AND id = $2", [f.tenantId, f.unitId]);
+    if (f.createdWarehouse) await db("UPDATE public.warehouses SET status = 'ARCHIVED', archived_at = now() WHERE tenant_id = $1 AND id = $2", [f.tenantId, f.warehouseId]);
+  }
+}
+
+test.afterAll(async () => {
+  await cleanup();
+});
+
 async function seed(): Promise<Fx> {
   // Bu spec yerel yığına (compose DB + migration rolü) SQL fikstürü yazar; E2E_BASE_URL (staging) koşusunda uygulanamaz. `test.skip` guard tarafından
   // yasak (G-11) olduğundan sessizce atlanmaz, açık hatayla durur: staging koşusu bu dosyayı hariç tutmalıdır (örn. `--grep-invert`).
@@ -97,9 +126,12 @@ async function seed(): Promise<Fx> {
     const q = db;
     const tenantId = (await q<{ id: string }>("SELECT id FROM public.tenants WHERE slug = 'demo'"))[0]?.id;
     if (tenantId === undefined) throw new Error("e2e: demo tenant yok");
+    await q("UPDATE public.tenant_settings SET receiving_qc_enabled = true WHERE tenant_id = $1", [tenantId]);
     const membershipId = (await q<{ id: string }>("SELECT id FROM public.tenant_memberships WHERE tenant_id = $1 ORDER BY joined_at LIMIT 1", [tenantId]))[0]?.id as string;
+    let createdWarehouse = false;
     let warehouseId = (await q<{ id: string }>("SELECT id FROM public.warehouses WHERE tenant_id = $1 AND status = 'ACTIVE' ORDER BY code LIMIT 1", [tenantId]))[0]?.id;
     if (warehouseId === undefined) {
+      createdWarehouse = true;
       warehouseId = randomUUID();
       await q("INSERT INTO public.warehouses (tenant_id, id, code, name) VALUES ($1,$2,$3,'E2E depo')", [tenantId, warehouseId, `E2E${run}`]);
     }
@@ -132,7 +164,9 @@ async function seed(): Promise<Fx> {
     await q("INSERT INTO public.inbound_receipt_lines (tenant_id, id, receipt_id, line_no, item_id, unit_id, conversion_factor, expected_quantity) VALUES ($1, gen_random_uuid(), $2, 1, $3, $4, 1, 30)", [
       tenantId, receiptId, itemId, unitId,
     ]);
-    return { tenantId, warehouseId, unitId, itemId, otherItemId, kabulId, raf1Id, raf2Id, kilitId, receiptId, receiptNo, membershipId };
+    const fx: Fx = { createdWarehouse, tenantId, warehouseId, unitId, itemId, otherItemId, kabulId, raf1Id, raf2Id, kilitId, receiptId, receiptNo, membershipId };
+    fixtures.push(fx);
+    return fx;
   }
 }
 
@@ -155,6 +189,8 @@ interface StepMetrics {
   innerHeight: number;
   small: string[];
   numericInputs: number;
+  /** İçeriğin son öğesi alt sabit çubuğun altına taşan yükseklik (px); ≤ 0: içerik çubuğun üstünde, kaydırma gerekmez (R-03). */
+  bodyOverflow: number;
 }
 
 /** Adım ekranı ölçümü: tek birincil, alt boşluk, taşma, kaydırma, 48 px altı hedefler, `inputmode=numeric` sayısı. */
@@ -181,18 +217,25 @@ async function measure(page: Page): Promise<StepMetrics> {
       innerHeight: window.innerHeight,
       small,
       numericInputs: document.querySelectorAll('input[inputmode="numeric"]').length,
+      bodyOverflow: (() => {
+        const step = document.querySelector('[data-testid="flow-step"]');
+        const bar = step && step.querySelector(':scope > [role="group"]');
+        if (!step || !bar) return 0;
+        const bottoms = [...step.children].filter((c) => c !== bar).map((c) => c.getBoundingClientRect().bottom);
+        return Math.round(Math.max(...bottoms) - bar.getBoundingClientRect().top);
+      })(),
     };
   })()`);
 }
 
 async function login(page: Page, label: string): Promise<void> {
-  await page.addInitScript("window.__taps = 0; document.addEventListener('pointerdown', () => { window.__taps++; }, true);");
+  await page.addInitScript("window.__taps = 0; document.addEventListener('pointerdown', () => { window.__taps++; }, true); try { delete window.BarcodeDetector; } catch (e) { window.BarcodeDetector = undefined; }");
   await page.goto("/");
   await page.getByRole("button", { name: `${label} olarak gir` }).click();
   await expect(page).toHaveURL(/\/t\/demo$/);
 }
 
-const isMobile = (name: string): boolean => name === "mobile";
+const isMobile = (name: string): boolean => name.endsWith("mobile");
 
 /** Ekran ölçümleri ve görüntüleri (aynı oturum: demo girişi hız sınırlı olduğundan ikinci giriş yapılmaz). */
 async function screens(page: Page, projectName: string): Promise<void> {
@@ -214,16 +257,42 @@ async function screens(page: Page, projectName: string): Promise<void> {
     await page.goto(`/t/demo/field/receive?receipt=${fx.receiptId}`);
     await page.waitForLoadState("networkidle");
     await shot("receive-scan");
+    // Tarama adımı: tek birincil "Barkodu okut" (Elle gir ikincil); okuyucu/kamera yoksa hazır vurgusu.
+    const primary = page.locator('[data-variant="primary"]:visible');
+    await expect(primary).toHaveCount(1);
+    await expect(primary).toHaveText("Barkodu okut");
+    await primary.click();
+    await expect(page.getByTestId("scan-panel")).toHaveAttribute("data-ready", "true");
     await scan(page, "0000000000000");
     await expect(page.getByTestId("scan-alert")).toBeVisible();
     const a = await page.getByTestId("scan-alert").boundingBox();
     metrics[`${size.name}-alert`] = a;
     if (mobile) await page.screenshot({ path: path.join(OUT, `final-${size.name}-wrong-scan-alert.png`) });
     await page.getByRole("button", { name: "Anladım, tekrar okut" }).click();
+    // SCAN_MISMATCH: tanımlı ama bu teslimde olmayan ürün.
+    await scan(page, BARCODE.baska);
+    await expect(page.getByTestId("scan-alert")).toContainText("SCAN_MISMATCH");
+    if (mobile) await page.screenshot({ path: path.join(OUT, `final-${size.name}-scan-mismatch-alert.png`) });
+    await page.getByRole("button", { name: "Anladım, tekrar okut" }).click();
     await scan(page, BARCODE.koli);
     await expect(page.getByRole("textbox", { name: /^Gelen \(/ })).toBeVisible();
-    await page.getByRole("button", { name: "Hasarlı var" }).click();
+    // R-03/B2: varsayılan durumda adım ekranı kaydırmasız sığar; seçili kabul rafı birincil düğmenin hemen üstünde görünür.
+    const qtyM = await measure(page);
+    metrics[`${size.name}-receive-qty-fit`] = qtyM;
+    expect(qtyM.bodyOverflow, `${size.name}: miktar adımı kaydırmasız sığmalı`).toBeLessThanOrEqual(1);
+    const rack = await page.getByTestId("rack-choice").boundingBox();
+    const prim = await page.locator('[data-variant="primary"]:visible').boundingBox();
+    expect(rack, `${size.name}: kabul rafı seçimi görünür`).not.toBeNull();
+    expect((rack?.y ?? 0) + (rack?.height ?? 0), `${size.name}: raf seçimi birincil düğmenin üstünde`).toBeLessThanOrEqual((prim?.y ?? 0) + 1);
+    await expect(page.getByTestId("rack-choice").locator('[aria-pressed="true"]')).toHaveCount(1);
     await shot("receive-qty");
+    await page.getByRole("button", { name: "Hasarlı var" }).click();
+    await shot("receive-qty-damaged");
+    await page.getByRole("textbox", { name: "Hasarlı adet" }).fill("0");
+    await page.getByRole("textbox", { name: /^Gelen \(/ }).fill("5");
+    await page.getByRole("button", { name: "Kabul et" }).click();
+    await expect(page.getByTestId("saved-summary")).toContainText("5 adet kabul edildi");
+    await shot("receive-saved");
     await page.goto(`/t/demo/field/putaway?wh=${fx.warehouseId}`);
     await page.waitForLoadState("networkidle");
     await shot("putaway-source");
@@ -278,7 +347,8 @@ test("kabul → kalite onayı → yerleştirme (görevli ve serbest) + yanlış 
   if (mobile) await page.screenshot({ path: path.join(OUT, `alert-${testInfo.project.name}.png`) });
   await page.getByRole("button", { name: "Anladım, tekrar okut" }).click();
   await expect(unknown).toHaveCount(0);
-  expect(await db("SELECT 1 FROM public.documents WHERE tenant_id = $1 AND source_kind = 'INBOUND_RECEIPT'", [fx.tenantId])).toHaveLength(0);
+  // Yanlış tarama kayıt yazmaz: bu teslim için kabul belgesi yok (önceki proje/spec koşuları aynı DB'de belge bırakmış olabilir; yalnız bu teslim sayılır).
+  expect(await db("SELECT 1 FROM public.documents WHERE tenant_id = $1 AND source_kind = 'INBOUND_RECEIPT' AND source_id = $2", [fx.tenantId, fx.receiptId])).toHaveLength(0);
 
   // Yanlış tarama 2: tanımlı ama bu teslimde olmayan ürün → "Yanlış ürün".
   await scan(page, BARCODE.baska);
@@ -312,8 +382,13 @@ test("kabul → kalite onayı → yerleştirme (görevli ve serbest) + yanlış 
   // İkinci koli aynı teslimden (kalan 18 → 12 daha): "Sıradaki ürün" → tara → kabul.
   await page.getByRole("button", { name: "Sıradaki ürün" }).click();
   await page.waitForLoadState("networkidle");
-  await scan(page, BARCODE.koli);
+  // Elle giriş tek ikincil yoldur: "Elle gir" bağlantısı ScanField'ı açar (tarama sayılmaz, aynı servis yolu); açıkken birincil düğme gizlenir.
+  await page.getByRole("button", { name: "Elle gir" }).click();
+  await expect(page.locator('[data-variant="primary"]:visible')).toHaveCount(0);
+  await page.getByRole("textbox", { name: "Barkod" }).fill(BARCODE.koli);
+  await page.getByRole("button", { name: "Onayla" }).click();
   await expect(page.getByRole("textbox", { name: /^Gelen \(/ })).toHaveValue("12");
+  await expect(page.getByText("Okuttuğun ürün:")).toBeVisible();
   // Aynı koli yeniden okutulunca adet eklenir ve kalan (18) ile sınırlanır: 12 + 12 → 18.
   await scan(page, BARCODE.koli);
   await expect(page.getByRole("textbox", { name: /^Gelen \(/ })).toHaveValue("18");
@@ -343,7 +418,7 @@ test("kabul → kalite onayı → yerleştirme (görevli ve serbest) + yanlış 
   await expect(row).toContainText("Kalan 6");
   await expect(page.getByText("Kişisel veri girmeyin.")).toBeVisible();
   // Yeni teslim: ürün ara → birim → miktar → satır → kaydet.
-  await page.getByLabel("Tedarikçi referansı").fill("E2E-IRS-2");
+  await page.getByLabel("Tedarikçi referansı").fill(`E2E-IRS-2-${run}`);
   await page.getByLabel("Ürün", { exact: true }).fill(`E2E-${run}`);
   await page.getByRole("button", { name: new RegExp(`Somun ${run}`) }).click();
   await page.getByLabel("Beklenen miktar").fill("5");
@@ -351,8 +426,8 @@ test("kabul → kalite onayı → yerleştirme (görevli ve serbest) + yanlış 
   await expect(page.getByTestId("draft-lines")).toContainText(`Somun ${run} · 5`);
   await page.getByRole("button", { name: "Teslimi kaydet" }).click();
   await expect(page.getByText(/KBL-\d{4}-\d{6} kaydedildi\./)).toBeVisible();
-  await expect(page.getByTestId("receipt-row").filter({ hasText: "E2E-IRS-2" })).toHaveCount(1);
-  expect(await db("SELECT 1 FROM public.inbound_receipts WHERE tenant_id = $1 AND supplier_ref = 'E2E-IRS-2' AND status = 'OPEN'", [fx.tenantId])).toHaveLength(1);
+  await expect(page.getByTestId("receipt-row").filter({ hasText: `E2E-IRS-2-${run}` })).toHaveCount(1);
+  expect(await db("SELECT 1 FROM public.inbound_receipts WHERE tenant_id = $1 AND supplier_ref = $2 AND status = 'OPEN'", [fx.tenantId, `E2E-IRS-2-${run}`])).toHaveLength(1);
 
   // Kalite onayı (ConfirmDialog): bekleyen karantina AVAILABLE olur.
   const before = await db<{ q: string }>(
@@ -387,7 +462,7 @@ test("kabul → kalite onayı → yerleştirme (görevli ve serbest) + yanlış 
   await page.evaluate("window.__taps = 0");
   await scan(page, BARCODE.tekli);
   await expect(page.getByTestId("flow-step")).toHaveAttribute("data-step", "2");
-  // Sayım kilidi: hedef lokasyon COUNTING → "Bu lokasyonda sayım sürüyor."
+  // Sayım kilidi: hedef lokasyon COUNTING → "Bu rafta sayım sürüyor."
   const session = randomUUID();
   await db("INSERT INTO public.count_sessions (tenant_id, id, warehouse_id, started_by) VALUES ($1,$2,$3,$4)", [fx.tenantId, session, fx.warehouseId, fx.membershipId]);
   await db("UPDATE public.location_count_locks SET status='COUNTING', count_session_id=$3, locked_at=now(), locked_by=$4 WHERE tenant_id=$1 AND location_id=$2", [fx.tenantId, fx.kilitId, session, fx.membershipId]);
@@ -395,7 +470,7 @@ test("kabul → kalite onayı → yerleştirme (görevli ve serbest) + yanlış 
   await expect(page.getByTestId("flow-step")).toHaveAttribute("data-step", "3");
   await page.getByRole("button", { name: "Rafa koy" }).click();
   const locked = page.getByTestId("scan-alert");
-  await expect(locked).toContainText("Bu lokasyonda sayım sürüyor.");
+  await expect(locked).toContainText("Bu rafta sayım sürüyor.");
   await expect(locked).toContainText("LOCATION_LOCKED");
   if (mobile) await page.screenshot({ path: path.join(OUT, `alert-locked-${testInfo.project.name}.png`) });
   await page.getByRole("button", { name: "Anladım, tekrar okut" }).click();
@@ -486,4 +561,43 @@ test("fikstür SQL hata iletisi parola/URL/argv içermez ve loopback dışına y
   }
   expect(remote).toContain("loopback değil");
   expect(remote).not.toContain(secret);
+});
+
+test("kamera taraması: Barkodu okut kamerayı açar, okunan kod aynı servis yoluyla işlenir (sahte BarcodeDetector)", async ({ page }, testInfo) => {
+  const fx = await seed();
+  await page.addInitScript(`
+    window.__fakeCode = "";
+    window.BarcodeDetector = class { async detect() { return window.__fakeCode ? [{ rawValue: window.__fakeCode }] : []; } };
+    navigator.mediaDevices.getUserMedia = async () => { const c = document.createElement("canvas"); c.width = 64; c.height = 64; c.getContext("2d").fillRect(0, 0, 64, 64); return c.captureStream(5); };
+  `);
+  await login(page, "Yönetici");
+  // login() başlatma betiği BarcodeDetector'ı siler; sahte olan sonradan (sayfa yüklemesinden önce) yeniden tanımlanır.
+  await page.addInitScript(`window.BarcodeDetector = class { async detect() { return window.__fakeCode ? [{ rawValue: window.__fakeCode }] : []; } };`);
+  await page.goto(`/t/demo/field/receive?receipt=${fx.receiptId}`);
+  await page.waitForLoadState("networkidle");
+  await page.getByRole("button", { name: "Barkodu okut" }).click();
+  await expect(page.getByTestId("camera-overlay")).toBeVisible();
+  await page.evaluate(`window.__fakeCode = ${JSON.stringify(BARCODE.koli)}`);
+  await expect(page.getByTestId("flow-step")).toHaveAttribute("data-step", "3");
+  await expect(page.getByTestId("camera-overlay")).toHaveCount(0);
+  await expect(page.getByRole("textbox", { name: /^Gelen \(/ })).toHaveValue("12");
+  void testInfo;
+});
+
+test("yetkisiz kullanıcı: kilit ekranı gerekçe + Yardım çağır yolu; tek birincil", async ({ page }, testInfo) => {
+  mkdirSync(OUT, { recursive: true });
+  await login(page, "Salt okunur");
+  for (const size of [{ n: "390", w: 390, h: 844 }, { n: "390s", w: 390, h: 664 }]) {
+    await page.setViewportSize({ width: size.w, height: size.h });
+    for (const flow of ["receive", "putaway"]) {
+      await page.goto(`/t/demo/field/${flow}`);
+      await expect(page.getByText("Bu iş sana kapalı")).toBeVisible();
+      await expect(page.getByTestId("help-link")).toHaveAttribute("href", "/help");
+      await expect(page.locator('[data-variant="primary"]:visible')).toHaveCount(1);
+      const m = await measure(page);
+      expect(m.scrollWidth).toBeLessThanOrEqual(m.clientWidth);
+      expect(m.small, `${size.n} ${flow} kilit: 48 px altı hedef`).toEqual([]);
+      if (isMobile(testInfo.project.name)) await page.screenshot({ path: path.join(OUT, `final-${size.n}-locked-${flow}.png`) });
+    }
+  }
 });

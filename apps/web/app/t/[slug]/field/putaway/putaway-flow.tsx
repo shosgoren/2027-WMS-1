@@ -2,12 +2,12 @@
 // Saha yerleştirme (T-313): [kaynak (KABUL) →] ürün okut → hedef lokasyon okut → onay → bitti. `PUTAWAY` görevinden (miktar ve ürün görevle birebir:
 // poka-yoke, A-305-7) ya da serbest başlar. Yetki, sayım kilidi (`LOCATION_LOCKED`), hedef lokasyon türü ve stok kuralları domain'dedir (`putaway`);
 // bu dosya yalnızca girdi toplar ve sunucu hatasını (kod + sonraki eylem) gösterir. Ortak saha parçaları `receive-flow.tsx`'tedir.
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 import { useTranslations } from "next-intl";
 import { Banner, CircleCheck, MapPinned } from "@wms/ui";
 import { ErrorNotice, errorKeyOf, intOf, scanMismatch, submitWithKey, useKeyHolder, type ErrorInfo } from "../../receipts/receipt-form.tsx";
 import { availableAtLocationAction, putawayAction, resolveItemScanAction, resolveLocationScanAction } from "../../receipts/actions.ts";
-import { FlowShell, PrimaryButton, PrimaryLink, QtyStepper, ScanAlert, ScanInput, useScanner, type AlertState } from "../receive/receive-flow.tsx";
+import { FlowShell, PrimaryButton, PrimaryLink, QtyStepper, ScanAlert, ScanPanel, useScanPrimary, useScanner, type AlertState } from "../receive/receive-flow.tsx";
 
 export interface PutawayTask {
   readonly id: string;
@@ -17,6 +17,7 @@ export interface PutawayTask {
   readonly quantity: string;
   readonly sourceId: string;
   readonly sourceCode: string;
+  readonly sourceName: string;
 }
 type Stage = "source" | "item" | "target" | "confirm" | "done";
 interface Loc {
@@ -33,13 +34,12 @@ interface Item {
 export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehouseId: string; task: PutawayTask | null }) {
   const t = useTranslations("receiving");
   const holder = useKeyHolder();
-  const wrap = useRef<HTMLDivElement>(null);
   const fieldHome = `/t/${encodeURIComponent(slug)}/field`;
   const tasksHref = `${fieldHome}/tasks`;
   const total = task === null ? 5 : 4;
   const first: Stage = task === null ? "source" : "item";
   const [stage, setStage] = useState<Stage>(first);
-  const [source, setSource] = useState<Loc | null>(task === null ? null : { id: task.sourceId, code: task.sourceCode, name: "" });
+  const [source, setSource] = useState<Loc | null>(task === null ? null : { id: task.sourceId, code: task.sourceCode, name: task.sourceName });
   const [item, setItem] = useState<Item | null>(task === null ? null : { id: task.itemId, name: task.itemName, code: task.itemCode });
   const [target, setTarget] = useState<Loc | null>(null);
   const [qty, setQty] = useState(intOf(task?.quantity) ?? 1);
@@ -116,7 +116,8 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
     [busy, alert, stage, slug, warehouseId, task, source],
   );
   const scanning = stage === "source" || stage === "item" || stage === "target";
-  const scanner = useScanner((v) => void onScanned(v), scanning && alert === null && !busy);
+  const { service: scanner, camera } = useScanner((v) => void onScanned(v), scanning && alert === null && !busy);
+  const scanPrimary = useScanPrimary(camera);
 
   async function confirm() {
     if (busy || source === null || item === null || target === null) return;
@@ -142,7 +143,7 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
       } else setError(out.error);
       return;
     }
-    setDonePair({ item: item.name, qty, to: target.code });
+    setDonePair({ item: item.name, qty, to: target.name || target.code });
     setStage("done");
   }
 
@@ -239,7 +240,7 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
               {item.name}
             </p>
             <p className="break-words text-base text-ink">
-              {t("putaway.fromTo", { from: source.code, to: target.code })}
+              {t("putaway.fromTo", { from: source.name || source.code, to: target.name || target.code })}
             </p>
           </section>
           {task !== null ? (
@@ -278,24 +279,23 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
         instruction={t(instrKey)}
         {...backProps}
         scanProxy
-        footer={<PrimaryButton onClick={() => wrap.current?.querySelector<HTMLButtonElement>('[data-mode="scan"] > button')?.click()}>{t("flow.manual")}</PrimaryButton>}
+        footer={<PrimaryButton onClick={scanPrimary.press}>{t("flow.scanNow")}</PrimaryButton>}
       >
         {task !== null && stage === "item" ? (
           <section className="flex min-w-0 flex-col gap-1 rounded-card border-2 border-border bg-surface p-3" data-testid="task-card">
             <p className="break-words text-xl font-bold text-ink">{task.itemName}</p>
-            <p className="break-words text-base text-ink">{t("putaway.taskLine", { qty: intOf(task.quantity) ?? task.quantity, from: task.sourceCode })}</p>
+            <p className="break-words text-base text-ink">{t("putaway.taskLine", { qty: intOf(task.quantity) ?? task.quantity, from: task.sourceName || task.sourceCode })}</p>
           </section>
         ) : null}
         {stage === "target" && item !== null ? (
           <section className="flex min-w-0 flex-col gap-1 rounded-card border-2 border-border bg-surface p-3">
             <p className="break-words text-xl font-bold text-ink">{item.name}</p>
-            {source === null ? null : <p className="break-words text-base text-ink">{t("putaway.takenFrom", { from: source.code })}</p>}
+            {source === null ? null : <p className="break-words text-base text-ink">{t("putaway.takenFrom", { from: source.name || source.code })}</p>}
           </section>
         ) : null}
-        <div ref={wrap} className="min-w-0">
-          <ScanInput service={scanner} label={busy ? t("flow.checking") : t(stage === "item" ? "putaway.itemLabel" : "putaway.locationLabel")} value={last} />
-        </div>
+        <ScanPanel service={scanner} prompt={busy ? t("flow.checking") : t(stage === "item" ? "putaway.itemPrompt" : stage === "source" ? "putaway.sourcePrompt" : "putaway.targetPrompt")} last={last} ready={scanPrimary.ready && last === ""} />
       </FlowShell>
+      {scanPrimary.overlay}
       {alertView}
     </>
   );

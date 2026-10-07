@@ -469,7 +469,7 @@
       },
       "receive": {
         "title": "Goods arrived",
-        "description": "Record incoming goods"
+        "description": "Count and record incoming goods"
       },
       "issue": {
         "title": "Goods are going out",
@@ -1010,7 +1010,7 @@
         "description": "Count a shelf and show the difference."
       }
     },
-    "noPermission": "You cannot do this job."
+    "noPermission": "You cannot do this job. Tell your manager."
   },
   "labels": {
     "title": "Print labels",
@@ -1244,7 +1244,7 @@
     "cancel": "Cancel",
     "scanAgain": "Got it, scan again",
     "alert": {
-      "scanTitle": "Scan failed",
+      "scanTitle": "Code not found",
       "mismatchTitle": "Wrong item",
       "networkTitle": "No connection",
       "putawayTitle": "Could not put on rack"
@@ -1256,7 +1256,7 @@
       "forbiddenAction": "Ask your manager or call for help.",
       "forbidden_scope": "You do not have access to this warehouse.",
       "forbidden_scopeAction": "Ask your manager for access.",
-      "location_locked": "A count is in progress at this location.",
+      "location_locked": "A count is in progress on this rack.",
       "location_lockedAction": "Try again when the count ends, or scan another rack.",
       "insufficient_stock": "There is not enough stock on this rack.",
       "insufficient_stockAction": "Lower the quantity or take from another rack.",
@@ -1357,7 +1357,7 @@
       "emptyAction": "New deliveries appear here. Tell your manager.",
       "emptyCanCreate": "Add a delivery first.",
       "lockedTitle": "This job is closed to you",
-      "lockedReason": "You cannot receive goods. Tell your manager.",
+      "lockedReason": "You cannot receive goods. Tell your manager or call for help.",
       "toField": "Field jobs",
       "notOpenTitle": "Delivery is not open",
       "notOpen": "This delivery was not found or is no longer open. Pick another.",
@@ -1372,12 +1372,12 @@
       "expectedItems": "Expected items",
       "qtyTitle": "How many arrived?",
       "qtyInstruction": "Check the number and change it if needed.",
-      "verify": "Is this the right item?",
+      "verify": "Item you scanned:",
       "received": "Arrived ({unit})",
       "damagedLabel": "Damaged count",
       "hasDamaged": "Some are damaged",
       "rackLabel": "Receiving rack",
-      "rackAuto": "Receiving rack: {code}",
+      "rackAuto": "Receiving rack: {name}",
       "confirm": "Receive",
       "savedTitle": "Saved",
       "saved": "{name}: {received} received.",
@@ -1389,7 +1389,12 @@
       "allDone": "Every item in this delivery was received.",
       "noLocationTitle": "No receiving rack",
       "noLocation": "This warehouse has no receiving rack.",
-      "noLocationAction": "Tell your manager."
+      "noLocationAction": "Tell your manager.",
+      "scanNow": "Scan barcode",
+      "scanPrompt": "Press the reader trigger and scan the box barcode.",
+      "readerReady": "Reader ready. Press the trigger and scan the barcode.",
+      "lastScan": "Last scanned: {code}",
+      "helpCall": "Call for help"
     },
     "putaway": {
       "title": "Put away",
@@ -1419,7 +1424,15 @@
       "noWarehouseTitle": "No warehouse",
       "noWarehouse": "A warehouse must be set up first. Tell your manager.",
       "warehouseTitle": "Which warehouse?",
-      "warehouseInstruction": "Pick the warehouse you work in."
+      "warehouseInstruction": "Pick the warehouse you work in.",
+      "sourcePrompt": "Scan the label of the rack you took goods from.",
+      "itemPrompt": "Scan the barcode of the item in your hand.",
+      "targetPrompt": "Scan the label of the rack to put it on."
+    },
+    "camera": {
+      "title": "Camera",
+      "hint": "Bring the barcode into the frame.",
+      "failed": "The camera could not be opened. Use the reader trigger or type the barcode."
     }
   }
 }

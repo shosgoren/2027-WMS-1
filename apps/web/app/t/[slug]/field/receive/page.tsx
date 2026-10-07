@@ -55,6 +55,10 @@ export default async function FieldReceivePage({ params, searchParams }: { param
         <p className="break-words text-lg text-ink" data-testid="receive-locked">
           {t("flow.lockedReason")}
         </p>
+          <Link href="/help" data-testid="help-link" className="flex min-h-12 w-fit items-center rounded-control border-2 border-border-strong bg-surface px-4 text-base font-bold text-ink focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus">
+            {t("flow.helpCall")}
+          </Link>
+
       </FlowShell>
     );
   }

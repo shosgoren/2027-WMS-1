@@ -40,11 +40,16 @@ export default async function FieldPutawayPage({ params, searchParams }: { param
   const db = getAppDb();
   const call = { db, principal, tenantSlug: slug };
   const icon = <MapPinned aria-hidden="true" className="size-6" />;
-  const message = (title: string, body: string, href: string, label: string) => (
+  const message = (title: string, body: string, href: string, label: string, help = false) => (
     <FlowShell hue="teal" icon={icon} step={1} total={4} title={title} backHref={href} footer={<PrimaryLink href={href}>{label}</PrimaryLink>}>
       <p className="break-words text-lg text-ink" data-testid="putaway-message">
         {body}
       </p>
+      {help ? (
+        <Link href="/help" data-testid="help-link" className="flex min-h-12 w-fit items-center rounded-control border-2 border-border-strong bg-surface px-4 text-base font-bold text-ink focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus">
+            {t("flow.helpCall")}
+          </Link>
+      ) : null}
     </FlowShell>
   );
   const guard = (e: unknown): never => {
@@ -59,7 +64,7 @@ export default async function FieldPutawayPage({ params, searchParams }: { param
   const current = summary.memberships.find((m) => m.slug === slug);
   if (current === undefined) notFound();
   const roles = current.roles;
-  if (!hasPermission(roles, "stock.post")) return message(t("flow.lockedTitle"), t("flow.lockedReason"), fieldHome, t("flow.toField"));
+  if (!hasPermission(roles, "stock.post")) return message(t("flow.lockedTitle"), t("flow.lockedReason"), fieldHome, t("flow.toField"), true);
 
   const taskId = first(sp.task);
   if (taskId !== undefined && taskId !== "") {
@@ -81,7 +86,7 @@ export default async function FieldPutawayPage({ params, searchParams }: { param
     }
     try {
       const [item, loc] = await Promise.all([getItem(call, { itemId: found.itemId }), getLocationBrief(call, { locationId: found.locationId })]);
-      const task: PutawayTask = { id: found.id, itemId: item.id, itemName: item.name, itemCode: item.code, quantity: found.quantity, sourceId: loc.id, sourceCode: loc.code };
+      const task: PutawayTask = { id: found.id, itemId: item.id, itemName: item.name, itemCode: item.code, quantity: found.quantity, sourceId: loc.id, sourceCode: loc.code, sourceName: loc.name };
       return <PutawayFlow slug={slug} warehouseId={found.warehouseId} task={task} />;
     } catch (e) {
       if (e instanceof AppError && e.code === "NOT_FOUND") return message(t("putaway.taskGoneTitle"), t("putaway.taskGone"), tasksHref, t("putaway.backToTasks"));

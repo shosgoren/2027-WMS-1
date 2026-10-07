@@ -22,6 +22,7 @@ export interface ReceiptLineView {
   readonly itemName: string;
   readonly unitId: string;
   readonly unitCode: string;
+  readonly unitName: string;
   readonly expected: string;
   readonly received: string;
   readonly damaged: string;
@@ -218,6 +219,13 @@ export function LineStatus({ expected, received, damaged, open }: { expected: st
 // ---------------------------------------------------------------------------------------------------------------------
 // Masaüstü: teslim listesi + oluşturma formu
 // ---------------------------------------------------------------------------------------------------------------------
+/** Durum rozeti: Açık (bilgi, mavi) ve Kapalı (başarı, yeşil) aynı renkte olmaz; renk tek taşıyıcı değildir (ikon + metin). */
+const STATUS_TONE: Record<"DRAFT" | "OPEN" | "CLOSED" | "CANCELLED", string> = {
+  DRAFT: "bg-warning-bg text-warning-ink",
+  OPEN: "bg-info-bg text-info-ink",
+  CLOSED: "bg-success-bg text-success-ink",
+  CANCELLED: "bg-danger-bg text-danger-ink",
+};
 const FOCUS = "focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus";
 const LINK_BTN = `inline-flex min-h-12 min-w-12 items-center justify-center rounded-control border-2 border-border-strong bg-surface px-4 text-base font-bold text-ink ${FOCUS}`;
 
@@ -239,7 +247,7 @@ interface DraftLine {
   readonly itemId: string;
   readonly itemName: string;
   readonly unitId: string;
-  readonly unitCode: string;
+  readonly unitName: string;
   readonly quantity: string;
 }
 interface Found {
@@ -250,6 +258,7 @@ interface Found {
 interface UnitOption {
   readonly unitId: string;
   readonly unitCode: string;
+  readonly unitName: string;
 }
 
 export function ReceiptsView({ slug, receipts, nextHref, warehouses, canCreate, canApprove }: ReceiptsViewProps) {
@@ -309,7 +318,7 @@ export function ReceiptsView({ slug, receipts, nextHref, warehouses, canCreate, 
     const unit = picked?.units.find((u) => u.unitId === unitId);
     if (picked === null || unit === undefined || !/^[1-9][0-9]{0,8}$/.test(qty)) return;
     changed();
-    setLines((l) => [...l, { itemId: picked.id, itemName: picked.name, unitId: unit.unitId, unitCode: unit.unitCode, quantity: qty }]);
+    setLines((l) => [...l, { itemId: picked.id, itemName: picked.name, unitId: unit.unitId, unitName: unit.unitName || unit.unitCode, quantity: qty }]);
     setPicked(null);
     setQuery("");
     setQty("");
@@ -368,8 +377,8 @@ export function ReceiptsView({ slug, receipts, nextHref, warehouses, canCreate, 
               <li key={r.id} data-testid="receipt-row" data-receipt-id={r.id} className="flex min-w-0 flex-col gap-2 rounded-card border-2 border-border bg-surface p-4">
                 <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
                   <h3 className="break-words text-lg font-bold text-ink">{r.number}</h3>
-                  <span className="inline-flex min-h-8 items-center gap-1 rounded-full bg-cat-green-bg px-3 text-sm font-bold text-cat-green-ink">
-                    {r.status === "OPEN" ? <Clock aria-hidden="true" className="size-4" /> : <CircleCheck aria-hidden="true" className="size-4" />}
+                  <span className={`inline-flex min-h-8 items-center gap-1 rounded-full px-3 text-sm font-bold ${STATUS_TONE[r.status]}`} data-status={r.status}>
+                    {r.status === "OPEN" ? <Clock aria-hidden="true" className="size-4" /> : r.status === "CLOSED" ? <CircleCheck aria-hidden="true" className="size-4" /> : <TriangleAlert aria-hidden="true" className="size-4" />}
                     {t(`status.${r.status}`)}
                   </span>
                 </div>
@@ -378,7 +387,7 @@ export function ReceiptsView({ slug, receipts, nextHref, warehouses, canCreate, 
                   {r.lines.map((l) => (
                     <li key={l.id} className="flex min-w-0 flex-col gap-1 border-t border-border pt-2">
                       <span className="break-words text-base font-semibold text-ink">
-                        {l.itemName} <span className="font-normal text-ink-muted">({l.unitCode})</span>
+                        {l.itemName} <span className="font-normal text-ink-muted">· {l.unitName}</span>
                       </span>
                       <LineStatus expected={l.expected} received={l.received} damaged={l.damaged} open={l.open} />
                     </li>
@@ -466,7 +475,7 @@ export function ReceiptsView({ slug, receipts, nextHref, warehouses, canCreate, 
                 {lines.map((l, i) => (
                   <li key={`${l.itemId}-${i}`} className="flex min-w-0 items-center justify-between gap-2 rounded-card bg-bg px-3 py-2">
                     <span className="min-w-0 break-words text-base text-ink">
-                      {l.itemName} · {l.quantity} {l.unitCode}
+                      {l.itemName} · {l.quantity} {l.unitName}
                     </span>
                     <Button
                       variant="secondary"
@@ -504,7 +513,7 @@ export function ReceiptsView({ slug, receipts, nextHref, warehouses, canCreate, 
                     <select value={unitId} onChange={(e) => setUnitId(e.target.value)} className={`min-h-12 w-full min-w-0 rounded-card border-2 border-border-strong bg-surface px-3 text-base text-ink ${FOCUS}`}>
                       {picked.units.map((u) => (
                         <option key={u.unitId} value={u.unitId}>
-                          {u.unitCode}
+                          {u.unitName || u.unitCode}
                         </option>
                       ))}
                     </select>

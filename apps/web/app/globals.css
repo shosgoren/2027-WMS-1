@@ -225,12 +225,6 @@ html {
     min-height: 0;
   }
 
-  /* İkon dairesi ve başlık döşemeye göre ölçeklenir (döşeme genişliği ≈ 45 dvw). */
-  .task-grid.task-grid-2col .tile-badge {
-    width: clamp(3rem, min(17dvw, 10dvh), 5.5rem);
-    height: clamp(3rem, min(17dvw, 10dvh), 5.5rem);
-  }
-
   .task-grid.task-grid-2col > .top-rows {
     grid-column: 1 / -1;
   }
@@ -244,21 +238,35 @@ html {
     grid-column: var(--col);
   }
 
+  /* Döşeme içeriği döşeme yüksekliğine göre ÖLÇEKLENİR (DESIGN_REVIEW §7.4.1, D-04b): ikon dairesi kalan yüksekliği doldurur (aralık ≤ 24 px),
+     başlık ve açıklama döşemeye göre büyür. Döşeme 140 px'i yalnızca açıklama (gerçek içerik) görünürken aşar; ≤ 140 px'te açıklama gizlidir. */
   .task-grid.task-grid-2col .task-tile {
+    container-type: size;
+    container-name: tile;
     flex-direction: column;
     align-items: flex-start;
-    justify-content: space-between;
+    justify-content: flex-start;
     gap: 0.5rem;
-    padding: 0.75rem 0.75rem 0.625rem;
+    padding: 0.75rem;
+  }
+
+  .task-grid.task-grid-2col .tile-badge {
+    flex: 1 1 0;
+    width: auto;
+    height: auto;
+    min-height: 2.5rem;
+    max-height: 7rem;
+    aspect-ratio: 1;
   }
 
   .task-grid.task-grid-2col .tile-body {
-    flex: 0 1 auto;
+    flex: none;
     width: 100%;
+    gap: 0.25rem;
   }
 
   .task-grid.task-grid-2col .tile-title {
-    font-size: clamp(1.0625rem, min(4.8dvw, 2.7dvh), 1.5rem);
+    font-size: clamp(1rem, 10.5cqh, 1.375rem);
     line-height: 1.15;
     display: -webkit-box;
     -webkit-box-orient: vertical;
@@ -266,7 +274,20 @@ html {
     overflow: hidden;
   }
 
-  .task-grid.task-grid-2col .tile-desc,
+  .task-grid.task-grid-2col .tile-desc {
+    display: none;
+    font-size: clamp(0.8125rem, 7.8cqh, 1rem);
+    line-height: 1.25;
+  }
+
+  /* Kapsayıcı sorgusu İÇERİK kutusunu ölçer: döşeme 140,5 px ⇒ içerik 112,5 px (kenarlık 2×2 + dolgu 2×12 = 28 px). */
+  @container tile (min-height: 112.5px) {
+    .task-grid.task-grid-2col .tile-desc {
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+    }
+  }
+
   .task-grid.task-grid-2col .tile-chevron {
     display: none;
   }

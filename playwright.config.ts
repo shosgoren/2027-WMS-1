@@ -20,9 +20,6 @@ function localClient(ip: string): { extraHTTPHeaders?: Record<string, string> } 
 export default defineConfig({
   testDir: "tests/e2e",
   testMatch: "**/*.spec.ts",
-  // Staging koşusunda (E2E_BASE_URL) doğrudan yerel veritabanı gerektiren fikstür spec'i çalıştırılmaz: zzz-receiving, migration rolüyle yerel compose
-  // DB'ye SQL fikstürü yazar (T-313); uzak hedefte böyle bir bağlantı yoktur. Yerel koşuda hariç tutma yoktur.
-  testIgnore: process.env.E2E_BASE_URL?.trim() ? ["**/zzz-receiving.spec.ts"] : [],
   globalSetup: "./tests/e2e/global-setup.ts",
   outputDir: ".artifacts/e2e/test-results",
   reporter: [["list"], ["html", { outputFolder: ".artifacts/e2e/report", open: "never" }]],
@@ -42,9 +39,18 @@ export default defineConfig({
     trace: remoteBaseURL ? "off" : "retain-on-failure",
     screenshot: "only-on-failure",
   },
+  // zzz-receiving (T-313) migration rolüyle YEREL compose DB'ye SQL fikstürü (ürün, lokasyon, teslim, stok) yazar: (1) uzak/staging hedefte böyle bir bağlantı
+  // yoktur, bu yüzden yalnızca yerel koşuda ve ayrı projelerde koşar; (2) bıraktığı kayıtlar sonraki spec'lerin boş durum varsayımlarını (T-274, kolay kurulum)
+  // bozacağından ana projelerden SONRA çalışır (masaüstü → mobil → receiving-masaüstü → receiving-mobil). Ana projeler bu dosyayı hariç tutar.
   projects: [
-    { name: "desktop", use: { ...devices["Desktop Chrome"], viewport: { width: 1280, height: 800 }, ...localClient("198.51.100.1") } },
+    { name: "desktop", testIgnore: "**/zzz-receiving.spec.ts", use: { ...devices["Desktop Chrome"], viewport: { width: 1280, height: 800 }, ...localClient("198.51.100.1") } },
     // Pixel 5 = 393x727, dokunmatik, mobil Chromium.
-    { name: "mobile", use: { ...devices["Pixel 5"], ...localClient("198.51.100.2") } },
+    { name: "mobile", testIgnore: "**/zzz-receiving.spec.ts", use: { ...devices["Pixel 5"], ...localClient("198.51.100.2") } },
+    ...(remoteBaseURL
+      ? []
+      : [
+          { name: "receiving-desktop", testMatch: "**/zzz-receiving.spec.ts", use: { ...devices["Desktop Chrome"], viewport: { width: 1280, height: 800 }, ...localClient("198.51.100.3") } },
+          { name: "receiving-mobile", testMatch: "**/zzz-receiving.spec.ts", use: { ...devices["Pixel 5"], ...localClient("198.51.100.4") } },
+        ]),
   ],
 });

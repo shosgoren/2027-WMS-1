@@ -469,7 +469,7 @@
       },
       "receive": {
         "title": "Depoya mal geldi",
-        "description": "Gelen malı kaydet"
+        "description": "Gelen ürünü say, kaydet"
       },
       "issue": {
         "title": "Depodan mal çıkacak",
@@ -1010,7 +1010,7 @@
         "description": "Rafı say, farkı göster."
       }
     },
-    "noPermission": "Bu işin yetkisi sende yok."
+    "noPermission": "Bu işin yetkisi sende yok. Yöneticine haber ver."
   },
   "labels": {
     "title": "Etiket yazdır",
@@ -1244,7 +1244,7 @@
     "cancel": "Vazgeç",
     "scanAgain": "Anladım, tekrar okut",
     "alert": {
-      "scanTitle": "Okuma olmadı",
+      "scanTitle": "Kod bulunamadı",
       "mismatchTitle": "Yanlış ürün",
       "networkTitle": "Bağlantı yok",
       "putawayTitle": "Rafa konamadı"
@@ -1256,7 +1256,7 @@
       "forbiddenAction": "Yöneticine söyle ya da Yardım çağır.",
       "forbidden_scope": "Bu depoda çalışma iznin yok.",
       "forbidden_scopeAction": "Yöneticinden depoyu iste.",
-      "location_locked": "Bu lokasyonda sayım sürüyor.",
+      "location_locked": "Bu rafta sayım sürüyor.",
       "location_lockedAction": "Sayım bitince yeniden dene ya da başka raf okut.",
       "insufficient_stock": "Bu rafta yeterli mal yok.",
       "insufficient_stockAction": "Miktarı azalt ya da başka raftan al.",
@@ -1357,7 +1357,7 @@
       "emptyAction": "Yeni teslim gelince burada görünür. Yöneticine söyle.",
       "emptyCanCreate": "Önce bir teslim ekle.",
       "lockedTitle": "Bu iş sana kapalı",
-      "lockedReason": "Mal kabul için yetkin yok. Yöneticine söyle.",
+      "lockedReason": "Mal kabul için yetkin yok. Yöneticine haber ver ya da yardım çağır.",
       "toField": "Saha işleri",
       "notOpenTitle": "Teslim açık değil",
       "notOpen": "Bu teslim bulunamadı ya da artık açık değil. Başka teslim seç.",
@@ -1372,12 +1372,12 @@
       "expectedItems": "Beklenen ürünler",
       "qtyTitle": "Kaç adet geldi?",
       "qtyInstruction": "Sayıyı kontrol et, gerekirse değiştir.",
-      "verify": "Doğru ürün mü?",
+      "verify": "Okuttuğun ürün:",
       "received": "Gelen ({unit})",
       "damagedLabel": "Hasarlı adet",
       "hasDamaged": "Hasarlı var",
       "rackLabel": "Kabul rafı",
-      "rackAuto": "Kabul rafı: {code}",
+      "rackAuto": "Kabul rafı: {name}",
       "confirm": "Kabul et",
       "savedTitle": "Kaydedildi",
       "saved": "{name}: {received} adet kabul edildi.",
@@ -1389,7 +1389,12 @@
       "allDone": "Bu teslimdeki her ürün alındı.",
       "noLocationTitle": "Kabul rafı yok",
       "noLocation": "Bu depoda kabul rafı tanımlı değil.",
-      "noLocationAction": "Yöneticine söyle."
+      "noLocationAction": "Yöneticine söyle.",
+      "scanNow": "Barkodu okut",
+      "scanPrompt": "Okuyucunun tetiğine bas, kolinin barkodunu okut.",
+      "readerReady": "Okuyucu hazır. Tetiğe bas ve barkodu okut.",
+      "lastScan": "Son okutulan: {code}",
+      "helpCall": "Yardım çağır"
     },
     "putaway": {
       "title": "Yerleştirme",
@@ -1419,7 +1424,15 @@
       "noWarehouseTitle": "Depo yok",
       "noWarehouse": "Önce bir depo kurulmalı. Yöneticine söyle.",
       "warehouseTitle": "Hangi depo?",
-      "warehouseInstruction": "Çalışacağın depoyu seç."
+      "warehouseInstruction": "Çalışacağın depoyu seç.",
+      "sourcePrompt": "Malı aldığın rafın etiketini okut.",
+      "itemPrompt": "Elindeki ürünün barkodunu okut.",
+      "targetPrompt": "Koyacağın rafın etiketini okut."
+    },
+    "camera": {
+      "title": "Kamera",
+      "hint": "Barkodu çerçeveye getir.",
+      "failed": "Kamera açılamadı. Okuyucunun tetiğini kullan ya da barkodu elle gir."
     }
   }
 }

@@ -278,6 +278,6 @@ describe("i18n: her hata anahtarı için TR + EN ileti ve sonraki eylem var", ()
       typeof o === "object" && o !== null ? Object.entries(o).flatMap(([k, v]) => flat(v, `${p}${k}.`)) : [p];
     expect(flat(load("tr.json").receiving).sort()).toEqual(flat(load("en.json").receiving).sort());
     expect(load("tr.json").receiving.errors.over_receipt).toBe("Beklenenden fazla okuttun. Kalan: {remaining}");
-    expect(load("tr.json").receiving.errors.location_locked).toBe("Bu lokasyonda sayım sürüyor.");
+    expect(load("tr.json").receiving.errors.location_locked).toBe("Bu rafta sayım sürüyor.");
   });
 });

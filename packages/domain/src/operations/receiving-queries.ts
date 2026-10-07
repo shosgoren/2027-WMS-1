@@ -24,6 +24,8 @@ export interface ReceiptLineView {
   readonly itemName: string;
   readonly unitId: string;
   readonly unitCode: string;
+  /** Kullanıcıya gösterilecek birim adı (kod ikincil). */
+  readonly unitName: string;
   /** Ondalık dizgiler (satır biriminde; float yok, I-09). */
   readonly expected: string;
   readonly received: string;
@@ -75,6 +77,7 @@ type ReceiptDbRow = {
     item_name: string;
     unit_id: string;
     unit_code: string;
+    unit_name: string;
     expected: string;
     received: string;
     damaged: string;
@@ -114,6 +117,7 @@ const toView = (r: ReceiptDbRow): ReceiptView => ({
     itemName: l.item_name,
     unitId: l.unit_id,
     unitCode: l.unit_code,
+    unitName: l.unit_name,
     expected: l.expected,
     received: l.received,
     damaged: l.damaged,
@@ -129,7 +133,7 @@ const RECEIPT_SELECT = sql`SELECT r.id, r.warehouse_id, r.number, r.supplier_ref
   LEFT JOIN LATERAL (
     SELECT jsonb_agg(jsonb_build_object(
              'id', x.id, 'line_no', x.line_no, 'item_id', x.item_id, 'item_code', i.code, 'item_name', i.name,
-             'unit_id', x.unit_id, 'unit_code', u.code,
+             'unit_id', x.unit_id, 'unit_code', u.code, 'unit_name', u.name,
              'expected', x.expected_quantity::text, 'received', x.received_quantity::text, 'damaged', x.damaged_quantity::text,
              'open', GREATEST(x.expected_quantity - x.received_quantity, 0)::text) ORDER BY x.line_no) AS lines
       FROM public.inbound_receipt_lines x

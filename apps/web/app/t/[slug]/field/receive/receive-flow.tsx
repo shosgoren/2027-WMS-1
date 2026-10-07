@@ -6,8 +6,8 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useId, useRef, useState, useTransition } from "react";
 import { useTranslations } from "next-intl";
-import { Banner, CircleAlert, CircleCheck, PackagePlus, ScanField } from "@wms/ui";
-import { ScannerService, type ScanSource } from "../../../../../lib/scanner/scanner-core.ts";
+import { Banner, CircleAlert, CircleCheck, PackagePlus, ScanField, ScanLine } from "@wms/ui";
+import { ScannerService, type ScanSource, type ScannerSource } from "../../../../../lib/scanner/scanner-core.ts";
 import { createKeystrokeSource } from "../../../../../lib/scanner/keystroke-source.ts";
 import { ErrorNotice, LineStatus, errorKeyOf, intOf, scanMismatch, submitWithKey, useKeyHolder, type ErrorInfo, type ReceiptDetail, type ReceiptLineView } from "../../receipts/receipt-form.tsx";
 import { receiveGoodsAction, resolveItemScanAction } from "../../receipts/actions.ts";
@@ -74,22 +74,24 @@ export interface FlowShellProps {
   backHref?: string;
   onBack?: () => void;
   footer: React.ReactNode;
-  /** Tarama adımı: alt birincil düğme "Elle gir" olur ve ScanField'ın kendi düğmesi gizlenir (tek birincil). */
+  /** Sabit çubukta birincil düğmenin hemen ÜSTÜNDE görünen seçim (örn. seçili kabul rafı); içerik kaydırmasına bağlı değildir. */
+  footerExtra?: React.ReactNode;
+  /** Tarama adımı: ScanField yalnızca "Elle gir" ile açılır (tek yol); elle girişte birincil düğme gizlenir. */
   scanProxy?: boolean;
   children: React.ReactNode;
 }
 
-/** Adım çerçevesi: üstte adım + geri, ortada tek soru, altta tek sabit birincil eylem (alt gezinme çubuğunun hemen üstünde). */
-export function FlowShell({ hue, icon, step, total, title, instruction, backHref, onBack, footer, scanProxy, children }: FlowShellProps) {
+/** Adım çerçevesi: tek satır üst bilgi (geri + kategori ikonu + adım + başlık), altta tek sabit birincil eylem (alt gezinme çubuğunun hemen üstünde). */
+export function FlowShell({ hue, icon, step, total, title, instruction, backHref, onBack, footer, footerExtra, scanProxy, children }: FlowShellProps) {
   const t = useTranslations("receiving");
   const back = "flex size-12 shrink-0 items-center justify-center rounded-control border-2 border-border bg-surface text-ink " + FOCUS;
   return (
     <main
-      className={`group flex w-full min-w-0 flex-col gap-3 px-4 pb-24 pt-3 ${scanProxy === true ? "[&_[data-mode=scan]>button]:hidden" : ""}`}
+      className={`group flex min-h-[calc(100dvh-8.25rem)] w-full min-w-0 flex-col gap-3 px-4 pt-3 ${footerExtra === undefined ? "pb-24" : "pb-44"} ${scanProxy === true ? "[&_[data-mode=scan]]:hidden" : ""}`}
       data-testid="flow-step"
       data-step={step}
     >
-      <div className="flex min-w-0 items-center gap-3">
+      <header className="flex min-w-0 items-center gap-3">
         {backHref !== undefined ? (
           <Link href={backHref} aria-label={t("back")} className={back}>
             <ArrowLeft />
@@ -99,22 +101,23 @@ export function FlowShell({ hue, icon, step, total, title, instruction, backHref
             <ArrowLeft />
           </button>
         ) : null}
-        <p className="min-w-0 text-sm font-bold text-ink-muted" data-testid="step-label">
-          {t("stepOf", { n: step, total })}
-        </p>
-      </div>
-      <header className="flex min-w-0 items-center gap-3">
-        <span aria-hidden="true" className={`flex size-12 shrink-0 items-center justify-center rounded-full ${HUE[hue]}`}>
+        <span aria-hidden="true" className={`flex size-10 shrink-0 items-center justify-center rounded-full ${HUE[hue]}`}>
           {icon}
         </span>
         <div className="flex min-w-0 flex-col">
-          <h1 className="break-words text-2xl font-extrabold leading-tight text-ink">{title}</h1>
-          {instruction === undefined ? null : <p className="break-words text-base text-ink">{instruction}</p>}
+          <p className="text-xs font-bold text-ink-muted" data-testid="step-label">
+            {t("stepOf", { n: step, total })}
+          </p>
+          <h1 className="break-words text-xl font-extrabold leading-tight text-ink">{title}</h1>
         </div>
       </header>
+      {instruction === undefined ? null : <p className="break-words text-base text-ink [@media(max-height:700px)]:hidden">{instruction}</p>}
       {children}
       <div role="group" aria-label={t("primaryBar")} className={`fixed inset-x-0 ${NAV_H} z-10 border-t border-border bg-surface px-4 py-2 group-has-[[data-mode=manual]]:hidden`}>
-        <div className="mx-auto w-full max-w-md">{footer}</div>
+        <div className="mx-auto flex w-full max-w-md flex-col gap-2">
+          {footerExtra}
+          {footer}
+        </div>
       </div>
     </main>
   );
@@ -157,7 +160,7 @@ export function ScanAlert({ title, reason, action, code, onClose }: { title: str
 export function QtyStepper({ label, value, min, max, onChange }: { label: string; value: number; min: number; max: number | null; onChange: (n: number) => void }) {
   const inputId = useId();
   const clamp = (n: number): number => Math.min(max ?? 999_999_999, Math.max(min, n));
-  const btn = `flex size-14 shrink-0 items-center justify-center rounded-control border-2 border-border-strong bg-surface text-3xl font-bold text-ink disabled:opacity-40 ${FOCUS}`;
+  const btn = `flex size-14 [@media(max-height:700px)]:size-12 shrink-0 items-center justify-center rounded-control border-2 border-border-strong bg-surface text-3xl font-bold text-ink disabled:opacity-40 ${FOCUS}`;
   return (
     <div className="flex min-w-0 flex-col gap-1">
       <label className="text-base font-semibold text-ink" htmlFor={inputId}>
@@ -177,7 +180,7 @@ export function QtyStepper({ label, value, min, max, onChange }: { label: string
             const d = e.target.value.replace(/\D/g, "").slice(0, 9);
             onChange(clamp(d === "" ? min : Number(d)));
           }}
-          className={`min-h-14 w-full min-w-0 flex-1 rounded-card border-2 border-border-strong bg-surface px-2 text-center text-3xl font-extrabold text-ink ${FOCUS}`}
+          className={`min-h-14 [@media(max-height:700px)]:min-h-12 w-full min-w-0 flex-1 rounded-card border-2 border-border-strong bg-surface px-2 text-center text-3xl font-extrabold text-ink ${FOCUS}`}
         />
         <button type="button" aria-label={`${label} +`} disabled={max !== null && value >= max} onClick={() => onChange(clamp(value + 1))} className={btn}>
           <span aria-hidden="true">+</span>
@@ -187,19 +190,158 @@ export function QtyStepper({ label, value, min, max, onChange }: { label: string
   );
 }
 
-/** Tarama kaynağı: klavye kaması (DataWedge) servis arkasındadır (ADR-010); etkin ekran tek dinleyicidir. `enabled=false` iken tarama iletilmez. */
-export function useScanner(handler: (value: string, source: ScanSource) => void, enabled: boolean): ScannerService | null {
+/**
+ * Tarama kaynakları: klavye kaması (DataWedge) ve kamera servis arkasındadır (ADR-010); etkin ekran tek dinleyicidir. `enabled=false` iken tarama iletilmez.
+ * `camera(code)` kamera okumasını aynı servis yoluyla (`source: "camera"`) iletir.
+ */
+export function useScanner(handler: (value: string, source: ScanSource) => void, enabled: boolean): { service: ScannerService | null; camera: (code: string) => void } {
   const [service, setService] = useState<ScannerService | null>(null);
   const ref = useRef(handler);
   ref.current = handler;
+  const cameraEmit = useRef<((v: string) => void) | null>(null);
   useEffect(() => {
     const s = new ScannerService();
     s.registerSource(createKeystrokeSource());
+    const cam: ScannerSource = {
+      id: "camera",
+      start(emit) {
+        cameraEmit.current = emit;
+        return () => {
+          cameraEmit.current = null;
+        };
+      },
+    };
+    s.registerSource(cam);
     setService(s);
   }, []);
   const stable = useCallback((v: string, src: ScanSource) => ref.current(v, src), []);
   useEffect(() => (service !== null && enabled ? service.onScan(stable) : undefined), [service, enabled, stable]);
-  return service;
+  const camera = useCallback((code: string) => cameraEmit.current?.(code), []);
+  return { service, camera };
+}
+
+interface BarcodeDetectorLike {
+  detect(source: HTMLVideoElement): Promise<readonly { rawValue: string }[]>;
+}
+type BarcodeDetectorCtor = new (options?: { formats?: string[] }) => BarcodeDetectorLike;
+const cameraCtor = (): BarcodeDetectorCtor | null =>
+  typeof window === "undefined" || typeof navigator === "undefined" || navigator.mediaDevices?.getUserMedia === undefined
+    ? null
+    : ((window as unknown as { BarcodeDetector?: BarcodeDetectorCtor }).BarcodeDetector ?? null);
+
+/** Kamera taraması (tarayıcı `BarcodeDetector` + `getUserMedia`); desteklenmeyen cihazda (el terminali) donanım tetiği kullanılır. */
+export function CameraOverlay({ onCode, onClose }: { onCode: (code: string) => void; onClose: () => void }) {
+  const t = useTranslations("receiving");
+  const video = useRef<HTMLVideoElement>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    const Ctor = cameraCtor();
+    if (Ctor === null) {
+      setFailed(true);
+      return undefined;
+    }
+    let stream: MediaStream | null = null;
+    let timer: ReturnType<typeof setInterval> | null = null;
+    let stopped = false;
+    const detector = new Ctor({ formats: ["ean_13", "ean_8", "code_128", "code_39", "qr_code", "data_matrix", "upc_a"] });
+    navigator.mediaDevices
+      .getUserMedia({ video: { facingMode: "environment" }, audio: false })
+      .then((st) => {
+        if (stopped) {
+          for (const tr of st.getTracks()) tr.stop();
+          return;
+        }
+        stream = st;
+        const v = video.current;
+        if (v === null) return;
+        v.srcObject = st;
+        void v.play().catch(() => undefined);
+        timer = setInterval(() => {
+          void detector
+            .detect(v)
+            .then((found) => {
+              const raw = found[0]?.rawValue;
+              if (raw !== undefined && raw !== "" && !stopped) onCode(raw);
+            })
+            .catch(() => undefined);
+        }, 250);
+      })
+      .catch(() => setFailed(true));
+    return () => {
+      stopped = true;
+      if (timer !== null) clearInterval(timer);
+      if (stream !== null) for (const tr of stream.getTracks()) tr.stop();
+    };
+  }, [onCode]);
+  return (
+    <div role="dialog" aria-modal="true" aria-label={t("camera.title")} data-testid="camera-overlay" className="fixed inset-0 z-40 flex flex-col gap-3 bg-ink p-4 text-on-accent">
+      <p className="text-center text-xl font-bold">{failed ? t("camera.failed") : t("camera.hint")}</p>
+      <video ref={video} muted playsInline className="min-h-0 w-full flex-1 rounded-card bg-ink object-cover" />
+      <button type="button" onClick={onClose} className={`flex min-h-14 w-full items-center justify-center rounded-control border-2 border-on-accent bg-transparent px-4 text-lg font-bold text-on-accent ${FOCUS}`}>
+        {t("cancel")}
+      </button>
+    </div>
+  );
+}
+
+/**
+ * Tarama paneli (tek yol): büyük okut ikonu + tek cümle; alt birincil düğme "Barkodu okut". ScanField (T-303) yalnızca "Elle gir" bağlantısıyla açılır
+ * (ikincil); okuma hazır olduğunda `ready` vurgusu görünür.
+ */
+export function ScanPanel({ service, prompt, last, ready }: { service: ScannerService | null; prompt: string; last: string; ready: boolean }) {
+  const t = useTranslations("receiving");
+  const wrap = useRef<HTMLDivElement>(null);
+  return (
+    <section
+      data-testid="scan-panel"
+      data-ready={ready ? "true" : "false"}
+      aria-live="polite"
+      className={`flex min-h-44 min-w-0 flex-1 flex-col items-center justify-center gap-3 rounded-card border-2 border-dashed bg-surface p-4 text-center ${ready ? "border-accent" : "border-border"}`}
+    >
+      <ScanLine aria-hidden="true" className="size-20 text-accent-ink" strokeWidth={1.75} />
+      <p className="break-words text-lg font-bold text-ink">{ready ? t("flow.readerReady") : prompt}</p>
+      {last === "" ? null : <p className="break-all text-sm text-ink-muted">{t("flow.lastScan", { code: last })}</p>}
+      <div ref={wrap} className="w-full min-w-0">
+        <ScanField
+          label={t("flow.scanLabel")}
+          value={last}
+          manualLabel={t("flow.manual")}
+          confirmLabel={t("flow.manualConfirm")}
+          cancelLabel={t("cancel")}
+          placeholder={t("flow.scanPlaceholder")}
+          onManualSubmit={(v) => service?.submitManual(v)}
+        />
+      </div>
+      <button
+        type="button"
+        onClick={() => wrap.current?.querySelector<HTMLButtonElement>('[data-mode="scan"] > button')?.click()}
+        className={`flex min-h-12 min-w-12 items-center justify-center rounded-control px-4 text-base font-bold text-accent-ink underline group-has-[[data-mode=manual]]:hidden ${FOCUS}`}
+      >
+        {t("flow.manual")}
+      </button>
+    </section>
+  );
+}
+
+/** Tarama adımının birincil düğmesi: kamera varsa kamerayı açar; yoksa okuyucuyu (el terminali tetiği) hazırlar ve yönerge gösterir. */
+export function useScanPrimary(camera: (code: string) => void): { ready: boolean; press: () => void; overlay: React.ReactNode } {
+  const [cam, setCam] = useState(false);
+  const [ready, setReady] = useState(false);
+  const onCode = useCallback(
+    (code: string) => {
+      setCam(false);
+      camera(code);
+    },
+    [camera],
+  );
+  const press = (): void => {
+    if (cameraCtor() !== null) setCam(true);
+    else {
+      setReady(true);
+      if (typeof navigator !== "undefined" && typeof navigator.vibrate === "function") navigator.vibrate(30);
+    }
+  };
+  return { ready, press, overlay: cam ? <CameraOverlay onCode={onCode} onClose={() => setCam(false)} /> : null };
 }
 
 export interface AlertState {
@@ -231,7 +373,6 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
   const router = useRouter();
   const [, startTransition] = useTransition();
   const holder = useKeyHolder();
-  const wrap = useRef<HTMLDivElement>(null);
   const [stage, setStage] = useState<Stage>("scan");
   const [picked, setPicked] = useState<Picked | null>(null);
   const [showDamaged, setShowDamaged] = useState(false);
@@ -295,7 +436,8 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
     },
     [busy, alert, slug, stage, picked, receipt],
   );
-  const scanner = useScanner((v) => void onScanned(v), stage !== "done" && alert === null && !busy);
+  const { service: scanner, camera } = useScanner((v) => void onScanned(v), stage !== "done" && alert === null && !busy);
+  const scanPrimary = useScanPrimary(camera);
 
   async function confirm() {
     if (picked === null || busy) return;
@@ -404,6 +546,32 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
             setStage("scan");
             setError(null);
           }}
+          footerExtra={
+            receipt.receivingLocations.length > 1 ? (
+              <fieldset className="m-0 flex min-w-0 flex-col gap-1 border-0 p-0" data-testid="rack-choice">
+                <legend className="sr-only">{t("flow.rackLabel")}</legend>
+                <p className="text-sm font-bold text-ink-muted [@media(max-height:700px)]:hidden">{t("flow.rackLabel")}</p>
+                <div className="flex min-w-0 flex-wrap gap-2">
+                  {receipt.receivingLocations.map((l) => (
+                    <SecondaryButton
+                      key={l.id}
+                      pressed={picked.locationId === l.id}
+                      onClick={() => {
+                        holder.contentChanged();
+                        setPicked({ ...picked, locationId: l.id });
+                      }}
+                    >
+                      {l.name}
+                    </SecondaryButton>
+                  ))}
+                </div>
+              </fieldset>
+            ) : (
+              <p className="text-sm font-semibold text-ink" data-testid="rack-auto">
+                {t("flow.rackAuto", { name: receipt.receivingLocations[0]?.name ?? "" })}
+              </p>
+            )
+          }
           footer={
             <PrimaryButton loading={busy} onClick={() => void confirm()}>
               {t("flow.confirm")}
@@ -415,11 +583,11 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
             <p className="break-words text-2xl font-extrabold text-ink" data-testid="verified-item">
               {picked.line.itemName}
             </p>
-            <p className="break-words text-sm text-ink-muted">{picked.line.itemCode}</p>
+            <p className="break-words text-sm text-ink-muted [@media(max-height:700px)]:hidden">{picked.line.itemCode}</p>
             <LineStatus expected={picked.line.expected} received={picked.line.received} damaged={picked.line.damaged} open={picked.line.open} />
           </section>
           <QtyStepper
-            label={t("flow.received", { unit: picked.line.unitCode })}
+            label={t("flow.received", { unit: picked.line.unitName })}
             value={picked.received}
             min={1}
             max={max}
@@ -449,27 +617,6 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
               {t("flow.hasDamaged")}
             </SecondaryButton>
           )}
-          {receipt.receivingLocations.length > 1 ? (
-            <fieldset className="flex min-w-0 flex-col gap-2">
-              <legend className="text-base font-semibold text-ink">{t("flow.rackLabel")}</legend>
-              <div className="flex min-w-0 flex-wrap gap-2">
-                {receipt.receivingLocations.map((l) => (
-                  <SecondaryButton
-                    key={l.id}
-                    pressed={picked.locationId === l.id}
-                    onClick={() => {
-                      holder.contentChanged();
-                      setPicked({ ...picked, locationId: l.id });
-                    }}
-                  >
-                    {l.code}
-                  </SecondaryButton>
-                ))}
-              </div>
-            </fieldset>
-          ) : (
-            <p className="text-sm text-ink-muted">{t("flow.rackAuto", { code: receipt.receivingLocations[0]?.code ?? "" })}</p>
-          )}
           {error === null ? null : <ErrorNotice error={error} context="receive" remaining={String(max ?? picked.line.open)} />}
         </FlowShell>
         {alertView}
@@ -496,17 +643,9 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
         instruction={t("flow.scanInstruction")}
         backHref={base}
         scanProxy
-        footer={
-          <PrimaryButton
-            onClick={() => wrap.current?.querySelector<HTMLButtonElement>('[data-mode="scan"] > button')?.click()}
-          >
-            {t("flow.manual")}
-          </PrimaryButton>
-        }
+        footer={<PrimaryButton onClick={scanPrimary.press}>{t("flow.scanNow")}</PrimaryButton>}
       >
-        <div ref={wrap} className="min-w-0">
-          <ScanInput service={scanner} label={busy ? t("flow.checking") : t("flow.scanLabel")} value={last} />
-        </div>
+        <ScanPanel service={scanner} prompt={busy ? t("flow.checking") : t("flow.scanPrompt")} last={last} ready={scanPrimary.ready && last === ""} />
         <section aria-label={t("flow.expectedItems")} className="flex min-w-0 flex-col gap-2">
           <p className="text-sm font-bold text-ink-muted">
             {receipt.number}
@@ -522,23 +661,8 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
           </ul>
         </section>
       </FlowShell>
+      {scanPrimary.overlay}
       {alertView}
     </>
-  );
-}
-
-/** ScanField sarmalayıcısı: elle girilen değer de aynı tarama yoluna (`submitManual`, kaynak `manual`) gider; tarama sayılmaz. */
-export function ScanInput({ service, label, value }: { service: ScannerService | null; label: string; value: string }) {
-  const t = useTranslations("receiving");
-  return (
-    <ScanField
-      label={label}
-      value={value}
-      manualLabel={t("flow.manual")}
-      confirmLabel={t("flow.manualConfirm")}
-      cancelLabel={t("cancel")}
-      placeholder={t("flow.scanPlaceholder")}
-      onManualSubmit={(v) => service?.submitManual(v)}
-    />
   );
 }

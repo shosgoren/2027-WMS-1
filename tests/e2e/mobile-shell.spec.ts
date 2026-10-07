@@ -381,9 +381,21 @@ test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş al
       expect(Math.max(...ws) - Math.min(...ws), `${where}: genişlik farkı`).toBeLessThanOrEqual(2);
       expect(Math.max(...hs) - Math.min(...hs), `${where}: yükseklik farkı`).toBeLessThanOrEqual(2);
       expect(Math.min(...hs), `${where}: en küçük döşeme yüksekliği`).toBeGreaterThanOrEqual(88);
-      // Tek sütun ≤ 140 px; 2 sütunda döşeme en çok kare: yükseklik ≤ genişlik (DESIGN_REVIEW §7.4.1; alt piksel toleransı 0.5).
-      if (twoCol) expect(Math.max(...hs), `${where}: 2 sütun döşeme en çok kare (yükseklik ≤ genişlik ${Math.min(...ws)})`).toBeLessThanOrEqual(Math.min(...ws) + 0.5);
-      else expect(Math.max(...hs), `${where}: en büyük döşeme yüksekliği`).toBeLessThanOrEqual(140);
+      // Tek sütun ≤ 140 px. 2 sütunda (DESIGN_REVIEW §7.4.1): ≤ 140 px; 140 px'i yalnızca döşeme GERÇEK içerik (görünür açıklama) taşıyorsa aşabilir ve ≤ kare;
+      // D-04b: döşeme içinde ikon/başlık/açıklama blokları arasındaki toplam dikey boşluk ≤ 24 px (iç yükseklik = yükseklik − kenarlık 2×2 − dolgu 2×12).
+      if (twoCol) {
+        expect(Math.max(...hs), `${where}: 2 sütun döşeme ≤ kare (yükseklik ≤ genişlik ${Math.min(...ws)})`).toBeLessThanOrEqual(Math.min(...ws) + 0.5);
+        const inside = await page.evaluate<Array<{ h: number; blank: number; hasDesc: boolean; label: string }>>(`[...document.querySelectorAll('.task-grid > .task-item > [data-state]')].filter((t) => t.getBoundingClientRect().height > 0).map((t) => {
+          const h = t.getBoundingClientRect().height;
+          const blocks = [...t.querySelectorAll('.tile-badge, .tile-title, .tile-desc')].map((e) => e.getBoundingClientRect().height);
+          const desc = t.querySelector('.tile-desc');
+          return { h, blank: h - 4 - 24 - blocks.reduce((a, b) => a + b, 0), hasDesc: !!desc && desc.getBoundingClientRect().height > 0 && (desc.textContent || '').trim() !== '', label: (t.querySelector('.tile-title')?.textContent || '') };
+        })`);
+        for (const tile of inside) {
+          if (tile.h > 140.5) expect(tile.hasDesc, `${where}: ${tile.label} 140 px'i aşıyor ama açıklaması yok`).toBe(true);
+          expect(tile.blank, `${where}: ${tile.label} döşeme içi dikey boşluk (D-04b, ${Math.round(tile.h)} px döşeme)`).toBeLessThanOrEqual(24);
+        }
+      } else expect(Math.max(...hs), `${where}: en büyük döşeme yüksekliği`).toBeLessThanOrEqual(140);
 
       // Başparmak bölgesi: ızgara alt sekmeye yaslı (<= 16 px), boş dikey alan <= %15, ilk iş en alt satırda.
       const gridBottom = Math.max(...L.tiles.map((t) => t.y + t.h));
