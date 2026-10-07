@@ -557,6 +557,13 @@ const TASK_ACTIONS: Record<string, Call> = {
   claimTaskAction: (slug) => taskActions.claimTaskAction!({ slug, taskId: bTask, expectedVersion: 1 }),
   assignTaskAction: (slug, v) => taskActions.assignTaskAction!({ slug, taskId: bTask, membershipId: v.membership, expectedVersion: 1 }),
   cancelTaskAction: (slug) => taskActions.cancelTaskAction!({ slug, taskId: bTask, expectedVersion: 1, reason: "Ele geçirme" }),
+  // T-293 (ADR-025): rehberli akış eylemleri; B'nin görev kimliğiyle A bağlamından çağrılır (kimlikler istemciden alınmaz, yalnızca görev kimliği + kod/miktar).
+  getTaskProgressAction: (slug) => taskActions.getTaskProgressAction!({ slug, taskId: bTask }),
+  recordTaskStepAction: (slug) => taskActions.recordTaskStepAction!({ slug, taskId: bTask, step: "SCAN_ITEM", scannedCode: "8690000000000" }),
+  beginSaveAction: (slug) => taskActions.beginSaveAction!({ slug, taskId: bTask }),
+  saveTaskAction: (slug) => taskActions.saveTaskAction!({ slug, taskId: bTask }),
+  resetTaskProgressAction: (slug) => taskActions.resetTaskProgressAction!({ slug, taskId: bTask }),
+  nextTaskAction: (slug) => taskActions.nextTaskAction!({ slug, afterTaskId: bTask }),
 };
 
 /**
