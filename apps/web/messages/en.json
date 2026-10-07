@@ -432,13 +432,16 @@
     "intro": "Tap the task you want. I will guide you step by step and will not let you do something wrong.",
     "tasksLabel": "Tasks",
     "lockedReason": "You are not allowed to do this. Ask your manager.",
+    "soonListNote": "These tasks will open after warehouse setup.",
+    "lockedListNote": "You are not allowed to do these tasks. Ask your manager.",
     "soonLabel": "Coming soon",
     "soonWarehouse": "This task will open after warehouse setup.",
     "soonScreen": "This screen will open soon.",
     "myTasks": {
       "title": "My tasks",
       "assigned": "{count} tasks assigned to you",
-      "empty": "No tasks are assigned to you right now."
+      "empty": "No tasks are assigned to you right now.",
+      "start": "Start with Scan"
     },
     "lockedList": {
       "toggle": "Tasks you cannot use ({count})"
@@ -670,7 +673,7 @@
   },
   "items": {
     "title": "Products",
-    "intro": "Manage product cards, their units and barcodes here.",
+    "intro": "Find a product or add a new one.",
     "lockedReason": "You do not have permission for this. Ask your manager.",
     "listLabel": "Product list",
     "create": "New product",
@@ -678,7 +681,15 @@
     "emptyAction": "Add your first product with “New product”.",
     "emptyReadOnly": "Ask your manager to add products.",
     "emptyFiltered": "No products match your search.",
-    "emptyFilteredAction": "Type the first letters of the code or name, or the full barcode; or clear the search.",
+    "emptyFilteredAction": "Change the name or code and try again; type the full barcode. Or clear the search.",
+    "emptyStatus": "No products match this filter.",
+    "emptyStatusAction": "Pick another status or clear the search.",
+    "setup": {
+      "warehouse": "First add a warehouse · step 1 / 3",
+      "locations": "Next: create the shelves · step 2 / 3",
+      "item": "Next: add your first product",
+      "teach": "There are three short steps before you add products."
+    },
     "codeLabel": "Code: {code}",
     "baseUnitLabel": "Base unit: {unit}",
     "status": {
@@ -692,10 +703,11 @@
     "firstPage": "Back to start",
     "search": {
       "label": "Search products",
-      "hint": "First letters of the code or name; for a barcode type or scan the whole value.",
+      "hint": "Type a name or code; you can scan the barcode.",
+      "placeholder": "E.g. URN-0001 or Box 40x30",
+      "advanced": "More options",
       "status": "Status",
       "all": "All",
-      "submit": "Search",
       "clear": "Clear search"
     },
     "tracking": {
@@ -1069,7 +1081,6 @@
     },
     "items": {
       "searchSuggestLabel": "Product suggestions",
-      "scanLabel": "Find a product by barcode",
       "unitAuto": "There is no unit yet; the “ADET” unit is created automatically with your first product.",
       "unitDefaultOption": "ADET · Piece (automatic)"
     },

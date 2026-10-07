@@ -13,7 +13,7 @@ import { ReceiptsView } from "./receipt-form.tsx";
 
 export const dynamic = "force-dynamic";
 
-// Sayfalı liste (≤50 satır/sayfa; sanallaştırma 200+ satırlık tek sayfa gerekince takip kartı — DESIGN_REVIEW §7 R-11).
+// Sayfalı liste (≤50 satır/sayfa; sanallaştırma 200+ satırlık tek sayfa gerekince takip kartı — DESIGN_REVIEW §8.1 R-11).
 const PAGE_SIZE = 30;
 
 export async function generateMetadata(): Promise<Metadata> {

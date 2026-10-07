@@ -73,7 +73,12 @@ export default async function ItemsPage({ params, searchParams }: { params: Prom
     });
     units = await listUnits(call);
     const unitCode = new Map(units.map((u) => [u.id, u.code] as const));
-    rows = page.items.map((it) => ({ id: it.id, code: it.code, name: it.name, status: it.status, baseUnitCode: unitCode.get(it.baseUnitId) ?? "" }));
+    // T-257: arama ESKİ kodla eşleştiyse sonuç kartında "bu kod X olarak değişti" bilgisi (sunucu `renamedFrom` verir; kural istemcide yok).
+    const old = new Map((page.renamedFrom ?? []).map((r) => [r.itemId, r.oldCode] as const));
+    rows = page.items.map((it) => {
+      const oldCode = old.get(it.id);
+      return { id: it.id, code: it.code, name: it.name, status: it.status, baseUnitCode: unitCode.get(it.baseUnitId) ?? "", ...(oldCode === undefined ? {} : { oldCode }) };
+    });
     nextCursor = page.nextCursor;
   } catch (e) {
     if (e instanceof AppError) {
@@ -89,7 +94,7 @@ export default async function ItemsPage({ params, searchParams }: { params: Prom
   }
 
   return (
-    <main className="mx-auto flex w-full max-w-3xl min-w-0 flex-col gap-4 px-4 py-6">
+    <main className="mx-auto flex w-full max-w-3xl min-w-0 flex-col gap-4 px-4 py-6 phone:flex-1 phone:gap-2 phone:pb-0 phone:pt-3">
       <ItemsView
         slug={slug}
         canManage={canManage}
