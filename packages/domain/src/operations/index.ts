@@ -62,3 +62,14 @@ export {
   type SalesOrderLineInput,
   type UpdateDraftOrderInput,
 } from "./orders.ts";
+// Toplama görevlendirmesi, toplama ve "ürün bulunamadı" (T-307). `reallocateOrderLine` (orders.ts) ve saf kurallar (picking.ts: planPickTasks...) iç yardımcıdır: burada YOKTUR.
+export {
+  confirmPick,
+  createPickAssignment,
+  type ConfirmPickInput,
+  type ConfirmPickResult,
+  type PickAssignmentInput,
+  type PickAssignmentResult,
+  type PickNotFound,
+  type PickReallocation,
+} from "./picking.ts";

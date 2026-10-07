@@ -303,7 +303,6 @@ export async function releaseForCancellation(tx: AccessTx, tenantId: string, loc
 }
 
 export interface ReservationMoveOp extends ReservationTake {
-  readonly source: ReservationSource;
   readonly sourceDimensionId: string;
   readonly targetDimensionId: string;
 }
@@ -359,6 +358,12 @@ export async function moveReservations(tx: AccessTx, tenantId: string, ops: read
 export interface ReservationMoveInput {
   readonly lineId: string;
   readonly reservationIds: readonly string[];
+  /**
+   * T-307: YALNIZ domain içi toplama yolu (`postApprovedDocumentInTx`, picking.ts) sipariş satırı rezervasyonunu (`documentLineId === null`) taşıyabilir.
+   * Genel `postDocument` yolu girdiyi `normalizeMoves` ile `{lineId, reservationIds}`'e indirger, bu alan oraya HİÇ ulaşamaz → belge `STOCK_MOVE`'u sipariş
+   * rezervasyonunu taşıyamaz (`VALIDATION_FAILED`; davranış T-306'dakiyle aynı). Belge satırı rezervasyonunda bu alanın etkisi yoktur.
+   */
+  readonly allowOrderReservations?: true;
 }
 
 export interface ReservationEffects {
@@ -441,23 +446,22 @@ export function planReservationEffects(args: {
     const sourceId = dimOf(from.key);
     const targetId = dimOf(to.key);
     const slices: ReservationSlice[] = [];
-    const lineOf = new Map<string, ReservationSource>();
     for (const raw of mv.reservationIds) {
       const id = uuid(raw);
       if (seenReservations.has(id)) throw invalid();
       seenReservations.add(id);
       const r = lockedActive.get(id);
       if (r === undefined || r.stockDimensionId !== sourceId) throw invalid();
-      // Sipariş satırı rezervasyonunun toplamada hedef boyuta taşınması T-307'nin kapsamıdır (LockedReservation sipariş kaynağını taşımaz): burada reddedilir.
-      if (r.documentLineId === null) throw invalid();
+      // T-307: sipariş satırı rezervasyonu (`documentLineId === null`) YALNIZ toplama yolunda (`allowOrderReservations`) taşınır; genel belge yolunda ret.
+      // Talep kaynağı taşıyıcıda kopyalanır (`moveReservations` bölünen payın kaynağını kaynak SATIRINDAN okur), bu yüzden planda kaynak türü gerekmez.
+      if (r.documentLineId === null && mv.allowOrderReservations !== true) throw invalid();
       slices.push({ id: r.id, quantity: toMicro(r.quantity) });
-      lineOf.set(r.id, { kind: "DOCUMENT_LINE", lineId: r.documentLineId });
     }
     const sum = slices.reduce((a, s) => a + s.quantity, 0n);
     const qty = to.delta;
     const amount = sum < qty ? sum : qty;
     for (const t of allocateAcross(slices, amount)) {
-      moveOps.push({ ...t, source: lineOf.get(t.id) as ReservationSource, sourceDimensionId: sourceId, targetDimensionId: targetId });
+      moveOps.push({ ...t, sourceDimensionId: sourceId, targetDimensionId: targetId });
     }
     bump(reservedDelta, sourceId, -amount);
     bump(reservedDelta, targetId, amount);
@@ -592,7 +596,7 @@ export async function releaseSelected(
   locked: LockedState,
   selected: readonly ReservationPlanRow[],
   wanted: bigint | null,
-  opts: { readonly stagedLast?: boolean } = {},
+  opts: { readonly stagedLast?: boolean; readonly freshQuantities?: boolean } = {},
 ): Promise<{ readonly closedIds: string[]; readonly amount: bigint; readonly parts: ReleasedPart[] }> {
   const lockedById = new Map(locked.reservations.map((r) => [r.id.toLowerCase(), r]));
   const dimIds = lockedDimensionIdByIdentity(locked);
@@ -602,7 +606,9 @@ export async function releaseSelected(
     const lr = lockedById.get(r.id.toLowerCase());
     const dimId = dimIds.get(dimensionIdentity(r.key));
     if (lr === undefined || lr.status !== "ACTIVE" || dimId === undefined || lr.stockDimensionId !== dimId) throw versionConflict();
-    slices.push({ id: lr.id, quantity: toMicro(lr.quantity) });
+    // `freshQuantities` (T-307): aynı komutta taşımadan sonra kilitli görüntüdeki miktar bayattır; seçili satırların taze okunan miktarı kullanılır
+    // (satırlar kilitlidir; durum/boyut yine kilitli görüntüyle doğrulanır).
+    slices.push({ id: lr.id, quantity: toMicro(opts.freshQuantities === true ? r.quantity : lr.quantity) });
     meta.set(lr.id, { dimensionId: dimId, row: r });
   }
   const available = slices.reduce((a, s) => a + s.quantity, 0n);

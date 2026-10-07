@@ -47,10 +47,12 @@ Ayrıntılar (`detail`; kodu değiştirmez, istemciyi yönlendirir — `ERROR_DE
 | `VALIDATION_FAILED` + `PARENT_INVALID` (Faz 2) | Üst lokasyon aynı depoda aktif değil / uygunsuz | 400 | `errors.validation_failed.parent_invalid` |
 | `VALIDATION_FAILED` + `HANDLING_UNIT_CYCLE` (Faz 2) | Taşıma birimi iç içe yerleşimi döngü oluşturur | 400 | `errors.validation_failed.handling_unit_cycle` |
 | `VALIDATION_FAILED` + `BARCODE_AMBIGUOUS` (Faz 2) | Barkod birden çok ürün/birimle eşleşir | 400 | `errors.validation_failed.barcode_ambiguous` |
+| `VALIDATION_FAILED` + `CODE_AMBIGUOUS` (Faz 2) | Eski kod birden çok kayıtla eşleşir | 400 | `errors.validation_failed.code_ambiguous` |
 | `VALIDATION_FAILED` + `UNIT_CONVERSION_INVALID` (Faz 2) | Dönüşüm katsayısı ≤ 0 ya da > 6 ondalık | 400 | `errors.validation_failed.unit_conversion_invalid` |
 | `VALIDATION_FAILED` + `QUANTITY_SCALE` (Faz 2) | Miktar ürünün ondalık hassasiyetini aşar | 400 | `errors.validation_failed.quantity_scale` |
 | `VALIDATION_FAILED` + `DOCUMENT_TOO_LARGE` (Faz 2) | Belge satır sayısı sert sınırı aşar (A-07) | 400 | `errors.validation_failed.document_too_large` |
 | `VALIDATION_FAILED` + `DOCUMENT_STATE` (Faz 2) | Belge durumu eyleme uygun değil | 400 | `errors.validation_failed.document_state` |
+| `VALIDATION_FAILED` + `SCAN_MISMATCH` (Faz 3A) | Okutulan lokasyon/ürün görevle eşleşmez (toplama) | 400 | `errors.validation_failed.scan_mismatch` |
 | `VALIDATION_FAILED` + `IDEMPOTENCY_KEY_REQUIRED` (Faz 2) | Stok komutunda istemci anahtarı yok (ADR-018) | 400 | `errors.validation_failed.idempotency_key_required` |
 | `FORBIDDEN` + `WAREHOUSE_OUT_OF_SCOPE` (Faz 2) | Depo, kullanıcının depo kapsamı dışında (A-46, A-77) | 403 | `errors.forbidden.warehouse_out_of_scope` |
 

@@ -327,6 +327,8 @@
     "validation_failed_document_too_largeAction": "Belgeyi birkaç belgeye böl.",
     "validation_failed_document_state": "Belgenin durumu bu işleme uygun değil.",
     "validation_failed_document_stateAction": "Sayfayı yenileyip belgenin güncel durumunu kontrol et.",
+    "validation_failed_scan_mismatch": "Okutulan lokasyon veya ürün görevle eşleşmiyor.",
+    "validation_failed_scan_mismatchAction": "Görevde yazan lokasyonu ve ürünü okutup yeniden dene.",
     "validation_failed_idempotency_key_required": "İstek anahtarı eksik.",
     "validation_failed_idempotency_key_requiredAction": "Sayfayı yenileyip işlemi yeniden gönder.",
     "forbidden_warehouse_out_of_scope": "Bu depo senin çalışma kapsamının dışında.",
@@ -604,6 +606,12 @@
       "updated": "Bir taslak siparişi güncelledin.",
       "cancelled": "Bir siparişi iptal ettin.",
       "line_cancelled": "Bir sipariş satırını iptal ettin."
+    },
+    "pick_assignment": {
+      "created": "Bir toplama görevlendirmesi oluşturdun."
+    },
+    "pick": {
+      "not_found": "Toplamada ürünü bulamadığını bildirdin; lokasyon sayıma alındı."
     }
   },
   "auditLog": {
