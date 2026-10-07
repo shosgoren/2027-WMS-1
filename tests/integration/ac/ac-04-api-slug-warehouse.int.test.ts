@@ -219,6 +219,13 @@ const ACTIONS: Record<string, Call> = {
   renameLocationAction: (slug) => actions.renameLocationAction!({ slug, locationId: B.childLocationId, code: loc("L") }),
   loadMoreLocationsAction: (slug) =>
     actions.loadMoreLocationsAction!({ slug, warehouseId: B.warehouseId, after: { depth: 0, code: "A", id: randomUUID() } }),
+  suggestCodeAction: (slug) => actions.suggestCodeAction!({ slug, kind: "location", warehouseId: B.warehouseId }),
+  previewBulkLocationsAction: (slug) =>
+    actions.previewBulkLocationsAction!({ slug, warehouseId: B.warehouseId, parentId: null, zone: "Z", rackFrom: 1, rackTo: 1, levelFrom: 1, levelTo: 1 }),
+  createBulkLocationsAction: (slug) =>
+    actions.createBulkLocationsAction!({ slug, warehouseId: B.warehouseId, parentId: null, zone: "Z", rackFrom: 1, rackTo: 1, levelFrom: 1, levelTo: 1, idempotencyKey: `k-${rnd()}` }),
+  searchLocationsAction: (slug) => actions.searchLocationsAction!({ slug, warehouseId: B.warehouseId, q: "A" }),
+  getSetupProgressAction: (slug) => actions.getSetupProgressAction!({ slug }),
 };
 
 describe("depo Server Action'ları", () => {

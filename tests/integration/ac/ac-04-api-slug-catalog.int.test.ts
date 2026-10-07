@@ -132,7 +132,12 @@ const calls = (): Record<string, Call> => ({
   setConversionAction: (slug) => act.setConversionAction!({ slug, itemId: B.itemId, unitId: B.boxUnitId, factor: "99" }),
   addBarcodeAction: (slug) => act.addBarcodeAction!({ slug, itemId: B.itemId, unitId: null, barcode: `9${rnd()}`, quantity: null }),
   removeBarcodeAction: (slug) => act.removeBarcodeAction!({ slug, barcodeId: bBarcode }),
+  suggestItemCodeAction: (slug) => act.suggestItemCodeAction!({ slug }),
+  searchItemsAction: (slug) => act.searchItemsAction!({ slug, q: "a" }),
 });
+
+/** `stock.view` ile çalışan salt okuma eylemleri (T-250): tenant üyesi her rol okuyabilir; çapraz tenant yine NOT_FOUND. */
+const READ_ONLY_ACTIONS: ReadonlySet<string> = new Set(["searchItemsAction"]);
 
 describe("katalog eylemleri (API: Server Action)", () => {
   it("@AC-04 kapsam: items/actions.ts dışa aktarımlarının tamamı bu tabloda (yeni eylem testsiz kalamaz)", () => {
@@ -197,11 +202,18 @@ describe("katalog eylemleri (API: Server Action)", () => {
     const outsider = (await adm.query<{ id: string }>("INSERT INTO public.users (name, email, email_verified) VALUES ('T219 outsider', $1, true) RETURNING id", [`t219-${rnd()}@example.test`])).rows[0]!.id;
     const beforeA = await snapshot(A);
     for (const name of Object.keys(calls())) {
-      for (const user of [outsider, B.ownerUserId, B.memberUserId, A.memberUserId]) {
+      // Salt okuma eylemlerinde (`stock.view`) A'nın KENDİ düşük yetkili üyesi meşru okuyucudur (aşağıda olumlu kontrol); yazma eylemlerinde reddedilir.
+      const readOnly = READ_ONLY_ACTIONS.has(name);
+      for (const user of [outsider, B.ownerUserId, B.memberUserId, ...(readOnly ? [] : [A.memberUserId])]) {
         as(user);
         const r = await calls()[name]!(A.slug);
         expect(r.ok, `${name} ${user}`).toBe(false);
         if (!r.ok) expect(["NOT_FOUND", "FORBIDDEN"], `${name} ${user}`).toContain(r.error.code);
+      }
+      if (readOnly) {
+        as(A.memberUserId);
+        const own = await calls()[name]!(A.slug);
+        expect(own.ok, `${name} A üyesi (olumlu kontrol): ${JSON.stringify(own)}`).toBe(true);
       }
       as(null);
       const anon = await calls()[name]!(A.slug);
