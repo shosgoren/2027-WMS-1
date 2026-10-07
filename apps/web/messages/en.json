@@ -1157,7 +1157,7 @@
     "noEligible": "Nobody can do this kind of task yet. Give a suitable role on the team screen first.",
     "cancelTitle": "Cancel task",
     "reasonLabel": "Reason for cancelling",
-    "reasonHint": "Required; written to the audit log. At most 500 characters.",
+    "reasonHint": "Required; written to the audit log. At most 500 characters. Do not write personal information such as a person's name or health details.",
     "back": "Go back",
     "submit": "Save",
     "confirmCancel": "Cancel task",
