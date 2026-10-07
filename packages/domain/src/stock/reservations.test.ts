@@ -136,6 +136,57 @@ describe("planReservationEffects: çıkışta tüketim (Senaryo A adım 7)", () 
   });
 });
 
+describe("planReservationEffects: sevkte sipariş rezervasyonu tüketimi (T-308, Senaryo A adım 7)", () => {
+  const ORDER_LINE = U(800);
+  /** Sipariş satırı rezervasyonu: `documentLineId` boş. */
+  const ores = (id: number, dim: string, q: number, status = "ACTIVE"): LockedReservation => ({ id: U(id), stockDimensionId: dim, documentLineId: null, quantity: `${q}.000000`, status });
+  const consume = (ids: number[], lineId = LINE_A) => [{ lineId, orderLineId: ORDER_LINE, reservationIds: ids.map(U) }];
+
+  it("bildirilen sipariş rezervasyonu tüketilir (kısmi: kalan ACTIVE); kısmi payın kaynağı SİPARİŞ satırıdır", () => {
+    const fx = planReservationEffects({
+      kind: "STOCK_OUT",
+      entries: [entry(LINE_A, SEVK, -m(3))],
+      locked: lockedOf([ores(10, DIM_SEVK, 4)]),
+      dimIdByIdentity,
+      consumes: consume([10]),
+    });
+    expect(fx.consumeOps.map((o) => [o.id, o.take, o.rest])).toEqual([[U(10), m(3), m(1)]]);
+    expect(fx.consumeOps[0]?.source).toEqual({ kind: "ORDER_LINE", lineId: ORDER_LINE });
+    expect(fx.reservedDelta.get(DIM_SEVK)).toBe(-m(3));
+    expect(fx.ownReserved.get(dimensionIdentity(SEVK))).toBe(m(3));
+  });
+  it("bildirilmemişse sipariş rezervasyonuna dokunulmaz (genel belge STOCK_OUT'u rezervasyonu tüketemez, A-134)", () => {
+    const fx = planReservationEffects({
+      kind: "STOCK_OUT",
+      entries: [entry(LINE_A, SEVK, -m(3))],
+      locked: lockedOf([ores(10, DIM_SEVK, 4)]),
+      dimIdByIdentity,
+    });
+    expect(fx.consumeOps).toEqual([]);
+    expect(fx.reservedDelta.size).toBe(0);
+  });
+  it("çıkış rezervasyon toplamını aşarsa ret (rezervasyonsuz sevk yolu yok)", () => {
+    expect(
+      code(() => planReservationEffects({ kind: "STOCK_OUT", entries: [entry(LINE_A, SEVK, -m(5))], locked: lockedOf([ores(10, DIM_SEVK, 4)]), dimIdByIdentity, consumes: consume([10]) })),
+    ).toBe("VALIDATION_FAILED");
+  });
+  it("yanlış boyut, kapalı rezervasyon, belge satırı rezervasyonu, tekrar eden kimlik ve çıkış satırı olmayan bildirim reddedilir", () => {
+    const base = { kind: "STOCK_OUT" as const, entries: [entry(LINE_A, SEVK, -m(2))], dimIdByIdentity };
+    expect(code(() => planReservationEffects({ ...base, locked: lockedOf([ores(10, DIM_R01, 4)]), consumes: consume([10]) }))).toBe("VALIDATION_FAILED");
+    expect(code(() => planReservationEffects({ ...base, locked: lockedOf([ores(10, DIM_SEVK, 4, "CONSUMED")]), consumes: consume([10]) }))).toBe("VALIDATION_FAILED");
+    expect(code(() => planReservationEffects({ ...base, locked: lockedOf([res(10, DIM_SEVK, LINE_B, 4)]), consumes: consume([10]) }))).toBe("VALIDATION_FAILED");
+    expect(code(() => planReservationEffects({ ...base, locked: lockedOf([ores(10, DIM_SEVK, 4)]), consumes: consume([10, 10]) }))).toBe("VALIDATION_FAILED");
+    expect(code(() => planReservationEffects({ ...base, locked: lockedOf([ores(10, DIM_SEVK, 4)]), consumes: consume([10], LINE_B) }))).toBe("VALIDATION_FAILED");
+  });
+  it("tüketim yalnız STOCK_OUT'ta vardır (STOCK_IN/STOCK_MOVE bildirimi ret)", () => {
+    const locked = lockedOf([ores(10, DIM_SEVK, 4)]);
+    expect(code(() => planReservationEffects({ kind: "STOCK_IN", entries: [entry(LINE_A, SEVK, m(2))], locked, dimIdByIdentity, consumes: consume([10]) }))).toBe("VALIDATION_FAILED");
+    expect(
+      code(() => planReservationEffects({ kind: "STOCK_MOVE", entries: [entry(LINE_B, R01, -m(2)), entry(LINE_B, SEVK, m(2))], locked, dimIdByIdentity, consumes: consume([10], LINE_B) })),
+    ).toBe("VALIDATION_FAILED");
+  });
+});
+
 describe("planReservationEffects: toplama taşıması (Senaryo A adım 6)", () => {
   const moveEntries = (qty: number): LedgerEntry[] => [entry(LINE_B, R01, -m(qty)), entry(LINE_B, SEVK, m(qty))];
   it("rezervasyon malla birlikte hedef boyuta taşınır: kaynak reserved −, hedef +", () => {

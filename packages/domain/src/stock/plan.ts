@@ -12,7 +12,7 @@ import type { StockDimensionKey } from "@wms/db";
 export type PostingKind = "STOCK_IN" | "STOCK_OUT" | "STOCK_MOVE";
 export type PostingStatus = StockDimensionKey["stockStatus"];
 /** 16 kural 4 + A-79: bu kartta yalnızca belge türünden türeyen nedenler. */
-export type LedgerReason = "RECEIPT" | "SHIPMENT" | "MOVE";
+export type LedgerReason = "RECEIPT" | "SHIPMENT" | "RETURN" | "MOVE";
 
 /**
  * A-248-1 (Q-49; 16 kural 3 yalnız "durum değişimi = −/+ çifti" der, geçiş matrisi tanımsızdır): fail-closed beyaz liste — yalnızca kalite onayı
@@ -129,13 +129,15 @@ const invalid = (): AppError => new AppError("VALIDATION_FAILED");
  * Satır biçimi + plan. Biçim ihlali (kaynak/hedef lokasyonun türle uyuşmaması, boş hareket) `VALIDATION_FAILED`.
  * IN: yalnız hedef; OUT: yalnız kaynak; MOVE: ikisi de ve kaynak boyut ≠ hedef boyut.
  */
-export function buildPostingPlan(kind: PostingKind, lines: readonly PostingLine[]): PostingPlan {
+export function buildPostingPlan(kind: PostingKind, lines: readonly PostingLine[], reasonOverride?: LedgerReason): PostingPlan {
   const entries: LedgerEntry[] = [];
   const ordered = [...lines].sort((a, b) => a.lineNo - b.lineNo);
   for (const line of ordered) {
     const qty = toMicro(line.baseQuantity);
     if (qty <= 0n) throw invalid();
-    const reason = REASON_BY_KIND[kind];
+    // T-308: müşteri iadesi `STOCK_IN` belgesidir ama nedeni `RETURN`'dür (A-79, ADR-021 §3); başka türe neden geçilemez.
+    if (reasonOverride !== undefined && !(kind === "STOCK_IN" && reasonOverride === "RETURN")) throw invalid();
+    const reason = reasonOverride ?? REASON_BY_KIND[kind];
     const { sourceLocationId: src, targetLocationId: dst } = line;
     // Hedef durum yalnız STOCK_MOVE'da anlamlıdır (IN/OUT tek uçlu); aksi kaynak ≠ hedef durum sessizce yanlış boyuta yazardı.
     if (kind !== "STOCK_MOVE" && line.sourceStatus !== line.targetStatus) throw invalid();

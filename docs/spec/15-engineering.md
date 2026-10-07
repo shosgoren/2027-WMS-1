@@ -53,6 +53,7 @@ Ayrıntılar (`detail`; kodu değiştirmez, istemciyi yönlendirir — `ERROR_DE
 | `VALIDATION_FAILED` + `DOCUMENT_TOO_LARGE` (Faz 2) | Belge satır sayısı sert sınırı aşar (A-07) | 400 | `errors.validation_failed.document_too_large` |
 | `VALIDATION_FAILED` + `DOCUMENT_STATE` (Faz 2) | Belge durumu eyleme uygun değil | 400 | `errors.validation_failed.document_state` |
 | `VALIDATION_FAILED` + `SCAN_MISMATCH` (Faz 3A) | Okutulan lokasyon/ürün görevle eşleşmez (toplama) | 400 | `errors.validation_failed.scan_mismatch` |
+| `VALIDATION_FAILED` + `RETURN_EXCEEDS_SHIPPED` (Faz 3A) | Müşteri iadesi, sipariş satırının sevk edilen − önceki iade miktarını aşar (A-135) | 400 | `errors.validation_failed.return_exceeds_shipped` |
 | `VALIDATION_FAILED` + `IDEMPOTENCY_KEY_REQUIRED` (Faz 2) | Stok komutunda istemci anahtarı yok (ADR-018) | 400 | `errors.validation_failed.idempotency_key_required` |
 | `FORBIDDEN` + `WAREHOUSE_OUT_OF_SCOPE` (Faz 2) | Depo, kullanıcının depo kapsamı dışında (A-46, A-77) | 403 | `errors.forbidden.warehouse_out_of_scope` |
 
