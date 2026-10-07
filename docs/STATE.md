@@ -1,6 +1,6 @@
 # STATE (≤80 satır — her görev sonunda Supervisor günceller)
 
-**Oturum kilidi:** session_01C59FRaUynaDdhNGZoRbKsY · 2026-10-07T09:25Z (zamanlanmış oturum: kilit 3 saatten yeniyse ve başka oturumunsa hiçbir şey yapmadan çık; değilse kendi kimliğinle yenile, her push'ta zamanı güncelle)
+**Oturum kilidi:** session_01C59FRaUynaDdhNGZoRbKsY · 2026-10-07T09:45Z (zamanlanmış oturum: kilit 3 saatten yeniyse ve başka oturumunsa hiçbir şey yapmadan çık; değilse kendi kimliğinle yenile, her push'ta zamanı güncelle)
 **Faz:** 2 stok çekirdeği TAMAM (main) + Faz 3A (int/faz3a: …T-222/253/256/258/259/270/271/272/273/274/304/305/306; tam test:int EXIT=0 82/82 1612+). Kullanıcı UTC+3: saat `date -u` ile. Kota kesintisinde sıfırlanma saatine send_later ZORUNLU.
 **Aktif görev:** T-307 toplama (SCAN_MISMATCH eki), T-313 kabul ekranları (scanner çekirdeği ayrımı + e2e sayım güncellemesi), T-275 kabul/arka plan takipleri (0024). int/faz3a @3029186.
 **Son tamamlanan:** #81 Faz 3A ilk dilim → main + staging (9130571, 07:47Z) · #80 T-220 qa · #79 T-223 zengin demo · #78 T-255 · #77 T-221 rezervasyon · #76 T-246d · #75 T-249 · #74 palet · önceki: JOURNAL
