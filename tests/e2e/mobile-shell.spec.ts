@@ -82,18 +82,37 @@ test("telefon kabuğu: ana ekran tek ekran, menü, alt sekme; masaüstü korunur
     await expect(page.getByRole("button", { name: "Çıkış yap" })).toHaveCount(0); // menüde (kapalı)
     await expect(page.getByTestId("bottom-nav")).toBeVisible();
 
-    // Tüm kartlar (5 etkin + 6 "Yakında") kaydırmadan görünür alanda, üst çubuk ile alt sekme çubuğu arasında.
+    // T-270 (Supervisor kararı: kasıtlı şartname değişikliği): 5 etkin döşeme kaydırmadan görünür alanda, üst çubuk ile alt sekme
+    // çubuğu arasında (kutu sınırı assertion'ları aynı). 6 "Yakında" iş ızgarada döşeme değil, tek satırlık düğmenin arkasındadır:
+    // düğme görünür alanda; dokununca tam 6 iş adı + "Yakında" listelenir (toplam 11 iş erişilebilir).
     const barBottom = (await bar.boundingBox())?.y ?? 0;
     const navTop = (await page.getByTestId("bottom-nav").boundingBox())?.y ?? 0;
-    const cards = tasks.locator("[data-state]");
-    expect(await cards.count()).toBe(11);
-    for (let i = 0; i < 11; i++) {
+    const cards = tasks.locator('[data-state="active"]');
+    expect(await cards.count()).toBe(5);
+    for (let i = 0; i < 5; i++) {
       const box = await cards.nth(i).boundingBox();
       expect(box, `${size.name}: kart ${i}`).not.toBeNull();
       expect((box?.y ?? 0) + (box?.height ?? 0), `${size.name}: kart ${i} alt sekmenin üstünde`).toBeLessThanOrEqual(navTop + 0.5);
       expect(box?.y ?? 0, `${size.name}: kart ${i} üst çubuğun altında`).toBeGreaterThanOrEqual(barBottom);
       expect((box?.x ?? 0) + (box?.width ?? 0), `${size.name}: kart ${i} sağ kenar`).toBeLessThanOrEqual(size.width);
     }
+    const soonRow = page.locator(".soon-toggle > summary");
+    const soonBox = await soonRow.boundingBox();
+    expect(soonBox, `${size.name}: Yakında satırı görünür`).not.toBeNull();
+    expect((soonBox?.y ?? 0) + (soonBox?.height ?? 0), `${size.name}: Yakında satırı alt sekmenin üstünde`).toBeLessThanOrEqual(navTop + 0.5);
+    expect(soonBox?.y ?? 0, `${size.name}: Yakında satırı üst çubuğun altında`).toBeGreaterThanOrEqual(barBottom);
+    await expect(soonRow).toContainText("Yakında gelecekler (6)");
+    await soonRow.click();
+    const soonCards = tasks.locator('[data-state="soon"]');
+    await expect(soonCards).toHaveCount(6);
+    for (const name of ["Depoya mal geldi", "Depodan mal çıkacak", "Malı başka depoya taşıyacağım", "Rafı sayacağım", "Bir ürün nerede, kaç tane var?", "Yanlış bir şey yaptım"]) {
+      const card = soonCards.filter({ hasText: name });
+      await expect(card, `${size.name}: ${name}`).toHaveCount(1);
+      await expect(card).toBeVisible();
+      await expect(card).toContainText("Yakında");
+    }
+    await soonRow.click();
+    await expect(cards.first()).toBeVisible();
 
     // Dokunma hedefleri >= 48 px (üst çubuk, kartlar, alt sekmeler).
     expect(await smallTargets(page, "body"), `${size.name}: 48 px altı dokunma hedefi`).toEqual([]);
