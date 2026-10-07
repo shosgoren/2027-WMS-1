@@ -147,6 +147,22 @@ export function bulkRefLookupSql(tenantId: string, key: string): SQL {
            LIMIT 1`;
 }
 
+/**
+ * T-273 (T-259 MINOR): GEÇİŞ penceresi — T-250 sürümünün yazdığı eski satırlar `entity_id = <ilk lokasyonun kimliği>` taşır, anahtar yalnızca
+ * `change_summary->>'bulk_ref'`tedir (0021 indeksi bunları kapsamaz; jsonb `->>` leakproof olmadığından RLS altında seq scan). Yeni biçim satırı
+ * bulunamazsa YALNIZCA bu geri uyumlu arama çalışır; aynı {@link IDEMPOTENCY_WINDOW_DAYS} penceresiyle sınırlıdır, yani eski biçimin yazılabildiği
+ * son andan 7 gün sonra hiçbir eski satır kapsama girmez ve bu arama kaldırılabilir (taramanın bedeli o güne dek sınırlı: yalnızca pencere içi
+ * `location_batch` satırları). `windowDays` yalnızca pencere sınırını sınamak içindir (audit `occurred_at` değiştirilemez). Yeni biçim satırlarını (`entity_id = anahtar`) dışlamaz; ilk arama zaten onları bulur.
+ */
+export function bulkRefLegacyLookupSql(tenantId: string, key: string, windowDays: number = IDEMPOTENCY_WINDOW_DAYS): SQL {
+  return sql`SELECT change_summary->>'spec_fp' AS spec_fp, change_summary->>'created' AS created
+            FROM public.audit_logs
+           WHERE tenant_id = ${tenantId}::uuid AND entity_type = 'location_batch' AND action = 'location.created'
+             AND change_summary->>'bulk_ref' = ${key}
+             AND occurred_at > now() - make_interval(days => ${windowDays}::int)
+           LIMIT 1`;
+}
+
 function parentOf(spec: BulkLocationsSpec): string | null {
   return spec.parentId === undefined || spec.parentId === null ? null : parseUuid(spec.parentId);
 }
@@ -215,7 +231,9 @@ export async function createBulkLocations(params: WarehouseCallParams, input: Cr
     await assertWarehouseVisible(tx, m, [warehouseId]);
     // Aynı anahtarın eşzamanlı iki isteği burada serileşir; ikincisi birincinin audit satırını görür.
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`${m.tenantId}:bulk-locations:${key}`}, 0))`);
-    const prior = await tx.execute<{ spec_fp: string | null; created: string | null }>(bulkRefLookupSql(m.tenantId, key));
+    type Prior = { spec_fp: string | null; created: string | null };
+    let prior = await tx.execute<Prior>(bulkRefLookupSql(m.tenantId, key));
+    if (prior[0] === undefined) prior = await tx.execute<Prior>(bulkRefLegacyLookupSql(m.tenantId, key)); // T-273: eski biçim (geçiş penceresi)
     if (prior[0] !== undefined) {
       if (prior[0].spec_fp !== fp) throw new AppError("IDEMPOTENCY_MISMATCH");
       return { created: Number(prior[0].created ?? plan.codes.length), first, last, replayed: true };

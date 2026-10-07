@@ -1,6 +1,8 @@
-// Ortak SALT OKUNUR modül (T-253): rezervasyon okumaları + belge/ürün/lokasyon okuma-denetim yardımcıları. `documents.ts` ↔ `reservations.ts`
+// Ortak okuma modülü (T-253): rezervasyon okumaları + belge/ürün/lokasyon okuma-denetim yardımcıları. `documents.ts` ↔ `reservations.ts`
 // içe aktarma döngüsünü kırar: documents → reservations → reservation-reads; bu modül ikisinden de HİÇBİRİNE bağımlı değildir (birim testi
-// import grafiğini doğrular). Stok tablolarına yazım burada YOKTUR (stock-sql-guard; yazıcılar `reservations.ts`'tedir).
+// import grafiğini doğrular). Stok tablolarına yazım burada YOKTUR (stock-sql-guard; yazıcılar `reservations.ts`'tedir). Tamamen kilitsiz DEĞİLDİR:
+// `assertItemsActive` (items) ve `assertLocationsActiveInWarehouse` (locations) satırları `FOR SHARE` ile KİLİTLER (arşivleme `FOR NO KEY UPDATE` ile
+// çakışsın diye); rezervasyon okumaları ve `readDocumentHeader` kilit almaz (başlığı çağıran `acquireStockLocks` ile kilitlemiş olmalıdır).
 //   - Rezervasyon okumaları (`readReservationPlanRows`, `readCancellationLockSet`, `stagedAmong`): kilit planı için KİLİTSİZ okuma; karar
 //     kilitten SONRA aynı transaction'da yeniden okunan değerle verilir (çağıranlar `apply` içinde tekrar çağırır; kilitli görüntüyle karşılaştırılır).
 //   - Belge/ürün/lokasyon yardımcıları (`readDocumentHeader`, `assertNotProcessing`, `assertItemsActive`, `assertLocationsActiveInWarehouse`):
@@ -243,11 +245,13 @@ export interface DocumentHeader {
  * ve `posting_job_id` kilit altında okunur). Yoksa `NOT_FOUND`.
  */
 export async function readDocumentHeader(tx: AccessTx, tenantId: string, documentId: string): Promise<DocumentHeader> {
+  const tenant = uuid(tenantId); // T-273: kimlikler sorgudan ÖNCE doğrulanır (geçersiz → VALIDATION_FAILED, DB 22P02 değil); küçük harfe çevrilir
+  const document = uuid(documentId);
   const rows = await tx.execute<{
     id: string; kind: string; status: DocumentHeader["status"]; version: number | string; warehouse_id: string; business_date: string; reason: string | null; posting_job_id: string | null;
   }>(
     sql`SELECT id, kind, status, version, warehouse_id, business_date::text AS business_date, reason, posting_job_id
-          FROM public.documents WHERE tenant_id = ${tenantId}::uuid AND id = ${documentId}::uuid`,
+          FROM public.documents WHERE tenant_id = ${tenant}::uuid AND id = ${document}::uuid`,
   );
   const r = rows[0];
   if (r === undefined) throw new AppError("NOT_FOUND");
