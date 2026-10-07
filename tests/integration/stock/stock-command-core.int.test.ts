@@ -437,6 +437,48 @@ describe("özellik bayrağı, hata eşlemesi, ürün durumu", () => {
     expect(await idemRows(A, key)).toHaveLength(0);
   });
 
+  it("T-256: bayrak açıkken aynı seriyi isteyen eşzamanlı komutlar 30 turda yeniden denemesiz (retry sayacı 0, 40P01 yok) tamamlanır", async () => {
+    const old = process.env.STOCK_SERIAL_LOCK_ENABLED;
+    process.env.STOCK_SERIAL_LOCK_ENABLED = "true";
+    const retries: unknown[] = [];
+    const logger = { info: (m: string, f?: Record<string, unknown>) => void (m === "stock.command.retry" && retries.push(f)), error: () => undefined };
+    try {
+      for (let round = 0; round < 30; round++) {
+        const locationId = uuid();
+        await adm.query("BEGIN");
+        try {
+          await adm.query("SELECT set_config('app.current_tenant_id', $1, true)", [A.tenantId]);
+          await adm.query("INSERT INTO public.locations (tenant_id, id, warehouse_id, parent_id, code, name, depth, kind) VALUES ($1, $2, $3, NULL, $4, 'T256 tur', 0, 'STORAGE')", [
+            A.tenantId,
+            locationId,
+            A.warehouseId,
+            `T256-${locationId.slice(0, 8)}`,
+          ]);
+          await adm.query("COMMIT");
+        } catch (e) {
+          await adm.query("ROLLBACK");
+          throw e;
+        }
+        const one = (stockStatus: "AVAILABLE" | "QUARANTINE") =>
+          cmd(A, {
+            key: uuid(),
+            input: { round, stockStatus },
+            logger,
+            plan: async () => ({
+              warehouseIds: [A.warehouseId],
+              locks: { ...EMPTY_LOCK_PLAN, locationIds: [locationId], dimensions: [{ ...dim(A.itemId, locationId, { lotId: A.lotId, serialId: A.serialId }), stockStatus }], serialIds: [A.serialId] },
+            }),
+          });
+        const outcomes = await Promise.all([one("AVAILABLE"), one("QUARANTINE")]);
+        expect(outcomes.map((o) => o.status)).toEqual(["COMPLETED", "COMPLETED"]);
+      }
+      expect(retries).toHaveLength(0);
+    } finally {
+      if (old === undefined) delete process.env.STOCK_SERIAL_LOCK_ENABLED;
+      else process.env.STOCK_SERIAL_LOCK_ENABLED = old;
+    }
+  }, 120_000);
+
   it("TRACKING_VIOLATION (23514, ensureDimensions) → AppError TRACKING_VIOLATION 422 ve kalıcı ret", async () => {
     const key = uuid();
     const plan = async (): Promise<StockCommandPlan> => ({

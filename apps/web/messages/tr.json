@@ -317,6 +317,8 @@
     "validation_failed_handling_unit_cycleAction": "Başka bir üst taşıma birimi seç.",
     "validation_failed_barcode_ambiguous": "Bu barkod birden fazla ürün veya birimle eşleşiyor.",
     "validation_failed_barcode_ambiguousAction": "Ürünü listeden elle seç.",
+    "validation_failed_code_ambiguous": "Bu eski kod birden fazla kayıtla eşleşiyor.",
+    "validation_failed_code_ambiguousAction": "Kaydı güncel koduyla ara.",
     "validation_failed_unit_conversion_invalid": "Birim dönüşüm katsayısı geçersiz.",
     "validation_failed_unit_conversion_invalidAction": "Sıfırdan büyük ve en çok 6 ondalıklı bir katsayı gir.",
     "validation_failed_quantity_scale": "Miktar, ürünün izin verdiği ondalık basamak sayısını aşıyor.",
@@ -752,7 +754,13 @@
         "conversion": "Dönüşüm kaydedildi.",
         "barcodeAdded": "Barkod eklendi.",
         "barcodeRemoved": "Barkod kaldırıldı.",
-        "archived": "Ürün arşivlendi."
+        "archived": "Ürün arşivlendi.",
+        "codeSame": "Kod zaten bu; bir şey değişmedi.",
+        "codeUndone": "Kod eski haline döndü."
+      },
+      "codeEdit": {
+        "button": "Kodu değiştir",
+        "for": "{name} için kodu değiştir"
       }
     },
     "errors": {
@@ -789,7 +797,8 @@
       "internalAction": "Biraz sonra yeniden dene; sürerse hata kodunu destek ekibine ilet."
     },
     "locked": "Ürünleri görme yetkin yok.",
-    "lockedAction": "Çalışma alanı yöneticine sor."
+    "lockedAction": "Çalışma alanı yöneticine sor.",
+    "renamedNote": "Bu kod {code} olarak değişti (eski kod: {old})"
   },
   "warehouses": {
     "title": "Depo ve raflar",
@@ -816,7 +825,9 @@
     "firstPage": "Başa dön",
     "done": {
       "created": "Depo eklendi.",
-      "archived": "Depo arşivlendi."
+      "archived": "Depo arşivlendi.",
+      "codeSame": "Kod zaten bu; bir şey değişmedi.",
+      "codeUndone": "Kod eski haline döndü."
     },
     "confirmArchive": {
       "title": "{name} arşivlensin mi?",
@@ -862,7 +873,9 @@
       "parentIs": "Bağlı olduğu yer: {parent}",
       "done": {
         "created": "Lokasyon eklendi.",
-        "archived": "Lokasyon arşivlendi."
+        "archived": "Lokasyon arşivlendi.",
+        "codeSame": "Kod zaten bu; bir şey değişmedi.",
+        "codeUndone": "Kod eski haline döndü."
       },
       "confirmArchive": {
         "title": "{name} arşivlensin mi?",
@@ -913,7 +926,13 @@
       "validation_failed_idempotency_key_required": "İstek kimliği eksik.",
       "validation_failed_idempotency_key_requiredAction": "Sayfayı yenileyip yeniden dene.",
       "idempotency_mismatch": "Bu istek kimliği başka bir girdiyle kullanılmış.",
-      "idempotency_mismatchAction": "Formu kapatıp yeniden aç, sonra yeniden dene."
+      "idempotency_mismatchAction": "Formu kapatıp yeniden aç, sonra yeniden dene.",
+      "validation_failed_code_ambiguous": "Bu eski kod birden çok lokasyonun geçmişinde var; hangisi olduğu anlaşılamıyor.",
+      "validation_failed_code_ambiguousAction": "Lokasyonun güncel kodunu yazarak ara."
+    },
+    "codeEdit": {
+      "button": "Kodu değiştir",
+      "for": "{name} için kodu değiştir"
     }
   },
   "field": {
@@ -1066,5 +1085,18 @@
       "done": "{count} lokasyon oluşturuldu: {first} … {last}",
       "doneReplayed": "Bu istek zaten işlenmişti; {count} lokasyon var."
     }
+  },
+  "codeEdit": {
+    "title": "Kodu değiştir",
+    "current": "Şimdiki kod: {code}",
+    "newCode": "Yeni kod",
+    "newCodeHint": "Bu kod başka bir kartta kullanılıyorsa sana hemen söyleriz.",
+    "preview": "{from} → {to}",
+    "previewSame": "Yeni bir kod yaz; değişiklik burada görünür.",
+    "history": "Geçmiş hareketler etkilenmez: eski kayıtlar bu karta bağlı kalır. Eski kodu okutan ya da arayan, yeni koda yönlendirilir.",
+    "cancel": "Vazgeç",
+    "submit": "Kodu değiştir",
+    "done": "Kod değişti: {from} → {to}.",
+    "undo": "Geri al ({code} koduna dön)"
   }
 }

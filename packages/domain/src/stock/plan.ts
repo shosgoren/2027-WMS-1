@@ -19,7 +19,12 @@ export type LedgerReason = "RECEIPT" | "SHIPMENT" | "MOVE";
  * (QUARANTINE→AVAILABLE) ve karantinaya alma (AVAILABLE→QUARANTINE). DAMAGED/BLOCKED'a ya da DAMAGED/BLOCKED'dan geçiş, matris netleşene dek reddedilir
  * (hasarlı stok hiçbir zaman kullanılabilir sayılmaz; Senaryo A varyantı).
  */
-const ALLOWED_STATUS_TRANSITIONS: ReadonlySet<string> = new Set(["QUARANTINE>AVAILABLE", "AVAILABLE>QUARANTINE"]);
+export const ALLOWED_STATUS_TRANSITION_PAIRS: readonly (readonly [PostingStatus, PostingStatus])[] = [
+  ["QUARANTINE", "AVAILABLE"],
+  ["AVAILABLE", "QUARANTINE"],
+];
+// T-258: aynı liste DB'de `0020_target_status_guard` tetikleyicisinde sabittir; eşitlik posting.int.test.ts'te 4x4 çift üzerinden doğrulanır.
+const ALLOWED_STATUS_TRANSITIONS: ReadonlySet<string> = new Set(ALLOWED_STATUS_TRANSITION_PAIRS.map(([a, b]) => `${a}>${b}`));
 export const isStatusTransitionAllowed = (from: PostingStatus, to: PostingStatus): boolean => from === to || ALLOWED_STATUS_TRANSITIONS.has(`${from}>${to}`);
 
 export const REASON_BY_KIND: Readonly<Record<PostingKind, LedgerReason>> = {
