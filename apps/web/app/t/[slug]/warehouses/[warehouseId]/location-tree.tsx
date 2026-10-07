@@ -11,7 +11,8 @@ import { Banner, Button, ConfirmDialog, EmptyState } from "@wms/ui";
 import { BulkBuilder } from "../../easy-setup/bulk-builder.tsx";
 import { PageBody } from "../../easy-setup/sheet.tsx";
 import { SetupGuide, isSetupComplete, useSetupProgress } from "../../easy-setup/setup-guide.tsx";
-import { archiveLocationAction, createLocationAction, getSetupProgressAction, loadMoreLocationsAction, suggestCodeAction } from "../actions.ts";
+import { CodeChangedNotice, CodeEditDialog } from "../../code-edit-dialog.tsx";
+import { archiveLocationAction, createLocationAction, getSetupProgressAction, loadMoreLocationsAction, renameLocationAction, suggestCodeAction } from "../actions.ts";
 import { CreateDialog, ServerErrorBanner } from "../warehouses-view.tsx";
 import type { ServerError } from "../warehouses-view.tsx";
 
@@ -81,6 +82,9 @@ export function LocationTree({
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set(initialItems.filter((i) => i.parentId === null).map((i) => i.id)));
   const [parent, setParent] = useState<{ readonly id: string | null; readonly label: string } | undefined>(undefined);
   const [archiving, setArchiving] = useState<LocationItem | null>(null);
+  const [editing, setEditing] = useState<LocationItem | null>(null);
+  const [codeChanged, setCodeChanged] = useState<{ readonly id: string; readonly from: string; readonly to: string } | null>(null);
+  const [undoing, setUndoing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [more, setMore] = useState(false);
   const [error, setError] = useState<{ error: ServerError; scope: "warehouse" | "location" } | null>(null);
@@ -134,6 +138,26 @@ export function LocationTree({
     setExpanded(n);
   }
 
+  async function changeCode(id: string, code: string) {
+    const r = await renameLocationAction({ slug, locationId: id, code });
+    return r.ok ? ({ ok: true, changed: r.data.changed } as const) : ({ ok: false, error: { code: r.error.code, detail: r.error.detail, requestId: r.error.requestId } } as const);
+  }
+  /** "Geri al" (N-03): eski koda dönüş aynı sunucu komutudur. */
+  async function undoCode() {
+    if (codeChanged === null) return;
+    setUndoing(true);
+    setError(null);
+    const r = await changeCode(codeChanged.id, codeChanged.from);
+    setUndoing(false);
+    if (!r.ok) {
+      setError({ error: r.error, scope: "location" });
+      return;
+    }
+    setCodeChanged(null);
+    setNotice(t("done.codeUndone"));
+    router.refresh();
+  }
+
   async function archive() {
     if (archiving === null) return;
     setBusy(true);
@@ -168,7 +192,7 @@ export function LocationTree({
 
   return (
     <>
-      <PageBody hide={bulkOpen || parent !== undefined}>
+      <PageBody hide={bulkOpen || parent !== undefined || editing !== null}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <Link href={base} className={LINK_CLS}>
@@ -192,6 +216,7 @@ export function LocationTree({
         </div>
       </div>
 
+      {codeChanged ? <CodeChangedNotice from={codeChanged.from} to={codeChanged.to} busy={undoing} onUndo={() => void undoCode()} /> : null}
       {notice ? <Banner kind="info">{notice}</Banner> : null}
       {error ? <ServerErrorBanner error={error.error} returnTo={returnTo} scope={error.scope} /> : null}
       {guide && progress !== null ? <SetupGuide slug={slug} progress={progress} /> : null}
@@ -236,6 +261,9 @@ export function LocationTree({
                     <div role="group" aria-label={tw("actionsFor", { name: it.name })} className="flex min-w-0 flex-col gap-2 sm:flex-row sm:flex-wrap sm:*:shrink-0 sm:*:whitespace-nowrap">
                       <Button variant="secondary" disabled={!writable} aria-describedby={lockText === null ? undefined : noteId} onClick={() => setParent({ id: it.id, label: `${it.name} (${it.code})` })}>
                         {t("addChild")}
+                      </Button>
+                      <Button variant="secondary" disabled={!writable} aria-describedby={lockText === null ? undefined : noteId} aria-label={tw("codeEdit.for", { name: it.name })} onClick={() => setEditing(it)}>
+                        {tw("codeEdit.button")}
                       </Button>
                       <Button variant="danger" disabled={!writable} aria-describedby={lockText === null ? undefined : noteId} onClick={() => setArchiving(it)}>
                         {t("archive")}
@@ -302,6 +330,25 @@ export function LocationTree({
         submit={async (v) => {
           const res = await createLocationAction({ slug, warehouseId, parentId: parent?.id ?? null, code: v.code, name: v.name, kind: v.kind, autoCode: v.autoCode });
           return res.ok ? { ok: true, data: res.data } : { ok: false, error: { code: res.error.code, detail: res.error.detail, requestId: res.error.requestId } };
+        }}
+      />
+      <CodeEditDialog
+        open={editing !== null}
+        subject={editing?.name ?? ""}
+        current={editing?.code ?? ""}
+        titleId="code-edit-location-title"
+        onClose={() => setEditing(null)}
+        submit={(code) => (editing === null ? Promise.resolve({ ok: false, error: { code: "NOT_FOUND" } } as const) : changeCode(editing.id, code))}
+        renderError={(e) => <ServerErrorBanner error={e} returnTo={returnTo} scope="location" />}
+        onDone={(r) => {
+          const id = editing?.id;
+          setEditing(null);
+          setError(null);
+          if (r.changed && id !== undefined) {
+            setNotice(null);
+            setCodeChanged({ id, from: r.from, to: r.to });
+          } else setNotice(t("done.codeSame"));
+          router.refresh();
         }}
       />
       <ConfirmDialog

@@ -15,6 +15,8 @@ import {
   getLocationTree,
   getSetupProgress,
   previewBulkLocations,
+  renameLocation,
+  renameWarehouse,
   searchLocations,
 } from "@wms/domain/warehouse";
 import type { LocationKindValue } from "@wms/domain/warehouse";
@@ -50,6 +52,8 @@ const archiveWarehouseSchema = z.object({ slug: slugSchema, warehouseId: idSchem
 const createLocationSchema = z
   .object({ slug: slugSchema, warehouseId: idSchema, parentId: idSchema.nullable(), code: textSchema, name: textSchema, kind: kindSchema, autoCode: z.boolean().optional() })
   .strict();
+const renameWarehouseSchema = z.object({ slug: slugSchema, warehouseId: idSchema, code: textSchema }).strict();
+const renameLocationSchema = z.object({ slug: slugSchema, locationId: idSchema, code: textSchema }).strict();
 const archiveLocationSchema = z.object({ slug: slugSchema, locationId: idSchema }).strict();
 const moreLocationsSchema = z
   .object({ slug: slugSchema, warehouseId: idSchema, after: z.object({ depth: z.number().int().min(0).max(16), code: textSchema, id: idSchema }).strict() })
@@ -80,6 +84,24 @@ export async function archiveWarehouseAction(raw: unknown) {
     const params = await writeContext(input.slug, ctx);
     const r = await archiveWarehouse(params, { warehouseId: input.warehouseId, requestId: ctx.requestId });
     return { archived: r.archived };
+  })(raw);
+}
+
+/** Depo kodunu değiştirir (T-257): normalleştirme, benzersizlik, kod geçmişi ve audit T-251 domain komutundadır. */
+export async function renameWarehouseAction(raw: unknown) {
+  return guardedAction({ schema: renameWarehouseSchema }, async (input, ctx) => {
+    const params = await writeContext(input.slug, ctx);
+    const r = await renameWarehouse(params, { warehouseId: input.warehouseId, code: input.code, requestId: ctx.requestId });
+    return { changed: r.changed };
+  })(raw);
+}
+
+/** Lokasyon kodunu değiştirir (T-257): depo içi benzersizlik ve kod geçmişi domain'dedir. */
+export async function renameLocationAction(raw: unknown) {
+  return guardedAction({ schema: renameLocationSchema }, async (input, ctx) => {
+    const params = await writeContext(input.slug, ctx);
+    const r = await renameLocation(params, { locationId: input.locationId, code: input.code, requestId: ctx.requestId });
+    return { changed: r.changed };
   })(raw);
 }
 
