@@ -236,6 +236,22 @@ async function homeLayout(page: Page, itemSelector: string): Promise<HomeLayout>
   })()`);
 }
 
+/**
+ * T-274 (Supervisor kararı): AÇIK ikincil listelerde `emptyRatio` uygulanmaz (metrik doldurma kutusu üretiyordu). Yerine aynı güçte iki ölçüt:
+ * etkileşimli ya da gerçek içerik taşımayan hiçbir kutu 160 px'i aşmaz ve satırlar altta (kapatma düğmesi alt sekmenin ≤ 16 px üstünde).
+ */
+async function expectExpandedList(page: Page, where: string): Promise<void> {
+  const m = await page.evaluate<{ maxPlain: number; plain: string; navTop: number; lastBottom: number }>(`(() => {
+    const nav = document.querySelector('[data-testid="bottom-nav"]').getBoundingClientRect();
+    const kids = [...document.querySelector('.task-grid').children].map((li) => ({ li, r: li.getBoundingClientRect() })).filter((x) => x.r.height > 0);
+    const plain = kids.filter((x) => !x.li.querySelector('a[href], button, summary, [tabindex="0"]'));
+    const maxPlain = Math.max(0, ...plain.map((x) => x.r.height));
+    return { maxPlain, plain: plain.map((x) => x.li.className).join(','), navTop: nav.top, lastBottom: Math.max(...kids.map((x) => x.r.bottom)) };
+  })()`);
+  expect(m.maxPlain, `${where}: etkileşimsiz kutu yüksekliği (${m.plain})`).toBeLessThanOrEqual(160);
+  expect(m.navTop - m.lastBottom, `${where}: açık liste altta (kapatma düğmesi alt sekmeye ≤ 16 px)`).toBeLessThanOrEqual(16);
+}
+
 /** T-274 H-03/H-04: gerekçe kartı listeye alttan bitişik; saat ikonu boyutu kaydedilir. */
 async function expectNoteCard(page: Page, note: string, rowSel: string, where: string, clockSizes: number[] | null): Promise<void> {
   const m = await page.evaluate<{ h: number; b: number; firstTop: number; icon: number }>(`(() => {
@@ -351,7 +367,7 @@ test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş al
       await expect(tasks.locator('a[data-state="active"]').first()).toBeHidden();
       const O = await homeLayout(page, ".task-grid > .soon-item > [data-state]");
       expect(O.tiles.length, `${where}: açık listede görünür iş`).toBe(6);
-      expect(O.emptyRatio, `${where}: Yakında açıkken boş alan oranı`).toBeLessThanOrEqual(0.15);
+      await expectExpandedList(page, `${where}: Yakında açık`);
       const closeBox = await soonRow.boundingBox();
       expect(O.navTop - ((closeBox?.y ?? 0) + (closeBox?.height ?? 0)), `${where}: kapatma düğmesi alt sekmeye yakın`).toBeLessThanOrEqual(16);
       expect(closeBox?.height ?? 0, `${where}: kapatma düğmesi dokunma yüksekliği`).toBeGreaterThanOrEqual(48);
@@ -373,7 +389,7 @@ test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş al
       // Toplayıcı: yetkisiz işler listesi bir kez gerekçe cümlesi + 3 kompakt iş; kapatma düğmesinde kilit ikonu yok; boş alan <= %15.
       if (!isAdmin) {
         await lockedRow.click();
-        await expect(page.locator(".locked-note")).toHaveText("Bu iş için yetkin yok. Sorumluna sorabilirsin.");
+        await expect(page.locator(".locked-note")).toHaveText("Bu işler için yetkin yok. Sorumluna sorabilirsin.");
         await expectNoteCard(page, ".locked-note", ".locked-item", where, null);
         const lockedCards = tasks.locator('[data-state="locked"]');
         await expect(lockedCards).toHaveCount(3);
@@ -381,7 +397,7 @@ test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş al
         await expect(page.locator(".locked-toggle .row-lock")).toBeHidden();
         const LO = await homeLayout(page, ".task-grid > .locked-item > [data-state]");
         expect(LO.tiles.length, `${where}: açık yetkisiz listede görünür iş`).toBe(3);
-        expect(LO.emptyRatio, `${where}: yetkisiz liste açıkken boş alan oranı`).toBeLessThanOrEqual(0.15);
+        await expectExpandedList(page, `${where}: yetkisiz açık`);
         for (const t of LO.tiles) {
           expect(t.h, `${where}: yetkisiz satır yüksekliği`).toBeGreaterThanOrEqual(56);
           expect(t.h, `${where}: yetkisiz satır yüksekliği (kompakt)`).toBeLessThanOrEqual(72);
@@ -439,6 +455,24 @@ async function itemsScreenChecks(page: Page): Promise<void> {
     expect(geo.navT - geo.cB, `${where}: Yeni ürün alt sekmeye yakın (I-03)`).toBeLessThanOrEqual(16);
     expect(geo.cB - geo.cT, `${where}: Yeni ürün yüksekliği`).toBeGreaterThanOrEqual(48);
     expect(geo.introLines, `${where}: açıklama tek satır (I-04)`).toBe(1);
+    // N-01: kurulum tamamlanmadıysa rehber TEK kompakt satırdır (dolu düğme yok); sabit çubuğun altında içerik kalmaz.
+    const collapsed = page.getByTestId("setup-collapsed");
+    if ((await collapsed.count()) > 0) {
+      await expect(collapsed.locator("summary")).toContainText(/Kurulum \d\/3 · Sıradaki: /);
+      await expect(page.getByTestId("setup-next")).toBeHidden();
+    }
+    await page.locator(".tenant-body").evaluate((el: { scrollTop: number; scrollHeight: number }) => {
+      el.scrollTop = el.scrollHeight;
+    });
+    const tail = await page.evaluate<{ contentBottom: number; ctaTop: number }>(`(() => {
+      const c = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Yeni ürün').getBoundingClientRect();
+      const last = document.querySelector('[aria-label="Ürün listesi"]').getBoundingClientRect();
+      return { contentBottom: last.bottom, ctaTop: c.top };
+    })()`);
+    expect(tail.contentBottom, `${where}: içerik sabit çubuğun altında kalmaz`).toBeLessThanOrEqual(tail.ctaTop + 1);
+    await page.locator(".tenant-body").evaluate((el: { scrollTop: number }) => {
+      el.scrollTop = 0;
+    });
     expect(await smallTargets(page, "body"), `${where}: 48 px altı hedef (I-05)`).toEqual([]);
     const m = await metrics(page);
     expect(m.scrollWidth, `${where}: yatay taşma`).toBeLessThanOrEqual(m.clientWidth);

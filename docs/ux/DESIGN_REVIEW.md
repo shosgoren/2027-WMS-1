@@ -96,3 +96,13 @@ Giderilen maddeler: (P1.1) döşeme biçemi tek ve beyaz, renk yalnız ikon dair
 | H-02 | Boş durum kartı (`my-tasks-empty`) yüksekliği ve "Tara ile başla" gerçek bağlantı (`/t/<slug>/field`) | ≤ 120 px + bağlantı | 121–140 px | > 140 px ya da bağlantı yok |
 | H-03 | Saat ikonu boyutu 360/390/430'da tutarlı | Fark ≤ 1 px | 2–4 px | > 4 px |
 | H-04 | Gerekçe kartı alttan bitişik: kart alt kenarı ile ilk liste satırı üstü arası; D-03 boş alan eşiği (≤ %15) bozulmaz | ≤ 16 px ve D-03 geçer | 17–32 px | > 32 px ya da D-03 kırılır |
+
+### 7.1 Supervisor kararı (2026-10-07, görsel inceleme sonrası): AÇIK ikincil listelerde `emptyRatio` uygulanmaz
+
+Gerekçe: "metrik doldurma kutusu üretiyordu; kullanıcı görsel kalitesi öncelikli". Önceki "emptyRatio önceliklidir" kararı (a67bd63) bu kararla DEĞİŞTİRİLDİ; ekran görüntüsünde yetkisiz liste açıkken ekranın yaklaşık yarısı yalnız kilit ikonu ve tek cümle taşıyan kutuydu.
+
+- **Kapsam:** D-03 (`emptyRatio ≤ %15`) yalnız KAPALI ana ekran için geçerlidir ve değişmedi. Açık Yakında / yetkisiz listelerinde yerine **H-05** geçer.
+- **H-05 (açık liste, doldurma yok):** etkileşimli ya da gerçek içerik taşımayan hiçbir kutu ≤ 160 px (2); 161–200 (1); > 200 (0). Satırlar altta: kapatma düğmesi alt sekmenin ≤ 16 px üstünde (2); 17–32 (1); > 32 (0). Açıklama satırların üstünde TEK kompakt başlık satırıdır ("Bu işler için yetkin yok. Sorumluna sorabilirsin."); üstündeki zemin düz kalır. e2e: `expectExpandedList` (mobile-shell).
+- **I-09 (N-01, kurulum rehberi):** kurulum tamamlanmadıysa rehber TEK kompakt satır ("Kurulum 0/3 · Sıradaki: Depo ekle", ok ile açılır); kapalıyken dolu düğme yok, "Yeni ürün" tek birincil eylem (2); aksi 0.
+- **I-10:** sabit çubuğun altında içerik kalmaz (liste sonu ≤ çubuk üstü) (2).
+- **I-11 (arama alanı örnek metni "Örn. URN-0001, koli ya da barkod"):** `Typeahead` `placeholder` desteklemiyor ve `easy-setup/typeahead.tsx` kart satırında yok; UYGULANMADI, kapsam eki bekleniyor.

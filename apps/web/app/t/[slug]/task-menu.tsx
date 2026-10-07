@@ -283,8 +283,8 @@ export async function TaskMenu({ slug, allowed, myTasks }: TaskMenuProps) {
   if (locked.length > 0) {
     items.push(
       <li key="locked-note" className="locked-note min-w-0 text-base font-semibold text-ink">
-        <Lock aria-hidden="true" className="size-10 shrink-0 text-ink-muted" />
-        <span className="break-words">{t("lockedReason")}</span>
+        <Lock aria-hidden="true" className="size-5 shrink-0 text-ink-muted" />
+        <span className="break-words">{t("lockedListNote")}</span>
       </li>,
     );
   }
@@ -298,7 +298,7 @@ export async function TaskMenu({ slug, allowed, myTasks }: TaskMenuProps) {
   if (soon.length > 0) {
     items.push(
       <li key="soon-note" className="soon-note min-w-0 text-base font-semibold text-ink">
-        <Clock aria-hidden="true" className="size-10 shrink-0 text-ink-muted" />
+        <Clock aria-hidden="true" className="size-5 shrink-0 text-ink-muted" />
         <span className="break-words">{t("soonWarehouse")}</span>
       </li>,
     );

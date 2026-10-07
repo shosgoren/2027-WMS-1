@@ -7,7 +7,7 @@ import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
-import { Banner, Button, EmptyState, TextField } from "@wms/ui";
+import { Banner, Button, ChevronDown, EmptyState, TextField } from "@wms/ui";
 import { PageBody, Sheet } from "../easy-setup/sheet.tsx";
 import { SetupGuide, isSetupComplete, useSetupProgress } from "../easy-setup/setup-guide.tsx";
 import { Typeahead } from "../easy-setup/typeahead.tsx";
@@ -322,6 +322,7 @@ export function ItemsView({
 }) {
   const t = useTranslations("items");
   const te = useTranslations("easySetup.items");
+  const tg = useTranslations("easySetup.guide");
   const router = useRouter();
   const pathname = usePathname();
   const params = useSearchParams();
@@ -426,7 +427,22 @@ export function ItemsView({
       </form>
 
       {/* Kurulum rehberi aramanın altında: ilk görünümde arama + birincil eylem her zaman görünür (T-274). */}
-      {guide && progress !== null ? <SetupGuide slug={slug} progress={progress} /> : null}
+      {guide && progress !== null ? (
+        <details data-testid="setup-collapsed" className="group min-w-0 rounded-card border-2 border-border bg-surface px-3">
+          <summary className="flex min-h-12 cursor-pointer list-none items-center gap-2 text-sm font-semibold text-ink focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus [&::-webkit-details-marker]:hidden">
+            <span className="min-w-0 flex-1 break-words">
+              {t("search.setupSummary", {
+                done: [progress.hasWarehouse, progress.hasLocation, progress.hasItem].filter(Boolean).length,
+                next: tg(!progress.hasWarehouse ? "warehouse.title" : !progress.hasLocation ? "locations.title" : "items.title"),
+              })}
+            </span>
+            <ChevronDown aria-hidden="true" className="size-5 shrink-0 transition-transform group-open:rotate-180" />
+          </summary>
+          <div className="pb-3">
+            <SetupGuide slug={slug} progress={progress} />
+          </div>
+        </details>
+      ) : null}
 
       <section aria-label={t("listLabel")} className="flex min-w-0 flex-col gap-3">
         {items.length === 0 ? (

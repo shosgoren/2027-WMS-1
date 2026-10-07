@@ -432,6 +432,7 @@
     "intro": "Tap the task you want. I will guide you step by step and will not let you do something wrong.",
     "tasksLabel": "Tasks",
     "lockedReason": "You are not allowed to do this. Ask your manager.",
+    "lockedListNote": "You are not allowed to do these tasks. Ask your manager.",
     "soonLabel": "Coming soon",
     "soonWarehouse": "This task will open after warehouse setup.",
     "soonScreen": "This screen will open soon.",
@@ -689,6 +690,7 @@
       "label": "Search products",
       "hint": "Type a code, name or barcode; you can scan the barcode.",
       "advanced": "More options",
+      "setupSummary": "Setup {done}/3 · Next: {next}",
       "status": "Status",
       "all": "All",
       "clear": "Clear search"

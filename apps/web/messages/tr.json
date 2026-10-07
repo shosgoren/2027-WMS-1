@@ -432,6 +432,7 @@
     "intro": "Yapmak istediğin işe dokun. Seni adım adım götüreceğim; yanlış bir şey yapmana izin vermem.",
     "tasksLabel": "İşler",
     "lockedReason": "Bu iş için yetkin yok. Sorumluna sorabilirsin.",
+    "lockedListNote": "Bu işler için yetkin yok. Sorumluna sorabilirsin.",
     "soonLabel": "Yakında",
     "soonWarehouse": "Bu iş depo kurulumundan sonra açılacak.",
     "soonScreen": "Bu ekran yakında açılacak.",
@@ -689,6 +690,7 @@
       "label": "Ürün ara",
       "hint": "Kod, ad ya da barkod yaz; barkodu okutabilirsin.",
       "advanced": "Gelişmiş",
+      "setupSummary": "Kurulum {done}/3 · Sıradaki: {next}",
       "status": "Durum",
       "all": "Hepsi",
       "clear": "Aramayı temizle"

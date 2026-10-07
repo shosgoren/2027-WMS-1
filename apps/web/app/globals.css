@@ -286,20 +286,24 @@ html {
     height: 4.5rem;
   }
 
+  /* Açıklama TEK kompakt başlık satırıdır (dolgu kutusu yok, T-274 Supervisor kararı): düz zemin, satırların hemen üstünde. */
   .task-grid:has(.locked-toggle[open]) > .locked-note,
   .task-grid:has(.soon-toggle[open]) > .soon-note {
     display: flex;
-    flex: 1 1 auto;
-    flex-direction: column;
+    flex: none;
+    flex-direction: row;
     align-items: center;
-    justify-content: center;
-    gap: 0.75rem;
-    min-height: 5rem;
-    padding: 1rem;
-    text-align: center;
-    border-radius: 1rem;
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
+    justify-content: flex-start;
+    gap: 0.5rem;
+    padding: 0.25rem 0.25rem 0.5rem;
+    font-size: 0.9375rem;
+    text-align: left;
+  }
+
+  .locked-note svg,
+  .soon-note svg {
+    width: 1.25rem;
+    height: 1.25rem;
   }
 
   .top-rows details[open] .row-lock {
