@@ -37,7 +37,7 @@ const createItemSchema = z
   .strict();
 const suggestItemCodeSchema = z.object({ slug: slugSchema, prefix: z.string().max(16).optional() }).strict();
 const searchItemsSchema = z.object({ slug: slugSchema, q: z.string().max(128), limit: z.number().int().min(1).max(10).optional() }).strict();
-const updateItemSchema = z.object({ slug: slugSchema, itemId: idSchema, name: textSchema.optional(), pickPolicy: pickSchema.optional() }).strict();
+const updateItemSchema = z.object({ slug: slugSchema, itemId: idSchema, code: textSchema.optional(), name: textSchema.optional(), pickPolicy: pickSchema.optional() }).strict();
 const archiveItemSchema = z.object({ slug: slugSchema, itemId: idSchema }).strict();
 const conversionSchema = z.object({ slug: slugSchema, itemId: idSchema, unitId: idSchema, factor: decimalSchema }).strict();
 const addBarcodeSchema = z
@@ -92,7 +92,8 @@ export async function searchItemsAction(raw: unknown) {
     const principal = ctx.principal;
     if (principal === null) throw new Error("unreachable: principal required");
     const page = await searchItems({ db: getAppDb(), principal, tenantSlug: input.slug }, { q: input.q, status: "ACTIVE", limit: input.limit ?? 8 });
-    return { items: page.items.map((i) => ({ id: i.id, code: i.code, name: i.name })) };
+    // T-257: eski kodla eşleşen kartlar için "bu kod X olarak değişti" bilgisi (eski kod → güncel kod).
+    return { items: page.items.map((i) => ({ id: i.id, code: i.code, name: i.name })), renamedFrom: (page.renamedFrom ?? []).map((r) => ({ itemId: r.itemId, oldCode: r.oldCode, currentCode: r.currentCode })) };
   })(raw);
 }
 
@@ -101,7 +102,7 @@ export async function updateItemAction(raw: unknown) {
     const params = await writeContext(input.slug, ctx);
     const r = await updateItem(
       { ...params, requestId: ctx.requestId },
-      { itemId: input.itemId, ...(input.name === undefined ? {} : { name: input.name }), ...(input.pickPolicy === undefined ? {} : { pickPolicy: input.pickPolicy }) },
+      { itemId: input.itemId, ...(input.code === undefined ? {} : { code: input.code }), ...(input.name === undefined ? {} : { name: input.name }), ...(input.pickPolicy === undefined ? {} : { pickPolicy: input.pickPolicy }) },
     );
     return { changed: r.changed };
   })(raw);

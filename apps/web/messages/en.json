@@ -317,6 +317,8 @@
     "validation_failed_handling_unit_cycleAction": "Choose a different parent handling unit.",
     "validation_failed_barcode_ambiguous": "This barcode matches more than one item or unit.",
     "validation_failed_barcode_ambiguousAction": "Choose the item from the list.",
+    "validation_failed_code_ambiguous": "This old code matches more than one record.",
+    "validation_failed_code_ambiguousAction": "Search the record by its current code.",
     "validation_failed_unit_conversion_invalid": "The unit conversion factor is not valid.",
     "validation_failed_unit_conversion_invalidAction": "Enter a factor greater than zero with at most 6 decimals.",
     "validation_failed_quantity_scale": "The quantity has more decimals than the item allows.",
@@ -748,7 +750,13 @@
         "conversion": "Conversion saved.",
         "barcodeAdded": "Barcode added.",
         "barcodeRemoved": "Barcode removed.",
-        "archived": "Product archived."
+        "archived": "Product archived.",
+        "codeSame": "The code is already this; nothing changed.",
+        "codeUndone": "The code is back to the old one."
+      },
+      "codeEdit": {
+        "button": "Change code",
+        "for": "Change code for {name}"
       }
     },
     "errors": {
@@ -785,7 +793,8 @@
       "internalAction": "Try again shortly; if it continues, send the error code to support."
     },
     "locked": "You do not have permission to view products.",
-    "lockedAction": "Ask your workspace manager."
+    "lockedAction": "Ask your workspace manager.",
+    "renamedNote": "This code changed to {code} (old code: {old})"
   },
   "warehouses": {
     "title": "Warehouses and racks",
@@ -812,7 +821,9 @@
     "firstPage": "Back to start",
     "done": {
       "created": "Warehouse added.",
-      "archived": "Warehouse archived."
+      "archived": "Warehouse archived.",
+      "codeSame": "The code is already this; nothing changed.",
+      "codeUndone": "The code is back to the old one."
     },
     "confirmArchive": {
       "title": "Archive {name}?",
@@ -858,7 +869,9 @@
       "parentIs": "Placed under: {parent}",
       "done": {
         "created": "Location added.",
-        "archived": "Location archived."
+        "archived": "Location archived.",
+        "codeSame": "The code is already this; nothing changed.",
+        "codeUndone": "The code is back to the old one."
       },
       "confirmArchive": {
         "title": "Archive {name}?",
@@ -909,7 +922,13 @@
       "validation_failed_idempotency_key_required": "The request id is missing.",
       "validation_failed_idempotency_key_requiredAction": "Reload the page and try again.",
       "idempotency_mismatch": "This request id was used with different input.",
-      "idempotency_mismatchAction": "Close and reopen the form, then try again."
+      "idempotency_mismatchAction": "Close and reopen the form, then try again.",
+      "validation_failed_code_ambiguous": "This old code appears in the history of more than one location, so it is unclear which one you mean.",
+      "validation_failed_code_ambiguousAction": "Search using the location's current code."
+    },
+    "codeEdit": {
+      "button": "Change code",
+      "for": "Change code for {name}"
     }
   },
   "field": {
@@ -1062,5 +1081,18 @@
       "done": "{count} locations created: {first} … {last}",
       "doneReplayed": "This request was already processed; {count} locations exist."
     }
+  },
+  "codeEdit": {
+    "title": "Change code",
+    "current": "Current code: {code}",
+    "newCode": "New code",
+    "newCodeHint": "If this code is already used by another record, we will tell you right away.",
+    "preview": "{from} → {to}",
+    "previewSame": "Type a new code; the change shows here.",
+    "history": "Past movements are not affected: old records stay linked to this record. Anyone who scans or searches the old code is sent to the new one.",
+    "cancel": "Cancel",
+    "submit": "Change code",
+    "done": "Code changed: {from} → {to}.",
+    "undo": "Undo (go back to {code})"
   }
 }

@@ -12,12 +12,13 @@ const archiveItem = vi.hoisted(() => vi.fn());
 const setUnitConversion = vi.hoisted(() => vi.fn());
 const addBarcode = vi.hoisted(() => vi.fn());
 const removeBarcode = vi.hoisted(() => vi.fn());
+const searchItems = vi.hoisted(() => vi.fn());
 const getPrincipal = vi.hoisted(() => vi.fn());
 
 vi.mock("next/headers", () => ({ headers: () => Promise.resolve(new Headers({ origin: "https://app.example.test", "fly-client-ip": "203.0.113.7" })) }));
 vi.mock("../../../../lib/auth-service.ts", () => ({ getAuthService: () => ({ getPrincipal }) }));
 vi.mock("@wms/db", () => ({ getAppDb: () => ({}) }));
-vi.mock("@wms/domain/catalog", () => ({ createItem, updateItem, archiveItem, setUnitConversion, addBarcode, removeBarcode }));
+vi.mock("@wms/domain/catalog", () => ({ createItem, updateItem, archiveItem, setUnitConversion, addBarcode, removeBarcode, searchItems }));
 vi.mock("../../../../lib/rate-limit.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../../lib/rate-limit.ts")>()),
   createProductionLimiter: () => ({ check: () => Promise.resolve() }),
@@ -25,7 +26,7 @@ vi.mock("../../../../lib/rate-limit.ts", async (importOriginal) => ({
 vi.mock("next-intl/server", () => ({ getTranslations: () => Promise.resolve((key: string) => key) }));
 vi.mock("@wms/domain/identity/access", () => ({ runTenantQuery: () => Promise.resolve("t1") }));
 
-import { addBarcodeAction, archiveItemAction, createItemAction, removeBarcodeAction, setConversionAction, updateItemAction } from "./actions.ts";
+import { addBarcodeAction, archiveItemAction, createItemAction, removeBarcodeAction, searchItemsAction, setConversionAction, updateItemAction } from "./actions.ts";
 import { errorKey } from "./items-view.tsx";
 import { TaskMenu } from "../task-menu.tsx";
 
@@ -196,5 +197,47 @@ describe('"Ürünler" kartı izne bağlı (stock.view)', () => {
     const p = await itemsCard(false);
     expect(p.href).toBeUndefined();
     expect(p.locked).toEqual({ reason: "lockedReason" });
+  });
+});
+
+describe("T-257: kod değiştirme (updateItemAction) ve eski kod bilgisi (searchItemsAction)", () => {
+  it("code alanı domain'e ham olarak iletilir (normalleştirme ve benzersizlik sunucuda)", async () => {
+    updateItem.mockResolvedValue({ itemId: IID, changed: true });
+    const res = await updateItemAction({ slug: "acme", itemId: IID, code: " yeni-01 " });
+    expect(res).toMatchObject({ ok: true, data: { changed: true } });
+    expect(updateItem.mock.calls[0]?.[1]).toEqual({ itemId: IID, code: " yeni-01 " });
+  });
+  it("code boş olamaz ve şema strict kalır (bilinmeyen alan reddedilir)", async () => {
+    for (const raw of [{ slug: "acme", itemId: IID, code: "" }, { slug: "acme", itemId: IID, code: "A", extra: 1 }]) {
+      const res = await updateItemAction(raw);
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.error.code).toBe("VALIDATION_FAILED");
+    }
+    expect(updateItem).not.toHaveBeenCalled();
+  });
+  it("CODE_TAKEN sunucu hatası kod + ayrıntıyla döner; arayüz 'ne yapmalı' metnine eşler", async () => {
+    updateItem.mockRejectedValue(new AppError("VALIDATION_FAILED", { detail: "CODE_TAKEN" }));
+    const res = await updateItemAction({ slug: "acme", itemId: IID, code: "A" });
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.error).toMatchObject({ code: "VALIDATION_FAILED", detail: "CODE_TAKEN" });
+    expect(errorKey(res.error)).toBe("validation_failed_code_taken");
+  });
+  it("arama: eski kodla eşleşen kart için renamedFrom (eski → güncel kod) aktarılır; yoksa boş dizi", async () => {
+    searchItems.mockResolvedValueOnce({ items: [{ id: IID, code: "YENI", name: "Ürün" }], nextCursor: null, renamedFrom: [{ oldCode: "ESKI", itemId: IID, currentCode: "YENI" }] });
+    const a = await searchItemsAction({ slug: "acme", q: "eski" });
+    expect(a).toMatchObject({ ok: true, data: { renamedFrom: [{ itemId: IID, oldCode: "ESKI", currentCode: "YENI" }] } });
+    searchItems.mockResolvedValueOnce({ items: [], nextCursor: null });
+    const b = await searchItemsAction({ slug: "acme", q: "x" });
+    expect(b).toMatchObject({ ok: true, data: { items: [], renamedFrom: [] } });
+  });
+  it("yeni i18n anahtarları tr ve en dosyasında var", () => {
+    for (const lang of ["tr", "en"]) {
+      const m = JSON.parse(readFileSync(path.resolve(import.meta.dirname, `../../../../messages/${lang}.json`), "utf8")) as Record<string, Record<string, unknown>>;
+      for (const k of ["title", "current", "newCode", "newCodeHint", "preview", "previewSame", "history", "cancel", "submit", "done", "undo"]) {
+        expect(typeof m.codeEdit?.[k], `${lang}:codeEdit.${k}`).toBe("string");
+      }
+      expect(typeof m.items?.renamedNote, `${lang}:items.renamedNote`).toBe("string");
+    }
   });
 });

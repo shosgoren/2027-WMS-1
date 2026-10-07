@@ -10,7 +10,8 @@ import type { FormEvent, ReactNode } from "react";
 import { Banner, Button, ConfirmDialog, EmptyState, TextField } from "@wms/ui";
 import { PageBody, Sheet } from "../easy-setup/sheet.tsx";
 import { SetupGuide, isSetupComplete, useSetupProgress } from "../easy-setup/setup-guide.tsx";
-import { archiveWarehouseAction, createWarehouseAction, suggestCodeAction } from "./actions.ts";
+import { CodeChangedNotice, CodeEditDialog } from "../code-edit-dialog.tsx";
+import { archiveWarehouseAction, createWarehouseAction, renameWarehouseAction, suggestCodeAction } from "./actions.ts";
 
 /** Sunucu eylem hatası (`ActionResult.error`): yalnızca kod + ayrıntı + istek kimliği kullanılır. */
 export interface ServerError {
@@ -25,6 +26,7 @@ const DETAILED = [
   "forbidden_warehouse_out_of_scope",
   "unauthenticated_recent_auth_required",
   "validation_failed_code_taken",
+  "validation_failed_code_ambiguous",
   "validation_failed_in_use",
   "validation_failed_parent_invalid",
   "validation_failed_document_too_large",
@@ -145,7 +147,8 @@ export function CreateDialog({
       if (!live) return;
       if (c === null) setCodeState("failed");
       else {
-        setCode(c);
+        // Kullanıcı öneri gelmeden yazmaya başladıysa yazdığı ezilmez (N-14: sessiz değişiklik yok).
+        setCode((cur) => (cur === "" ? c : cur));
         setCodeState("ready");
       }
     });
@@ -251,6 +254,9 @@ export function WarehousesView({
   const base = `/t/${encodeURIComponent(slug)}/warehouses`;
   const [createOpen, setCreateOpen] = useState(false);
   const [archiving, setArchiving] = useState<WarehouseView | null>(null);
+  const [editing, setEditing] = useState<WarehouseView | null>(null);
+  const [codeChanged, setCodeChanged] = useState<{ readonly id: string; readonly from: string; readonly to: string } | null>(null);
+  const [undoing, setUndoing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ServerError | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -267,6 +273,26 @@ export function WarehousesView({
       router.replace(pathname);
     }
   }, [params, canManage, pathname, router]);
+
+  async function changeCode(id: string, code: string) {
+    const r = await renameWarehouseAction({ slug, warehouseId: id, code });
+    return r.ok ? ({ ok: true, changed: r.data.changed } as const) : ({ ok: false, error: { code: r.error.code, detail: r.error.detail, requestId: r.error.requestId } } as const);
+  }
+  /** "Geri al" (N-03): eski koda dönüş aynı sunucu komutudur. */
+  async function undoCode() {
+    if (codeChanged === null) return;
+    setUndoing(true);
+    setError(null);
+    const r = await changeCode(codeChanged.id, codeChanged.from);
+    setUndoing(false);
+    if (!r.ok) {
+      setError(r.error);
+      return;
+    }
+    setCodeChanged(null);
+    setNotice(t("done.codeUndone"));
+    router.refresh();
+  }
 
   async function archive() {
     if (archiving === null) return;
@@ -286,7 +312,7 @@ export function WarehousesView({
 
   return (
     <>
-      <PageBody hide={createOpen}>
+      <PageBody hide={createOpen || editing !== null}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <h1 className="break-words text-2xl font-extrabold text-ink">{t("title")}</h1>
@@ -304,6 +330,7 @@ export function WarehousesView({
         </div>
       </div>
 
+      {codeChanged ? <CodeChangedNotice from={codeChanged.from} to={codeChanged.to} busy={undoing} onUndo={() => void undoCode()} /> : null}
       {notice ? <Banner kind="info">{notice}</Banner> : null}
       {error ? <ServerErrorBanner error={error} returnTo={base} /> : null}
       {guide && progress !== null ? <SetupGuide slug={slug} progress={progress} /> : null}
@@ -328,6 +355,11 @@ export function WarehousesView({
                     <Link href={`${base}/${encodeURIComponent(w.id)}`} className={LINK_CLS}>
                       {t("open")}
                     </Link>
+                    {active ? (
+                      <Button variant="secondary" disabled={!canManage} aria-describedby={canManage ? undefined : noteId} aria-label={t("codeEdit.for", { name: w.name })} onClick={() => setEditing(w)}>
+                        {t("codeEdit.button")}
+                      </Button>
+                    ) : null}
                     {active ? (
                       <Button variant="danger" disabled={!canManage} aria-describedby={canManage ? undefined : noteId} onClick={() => setArchiving(w)}>
                         {t("archive")}
@@ -382,6 +414,25 @@ export function WarehousesView({
         submit={async (v) => {
           const res = await createWarehouseAction({ slug, code: v.code, name: v.name, autoCode: v.autoCode });
           return res.ok ? { ok: true, data: res.data } : { ok: false, error: { code: res.error.code, detail: res.error.detail, requestId: res.error.requestId } };
+        }}
+      />
+      <CodeEditDialog
+        open={editing !== null}
+        subject={editing?.name ?? ""}
+        current={editing?.code ?? ""}
+        titleId="code-edit-warehouse-title"
+        onClose={() => setEditing(null)}
+        submit={(code) => (editing === null ? Promise.resolve({ ok: false, error: { code: "NOT_FOUND" } } as const) : changeCode(editing.id, code))}
+        renderError={(e) => <ServerErrorBanner error={e} returnTo={base} />}
+        onDone={(r) => {
+          const id = editing?.id;
+          setEditing(null);
+          setError(null);
+          if (r.changed && id !== undefined) {
+            setNotice(null);
+            setCodeChanged({ id, from: r.from, to: r.to });
+          } else setNotice(t("done.codeSame"));
+          router.refresh();
         }}
       />
       <ConfirmDialog

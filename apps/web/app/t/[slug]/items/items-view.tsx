@@ -82,6 +82,14 @@ export interface UnitOption {
   readonly name: string;
 }
 
+/** Arama sonucu (T-257): `oldCode` doluysa arama ESKİ kodla eşleşti ("bu kod {code} olarak değişti"). */
+export interface ItemHit {
+  readonly id: string;
+  readonly code: string;
+  readonly name: string;
+  readonly oldCode?: string;
+}
+
 export interface ItemListView {
   readonly id: string;
   readonly code: string;
@@ -97,6 +105,18 @@ const SCALES = [0, 1, 2, 3, 4, 5, 6] as const;
 /** Akıllı varsayılan (A-250-5): birim ADET (sektör şablonları temel birim olarak ADET önerir), yoksa listedeki ilk birim. */
 function defaultUnitId(units: readonly UnitOption[]): string {
   return (units.find((u) => u.code.toUpperCase() === "ADET") ?? units[0])?.id ?? "";
+}
+
+/** Sunucunun `renamedFrom` bilgisini sonuç satırlarına işler; birden çok aday varsa hepsi listelenir (sessiz seçim yok, N-14). */
+function withRenamed(data: {
+  readonly items: readonly { readonly id: string; readonly code: string; readonly name: string }[];
+  readonly renamedFrom: readonly { readonly itemId: string; readonly oldCode: string }[];
+}): readonly ItemHit[] {
+  const old = new Map(data.renamedFrom.map((r) => [r.itemId, r.oldCode] as const));
+  return data.items.map((i) => {
+    const oldCode = old.get(i.id);
+    return oldCode === undefined ? i : { ...i, oldCode };
+  });
 }
 
 function CreateItemDialog({ open, slug, units, returnTo, onClose, onDone }: { open: boolean; slug: string; units: readonly UnitOption[]; returnTo: string; onClose: () => void; onDone: (itemId: string) => void }) {
@@ -131,7 +151,8 @@ function CreateItemDialog({ open, slug, units, returnTo, onClose, onDone }: { op
     void suggestItemCodeAction({ slug }).then((r) => {
       if (!live) return;
       if (r.ok) {
-        setCode(r.data.code);
+        // Kullanıcı öneri gelmeden yazmaya başladıysa yazdığı ezilmez (N-14: sessiz değişiklik yok).
+        setCode((cur) => (cur === "" ? r.data.code : cur));
         setCodeState("ready");
       } else setCodeState("failed");
     });
@@ -328,7 +349,7 @@ export function ItemsView({
       {guide && progress !== null ? <SetupGuide slug={slug} progress={progress} /> : null}
 
       <form method="get" action={base} role="search" aria-label={t("search.label")} className="flex min-w-0 flex-col gap-3 rounded-card border-2 border-border bg-surface p-4">
-        <Typeahead<{ id: string; code: string; name: string }>
+        <Typeahead<ItemHit>
           label={t("search.label")}
           hint={t("search.hint")}
           name="q"
@@ -337,14 +358,18 @@ export function ItemsView({
           scanLabel={te("scanLabel")}
           search={async (q) => {
             const r = await searchItemsAction({ slug, q, limit: 8 });
-            return r.ok ? r.data.items : [];
+            return r.ok ? withRenamed(r.data) : [];
           }}
-          toSuggestion={(i) => ({ key: i.id, primary: i.name, secondary: t("codeLabel", { code: i.code }) })}
+          toSuggestion={(i) => ({
+            key: i.id,
+            primary: i.name,
+            secondary: i.oldCode === undefined ? t("codeLabel", { code: i.code }) : t("renamedNote", { code: i.code, old: i.oldCode }),
+          })}
           onSelect={(i) => router.push(`${base}/${encodeURIComponent(i.id)}`)}
           scan={{
             resolve: async (v) => {
               const r = await searchItemsAction({ slug, q: v, limit: 2 });
-              return r.ok ? r.data.items : [];
+              return r.ok ? withRenamed(r.data) : [];
             },
           }}
         />
