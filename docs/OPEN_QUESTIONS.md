@@ -80,6 +80,16 @@ Q-83 | Saha yerleştirme/toplamada önerilenden farklı ama geçerli lokasyon ok
 Q-84 | "Yardım çağır" gerçek bildirim göndermeli mi; kime (TENANT_ADMIN, WAREHOUSE_MANAGER, atanmış sorumlu), hangi kanalla (uygulama içi, e-posta)? | T-265, spec 08 §"Sıfır eğitim" | açık — A-159
 Q-85 | Ürün içi kullanılabilirlik telemetrisi (yardım dokunuşu, görev süresi, terk, yanlış tarama oranı) olay şeması, saklama süresi ve KVKK dayanağı; UX_NOVICE §5 hedefleri (görev başarı ≥%90, K-19 yardımsız başarı ≥%80) onaylanıyor mu? | T-265, T-266, UX_NOVICE §5, Q-07 | açık — A-160
 Q-86 | Sihirbaz/uzman modu ve görünüm tercihleri (tur görüldü, büyük yazı, sesli okuma) kimde ve nerede: kullanıcı tercihi mi, rol varsayılanı mı, tenant ayarı (`settings.manage`) mı; sunucuda saklanmalı mı? İlk kullanım turunun rol eşlemesi doğru mu? | T-266, T-267, T-268 | açık — A-161, A-162
+Q-87 | Rota/yürüme metriği: lokasyon doğal kod sırası yeterli mi, yılan (serpentine) koridor geçişi mi, koordinat/mesafe mi? Kat geçişi (asansör/merdiven) önceliği? | T-323, T-325, ADR-023 | açık — A-163
+Q-88 | "Bugünkü sipariş" ve dalga kesim saati: siparişte teslim/sevk tarihi alanı gerekli mi; günlük kesim saati var mı, tenant ayarı mı? | T-325, T-328 | açık — A-164
+Q-89 | Toplama birimi ve iş yükü dengesi: sipariş bütün mü (küme toplama) yoksa bölgeye göre bölünür mü; yük ölçüsü satır mı, durak mı, miktar mı; plan rezervasyonu da yapmalı mı; kim planlar/atar? | T-325 | açık — A-165
+Q-90 | Personel çalışma alanı: kalıcı mı, vardiya/gün bazlı mı; alanı olmayan personel tüm depoya uygun mu; atama izni? | T-324, T-326 | açık — A-166
+Q-91 | Toplama süresi tahmini: durak başına süre, birim başına süre gibi değerler ölçülecek mi; önizlemede süre gösterilecek mi? | T-325, T-326 | açık — A-167
+Q-92 | "Dikkat" kart türleri, eşikleri ve sırası; kart erteleme/kapatma gerekli mi (gerekirse kalıcı tablo)? | T-328 | açık — A-168
+Q-93 | Ses verisi KVKK: tarayıcı konuşma tanıma veya dış sağlayıcıya giden kullanıcı sesi için aydınlatma/açık rıza, yurt dışı aktarım ve sağlayıcı saklama koşulu; ses kaydı ve transkript hiç saklanmayacak mı? | T-327, T-329, T-330, ADR-007, Q-07 | açık — A-169
+Q-94 | Ses sağlayıcısı (önceden üretilmiş klipler için sinirsel TTS ve gerçek zamanlı konuşma) seçimi ve API anahtarı — kullanıcı hesabı işi; adaylar yalnız seçenek, özellikleri doğrulanmadı | T-327, T-330, ADR-023 | açık — A-170
+Q-95 | Sesli komut ve konuşan asistan hangi pakette; tenant başına TTS karakteri ve gerçek zamanlı dakika limitleri ve aşım davranışı | T-329, T-330, 4S | açık — A-171
+Q-96 | Yazma niyetinde sesli "onayla" yeterli mi, yoksa her zaman dokunuş mu gerekir (gürültülü zemin, yanlış tanıma riski)? | T-329, T-330, ADR-023 §3 | açık — A-172
 
 ## Varsayımlar
 A-01 | Neon pooler'ı transaction-mode PgBouncer'dır (kullanıcı kararı kaydı, 2026-10-05) — **teyit edildi 2026-10-05, sürüm hariç** (belge + T-005d koşu 3 çoklama gözlemi, https://github.com/shosgoren/2027-WMS-1/actions/runs/37388724069); PgBouncer sürümü gözlenemedi | Neon pooler türünü/kipini değiştirdiğini duyurana veya yeniden spike aksini gösterene kadar | Q-02
@@ -237,3 +247,13 @@ A-159 | Faz 3A'da "Yardım çağır" bildirim göndermez; bağlamsal ipucu + `/h
 A-160 | Ürün içi telemetri yok; kullanılabilirlik ölçümleri yalnız elle yapılan "ilk kez kullanan" yürüyüşünde (`.artifacts/novice-walkthrough/`); UX_NOVICE §5 hedefleri bağlayıcı değil, taban ölçümü sonrası onaya sunulur | Q-85 | T-265, UX_NOVICE §5
 A-161 | Sihirbaz modu varsayılan açık; "Uzman modu", tur görüldü, büyük yazı ve sesli okuma tercihleri yalnız cihazda (localStorage; anahtar tenant + kullanıcı kimliği özeti, değer kişisel veri/miktar içermez); sunucu kalıcılığı ve migration yok. Ortak cihazda her kullanıcı kendi anahtarını görür | Q-86 | T-266, T-267, T-268
 A-162 | İlk kullanım turu rol eşlemesi: TENANT_ADMIN → "dükkân sahibi" (kurulum), WAREHOUSE_MANAGER ve READ_ONLY → "yönetici", PICKER ve COUNTER → "depo çalışanı"; çok rollüde bu sıradaki ilk eşleşen; tur yetki vermez | Q-86 | T-267
+A-163 | Yürüme sırası = (kat, bölge, koridor, raf, göz) doğal sıralaması (sayısal parçalar sayı olarak); yılan geçiş ve mesafe yok; elle verilen `pick_sequence` korunur; sırasız lokasyon kod sırasıyla sona | Q-87 | T-323, T-325
+A-164 | "Bugünkü sipariş" = tahsisli açık satırı olan OPEN sipariş; tenant saat dilimine göre "bugün gelen" / "önceki günlerden kalan" ayrımı; kesim saati yok; "gecikmiş" = önceki günlerden kalan (teslim tarihi alanı yok) | Q-88 | T-325, T-328
+A-165 | Planlama birimi sipariş (bölünmez); baskın bölge = en çok tahsisli satırın bölgesi; aday sırası: bölgesi eşleşen toplayıcı → alansız toplayıcı → tüm toplayıcılar; seçim en az açık PICK görevi, eşitlikte üyelik kimliği; plan rezervasyon yapmaz; planlama/atama `document.approve` (A-132) | Q-89 | T-325
+A-166 | Çalışma alanı kalıcı (değiştirilene kadar); vardiya/günlük geçici atama yok; alansız toplayıcı tüm depoya uygun; alan yetki değildir; yazma `document.approve` | Q-90 | T-324, T-326
+A-167 | Önizlemede süre tahmini gösterilmez; yalnız durak sayısı ve koridor değişimi | Q-91 | T-325, T-326
+A-168 | Dikkat kartları T-328 listesindeki 6 tür ve sırayla, en çok 5 kart; erteleme/kapatma yok, durum düzelince kart kaybolur; yeni tablo yok | Q-92 | T-328
+A-169 | Ses kaydı saklanmaz; transkript yalnız istemci belleğinde, sunucuya/loga/audit'e/hata gövdesine girmez; sunucuya yalnız `{ intent, params }`; yerinde (cihaz içi) tanıma doğrulanamayan tarayıcıda sesli komut gizli | Q-93 | T-329, T-330
+A-170 | Ses sağlayıcısı seçilmedi: önceden üretilmiş klip seti boş, `VOICE_FEEDBACK_CLIPS_ENABLED` kapalı; sesli geri bildirim cihaz sentezi (TR sesi varsa) → ton + titreşim zinciriyle; konuşan asistan kartı başlamaz | Q-94 | T-327, T-330
+A-171 | 4S entitlement gelene kadar sesli komut `VOICE_COMMANDS_ENABLED` + `VOICE_COMMANDS_TENANTS` izin listesiyle, varsayılan kapalı (fail-closed); ölçüm/limit yok, bu yüzden asistan (T-330) 4S limitleri olmadan açılmaz | Q-95 | T-329, T-330
+A-172 | Sesli onay yalnız önizleme ekranda görünürken ve kapalı gramerde tam "onayla"/"onaylıyorum" eşleşmesiyle; model/AI onay veremez | Q-96 | T-329, T-330

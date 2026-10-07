@@ -168,3 +168,31 @@ Not: Hedef sayılar uydurma değil, varsayımdır (G-03, A-160): ilk sürümde t
 - Honeywell'in resmi uygulama-UX rehberi bulunamadı; yalnız tarayıcı "good read / bad read" göstergesi belgeleri var. Zebra kaynağı DataWedge belgesi + üçüncü taraf rehber.
 - `@axe-core/playwright`, `navigator.vibrate` (iOS Safari), TR `speechSynthesis` sesi kurulu/destekli mi doğrulanmadı.
 - Kaynak sayfaları doğrudan açılamadı; alıntı içerikler arama özetlerine dayanır.
+
+---
+
+## 6. Az dokunuş ilkesi ve dokunuş bütçesi (T-321, ADR-023)
+
+> Hedef (kullanıcı, birebir): "Minimum bilgi girişi yada dokunma ve maksimum faydayı sağlayabilir miyiz … program hem az zaman ayırmalı ve ayırdığı zamanda fayda verim sağladığını hissetmelidir."
+
+**N-16 — Az dokunuş, çok fayda.** Her ana iş bir **niyettir** (ADR-023) ve bir dokunuş bütçesi taşır. Sistem soruyu değil öneriyi getirir: önce hazır plan/önizleme gösterilir, kullanıcı yalnız onaylar veya tek öğeyi değiştirir. Bilinen veri yeniden sorulmaz (N-14); seçim serbest metinden önce gelir (N-02).
+- **Dokunuş** = işi başlatan ekran açıkken, iş tamamlanana kadar gereken dokunuş/tıklama sayısı (ekran açılışı ve kaydırma sayılmaz; tarama dokunuş değildir).
+- **Yazma niyeti** her zaman önizleme + **tek** onay ister (ADR-023 §3); onay önizlemenin birincil düğmesidir, ayrı diyalog açılmaz. Geri alınabilen yazımlar onaydan sonra "Geri al" sunar (N-03, ADR-024).
+- **Ses** (üst paket) dokunuşun yerine geçer ama onayı atlamaz: yazma niyetinde önizleme yine açılır, "onayla" sesi veya bir dokunuş gerekir.
+- **Uyarı yönlendirir:** "Dikkat" kartı bir cümle + tek eylem düğmesi taşır (T-328); kritik saha hatası ekran engeline ek olarak kısa ve vurgulu sesle söylenir (T-327), iş onaylanana kadar durur (N-13).
+- Bütçe aşan akış tasarım hatasıdır: kart kabul ölçütüne e2e dokunuş sayacı yazılır; aşım ancak gerekçeli istisna ile (kartta "Bütçe istisnası: neden").
+
+**Niyet başına dokunuş bütçesi (≤; ses sütunu üst paket)**
+
+| Niyet | İş | Başlangıç | Dokunuş bütçesi | Ses ile | Kart |
+|---|---|---|---|---|---|
+| `orders.today` | Bugünkü siparişleri tüm bilgiyle göster | Ana ekran | 1 | 1 cümle, 0 dokunuş | T-326 |
+| `pick.plan_and_assign` | Siparişleri yürüme sırasıyla planla, personele ata | "Bugün" ekranı (ana ekrandan +1) | 2 (ana ekrandan 3) | 1 cümle + "onayla" veya 1 dokunuş | T-325, T-326 |
+| `pick.undo_plan` | Az önce yapılan planı geri al | Plan sonrası bildirim | 1 | — | T-326 |
+| `staff.assign_area` | Bir personelin kat/bölge/koridorunu ayarla | Personel alanları ekranı | 3 (kişi → alan → onay) | 1 cümle + "onayla" | T-324, T-326 |
+| `location.recompute_walk_order` | Deponun yürüme sırasını güncelle | Personel alanları ekranı | 2 | — | T-323, T-326 |
+| `attention.*` eylemi | Dikkat kartındaki işi başlat | "Bugün" ekranı | 1 (yazma niyetinde 2) | — | T-328 |
+| `actions.today` | Bugün yaptıklarımı göster | Ana ekran | 1 | 1 cümle | T-322 |
+| Tarama hatası onayı | Yanlış okutmayı anla, tekrar okut | Saha akışı | 1 | — (ses yalnız uyarır) | T-263, T-327 |
+
+**Ölçüm:** e2e testleri dokunuşu `pointerdown` sayacıyla ölçer (T-326, T-328); sonuç `.artifacts/<kart>/touch-budget.json`. Bütçeler varsayımdır (G-03) — ilk "ilk kez kullanan" yürüyüşünden (§5) sonra gözden geçirilir.
