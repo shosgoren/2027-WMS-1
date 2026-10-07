@@ -72,8 +72,8 @@ export {
 } from "./numbering.ts";
 export { SYNC_POST_MAX_LINES, postDocument, type PostDocumentInput } from "./posting.ts";
 // T-305: saha komutlarının (kabul, yerleştirme…) belgeyi aynı transaction'da oluşturup işlemesi için DAR bileşik yol: yalnızca posting çekirdeği
-// (kilitli görüntü üzerinde işleme) açılır; defter/bakiye yazımı hâlâ yalnızca posting.ts'tedir (G-01). Kilitler yine executeStockCommand/acquireStockLocks'tadır.
-export { postApprovedDocumentInTx, type PostInTxOptions } from "./posting.ts";
+// (kilitli görüntü üzerinde işleme) açılır; çekirdek belge kilidini ya da "bu tx'te yaratıldı" kaydını ister (aksi INTERNAL) ve apps/** bu adları import edemez (eslint); defter/bakiye yazımı hâlâ yalnızca posting.ts'tedir (G-01). Kilitler yine executeStockCommand/acquireStockLocks'tadır.
+export { postApprovedDocumentInTx, registerTxCreatedDocument, type PostInTxOptions } from "./posting.ts";
 export {
   RESERVATION_EXPIRY_FLAG,
   applyReservedDeltas,

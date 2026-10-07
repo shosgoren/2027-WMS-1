@@ -8,6 +8,7 @@
 // A-305-7: `taskId` verilirse görev PUTAWAY/REPUTAWAY, OPEN/ASSIGNED olmalı; ürün, kaynak lokasyon ve miktar görevle BİREBİR eşleşmeli (kısmi yerleştirme
 // görevi tamamlamaz; bölünmüş yerleştirme için görev iptal edilip görevsiz yerleştirme yapılır). Başkasına atanmış görevi yalnızca `document.approve` sahibi
 // tamamlar (A-304-3: atanan kişi denetimi saha komutunundur).
+// A-305-10: görevsiz yerleştirme eşleşen açık PUTAWAY görevlerini FIFO kapatır (bkz. apply).
 // A-305-8: hedef lokasyon `STORAGE` türünde ve kaynaktan farklı olmalı; kaynak lokasyon türü sınırlanmaz (geri yerleştirme SEVK → raf aynı komutu kullanır).
 import { sql } from "drizzle-orm";
 import { AppError } from "@wms/shared/errors";
@@ -154,7 +155,28 @@ export async function putaway(
       const built = await buildSpec(tx, ctx.tenantId, p, taskId);
       if (task !== undefined && task.warehouse_id.toLowerCase() !== built.warehouseId.toLowerCase()) throw new AppError("VALIDATION_FAILED");
       const applied = await postFieldDocument(tx, locked, ctx, built, input.requestId ?? null);
-      if (taskId !== null && task !== undefined) await completeTask(tx, taskId, Number(task.version), ctx.membership, input.requestId ?? null);
+      if (taskId !== null && task !== undefined) {
+        await completeTask(tx, taskId, Number(task.version), ctx.membership, input.requestId ?? null);
+      } else {
+        // A-305-10 (MINOR-7): görevsiz yerleştirme, aynı (depo, ürün, kaynak lokasyon) için açık PUTAWAY görevlerini FIFO (created_at, id) tamamlar:
+        // kalan miktar görev miktarını karşılıyorsa görev DONE olur ve düşülür; karşılamayan ilk görevde DURUR (görev miktarı sütunu değişmez, görev açık kalır).
+        // Başkasına atanmış görev yalnızca `document.approve` sahibince kapatılır; aksi atlanır.
+        const open = await tx.execute<TaskLockRow & { id: string }>(
+          sql`SELECT id, warehouse_id, kind, status, assigned_membership_id, location_id, item_id, quantity::text AS quantity, version
+                FROM public.warehouse_tasks
+               WHERE tenant_id = ${ctx.tenantId}::uuid AND kind = 'PUTAWAY' AND status IN ('OPEN', 'ASSIGNED') AND warehouse_id = ${built.warehouseId}::uuid
+                 AND item_id = ${p.itemId}::uuid AND location_id = ${p.sourceLocationId}::uuid
+               ORDER BY created_at, id FOR UPDATE`,
+        );
+        let left = decimalToMicro(p.quantity);
+        for (const t of open) {
+          if (t.status === "ASSIGNED" && t.assigned_membership_id !== ctx.membership.membershipId && !hasPermission(ctx.membership.roles, "document.approve")) continue;
+          const need = t.quantity === null ? 0n : decimalToMicro(t.quantity);
+          if (need <= 0n || need > left) break;
+          await completeTask(tx, t.id, Number(t.version), ctx.membership, input.requestId ?? null);
+          left -= need;
+        }
+      }
       return applied;
     },
   });

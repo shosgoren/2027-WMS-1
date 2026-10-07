@@ -169,12 +169,13 @@ describe("görev komutları", () => {
     expect(await row(taskId)).toMatchObject({ status: "CANCELLED" });
     const [audit] = await audits(A.tenantId, "warehouse_task.cancelled", taskId);
     expect(audit?.reason).toBe("Sipariş iptal edildi");
-    for (const p of [
-      assignTask(admin(A), { taskId, membershipId: A.memberMembershipId, expectedVersion: 2 }),
-      claimTask(admin(A), { taskId, expectedVersion: 2 }),
-      cancelTask(admin(A), { taskId, expectedVersion: 2, reason: "tekrar" }),
+    // Her çağrı tembel başlatılır ve sırayla beklenir: önceden oluşturulmuş söz, önceki `await` sürerken reddedilirse işlenmemiş ret (unhandled rejection) doğurur.
+    for (const call of [
+      () => assignTask(admin(A), { taskId, membershipId: A.memberMembershipId, expectedVersion: 2 }),
+      () => claimTask(admin(A), { taskId, expectedVersion: 2 }),
+      () => cancelTask(admin(A), { taskId, expectedVersion: 2, reason: "tekrar" }),
     ]) {
-      expect(await failure(p)).toMatchObject({ code: "VALIDATION_FAILED", detail: "DOCUMENT_STATE" });
+      expect(await failure(call())).toMatchObject({ code: "VALIDATION_FAILED", detail: "DOCUMENT_STATE" });
     }
   });
 

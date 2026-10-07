@@ -21,6 +21,7 @@ import {
   SYNC_POST_MAX_LINES,
   buildPostingPlan,
   postApprovedDocumentInTx,
+  registerTxCreatedDocument,
   type PostingKind,
   type PostingLine,
   type PostingStatus,
@@ -198,6 +199,7 @@ export async function postFieldDocument(
   const date = await tenantToday(tx, ctx.tenantId);
   const typeVersionId = await systemTypeVersionId(tx, spec.kind);
   const documentId = randomUUID();
+  registerTxCreatedDocument(tx, documentId); // çekirdek: bu belge bu transaction'da doğdu (kilit planında belge yok)
   await tx.execute(
     sql`INSERT INTO public.documents (tenant_id, id, kind, type_version_id, warehouse_id, business_date, created_by, source_kind, source_id)
         VALUES (${ctx.tenantId}::uuid, ${documentId}::uuid, ${spec.kind}, ${typeVersionId}::uuid, ${spec.warehouseId}::uuid, ${date}::date,
