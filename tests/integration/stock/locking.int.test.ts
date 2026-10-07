@@ -443,6 +443,145 @@ describe("eşzamanlı ters sıralı planlar: deadlock yok (bariyerli, olasılık
   }, 30_000);
 });
 
+describe("seri kilidi (T-256): aynı seriyi isteyen eşzamanlı planlarda 40P01 yok", () => {
+  // KÖK NEDEN (T-256): `stock_dimensions.serial_id` FK'sı, YENİ boyut satırı eklenirken `serials` satırında `FOR KEY SHARE` alır
+  // (adım 3, `ensureDimensions`). Adım 6'daki `FOR UPDATE` ise KEY SHARE ile çakışır. Aynı seriyi isteyen iki işlem de adım 3'te
+  // KEY SHARE'i (birlikte) alıp adım 6'da birbirinin KEY SHARE'ini beklerse 40P01 olur; seri id sırası bunu ÇÖZMEZ (tek anahtar).
+  // Düzeltme: adım 6 `FOR NO KEY UPDATE` (KEY SHARE ile çakışmaz; kendi içinde çakışır => seri komutları yine seri hâle gelir).
+  // Bariyer (zamanlamaya dayanmaz): `zz_t256_balance_barrier` bakiye satırı eklenmeden ÖNCE (boyut INSERT'i bitmiş, KEY SHARE alınmış)
+  // karşı taraf da oraya gelene dek (ya da ölene dek) bekler; kendisi hiçbir kilit BEKLEMEZ => düzeltmeyle de kilitlenmez.
+  // Mutasyon: `lockSerials` içinde `FOR NO KEY UPDATE` → `FOR UPDATE` yapılınca bu test her turda 40P01 görür.
+  const ROUNDS = 30;
+  type Tx = Parameters<Parameters<typeof withTenant>[1]>[0];
+  const makeGate = (parties: number) => {
+    let arrived = 0;
+    const waiters: (() => void)[] = [];
+    return {
+      arrive: (): Promise<void> =>
+        new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error("t256 gate timeout")), 30_000);
+          waiters.push(() => {
+            clearTimeout(timer);
+            resolve();
+          });
+          if (++arrived === parties) for (const w of waiters) w();
+        }),
+    };
+  };
+  const party = <T,>(me: 1 | 2, gate: ReturnType<typeof makeGate>, work: (tx: Tx) => Promise<T>): Promise<T> =>
+    withTenant(ctxA, async (tx) => {
+      await tx.execute(`SELECT set_config('t256.me', '${me}', true), pg_advisory_xact_lock(256, ${me})`);
+      await gate.arrive();
+      return work(tx);
+    });
+  const freshLocation = async (): Promise<string> => {
+    const locationId = randomUUID();
+    await adminTx(A.tenantId, async (q) => {
+      await q("INSERT INTO public.locations (tenant_id, id, warehouse_id, parent_id, code, name, depth, kind) VALUES ($1, $2, $3, NULL, $4, 'T256 tur', 0, 'STORAGE')", [
+        A.tenantId,
+        locationId,
+        A.warehouseId,
+        `T256-${locationId.slice(0, 8)}`,
+      ]);
+    });
+    return locationId;
+  };
+  const withFlag = async <T,>(fn: () => Promise<T>): Promise<T> => {
+    const old = process.env.STOCK_SERIAL_LOCK_ENABLED;
+    process.env.STOCK_SERIAL_LOCK_ENABLED = "true";
+    try {
+      return await fn();
+    } finally {
+      if (old === undefined) delete process.env.STOCK_SERIAL_LOCK_ENABLED;
+      else process.env.STOCK_SERIAL_LOCK_ENABLED = old;
+    }
+  };
+  /** İki taraf: AYNI seri, AYNI lokasyon, farklı stok durumu (=> farklı YENİ boyut satırı; ikisi de seri FK'sında KEY SHARE alır). */
+  const serialPlan = (locationId: string, stockStatus: "AVAILABLE" | "QUARANTINE", withSerialLock: boolean): StockLockPlan =>
+    empty({
+      locationIds: [locationId],
+      dimensions: [dim(A.itemId, locationId, { lotId: A.lotId, serialId: A.serialId, stockStatus })],
+      serialIds: withSerialLock ? [A.serialId] : [],
+    });
+  const round = async (withSerialLock: boolean): Promise<(string | undefined)[]> => {
+    const locationId = await freshLocation();
+    const gate = makeGate(2);
+    return Promise.all([
+      sqlstateOf(party(1, gate, (tx) => acquireStockLocks(tx, A.tenantId, serialPlan(locationId, "AVAILABLE", withSerialLock)))),
+      sqlstateOf(party(2, gate, (tx) => acquireStockLocks(tx, A.tenantId, serialPlan(locationId, "QUARANTINE", withSerialLock)))),
+    ]);
+  };
+
+  let ownsBarrier = false;
+  beforeAll(async () => {
+    const stale = await admin.query<{ what: string }>(
+      `SELECT 'trigger ' || tgname AS what FROM pg_trigger WHERE tgname LIKE 'zz\\_t256%' AND NOT tgisinternal
+       UNION ALL SELECT 'function ' || p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE p.proname LIKE 't256\\_%' AND n.nspname = 'public'`,
+    );
+    if (stale.rows.length > 0) {
+      throw new Error(
+        `T-256 test artığı bulundu (${stale.rows.map((r) => r.what).join(", ")}); önceki koşu temizlenmemiş. Elle: DROP TRIGGER zz_t256_balance_barrier ON public.stock_balances; DROP FUNCTION public.t256_balance_barrier();`,
+      );
+    }
+    await admin.query(`
+      CREATE FUNCTION public.t256_balance_barrier() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $fn$
+      DECLARE
+        me int := nullif(current_setting('t256.me', true), '')::int;
+        other int;
+        t0 timestamptz := clock_timestamp();
+      BEGIN
+        IF me IS NULL THEN RETURN NEW; END IF;
+        other := 3 - me;
+        PERFORM pg_advisory_xact_lock(256, 10 + me);
+        LOOP
+          EXIT WHEN EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND classid = 256::oid AND objid = (10 + other)::oid AND granted)
+            OR NOT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND classid = 256::oid AND objid = other::oid AND granted);
+          IF clock_timestamp() - t0 > interval '30 seconds' THEN RAISE EXCEPTION 't256 barrier timeout'; END IF;
+          PERFORM pg_sleep(0.005);
+        END LOOP;
+        RETURN NEW;
+      END
+      $fn$`);
+    ownsBarrier = true;
+    await admin.query("REVOKE ALL ON FUNCTION public.t256_balance_barrier() FROM PUBLIC");
+    await admin.query("CREATE TRIGGER zz_t256_balance_barrier BEFORE INSERT ON public.stock_balances FOR EACH ROW EXECUTE FUNCTION public.t256_balance_barrier()");
+  }, 60_000);
+
+  afterAll(async () => {
+    if (!ownsBarrier) return;
+    await admin.query("DROP TRIGGER IF EXISTS zz_t256_balance_barrier ON public.stock_balances");
+    await admin.query("DROP FUNCTION IF EXISTS public.t256_balance_barrier()");
+  }, 60_000);
+
+  it(`bayrak AÇIK: aynı seriyi kilitleyen iki işlem ${ROUNDS}/${ROUNDS} turda deadlock'suz (40P01 sayacı 0); ikisi de başarılı`, async () => {
+    let deadlocks = 0;
+    await withFlag(async () => {
+      for (let n = 0; n < ROUNDS; n++) {
+        const outcomes = await round(true);
+        deadlocks += outcomes.filter((o) => o === "40P01").length;
+        expect(outcomes).toEqual([undefined, undefined]);
+      }
+    });
+    expect(deadlocks).toBe(0);
+  }, 300_000);
+
+  it("kontrol: aynı bariyerde seri kilidi olmayan plan (bayrak kapalıyken seri kilidi planlanamaz) deadlock üretmez", async () => {
+    const old = process.env.STOCK_SERIAL_LOCK_ENABLED;
+    delete process.env.STOCK_SERIAL_LOCK_ENABLED;
+    try {
+      let deadlocks = 0;
+      for (let n = 0; n < ROUNDS; n++) {
+        const outcomes = await round(false);
+        deadlocks += outcomes.filter((o) => o === "40P01").length;
+        expect(outcomes).toEqual([undefined, undefined]);
+      }
+      expect(deadlocks).toBe(0);
+    } finally {
+      if (old !== undefined) process.env.STOCK_SERIAL_LOCK_ENABLED = old;
+    }
+  }, 300_000);
+});
+
 describe("sayım kilidi", () => {
   // T-302: kilit satırı count_sessions'a FK'lidir (A-84); fikstürün tohumladığı oturum kullanılır.
   let session = "";
