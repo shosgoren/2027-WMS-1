@@ -333,7 +333,7 @@ async function keystrokeScan(page: Page, code: string): Promise<void> {
   await page.evaluate(`(() => { const send = (key) => document.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true })); send("\\u0002"); for (const ch of ${JSON.stringify(code)}) send(ch); send("Enter"); })()`);
 }
 
-test("el terminali tetiği (klavye kaması): kamera katmanı açıkken de okutma kabul edilir, akış ilerler ve katman kapanır", async ({ page }, testInfo) => {
+test("el terminali tetiği (klavye kaması): kamera katmanı açıkken de kapalıyken de okutma kabul edilir, akış ilerler", async ({ page }, testInfo) => {
   await page.addInitScript(`${NATIVE_STUB} ${FEEDBACK_STUBS}`);
   await login(page, testInfo);
   await openCamera(page);
@@ -342,9 +342,11 @@ test("el terminali tetiği (klavye kaması): kamera katmanı açıkken de okutma
   await keystrokeScan(page, "0000000000000"); // tanımsız raf: sunucu reddi → akış bu kodu aldı demektir
   await expect(page.getByTestId("last-scan-code")).toContainText("0000000000000");
   await expect(page.getByTestId("scan-alert")).toBeVisible();
-  await expect(overlay).toHaveCount(0); // iki kaynak aynı anda iş yapmaz
+  await expect(overlay).toBeVisible(); // katman klavye kaynağını engellemez ve kapanmaz
   // Katman KAPALIYKEN de aynı yol çalışır.
   await page.getByRole("button", { name: "Anladım, tekrar okut" }).click();
+  await overlay.getByRole("button", { name: "Vazgeç" }).click();
+  await expect(overlay).toHaveCount(0);
   await keystrokeScan(page, "1111111111116");
   await expect(page.getByTestId("last-scan-code")).toContainText("1111111111116");
   await expect(page.getByTestId("scan-alert")).toBeVisible();
@@ -487,12 +489,21 @@ interface Fx {
 }
 const fixtures: Fx[] = [];
 test.afterAll(() => {
+  // Fikstür SİLİNİR (arşivlenmez): bu dosya diğer spec'lerden ÖNCE koşar ve onların boş durum/arşiv listesi varsayımlarını (T-274) bozmamalı.
+  // Stok hareketi yoktur (yalnızca okuma akışı); bağımlılık sırasıyla satır → başlık → barkod → ürün → lokasyon → birim.
   for (const f of fixtures.splice(0)) {
-    psql("UPDATE public.inbound_receipts SET status = 'CANCELLED', version = version + 1 WHERE tenant_id = $1 AND id = $2", [f.tenantId, f.receiptId]);
+    // Önce ARŞİVLE (silme bir nedenle başarısız olsa bile etkin kayıt kalmaz: sonraki spec'ler bu lokasyonu/ürünü seçmez), sonra sil.
     psql("UPDATE public.locations SET status = 'ARCHIVED', archived_at = now() WHERE tenant_id = $1 AND id = $2", [f.tenantId, f.locId]);
     psql("UPDATE public.items SET status = 'ARCHIVED', archived_at = now() WHERE tenant_id = $1 AND id = $2", [f.tenantId, f.itemId]);
-    psql("UPDATE public.units SET status = 'ARCHIVED', archived_at = now() WHERE tenant_id = $1 AND id = $2", [f.tenantId, f.unitId]);
-    if (f.createdWarehouse) psql("UPDATE public.warehouses SET status = 'ARCHIVED', archived_at = now() WHERE tenant_id = $1 AND id = $2", [f.tenantId, f.warehouseId]);
+    psql("UPDATE public.inbound_receipts SET status = 'CANCELLED', version = version + 1 WHERE tenant_id = $1 AND id = $2", [f.tenantId, f.receiptId]);
+    psql("DELETE FROM public.inbound_receipt_lines WHERE tenant_id = $1 AND receipt_id = $2", [f.tenantId, f.receiptId]);
+    psql("DELETE FROM public.inbound_receipts WHERE tenant_id = $1 AND id = $2", [f.tenantId, f.receiptId]);
+    psql("DELETE FROM public.item_barcodes WHERE tenant_id = $1 AND item_id = $2", [f.tenantId, f.itemId]);
+    psql("DELETE FROM public.items WHERE tenant_id = $1 AND id = $2", [f.tenantId, f.itemId]);
+    psql("DELETE FROM public.location_count_locks WHERE tenant_id = $1 AND location_id = $2", [f.tenantId, f.locId]);
+    psql("DELETE FROM public.locations WHERE tenant_id = $1 AND id = $2", [f.tenantId, f.locId]);
+    psql("DELETE FROM public.units WHERE tenant_id = $1 AND id = $2", [f.tenantId, f.unitId]);
+    if (f.createdWarehouse) psql("DELETE FROM public.warehouses WHERE tenant_id = $1 AND id = $2", [f.tenantId, f.warehouseId]);
   }
 });
 

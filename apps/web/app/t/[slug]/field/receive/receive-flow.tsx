@@ -209,10 +209,9 @@ export function QtyStepper({ label, value, min, max, onChange }: { label: string
  * Tarama kaynakları: klavye kaması (DataWedge) ve kamera servis arkasındadır (ADR-010); etkin ekran tek dinleyicidir. `enabled=false` iken tarama iletilmez.
  * `camera(code)` kamera okumasını aynı servis yoluyla (`source: "camera"`) iletir.
  */
-export function useScanner(handler: (value: string, source: ScanSource) => void, enabled: boolean): { service: ScannerService | null; camera: (code: string) => void; dropped: boolean; clearDropped: () => void; hardwareScans: number } {
+export function useScanner(handler: (value: string, source: ScanSource) => void, enabled: boolean): { service: ScannerService | null; camera: (code: string) => void; dropped: boolean; clearDropped: () => void } {
   const [service, setService] = useState<ScannerService | null>(null);
   const [dropped, setDropped] = useState(false);
-  const [hardwareScans, setHardwareScans] = useState(0);
   const enabledRef = useRef(enabled);
   enabledRef.current = enabled;
   const ref = useRef(handler);
@@ -233,10 +232,7 @@ export function useScanner(handler: (value: string, source: ScanSource) => void,
     s.registerSource(cam);
     setService(s);
   }, []);
-  const stable = useCallback((v: string, src: ScanSource) => {
-    if (src === "keystroke") setHardwareScans((n) => n + 1);
-    ref.current(v, src);
-  }, []);
+  const stable = useCallback((v: string, src: ScanSource) => ref.current(v, src), []);
   useEffect(() => (service !== null && enabled ? service.onScan(stable) : undefined), [service, enabled, stable]);
   // Okuma kapalıyken (işlem sürüyor ya da uyarı açık) gelen kamera kodu SESSİZCE düşmez: kullanıcıya bildirilir (T-313 güvenlik MINOR).
   const camera = useCallback((code: string) => {
@@ -247,7 +243,7 @@ export function useScanner(handler: (value: string, source: ScanSource) => void,
     cameraEmit.current?.(code);
   }, []);
   const clearDropped = useCallback(() => setDropped(false), []);
-  return { service, camera, dropped, clearDropped, hardwareScans };
+  return { service, camera, dropped, clearDropped };
 }
 
 type CamPhase =
@@ -537,8 +533,6 @@ export interface ScanOutcome {
   readonly busy: boolean;
   readonly name: string | undefined;
   readonly alerting: boolean;
-  /** Klavye kaması (el terminali) okutma sayısı: artınca kamera katmanı kapanır (iki kaynak aynı anda iş yapmaz). */
-  readonly hardwareScans: number;
 }
 
 /**
@@ -574,13 +568,6 @@ export function useScanPrimary(camera: (code: string) => void, outcome: ScanOutc
     const timer = setTimeout(close, ms);
     return () => clearTimeout(timer);
   }, [accepted, outcome.busy, outcome.name, outcome.alerting, close]);
-  // El terminali okutması geldi: kamera katmanını kapat (kod akışa zaten gitti).
-  const hw = useRef(outcome.hardwareScans);
-  useEffect(() => {
-    if (hw.current === outcome.hardwareScans) return;
-    hw.current = outcome.hardwareScans;
-    close();
-  }, [outcome.hardwareScans, close]);
   // "Elle gir": katman kapanınca tarama panelindeki ScanField elle giriş kipine geçer (aynı bileşen, ikinci bir giriş yolu yok).
   useEffect(() => {
     if (cam || !wantManual.current) return;
@@ -706,8 +693,8 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
     },
     [busy, alert, slug, stage, picked, receipt],
   );
-  const { service: scanner, camera, dropped, clearDropped, hardwareScans } = useScanner((v) => void onScanned(v), stage !== "done" && alert === null && !busy);
-  const scanPrimary = useScanPrimary(camera, { busy, name: lastName, alerting: alert !== null, hardwareScans });
+  const { service: scanner, camera, dropped, clearDropped } = useScanner((v) => void onScanned(v), stage !== "done" && alert === null && !busy);
+  const scanPrimary = useScanPrimary(camera, { busy, name: lastName, alerting: alert !== null });
 
   async function confirm() {
     if (picked === null || busy) return;

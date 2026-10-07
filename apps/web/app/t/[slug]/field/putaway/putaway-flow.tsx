@@ -120,8 +120,8 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
     [busy, alert, stage, slug, warehouseId, task, source],
   );
   const scanning = stage === "source" || stage === "item" || stage === "target";
-  const { service: scanner, camera, dropped, clearDropped, hardwareScans } = useScanner((v) => void onScanned(v), scanning && alert === null && !busy);
-  const scanPrimary = useScanPrimary(camera, { busy, name: lastName, alerting: alert !== null, hardwareScans });
+  const { service: scanner, camera, dropped, clearDropped } = useScanner((v) => void onScanned(v), scanning && alert === null && !busy);
+  const scanPrimary = useScanPrimary(camera, { busy, name: lastName, alerting: alert !== null });
 
   async function confirm() {
     if (busy || source === null || item === null || target === null) return;
