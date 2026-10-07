@@ -20,14 +20,32 @@
 //
 // A-xx: A-248-1 durum geçişi fail-closed beyaz liste (bkz. plan.ts; A-217-1/A-147 kaldırıldı); rezerveli kısım durum değiştirmez (aşağıda); A-217-2 yeterlilik girişleri saymaz; A-217-3 defter nedeni belge türünden gelir
 // (STOCK_IN→RECEIPT, STOCK_OUT→SHIPMENT, STOCK_MOVE→MOVE; diğer nedenler 3A belge türlerinde); A-145 satır lokasyonları belge deposunda;
-// A-07 senkron üst sınırı 200 satır (üstü T-222; o zamana dek `VALIDATION_FAILED`/`DOCUMENT_STATE`, sahte başarı yok).
+// A-07 senkron üst sınırı 200 satır; üstü (≤ 2.000, A-07) T-222 ile worker'da işlenir: istek yalnızca belgeyi kilitler, `posting_job_id` yazar, işi kuyruğa
+// bırakır ve idempotency kaydını `IN_PROGRESS` tutar (`deferred`); worker aynı `plan/apply` çiftiyle (`buildPostCommand`, `worker: true`) `resume` ile tamamlar.
+// A-222-1: eşik üstü `STOCK_MOVE` rezervasyon taşıması (`reservationMoves`) desteklenmez (iş yükünde taşıma yok) → `VALIDATION_FAILED`.
 import { sql } from "drizzle-orm";
 import type { LockedState } from "@wms/db";
 import { AppError } from "@wms/shared/errors";
-import type { AccessTx } from "../identity/access.ts";
+import type { JobQueue } from "@wms/shared/queue";
+import { runTenantQuery, type AccessTx } from "../identity/access.ts";
 import { pgUuidArray } from "../warehouse/scope.ts";
-import { EMPTY_LOCK_PLAN, executeStockCommand, type StockCommandPlan } from "./command.ts";
-import { assertItemsActive, assertLocationsActiveInWarehouse, assertNotProcessing, readDocumentHeader, type StockDocCallParams } from "./documents.ts";
+import {
+  EMPTY_LOCK_PLAN,
+  FeatureDisabledError,
+  executeStockCommand,
+  type StockCommandApplied,
+  type StockCommandParams,
+  type StockCommandPlan,
+} from "./command.ts";
+import {
+  MAX_DOCUMENT_LINES,
+  assertItemsActive,
+  assertLocationsActiveInWarehouse,
+  assertNotProcessing,
+  readDocumentHeader,
+  type DocumentHeader,
+  type StockDocCallParams,
+} from "./documents.ts";
 import type { StockCommandResult } from "./idempotency.ts";
 import {
   buildPostingPlan,
@@ -176,41 +194,46 @@ function assertCovered(p: PostingPlan, locked: LockedState): void {
   if (!ok) throw new AppError("VERSION_CONFLICT", { retryable: true });
 }
 
-/** `stock.post`: bkz. dosya başı. */
-export async function postDocument(
-  params: StockDocCallParams,
-  input: PostDocumentInput,
-): Promise<StockCommandResult & { readonly replayed: boolean }> {
-  if (typeof input.documentId !== "string" || !UUID_RE.test(input.documentId)) throw new AppError("VALIDATION_FAILED");
-  if (typeof input.expectedVersion !== "number" || !Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) {
-    throw new AppError("VALIDATION_FAILED");
-  }
-  const documentId = input.documentId.toLowerCase();
-  const expectedVersion = input.expectedVersion;
-  const moves = normalizeMoves(input.reservationMoves);
-  // Yalnızca verildiyse özete girer: önceki (taşımasız) isteklerin özeti değişmez.
-  const hashInput = moves === undefined ? { documentId, expectedVersion } : { documentId, expectedVersion, reservationMoves: moves };
-  const outcome = await executeStockCommand<typeof hashInput, StockCommandResult>({
-    db: params.db,
-    principal: params.principal,
-    tenantSlug: params.tenantSlug,
-    clientKey: params.clientKey,
-    commandType: "stock.document.post",
-    permission: "stock.post",
-    input: hashInput,
-    ...(params.retry === undefined ? {} : { retry: params.retry }),
-    ...(params.timeouts === undefined ? {} : { timeouts: params.timeouts }),
-    ...(params.logger === undefined ? {} : { logger: params.logger }),
+const tooLarge = (): AppError => new AppError("VALIDATION_FAILED", { detail: "DOCUMENT_TOO_LARGE" });
+
+export interface PostDocumentParams extends StockDocCallParams {
+  /** Eşik üstü belge için kuyruk (yalnızca `enqueue`); verilmezse eşik üstü belge `FEATURE_DISABLED` ile reddedilir (sahte başarı yok). */
+  readonly queue?: Pick<JobQueue<AccessTx>, "enqueue">;
+}
+
+/** `postDocument` yanıtı: senkron sonuç ya da eşik üstü belge için `PROCESSING` (yoklama: `getPostingStatus`). */
+export type PostDocumentResult = Omit<StockCommandResult, "status"> & {
+  readonly status?: StockCommandResult["status"] | "PROCESSING";
+  readonly replayed: boolean;
+};
+
+export interface PostCommandOptions {
+  readonly documentId: string;
+  /** `null`: worker (belge işleme kilidi altında, sürüm kilit planında okunur). */
+  readonly expectedVersion: number | null;
+  readonly moves: readonly ReservationMoveInput[] | undefined;
+  readonly requestId: string | null | undefined;
+  /** Worker yolu: eşik üstü belge işlenir (≤ 2.000) ve işleme kilidi (`posting_job_id`) beklenen durumdur; çağıran (jobs.ts) kimliği doğrular. */
+  readonly worker: boolean;
+  readonly queue?: PostDocumentParams["queue"];
+}
+
+/** Senkron ve worker yolunun ORTAK `plan/apply` çifti (`executeStockCommand`'a verilir). */
+export function buildPostCommand(o: PostCommandOptions): Pick<StockCommandParams<unknown>, "plan" | "apply"> {
+  const { documentId, moves } = o;
+  const maxPlanLines = o.worker ? MAX_DOCUMENT_LINES : SYNC_POST_MAX_LINES;
+  return {
     plan: async (tx, _i, m) => {
       // Salt okuma; iş kuralı DENETLENMEZ (yeniden oynatma saklı sonuca ulaşır). Geçersiz/aşırı belge → yalnızca belge kilidi; apply reddeder.
-      const head = await tx.execute<{ warehouse_id: string; kind: string }>(
-        sql`SELECT warehouse_id, kind FROM public.documents WHERE tenant_id = ${m.tenantId}::uuid AND id = ${documentId}::uuid`,
+      const head = await tx.execute<{ warehouse_id: string; kind: string; version: number | string }>(
+        sql`SELECT warehouse_id, kind, version FROM public.documents WHERE tenant_id = ${m.tenantId}::uuid AND id = ${documentId}::uuid`,
       );
       const h = head[0];
       if (h === undefined) throw new AppError("NOT_FOUND");
+      const expectedVersion = o.expectedVersion ?? Number(h.version);
       const lines = await loadLines(tx, m.tenantId, documentId);
       let built: PostingPlan | undefined;
-      if (KINDS.has(h.kind) && lines.length >= 1 && lines.length <= SYNC_POST_MAX_LINES) {
+      if (KINDS.has(h.kind) && lines.length >= 1 && lines.length <= maxPlanLines) {
         try {
           built = buildPostingPlan(h.kind as PostingKind, lines);
         } catch (e) {
@@ -224,16 +247,17 @@ export async function postDocument(
       const extra = built === undefined ? [] : await locationWarehouses(tx, m.tenantId, built.locationIds);
       return { warehouseIds: [...new Set([h.warehouse_id, ...extra])], locks: lockPlanOf(documentId, expectedVersion, built, [...new Set(reservationIds)].sort()) };
     },
-    apply: async (tx, locked, ctx) => {
+    apply: async (tx, locked, ctx): Promise<StockCommandApplied> => {
       if (locked.document === undefined) throw new AppError("INTERNAL");
       const header = await readDocumentHeader(tx, ctx.tenantId, documentId); // belge kilitli
-      assertNotProcessing(header); // M-6
+      if (!o.worker) assertNotProcessing(header); // M-6 (worker'da kilit beklenen durumdur; jobs.ts işi doğrular)
       if (header.status !== "APPROVED") throw documentState();
       if (!KINDS.has(header.kind)) throw new AppError("VALIDATION_FAILED");
       const kind = header.kind as PostingKind;
       const lines = await loadLines(tx, ctx.tenantId, documentId);
       if (lines.length < 1) throw new AppError("VALIDATION_FAILED");
-      if (lines.length > SYNC_POST_MAX_LINES) throw documentState(); // T-222 gelene dek kapalı yol: açık hata
+      if (lines.length > MAX_DOCUMENT_LINES) throw tooLarge(); // sert sınır; işleme anında yeniden denetlenir
+      if (lines.length > SYNC_POST_MAX_LINES && !o.worker) return deferToWorker(tx, ctx, header, o);
       const built = buildPostingPlan(kind, lines);
       assertCovered(built, locked);
 
@@ -288,16 +312,101 @@ export async function postDocument(
           action: "stock_document.posted",
           entityType: "stock_document",
           entityId: documentId,
-          requestId: input.requestId ?? null,
+          requestId: o.requestId ?? null,
           changeSummary: { kind, lineCount: lines.length, ledgerRows: built.entries.length, warehouseId: header.warehouseId, reservationsConsumed: consumed.length, reservationsMoved: moved.length },
         },
         // Numara EN SON; aynı UPDATE belgeyi POSTED yapar (sürüm +1 ve durum geçmişi DB tetikleyicilerindedir).
         numbering: { documentId, kind: kind, businessDate: header.businessDate, status: "POSTED" },
       };
     },
+  };
+}
+
+/**
+ * Eşik üstü belge (T-222, ADR-018 §6): belge kilitli (acquireStockLocks) ve APPROVED iken işi kuyruğa bırakır, `posting_job_id` +
+ * `posting_requested_by` yazar. İdempotency kaydı `IN_PROGRESS` kalır (`deferred`). `enqueue` aynı transaction'dadır: geri alma işi de geri alır.
+ */
+async function deferToWorker(
+  tx: AccessTx,
+  ctx: { readonly tenantId: string; readonly userId: string; readonly idempotencyRecordId: string },
+  header: DocumentHeader,
+  o: PostCommandOptions,
+): Promise<StockCommandApplied> {
+  if (o.moves !== undefined && o.moves.length > 0) throw new AppError("VALIDATION_FAILED"); // A-222-1
+  if (o.queue === undefined) throw new FeatureDisabledError("ASYNC_POSTING");
+  const enq = await o.queue.enqueue(tx, {
+    type: "stock.document.post",
+    actorUserId: ctx.userId,
+    payload: { documentId: header.id, idempotencyRecordId: ctx.idempotencyRecordId },
+    singletonKey: header.id,
   });
-  if (outcome.status !== "COMPLETED") throw new AppError("VERSION_CONFLICT", { retryable: true }); // senkron yolda beklenmez
+  // `singletonKey` çakışması: önceki iş hâlâ sonlanıyor (FAILED yazıldı, kuyruk satırı kapanmadı). Yeniden denenebilir geçici durum.
+  if (enq.jobId === null) throw new AppError("VERSION_CONFLICT", { retryable: true });
+  const rows = await tx.execute<{ id: string }>(
+    sql`UPDATE public.documents SET posting_job_id = ${enq.jobId}::uuid, posting_requested_by = ${ctx.userId}::uuid
+         WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${header.id}::uuid AND status = 'APPROVED' AND posting_job_id IS NULL RETURNING id`,
+  );
+  if (rows[0] === undefined) throw documentState();
+  return { result: { documentId: header.id, status: "APPROVED" }, audit: null, deferred: true };
+}
+
+/** `stock.post`: bkz. dosya başı. */
+export async function postDocument(params: PostDocumentParams, input: PostDocumentInput): Promise<PostDocumentResult> {
+  if (typeof input.documentId !== "string" || !UUID_RE.test(input.documentId)) throw new AppError("VALIDATION_FAILED");
+  if (typeof input.expectedVersion !== "number" || !Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) {
+    throw new AppError("VALIDATION_FAILED");
+  }
+  const documentId = input.documentId.toLowerCase();
+  const expectedVersion = input.expectedVersion;
+  const moves = normalizeMoves(input.reservationMoves);
+  // Yalnızca verildiyse özete girer: önceki (taşımasız) isteklerin özeti değişmez.
+  const hashInput = moves === undefined ? { documentId, expectedVersion } : { documentId, expectedVersion, reservationMoves: moves };
+  const outcome = await executeStockCommand<typeof hashInput, StockCommandResult>({
+    db: params.db,
+    principal: params.principal,
+    tenantSlug: params.tenantSlug,
+    clientKey: params.clientKey,
+    commandType: "stock.document.post",
+    permission: "stock.post",
+    input: hashInput,
+    ...(params.retry === undefined ? {} : { retry: params.retry }),
+    ...(params.timeouts === undefined ? {} : { timeouts: params.timeouts }),
+    ...(params.logger === undefined ? {} : { logger: params.logger }),
+    ...buildPostCommand({ documentId, expectedVersion, moves, requestId: input.requestId, worker: false, ...(params.queue === undefined ? {} : { queue: params.queue }) }),
+  });
+  // IN_PROGRESS: eşik üstü belge kuyrukta (bu istek ya da aynı anahtarlı önceki istek); sonuç `getPostingStatus` ile yoklanır.
+  // Yeni istek ile aynı anahtarlı tekrar ayırt edilmez (ikisi de IN_PROGRESS): `replayed` bu yanıtta anlamsızdır, false.
+  if (outcome.status !== "COMPLETED") return { documentId, status: "PROCESSING", replayed: false };
   return { ...outcome.result, replayed: outcome.replayed };
+}
+
+export type PostingStatusView =
+  | { readonly status: "DRAFT" | "APPROVED" | "PROCESSING" | "POSTED" | "CANCELLED" }
+  | { readonly status: "FAILED"; readonly errorCode: string };
+
+/**
+ * `stock.view`: `DRAFT|APPROVED|PROCESSING|POSTED|FAILED(kod)` (UI yoklar, T-229). `FAILED`: belge `APPROVED`, işleme kilidi yok ve en son worker
+ * kaydı `FAILED` (kayıtta yalnızca `result.documentId` bağıdır).
+ */
+export async function getPostingStatus(params: Omit<StockDocCallParams, "clientKey">, documentId: string): Promise<PostingStatusView> {
+  if (typeof documentId !== "string" || !UUID_RE.test(documentId)) throw new AppError("VALIDATION_FAILED");
+  const id = documentId.toLowerCase();
+  return runTenantQuery({ ...params, permission: "stock.view" }, async (tx, m) => {
+    const rows = await tx.execute<{ status: DocumentHeader["status"]; posting_job_id: string | null }>(
+      sql`SELECT status, posting_job_id FROM public.documents WHERE tenant_id = ${m.tenantId}::uuid AND id = ${id}::uuid`,
+    );
+    const d = rows[0];
+    if (d === undefined) throw new AppError("NOT_FOUND");
+    if (d.posting_job_id !== null) return { status: "PROCESSING" } as const;
+    if (d.status !== "APPROVED") return { status: d.status } as const;
+    const failed = await tx.execute<{ error_code: string | null }>(
+      sql`SELECT error_code FROM public.idempotency_records
+           WHERE tenant_id = ${m.tenantId}::uuid AND command_type = 'stock.document.post' AND status = 'FAILED' AND result->>'documentId' = ${id}
+           ORDER BY completed_at DESC LIMIT 1`,
+    );
+    const code = failed[0]?.error_code;
+    return code === undefined || code === null ? ({ status: "APPROVED" } as const) : ({ status: "FAILED", errorCode: code } as const);
+  });
 }
 
 /** Salt okuma: planlanan serilerin pozitif bakiyeli boyutları (belge dışı boyutlar dahil; seri kilidi altında kararlıdır). */

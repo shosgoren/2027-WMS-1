@@ -31,6 +31,7 @@ import { assertWarehouseInScope } from "../warehouse/scope.ts";
 import {
   StoredRejectionError,
   assertResultWhitelisted,
+  decodeErrorCode,
   beginIdempotency,
   completeIdempotency,
   isPersistedRejectionCode,
@@ -150,6 +151,11 @@ export interface StockCommandApplied {
   /** `null` yalnızca kayıtlı bir audit eylemi olmayan komutlar içindir (açık istisna; rapor Bulgusu). */
   readonly audit: StockAudit | null;
   readonly numbering?: StockNumbering;
+  /**
+   * T-222 (ADR-018 §6): iş kuyruğa bırakıldı; idempotency kaydı `IN_PROGRESS` kalır (worker `resume` ile tamamlar). `audit: null` ve `numbering`
+   * yok olmalıdır (sonuç henüz yoktur); aksi `INTERNAL`. Dönüş `{ status: "IN_PROGRESS" }`.
+   */
+  readonly deferred?: true;
 }
 
 export interface StockCommandContext {
@@ -176,6 +182,13 @@ export interface StockCommandParams<I, R extends StockCommandResult = StockComma
   readonly plan: (tx: AccessTx, input: I, membership: Membership) => Promise<StockCommandPlan>;
   readonly apply: (tx: AccessTx, locked: LockedState, ctx: StockCommandContext) => Promise<StockCommandApplied & { readonly result: R }>;
   readonly timeouts?: StockTimeouts;
+  /**
+   * T-222 worker yolu: istek transaction'ında yazılmış `IN_PROGRESS` kaydı yeni kayıt açmadan sürdürülür. Kayıt `FOR UPDATE` okunur; komut türü
+   * ve aktör (= `principal`, yani işi isteyen kullanıcı) eşleşmeli, durum `IN_PROGRESS` olmalıdır. Özet (`request_hash`) ve istemci anahtarı
+   * kayıttan alınır (worker yükünde yoktur). Kayıt `COMPLETED` ise saklı sonuç (`replayed`), `REJECTED`/`FAILED` ise saklı hata döner. Bu modda iş
+   * kuralı reddi `REJECTED` olarak YAZILMAZ: çağıran (worker) `FAILED`'ı kendi ayrı transaction'ında yazar. `clientKey` verilmez.
+   */
+  readonly resume?: { readonly recordId: string };
   /** Test/ayar: yeniden deneme uykusu ve rastgelelik. */
   readonly retry?: Pick<RetryOptions, "sleep" | "random" | "maxAttempts">;
   readonly logger?: Logger;
@@ -221,8 +234,10 @@ export async function executeStockCommand<I, R extends StockCommandResult = Stoc
   if ((p.tenantSlug === undefined) === (p.tenantId === undefined)) {
     throw new TypeError("executeStockCommand: exactly one of tenantSlug / tenantId is required");
   }
-  const clientKey = parseClientKey(p.clientKey);
-  const hash = requestHash(p.input);
+  const resuming = p.resume !== undefined;
+  // Sürdürmede anahtar ve özet kayıttan gelir (aşağıda); istek girdisi yalnızca `plan` içindir.
+  let clientKey = resuming ? "" : parseClientKey(p.clientKey);
+  let hash = resuming ? "" : requestHash(p.input);
   const timeouts = p.timeouts ?? STOCK_TIMEOUTS.sync;
   const logger = p.logger ?? defaultLogger();
   const seen: { tenantId?: string; userId?: string } = {};
@@ -233,8 +248,18 @@ export async function executeStockCommand<I, R extends StockCommandResult = Stoc
     try {
       const plan = await p.plan(tx, p.input, m);
       await assertWarehouseInScope(tx, m, plan.warehouseIds);
-      const key: IdempotencyKey = { tenantId: m.tenantId, commandType: p.commandType, clientKey, actorUserId: m.userId, requestHash: hash };
-      const begun = await beginIdempotency(tx, key);
+      let begun: IdempotencyOutcome;
+      if (p.resume !== undefined) {
+        const r = await resumeIdempotency(tx, m, p.commandType, p.resume.recordId);
+        if (r.kind === "COMPLETED") return { status: "COMPLETED", replayed: true, result: r.result as R };
+        if (r.kind === "REJECTED") throw r.error;
+        clientKey = r.clientKey;
+        hash = r.requestHash;
+        begun = { kind: "NEW", recordId: r.recordId };
+      } else {
+        const key: IdempotencyKey = { tenantId: m.tenantId, commandType: p.commandType, clientKey, actorUserId: m.userId, requestHash: hash };
+        begun = await beginIdempotency(tx, key);
+      }
       if (begun.kind === "COMPLETED") return { status: "COMPLETED", replayed: true, result: begun.result as R };
       if (begun.kind === "REJECTED") throw begun.error;
       if (begun.kind === "IN_PROGRESS") return { status: "IN_PROGRESS" };
@@ -251,6 +276,10 @@ export async function executeStockCommand<I, R extends StockCommandResult = Stoc
       });
       // Beyaz liste sorgudan önce de denetlenir: liste dışı alan yazımdan ÖNCE reddedilir.
       assertResultWhitelisted(applied.result);
+      if (applied.deferred === true) {
+        if (applied.audit !== null || applied.numbering !== undefined) throw new AppError("INTERNAL"); // sözleşme ihlali: sonuçsuz iş audit/numara yazmaz
+        return { status: "IN_PROGRESS" };
+      }
       if (applied.audit !== null) await appendAudit(tx, { ...applied.audit, actorUserId: m.userId });
       let result: StockCommandResult = applied.result;
       if (applied.numbering !== undefined) {
@@ -288,7 +317,7 @@ export async function executeStockCommand<I, R extends StockCommandResult = Stoc
       isPersistedRejectionCode(err.code) &&
       !(err instanceof StoredRejectionError) &&
       !(err instanceof FeatureDisabledError);
-    if (!persist) throw err;
+    if (!persist || resuming) throw err; // sürdürmede FAILED'ı çağıran yazar (ayrı transaction)
     const key: IdempotencyKey = { tenantId, commandType: p.commandType, clientKey, actorUserId: userId, requestHash: hash };
     const existing = await persistRejection(p, key, err, timeouts, logger);
     if (existing === undefined) throw err;
@@ -297,6 +326,33 @@ export async function executeStockCommand<I, R extends StockCommandResult = Stoc
     if (existing.kind === "IN_PROGRESS") return { status: "IN_PROGRESS" };
     throw err;
   }
+}
+
+type ResumeOutcome =
+  | { readonly kind: "NEW"; readonly recordId: string; readonly clientKey: string; readonly requestHash: string }
+  | { readonly kind: "COMPLETED"; readonly result: StockCommandResult }
+  | { readonly kind: "REJECTED"; readonly error: AppError };
+
+/** `resume` (T-222): kaydı `FOR UPDATE` okur ve doğrular. Bulunamayan kayıt `NOT_FOUND`; komut türü/aktör farkı `IDEMPOTENCY_MISMATCH`. */
+async function resumeIdempotency(tx: AccessTx, m: Membership, commandType: string, recordId: string): Promise<ResumeOutcome> {
+  const rows = await tx.execute<{
+    id: string; client_key: string; command_type: string; actor_user_id: string; request_hash: string; status: string; result: unknown; error_code: string | null;
+  }>(
+    sql`SELECT id, client_key, command_type, actor_user_id, request_hash, status, result, error_code FROM public.idempotency_records
+         WHERE tenant_id = ${m.tenantId}::uuid AND id = ${recordId}::uuid FOR UPDATE`,
+  );
+  const row = rows[0];
+  if (row === undefined) throw new AppError("NOT_FOUND");
+  if (row.command_type !== commandType || row.actor_user_id.toLowerCase() !== m.userId.toLowerCase()) throw new AppError("IDEMPOTENCY_MISMATCH");
+  if (row.status === "COMPLETED") {
+    const parsed = typeof row.result === "string" ? (JSON.parse(row.result) as unknown) : row.result;
+    return { kind: "COMPLETED", result: (parsed ?? {}) as StockCommandResult };
+  }
+  if (row.status === "REJECTED" || row.status === "FAILED") {
+    const stored = decodeErrorCode(row.error_code ?? "INTERNAL");
+    return { kind: "REJECTED", error: new StoredRejectionError(stored.code, stored.detail === undefined ? {} : { detail: stored.detail }) };
+  }
+  return { kind: "NEW", recordId: row.id, clientKey: row.client_key.toLowerCase(), requestHash: row.request_hash };
 }
 
 /**
