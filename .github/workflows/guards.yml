@@ -23,8 +23,9 @@
 #     `check-pilot` tabanda `pilot.mjs` yoksa aynı kuralla atlanır.
 #   - Taban dalı rapordan/koşudan sonra değişirse (ör. sonradan geri alınırsa) koşu yeniden
 #     tetiklenmez; Supervisor birleştirmeden hemen önce guards'ı yeniden koşturur.
-#   - Yalnızca yerleşik GITHUB_TOKEN (G-09), yalnızca `check-all`'ın bekçi adımında (check:protected
-#     PR açıklamasını API'den okur). İzinler en dar: contents: read, pull-requests: read.
+#   - Yalnızca yerleşik GITHUB_TOKEN (G-09), yalnızca `check-all`'ın iki adımında: bekçi adımı
+#     (check:protected PR açıklamasını API'den okur) ve push'ta "Fetch merged PR record" (T-299; PR
+#     kaydını okur, PR kodu çalıştırmaz). İzinler en dar: contents: read, pull-requests: read.
 # Commit öncesi kanca (`.githooks/pre-commit`) atlanabilir (`--no-verify`); zorlama buradadır.
 name: guards
 
@@ -115,24 +116,30 @@ jobs:
           path: pr
           fetch-depth: 0
           persist-credentials: false
-      # main push'unda (T-299) check:scope PR dalını birleştirme commit'inin konusundan ve ikinci
-      # ebeveyninden çözer; konuya tek başına güvenmez: GitHub'ın `refs/pull/N/head` ref'i
-      # `refs/remotes/pull/N/head` olarak getirilir ve ikinci ebeveynle birebir karşılaştırılır.
-      # Konu yalnızca rakam çıkarmak için (katı regex) okunur; kabuğa gömülmez. Konu biçimi uymuyorsa
-      # getirme atlanır ve bekçi MAIN_PR_SUBJECT/MAIN_PR_UNVERIFIED ile FAIL eder (atla/geç yok).
-      # Getirme başarısızsa iş FAIL. Yalnızca push olayı (PR olaylarında bu ref'ler getirilmez).
-      - name: Fetch merged PR head (main push)
+      # main push'unda (T-299) check:scope PR dalını birleştirme commit'inin konusundan çözer; konu
+      # TEK BAŞINA kanıt değildir (push'ta kim ne yazarsa yazabilir). Kanıt zinciri bekçidedir:
+      #   - HEAD^1 == `github.event.before` (push'ta tek commit; aksi hâlde before..HEAD^1 denetimsiz),
+      #   - GitHub API kaydı (aşağıdaki adım, `pr.json`): birleştirilmiş, merge_commit_sha == HEAD,
+      #     taban main, head.ref == konudaki dal, head.sha == HEAD^2, fork değil, sahip eşleşir.
+      # Kalan güven kabulü: API yanıtı GitHub'dan gelir (token yalnız bu adımda, `pull-requests: read`);
+      # kaydı yazan adım PR kodu çalıştırmaz. Bu adım yalnız konudan rakam okur (katı regex, kabuğa
+      # gömülmez). Konu biçimi uymaz / API'ye ulaşılamaz → `pr.json` yazılmaz ve bekçi FAIL eder
+      # (atla/geç yok). Yalnız `push` olayı; PR olaylarında main kipi zaten açılmaz.
+      # Not: bu bekçi squash/rebase birleştirmeyi kabul etmez (2 ebeveyn şart); depo ayarı kapsam dışı.
+      - name: Fetch merged PR record (main push)
         if: github.event_name == 'push'
-        working-directory: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          subject="$(git log -1 --format=%s HEAD)"
+          subject="$(git -C pr log -1 --format=%s HEAD)"
           if [[ "$subject" =~ ^Merge\ pull\ request\ \#([1-9][0-9]{0,8})\ from\ [A-Za-z0-9][A-Za-z0-9-]*/[^[:space:]]+ ]]; then
             n="${BASH_REMATCH[1]}"
-            git fetch --no-tags --quiet origin "+refs/pull/${n}/head:refs/remotes/pull/${n}/head"
-            echo "PR #${n} başı getirildi: $(git rev-parse --short "refs/remotes/pull/${n}/head")"
+            gh api "repos/${REPO}/pulls/${n}" > "$RUNNER_TEMP/pr.json"
+            echo "PR #${n} kaydı alındı"
           else
-            echo "::notice::HEAD konusu PR birleştirme biçiminde değil; PR başı getirilmedi (check:scope FAIL verecek)"
+            echo "::notice::HEAD konusu PR birleştirme biçiminde değil; PR kaydı alınmadı (check:scope FAIL verecek)"
           fi
       # check:scope kartı dal adından bulur; ayrık HEAD'e doğrulanmış dal adı verilir.
       - name: Name PR branch
@@ -176,6 +183,10 @@ jobs:
         if: steps.mode.outputs.mode == 'current'
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          # check:scope main kipi (T-299): push öncesi uç + PR API kaydı (yalnız push olayında
+          # kullanılır; PR olaylarında `before` boştur ve kip açılmaz). `all` argüman iletmez.
+          GUARD_PUSH_BEFORE: ${{ github.event.before }}
+          GUARD_PR_JSON: ${{ runner.temp }}/pr.json
         run: node base/scripts/guards/cli.mjs all --root pr
       # upload-artifact gizli yolları atlar; .artifacts gizli olmayan geçici dizine kopyalanır.
       - name: Stage guard artifacts
