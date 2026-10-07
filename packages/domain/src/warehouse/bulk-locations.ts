@@ -4,14 +4,15 @@
 //   (tek transaction, hepsi ya da hiçbiri). Çakışma varsa oluşturma `CODE_TAKEN` ile reddedilir; kullanıcı önizlemede çakışmaları görür.
 // - Yetki, depo kapsamı, depo/ebeveyn kilidi (`FOR SHARE`), `depth` ve tür kuralları `createLocation` ile aynıdır (`settings.manage`).
 //   Kodlar domain'de üretilir (UI'da kural yok); biçim: `<BÖLGE>-<raf>-<göz>`, sayılar en az 2 basamak sıfır dolgulu. Ad = kod (A-250-3).
-// - Üst sınır {@link BULK_LOCATIONS_MAX} (A-250-2): sınırı aşan istek, hiçbir kod üretilmeden `VALIDATION_FAILED`.
-// - İdempotency (A-250-4): `idempotencyKey` (UUID) zorunlu. Anahtar, komutun tek `location.created` audit satırında (`bulk_ref`; anahtar adları audit maskeleme listesine takılmasın diye `*_fp`/`*_loc`) saklanır;
+// - Üst sınır {@link BULK_LOCATIONS_MAX} (A-250-2): sınırı aşan istek, hiçbir kod üretilmeden `VALIDATION_FAILED`. Depo başına toplam
+//   {@link WAREHOUSE_LOCATIONS_MAX} (A-259-1) mevcut + planlanan sayıyla denetlenir (önizleme de reddeder).
+// - İdempotency (A-250-4): `idempotencyKey` (UUID) zorunlu. Anahtar, komutun tek `location.created` audit satırında (`entity_id`; ayrıca `bulk_ref`; anahtar adları audit maskeleme listesine takılmasın diye `*_fp`/`*_loc`) saklanır;
 //   aynı anahtar + aynı girdi → yeni yazım yok, `replayed: true`; aynı anahtar + farklı girdi → `IDEMPOTENCY_MISMATCH`. Eşzamanlı aynı anahtar
 //   transaction-düzeyi advisory kilitle serileşir. Anahtar {@link IDEMPOTENCY_WINDOW_DAYS} gün aranır (audit taraması sınırlı kalsın).
 // - Audit: komut başına TEK satır (`location.created`, `entity_type = location_batch`); tek tek lokasyon satırı yok (A-250-3).
 //   Her lokasyon için sayım kilidi satırı 0010 tetikleyicisiyle oluşur; komut sayısını doğrular (yoksa `COUNT_LOCK_ROW_MISSING`).
 import { createHash } from "node:crypto";
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import { appendAudit } from "@wms/db";
 import { AppError } from "@wms/shared/errors";
 import { runTenantCommand, runTenantQuery, type AccessTx } from "../identity/access.ts";
@@ -22,6 +23,8 @@ import { countLockRowsExisting } from "./stock-usage.ts";
 
 /** A-250-2: tek komutta en çok lokasyon. */
 export const BULK_LOCATIONS_MAX = 2000;
+/** A-259-1: depo başına toplam lokasyon üst sınırı (arşivliler dahil: satır arşivde de durur). Aşım `DOCUMENT_TOO_LARGE` (A-259-2). */
+export const WAREHOUSE_LOCATIONS_MAX = 50_000;
 /** A-250-4: idempotency anahtarının aranacağı pencere. */
 export const IDEMPOTENCY_WINDOW_DAYS = 7;
 const RANGE_MAX = 999;
@@ -130,6 +133,33 @@ async function findConflicts(tx: AccessTx, tenantId: string, warehouseId: string
   return { list: rows.slice(0, CONFLICT_LIST_MAX).map((r) => r.code), count: rows.length };
 }
 
+/**
+ * Depo başına toplam lokasyon sınırı (T-259 MINOR-6): mevcut + planlanan > {@link WAREHOUSE_LOCATIONS_MAX} ise `DOCUMENT_TOO_LARGE`.
+ * Eşzamanlı iki toplu komutun ikisi de sınırın altında görüp aşmasın diye (yalnız yazımda) depo başına transaction-düzeyi advisory
+ * kilit alınır; sayım `(tenant_id, warehouse_id, code)` benzersiz indeksinden yapılır.
+ */
+async function assertWarehouseCapacity(tx: AccessTx, tenantId: string, warehouseId: string, adding: number, serialize: boolean): Promise<void> {
+  if (serialize) await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`${tenantId}:warehouse-locations-cap:${warehouseId}`}, 0))`);
+  const r = await tx.execute<{ n: string | number }>(
+    sql`SELECT count(*) AS n FROM public.locations WHERE tenant_id = ${tenantId}::uuid AND warehouse_id = ${warehouseId}::uuid`,
+  );
+  if (Number(r[0]?.n ?? 0) + adding > WAREHOUSE_LOCATIONS_MAX) throw new AppError("VALIDATION_FAILED", { detail: "DOCUMENT_TOO_LARGE" });
+}
+
+/**
+ * İdempotency araması (T-259 MINOR-5): toplu komutun audit satırı `entity_type = 'location_batch'`, `entity_id` = idempotency anahtarı.
+ * `entity_id = anahtar` (texteq: leakproof) 0021 kısmi indeksini (`audit_logs_tenant_bulk_ref_idx`) RLS altında da kullanır; eski
+ * `change_summary->>'bulk_ref'` koşulu (jsonb işlevleri leakproof değil) wms_app planında seq scan'e düşerdi. Test aynı SQL'i EXPLAIN eder.
+ */
+export function bulkRefLookupSql(tenantId: string, key: string): SQL {
+  return sql`SELECT change_summary->>'spec_fp' AS spec_fp, change_summary->>'created' AS created
+            FROM public.audit_logs
+           WHERE tenant_id = ${tenantId}::uuid AND entity_type = 'location_batch' AND entity_id = ${key}
+             AND action = 'location.created'
+             AND occurred_at > now() - make_interval(days => ${IDEMPOTENCY_WINDOW_DAYS}::int)
+           LIMIT 1`;
+}
+
 function parentOf(spec: BulkLocationsSpec): string | null {
   return spec.parentId === undefined || spec.parentId === null ? null : parseUuid(spec.parentId);
 }
@@ -153,6 +183,7 @@ export async function previewBulkLocations(params: WarehouseCallParams, spec: Bu
       if (p[0] === undefined || p[0].status !== "ACTIVE") throw new AppError("VALIDATION_FAILED", { detail: "PARENT_INVALID" });
       childDepth(Number(p[0].depth));
     }
+    await assertWarehouseCapacity(tx, m.tenantId, warehouseId, plan.codes.length, false);
     const conflicts = await findConflicts(tx, m.tenantId, warehouseId, plan.codes);
     return {
       count: plan.codes.length,
@@ -197,20 +228,14 @@ export async function createBulkLocations(params: WarehouseCallParams, input: Cr
     await assertWarehouseVisible(tx, m, [warehouseId]);
     // Aynı anahtarın eşzamanlı iki isteği burada serileşir; ikincisi birincinin audit satırını görür.
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`${m.tenantId}:bulk-locations:${key}`}, 0))`);
-    const prior = await tx.execute<{ spec_fp: string | null; created: string | null }>(
-      sql`SELECT change_summary->>'spec_fp' AS spec_fp, change_summary->>'created' AS created
-            FROM public.audit_logs
-           WHERE tenant_id = ${m.tenantId}::uuid AND action = 'location.created'
-             AND occurred_at > now() - make_interval(days => ${IDEMPOTENCY_WINDOW_DAYS}::int)
-             AND change_summary->>'bulk_ref' = ${key}
-           LIMIT 1`,
-    );
+    const prior = await tx.execute<{ spec_fp: string | null; created: string | null }>(bulkRefLookupSql(m.tenantId, key));
     if (prior[0] !== undefined) {
       if (prior[0].spec_fp !== fp) throw new AppError("IDEMPOTENCY_MISMATCH");
       return { created: Number(prior[0].created ?? plan.codes.length), first, last, replayed: true };
     }
 
     const depth = await loadTarget(tx, m.tenantId, warehouseId, parentId);
+    await assertWarehouseCapacity(tx, m.tenantId, warehouseId, plan.codes.length, true);
     const conflicts = await findConflicts(tx, m.tenantId, warehouseId, plan.codes);
     if (conflicts.count > 0) throw codeTaken();
 
@@ -230,7 +255,7 @@ export async function createBulkLocations(params: WarehouseCallParams, input: Cr
       action: "location.created",
       actorUserId: m.userId,
       entityType: "location_batch",
-      entityId: ids[0] ?? null,
+      entityId: key, // idempotency anahtarı = toplu komutun kimliği (arama indeksi için, bkz. bulkRefLookupSql)
       requestId: input.requestId ?? null,
       changeSummary: {
         warehouse_id: warehouseId,

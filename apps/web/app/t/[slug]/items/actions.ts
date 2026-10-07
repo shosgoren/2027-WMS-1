@@ -6,7 +6,7 @@
 import { headers } from "next/headers";
 import { z } from "zod";
 import { getAppDb } from "@wms/db";
-import { addBarcode, archiveItem, createItem, createWithSuggestedCode, ensureDefaultUnit, removeBarcode, searchItems, setUnitConversion, suggestCode, updateItem } from "@wms/domain/catalog";
+import { addBarcode, archiveItem, createItem, createItemWithDefaultUnit, createWithSuggestedCode, removeBarcode, searchItems, setUnitConversion, suggestCode, updateItem } from "@wms/domain/catalog";
 import { createProductionGuard, limitVerifiedTenant, type ActionContext } from "../../../../lib/action-guard.ts";
 
 const guardedAction = createProductionGuard(() => headers());
@@ -31,7 +31,7 @@ const createItemSchema = z
     quantityScale: z.number().int().min(0).max(6).optional(),
     trackingMode: trackingSchema.optional(),
     pickPolicy: pickSchema.optional(),
-    /** T-250: kod kullanıcı tarafından değiştirilmedi (önerilen kod); çakışmada sıradaki öneriyle yeniden denenir. */
+    /** T-250: kod kullanıcı tarafından değiştirilmedi (önerilen kod) beyanı; sunucu ayrıca kodun önerilen biçimde olduğunu doğrular, çakışmada sıradaki öneriyle yeniden dener. */
     autoCode: z.boolean().optional(),
   })
   .strict();
@@ -56,24 +56,19 @@ async function writeContext(slug: string, ctx: ActionContext) {
 export async function createItemAction(raw: unknown) {
   return guardedAction({ schema: createItemSchema }, async (input, ctx) => {
     const params = await writeContext(input.slug, ctx);
-    const baseUnitId = input.baseUnitId ?? (await ensureDefaultUnit({ ...params, requestId: ctx.requestId })).unitId;
-    const create = (code: string) =>
-      createItem(
-        { ...params, requestId: ctx.requestId },
-        {
-          code,
-          name: input.name,
-          baseUnitId,
-          ...(input.quantityScale === undefined ? {} : { quantityScale: input.quantityScale }),
-          ...(input.trackingMode === undefined ? {} : { trackingMode: input.trackingMode }),
-          ...(input.pickPolicy === undefined ? {} : { pickPolicy: input.pickPolicy }),
-        },
-      );
-    if (input.autoCode !== true) {
-      const r = await create(input.code);
-      return { itemId: r.itemId };
-    }
-    const r = await createWithSuggestedCode({ code: input.code, auto: true, suggest: () => suggestCode(params, { kind: "item" }), create });
+    const base = {
+      name: input.name,
+      ...(input.quantityScale === undefined ? {} : { quantityScale: input.quantityScale }),
+      ...(input.trackingMode === undefined ? {} : { trackingMode: input.trackingMode }),
+      ...(input.pickPolicy === undefined ? {} : { pickPolicy: input.pickPolicy }),
+    };
+    const p = { ...params, requestId: ctx.requestId };
+    const baseUnitId = input.baseUnitId;
+    // Birim verilmediyse varsayılan birim çözümü ve ürün TEK transaction'dadır (domain); ürün reddedilirse birim de geri alınır (T-259).
+    const create = (code: string) => (baseUnitId === undefined ? createItemWithDefaultUnit(p, { ...base, code }) : createItem(p, { ...base, code, baseUnitId }));
+    if (input.autoCode !== true) return { itemId: (await create(input.code)).itemId };
+    // `autoCode` yalnızca istemci beyanıdır: otomatik yeniden deneme için kodun sunucu önerisi biçiminde olması da gerekir (domain, T-259).
+    const r = await createWithSuggestedCode({ kind: "item", code: input.code, auto: true, suggest: (prefix) => suggestCode(params, { kind: "item", prefix }), create });
     return { itemId: r.itemId };
   })(raw);
 }

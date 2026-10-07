@@ -5,7 +5,7 @@
 import { useTranslations } from "next-intl";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { Banner, Button, EmptyState, TextField } from "@wms/ui";
 import { PageBody, Sheet } from "../easy-setup/sheet.tsx";
@@ -129,6 +129,8 @@ function CreateItemDialog({ open, slug, units, returnTo, onClose, onDone }: { op
   const [name, setName] = useState("");
   const [code, setCode] = useState("");
   const [touched, setTouched] = useState(false);
+  // Gecikmeli öneri yanıtı kapanışın (closure) bayat `touched` değerini görmesin diye ref (T-259 MINOR-2).
+  const touchedRef = useRef(false);
   const [codeState, setCodeState] = useState<"loading" | "ready" | "failed">("loading");
   const [unitId, setUnitId] = useState(() => defaultUnitId(units));
   const [scale, setScale] = useState("0");
@@ -143,6 +145,7 @@ function CreateItemDialog({ open, slug, units, returnTo, onClose, onDone }: { op
     setName("");
     setCode("");
     setTouched(false);
+    touchedRef.current = false;
     setCodeState("loading");
     setUnitId(defaultUnitId(units));
     setScale("0");
@@ -151,8 +154,8 @@ function CreateItemDialog({ open, slug, units, returnTo, onClose, onDone }: { op
     void suggestItemCodeAction({ slug }).then((r) => {
       if (!live) return;
       if (r.ok) {
-        // Kullanıcı öneri gelmeden yazmaya başladıysa yazdığı ezilmez (N-14: sessiz değişiklik yok).
-        setCode((cur) => (cur === "" ? r.data.code : cur));
+        // Kullanıcı kodu değiştirdiyse (`touched`; silip boş bırakmak dahil) öneri uygulanmaz (N-14: sessiz değişiklik yok).
+        if (!touchedRef.current) setCode(r.data.code);
         setCodeState("ready");
       } else setCodeState("failed");
     });
@@ -208,7 +211,10 @@ function CreateItemDialog({ open, slug, units, returnTo, onClose, onDone }: { op
         hint={codeState === "loading" ? te("code.loading") : codeState === "failed" ? te("code.failed") : touched ? `${te("code.custom")} ${t("codeHint")}` : `${te("code.suggested")} ${t("codeHint")}`}
         name="code"
         value={code}
+        readOnly={codeState === "loading"}
+        aria-busy={codeState === "loading"}
         onChange={(e) => {
+          touchedRef.current = true;
           setTouched(true);
           setCode(e.target.value);
         }}

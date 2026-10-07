@@ -5,7 +5,7 @@
 import { useTranslations } from "next-intl";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { Banner, Button, ConfirmDialog, EmptyState, TextField } from "@wms/ui";
 import { PageBody, Sheet } from "../easy-setup/sheet.tsx";
@@ -132,6 +132,8 @@ export function CreateDialog({
   const [code, setCode] = useState("");
   const [kind, setKind] = useState("STORAGE");
   const [touched, setTouched] = useState(false);
+  // Gecikmeli öneri yanıtı kapanışın (closure) bayat `touched` değerini görmesin diye ref (T-259 MINOR-2).
+  const touchedRef = useRef(false);
   const [codeState, setCodeState] = useState<"loading" | "ready" | "failed">("loading");
 
   useEffect(() => {
@@ -141,14 +143,15 @@ export function CreateDialog({
     setName(defaultName);
     setKind("STORAGE");
     setTouched(false);
+    touchedRef.current = false;
     setCode("");
     setCodeState("loading");
     void suggest().then((c) => {
       if (!live) return;
       if (c === null) setCodeState("failed");
       else {
-        // Kullanıcı öneri gelmeden yazmaya başladıysa yazdığı ezilmez (N-14: sessiz değişiklik yok).
-        setCode((cur) => (cur === "" ? c : cur));
+        // Kullanıcı kodu değiştirdiyse (`touched`; silip boş bırakmak dahil) öneri uygulanmaz (N-14: sessiz değişiklik yok).
+        if (!touchedRef.current) setCode(c);
         setCodeState("ready");
       }
     });
@@ -196,7 +199,10 @@ export function CreateDialog({
         hint={codeState === "loading" ? te("loading") : codeState === "failed" ? te("failed") : touched ? `${te("custom")} ${t("codeHint")}` : `${te("suggested")} ${t("codeHint")}`}
         name="code"
         value={code}
+        readOnly={codeState === "loading"}
+        aria-busy={codeState === "loading"}
         onChange={(e) => {
+          touchedRef.current = true;
           setTouched(true);
           setCode(e.target.value);
         }}
