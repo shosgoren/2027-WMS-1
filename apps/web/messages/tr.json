@@ -589,6 +589,12 @@
       "claimed": "Bir depo görevini üstlendin.",
       "cancelled": "Bir depo görevini iptal ettin.",
       "completed": "Bir depo görevini tamamladın."
+    },
+    "inbound_receipt": {
+      "created": "Beklenen bir teslim kaydı oluşturdun.",
+      "opened": "Beklenen bir teslimi mal kabule açtın.",
+      "cancelled": "Beklenen bir teslimi iptal ettin.",
+      "received": "Gelen malı teslim kaydına karşı kabul ettin."
     }
   },
   "auditLog": {

@@ -37,7 +37,7 @@ function fakeTx() {
 }
 
 describe("eylem listesi", () => {
-  it("kayıtlı 48 eylemi içerir", () => {
+  it("kayıtlı eylemleri içerir (T-305: inbound_receipt.* dahil)", () => {
     expect([...AUDIT_ACTIONS].sort()).toEqual(
       [
         "member.invited", "member.removed", "member.role_changed", "member.left", "ownership.transferred",
@@ -52,6 +52,7 @@ describe("eylem listesi", () => {
         "warehouse.code_changed", "location.code_changed", "item.code_changed",
         "external_ref.linked",
         "warehouse_task.created", "warehouse_task.assigned", "warehouse_task.claimed", "warehouse_task.cancelled", "warehouse_task.completed",
+        "inbound_receipt.created", "inbound_receipt.opened", "inbound_receipt.cancelled", "inbound_receipt.received",
       ].sort(),
     );
   });

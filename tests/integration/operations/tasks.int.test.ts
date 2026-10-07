@@ -169,12 +169,13 @@ describe("görev komutları", () => {
     expect(await row(taskId)).toMatchObject({ status: "CANCELLED" });
     const [audit] = await audits(A.tenantId, "warehouse_task.cancelled", taskId);
     expect(audit?.reason).toBe("Sipariş iptal edildi");
-    for (const p of [
-      assignTask(admin(A), { taskId, membershipId: A.memberMembershipId, expectedVersion: 2 }),
-      claimTask(admin(A), { taskId, expectedVersion: 2 }),
-      cancelTask(admin(A), { taskId, expectedVersion: 2, reason: "tekrar" }),
+    // Her çağrı tembel başlatılır ve sırayla beklenir: önceden oluşturulmuş söz, önceki `await` sürerken reddedilirse işlenmemiş ret (unhandled rejection) doğurur.
+    for (const call of [
+      () => assignTask(admin(A), { taskId, membershipId: A.memberMembershipId, expectedVersion: 2 }),
+      () => claimTask(admin(A), { taskId, expectedVersion: 2 }),
+      () => cancelTask(admin(A), { taskId, expectedVersion: 2, reason: "tekrar" }),
     ]) {
-      expect(await failure(p)).toMatchObject({ code: "VALIDATION_FAILED", detail: "DOCUMENT_STATE" });
+      expect(await failure(call())).toMatchObject({ code: "VALIDATION_FAILED", detail: "DOCUMENT_STATE" });
     }
   });
 
@@ -245,7 +246,7 @@ describe("görev komutları", () => {
     expect("completeTask" in ops).toBe(false);
     expect("createTasks" in ops).toBe(false);
     expect(Object.keys(ops).sort()).toEqual(
-      ["REASON_MAX", "TASK_KINDS", "TASK_KIND_PERMISSION", "TASK_LIST_LIMIT_DEFAULT", "TASK_LIST_LIMIT_MAX", "TASK_SOURCE_KINDS", "TASK_STATUSES", "assignTask", "cancelTask", "claimTask", "listMyTasks", "listTasks", "nextTaskStatus"].sort(),
+      ["REASON_MAX", "TASK_KINDS", "TASK_KIND_PERMISSION", "TASK_LIST_LIMIT_DEFAULT", "TASK_LIST_LIMIT_MAX", "TASK_SOURCE_KINDS", "TASK_STATUSES", "assignTask", "cancelTask", "claimTask", "listMyTasks", "listTasks", "nextTaskStatus", "approveQuality", "cancelInboundReceipt", "createInboundReceipt", "openInboundReceipt", "putaway", "receiveGoods"].sort(),
     );
     const pkg = JSON.parse(readFileSync(new URL("../../../packages/domain/package.json", import.meta.url), "utf8")) as { exports: Record<string, string> };
     expect(pkg.exports["./operations"]).toBe("./src/operations/index.ts");
