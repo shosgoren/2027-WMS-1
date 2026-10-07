@@ -277,7 +277,7 @@ describe("reseedDemo", () => {
          FROM public.tenants t JOIN public.tenant_settings s ON s.tenant_id = t.id WHERE t.id = $1`,
       [DEMO_TENANT_ID],
     ))[0]!;
-    expect(s).toMatchObject({ name: DEMO_TENANT_NAME, locale: "tr", time_zone: "Europe/Istanbul", sector_template_key: "PACKAGING_SUPPLIES", sector_template_version: 1, onboarding_status: "COMPLETED" });
+    expect(s).toMatchObject({ name: DEMO_TENANT_NAME, locale: "tr", time_zone: "Europe/Istanbul", sector_template_key: "PACKAGING_SUPPLIES", sector_template_version: 2, onboarding_status: "COMPLETED" });
     expect(s.terminology).toEqual(template.terminology);
 
     const c1 = await counts();
@@ -288,6 +288,7 @@ describe("reseedDemo", () => {
       bootstrapped: false,
       memberships: { created: 0, reactivated: 0, rolesFixed: 0, ownershipChanged: false, removed: 0 },
       settings: { nameOrLocaleChanged: false, templateChanged: false },
+      catalog: { itemsCreated: 0, locationsCreated: 0, stockDocuments: 0, stockLines: 0 },
     });
     expect(await counts()).toEqual(c1); // satır sayıları eşit
     expect(await demoState()).toEqual(expectedDemoState());

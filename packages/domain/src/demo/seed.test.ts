@@ -6,8 +6,14 @@ import { JOB_PAYLOAD_SCHEMAS, QueueError, parseJob } from "@wms/shared/queue";
 import { ROLE_KEYS } from "../identity/permissions.ts";
 import {
   DEMO_EMAIL_DOMAIN,
+  DEMO_ITEMS,
+  DEMO_LOCATIONS,
   DEMO_ROLES,
+  DEMO_STOCK_TARGETS,
   DEMO_TENANT_ID,
+  demoDiffDigest,
+  demoStockKey,
+  diffDemoStock,
   loadDemoSeedConfig,
   nextDailyRunUtc,
 } from "./seed.ts";
@@ -110,5 +116,60 @@ describe("nextDailyRunUtc", () => {
     expect(nextDailyRunUtc(new Date("2026-10-06T03:00:00.000Z")).toISOString()).toBe("2026-10-07T03:00:00.000Z");
     expect(nextDailyRunUtc(new Date("2026-10-06T23:30:00.000Z")).toISOString()).toBe("2026-10-07T03:00:00.000Z");
     expect(nextDailyRunUtc(new Date("2026-12-31T12:00:00.000Z")).toISOString()).toBe("2027-01-01T03:00:00.000Z");
+  });
+});
+
+describe("demo içeriği tanımı (T-223)", () => {
+  it("hedefler tanımlı ürün ve lokasyonlara bakar; yalnızca yaprak STORAGE lokasyonları", () => {
+    const items = new Set(DEMO_ITEMS.map((i) => i.code));
+    const locs = new Map(DEMO_LOCATIONS.map((l) => [l.code, l]));
+    expect(items.size).toBeGreaterThanOrEqual(10);
+    expect(DEMO_LOCATIONS.filter((l) => l.parent === "A")).toHaveLength(3); // 3 raf
+    expect(DEMO_LOCATIONS.filter((l) => l.parent?.startsWith("A-R"))).toHaveLength(12); // 3 x 4 göz
+    expect(new Set(DEMO_STOCK_TARGETS.map((t) => t.item)).size).toBeLessThan(items.size); // bazı ürünler stoksuz
+    for (const t of DEMO_STOCK_TARGETS) {
+      expect(items.has(t.item)).toBe(true);
+      expect(locs.get(t.location)?.kind).toBe("STORAGE");
+      expect(/^[1-9]\d*$/.test(t.quantity)).toBe(true);
+    }
+    for (const l of DEMO_LOCATIONS) expect(l.parent === null || locs.has(l.parent)).toBe(true);
+    // ebeveyn her zaman çocuktan ÖNCE tanımlıdır (oluşturma sırası)
+    DEMO_LOCATIONS.forEach((l, i) => expect(l.parent === null || DEMO_LOCATIONS.findIndex((x) => x.code === l.parent) < i).toBe(true));
+  });
+});
+
+describe("demo stok farkı ve koşu anahtarı (MINOR-11)", () => {
+  const cur = (o: Record<string, bigint>) => new Map(Object.entries(o));
+  it("boş bakiyeden hedefe: tümü STOCK_IN; hedefte: fark yok", () => {
+    const d = diffDemoStock(DEMO_STOCK_TARGETS, cur({}));
+    expect(d).toHaveLength(DEMO_STOCK_TARGETS.length);
+    expect(d.every((x) => x.delta > 0n)).toBe(true);
+    const atTarget = cur(Object.fromEntries(DEMO_STOCK_TARGETS.map((t) => [`${t.item}|${t.location}`, BigInt(t.quantity) * 1_000_000n])));
+    expect(diffDemoStock(DEMO_STOCK_TARGETS, atTarget)).toEqual([]);
+  });
+  it("hedefin altı/üstü işaretli fark üretir", () => {
+    const first = DEMO_STOCK_TARGETS[0]!;
+    const below = diffDemoStock(DEMO_STOCK_TARGETS, cur({ [`${first.item}|${first.location}`]: 100n * 1_000_000n }));
+    expect(below.find((x) => x.item === first.item && x.location === first.location)?.delta).toBe((BigInt(first.quantity) - 100n) * 1_000_000n);
+    const above = diffDemoStock(DEMO_STOCK_TARGETS, cur({ [`${first.item}|${first.location}`]: (BigInt(first.quantity) + 5n) * 1_000_000n }));
+    expect(above.find((x) => x.item === first.item && x.location === first.location)?.delta).toBe(-5_000_000n);
+  });
+  it("özet belirlenimli ve içeriğe duyarlı; anahtar koşu/fark/tür/aşamaya göre ayrışır, aynı girdi aynı UUID", () => {
+    const a = diffDemoStock(DEMO_STOCK_TARGETS, cur({}));
+    const b = diffDemoStock(DEMO_STOCK_TARGETS, cur({ "KRT-3020|A1-G01": 1_000_000n }));
+    expect(demoDiffDigest(a)).toBe(demoDiffDigest(diffDemoStock(DEMO_STOCK_TARGETS, cur({}))));
+    expect(demoDiffDigest(a)).not.toBe(demoDiffDigest(b));
+    const run = "11111111-1111-4111-8111-111111111111";
+    const k = demoStockKey(run, demoDiffDigest(a), "STOCK_IN", "create");
+    expect(k).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(demoStockKey(run, demoDiffDigest(a), "STOCK_IN", "create")).toBe(k);
+    const others = [
+      demoStockKey("22222222-2222-4222-8222-222222222222", demoDiffDigest(a), "STOCK_IN", "create"),
+      demoStockKey(run, demoDiffDigest(b), "STOCK_IN", "create"),
+      demoStockKey(run, demoDiffDigest(a), "STOCK_OUT", "create"),
+      demoStockKey(run, demoDiffDigest(a), "STOCK_IN", "approve"),
+      demoStockKey(run, demoDiffDigest(a), "STOCK_IN", "post"),
+    ];
+    expect(new Set([k, ...others]).size).toBe(6);
   });
 });

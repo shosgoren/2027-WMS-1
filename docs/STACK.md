@@ -27,6 +27,7 @@ Kaynak sözdizimi: `<dosya>#<json.yolu>` (package.json alanı) veya `docker-comp
 | MinIO (yerel/CI) | alpine/minio | RELEASE.2025-10-15T17-29-55Z | docker-compose.yml#minio | ADR-006 |
 | Mailpit (yerel/CI) | axllent/mailpit | v1.31.4 | docker-compose.yml#mailpit | |
 | Testcontainers | testcontainers | 12.2.0 | package.json#devDependencies.testcontainers | |
+| fast-check (özellik tabanlı test; MIT, T-220) | fast-check | 4.10.2 | package.json#devDependencies.fast-check | Yalnızca testlerde (15 §Test stratejisi); sabit tohum |
 | Playwright | @playwright/test | 1.56.1 | package.json#devDependencies.@playwright/test | Chromium r1194 (T-131; ortamdaki önkurulu tarayıcı ile eşleşir) |
 | node-postgres (yalnızca test/harness) | pg | 8.23.1 | package.json#devDependencies.pg | |
 | node-postgres tipleri | @types/pg | 8.23.1 | package.json#devDependencies.@types/pg | |

@@ -164,7 +164,7 @@ describe("onboarding idempotency (T-124 madde 1)", () => {
     }
     const mid = (await q<{ onboarding_status: string; onboarding_steps: { key: string; status: string }[] }>("SELECT onboarding_status, onboarding_steps FROM public.tenant_settings WHERE tenant_id = $1", [ws.tenantId]))[0]!;
     expect(mid.onboarding_status).toBe("IN_PROGRESS");
-    expect(mid.onboarding_steps.map((s) => s.status)).toEqual(["DONE", "PENDING"]);
+    expect(mid.onboarding_steps.map((s) => s.status)).toEqual(["DONE", "PENDING", "PENDING", "PENDING"]);
     expect(await n("SELECT count(*) n FROM public.audit_logs WHERE tenant_id = $1 AND action = 'onboarding.step_completed'", [ws.tenantId])).toBe(1);
 
     // Kalan adımı eşzamanlı 5 çağrı tamamlamaya çalışır: toplamda adım yalnızca 1 kez uygulanır.
@@ -172,16 +172,16 @@ describe("onboarding idempotency (T-124 madde 1)", () => {
     const runs = await Promise.allSettled(dbs.map((db) => continueOnboarding({ db, principal: principal(user), slug: ws.slug })));
     expect(runs.filter((r) => r.status === "rejected").map((r) => (r as PromiseRejectedResult).reason)).toEqual([]);
     const applied = runs.flatMap((r) => (r as PromiseFulfilledResult<Awaited<ReturnType<typeof continueOnboarding>>>).value.applied);
-    expect(applied).toEqual(["terminology.applied"]);
+    expect(applied.sort()).toEqual(["locations.applied", "terminology.applied", "units.applied"]);
     for (const r of runs) expect((r as PromiseFulfilledResult<Awaited<ReturnType<typeof continueOnboarding>>>).value.status).toBe("COMPLETED");
 
     const final = (await q<{ onboarding_status: string }>("SELECT onboarding_status FROM public.tenant_settings WHERE tenant_id = $1", [ws.tenantId]))[0]!;
     expect(final.onboarding_status).toBe("COMPLETED");
     const steps = await q<{ step: string }>("SELECT change_summary->>'step' AS step FROM public.audit_logs WHERE tenant_id = $1 AND action = 'onboarding.step_completed' ORDER BY step", [ws.tenantId]);
-    expect(steps.map((s) => s.step)).toEqual(["settings.applied", "terminology.applied"]);
+    expect(steps.map((s) => s.step)).toEqual(["locations.applied", "settings.applied", "terminology.applied", "units.applied"]);
     // Tamamlandıktan sonra yeni çağrı yan etkisizdir.
     expect(await continueOnboarding({ db: pool(), principal: principal(user), slug: ws.slug })).toEqual({ status: "COMPLETED", applied: [] });
-    expect(await n("SELECT count(*) n FROM public.audit_logs WHERE tenant_id = $1 AND action = 'onboarding.step_completed'", [ws.tenantId])).toBe(2);
+    expect(await n("SELECT count(*) n FROM public.audit_logs WHERE tenant_id = $1 AND action = 'onboarding.step_completed'", [ws.tenantId])).toBe(4);
   }, 90_000);
 
   it("kapı (A-50): SIGNUP_ENABLED kapalı / WMS_ENV prod|tanımsız → FORBIDDEN ve hiçbir satır yazılmaz", async () => {
