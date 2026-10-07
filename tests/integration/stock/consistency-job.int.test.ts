@@ -295,11 +295,15 @@ describe("tenant işi: karşılaştırma", () => {
     expect((await check(X)).status).toBe("OK");
     expect((await check(Y)).status).toBe("OK");
     // Test-yalnız bozma: Y'de bakiye +1; X'te bakiye +1, rezerve +1 ve bir kilit satırı silinir. Defter/rezervasyon satırlarına dokunulmaz.
+    // T-291: kasıtlı bozma test sonunda `finally` ile geri alınır (ortak int DB'de restore/tutarlılık denetimleri (T-284) sonraki dosyalarda
+    // yanlış kırmızı vermesin). Silinen kilit satırı geri yüklenmek üzere saklanır. Assertion'lar değişmez.
+    const lockRows = (await adm.query("SELECT * FROM public.location_count_locks WHERE tenant_id = $1 AND location_id = $2", [X.tenantId, x.loc])).rows as Record<string, unknown>[];
     await withTriggersOff(["stock_balances", "location_count_locks"], async () => {
       await adm.query("UPDATE public.stock_balances SET quantity = quantity + 1 WHERE tenant_id = $1 AND stock_dimension_id = $2", [Y.tenantId, dimY]);
       await adm.query("UPDATE public.stock_balances SET quantity = quantity + 1, reserved_quantity = reserved_quantity + 1 WHERE tenant_id = $1 AND stock_dimension_id = $2", [X.tenantId, dimX]);
       await adm.query("DELETE FROM public.location_count_locks WHERE tenant_id = $1 AND location_id = $2", [X.tenantId, x.loc]);
     });
+    try {
     const snapX = await snapshot(X);
     const snapY = await snapshot(Y);
     const sig = await signalCounts();
@@ -329,6 +333,16 @@ describe("tenant işi: karşılaştırma", () => {
     expect(await snapshot(Y)).toEqual(snapY);
     // Sinyal tablosunda tenant sütunu yok (M-7).
     expect((await q("SELECT column_name FROM information_schema.columns WHERE table_name = 'stock_consistency_signals' AND column_name LIKE '%tenant%'"))).toHaveLength(0);
+    } finally {
+      await withTriggersOff(["stock_balances", "location_count_locks"], async () => {
+        await adm.query("UPDATE public.stock_balances SET quantity = quantity - 1 WHERE tenant_id = $1 AND stock_dimension_id = $2", [Y.tenantId, dimY]);
+        await adm.query("UPDATE public.stock_balances SET quantity = quantity - 1, reserved_quantity = reserved_quantity - 1 WHERE tenant_id = $1 AND stock_dimension_id = $2", [X.tenantId, dimX]);
+        for (const r of lockRows) {
+          const cols = Object.keys(r);
+          await adm.query(`INSERT INTO public.location_count_locks (${cols.map((c) => `"${c}"`).join(", ")}) VALUES (${cols.map((_, k) => `$${k + 1}`).join(", ")})`, cols.map((c) => r[c]));
+        }
+      });
+    }
   }, 180_000);
 
   it("(d) seri başına birden çok pozitif boyut: kısmi tekil indeks geçici kaldırılınca tespit edilir; indeks aynı tanımla geri kurulur", async () => {
@@ -380,6 +394,7 @@ describe("tenant işi: karşılaştırma", () => {
     await withTriggersOff(["stock_balances"], async () => {
       await adm.query("UPDATE public.stock_balances SET quantity = quantity + 2 WHERE tenant_id = $1 AND stock_dimension_id = $2", [X.tenantId, bad]);
     });
+    try {
     const seen: string[] = [];
     const flagged: string[] = [];
     let after = NIL_UUID;
@@ -399,6 +414,12 @@ describe("tenant işi: karşılaştırma", () => {
     expect(chunks).toBe(Math.ceil(dims.length / 2) + (dims.length % 2 === 0 ? 1 : 0));
     expect(flagged).toEqual([bad]);
     expect(seen.at(-1)).toBe(dims.at(-1));
+    } finally {
+      // T-291: kasıtlı bozma geri alınır (ortak int DB).
+      await withTriggersOff(["stock_balances"], async () => {
+        await adm.query("UPDATE public.stock_balances SET quantity = quantity - 2 WHERE tenant_id = $1 AND stock_dimension_id = $2", [X.tenantId, bad]);
+      });
+    }
   }, 180_000);
 });
 
