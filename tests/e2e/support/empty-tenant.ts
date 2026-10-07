@@ -1,12 +1,13 @@
 // T-279: boş tenant fikstürü istemcisi. Fikstür `tests/e2e/global-setup.ts` içinde (yerel koşuda) kurulur: demo OLMAYAN bir hesap, uygulamanın
 // kendi yoluyla (kayıt ucu + kurulum sihirbazı, M9 koruması etkin) boş bir çalışma alanı açar ve MFA'yı gerçek ekrandan kurar; çalışma alanının sahibi
 // TENANT_ADMIN'dir. MFA kuralı (access.ts:92-96) aynen geçerlidir. Kimlik bilgileri YALNIZCA `process.env`'dedir (bellek; parola ve TOTP sırrı her
-// koşuda rastgele, diske/loga/rapora/trace'e yazılmaz, G-09). Uzak koşuda (E2E_BASE_URL) fikstür YOKTUR: bu modülü kullanan spec dosyaları
+// koşuda rastgele, diske/loga/rapora yazılmaz, G-09; bu modülü kullanan spec'lerde trace kapalıdır — aşağıya bkz.). Uzak koşuda (E2E_BASE_URL) fikstür YOKTUR: bu modülü kullanan spec dosyaları
 // `playwright.config.ts` `testIgnore` ile dışlanır.
 //
 // G-09 yöntemi: Playwright her API çağrısını (fill/type/press) değeriyle adım başlığına, rapora, çağrı günlüğüne ve trace'e yazar. Bu yüzden gizli
 // değer HİÇBİR Playwright çağrısına parametre olmaz: sayfaya `exposeFunction` ile yalnızca bir işlev adı verilir, sayfa içi sabit bir betik değeri
 // o işlevden alıp alana yazar (değer yalnızca sayfa <-> süreç arasında, API parametresi olmadan akar). Hata iletilerine gizli değer girmez.
+// Trace bunu KORUMAZ: DOM anlık görüntüsü input değerini, ağ kaydı istek gövdesini saklar → giriş yapan spec'ler `trace: "off"` kullanır.
 import { createHmac } from "node:crypto";
 import { expect } from "@playwright/test";
 import type { Browser, Page } from "@playwright/test";

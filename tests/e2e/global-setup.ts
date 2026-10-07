@@ -203,8 +203,9 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | und
     };
     const email = `bos-${suffix}@example.test`; // demo olmayan alan adı (DEMO_EMAIL_DOMAIN=example.invalid)
     const password = randomBytes(18).toString("hex");
-    const browser = await chromium.launch();
+    let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
     try {
+      browser = await chromium.launch();
       const made = await provisionEmptyTenant({
         browser,
         origin: `https://localhost:${portB}`,
@@ -219,9 +220,14 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | und
       process.env.E2E_EMPTY_PASSWORD = password;
       process.env.E2E_EMPTY_TOTP_SECRET = made.totpSecret;
     } finally {
-      await browser.close();
-      closeProxyB();
-      stop(webB);
+      // Kayıt açık örnek her yolda kapanır ve testler başlamadan çıkışı beklenir (T-279 SR MINOR).
+      try {
+        await browser?.close();
+      } finally {
+        closeProxyB();
+        stop(webB);
+        await waitFor("kayıt açık web örneği kapanmadı", 15_000, () => webB.exitCode !== null || webB.signalCode !== null);
+      }
     }
   } catch (e) {
     await teardown();

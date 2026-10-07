@@ -5,8 +5,10 @@ import { test } from "@playwright/test";
 import { itemsScreenChecks } from "./support/items-screen.ts";
 import { loginEmptyTenant, localClient } from "./support/empty-tenant.ts";
 
-// Parola/TOTP kodu hiçbir Playwright çağrısına parametre olmaz (support/empty-tenant.ts: exposeFunction; G-09), bu yüzden rapor/trace sır içermez.
-test.use(localClient("198.51.100.11"));
+// Parola/TOTP kodu hiçbir Playwright çağrısına parametre olmaz (support/empty-tenant.ts: exposeFunction; G-09) → adım başlıkları/rapor temiz.
+// Trace KAPALI: trace DOM anlık görüntüsü input değerini (`__playwright_value_`, parola alanı dahil) ve ağ kaydı giriş isteği gövdesini
+// saklar; başarısız testte parola trace.zip'e (CI artifact) düşerdi (T-279 SR @70003ef). Hata kanıtı: ekran görüntüsü + hata bağlamı.
+test.use({ ...localClient("198.51.100.11"), trace: "off" });
 
 test("boş kiracı: ürünler ekranı boş durumu (S-01, B-03, B-02, I-01..I-05, B-04, B-05)", async ({ page }) => {
   const t = await loginEmptyTenant(page);

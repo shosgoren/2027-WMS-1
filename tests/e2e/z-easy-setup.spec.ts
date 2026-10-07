@@ -10,8 +10,10 @@ import { expect, test } from "@playwright/test";
 import type { Locator, Page } from "@playwright/test";
 import { localClient, loginEmptyTenant } from "./support/empty-tenant.ts";
 
-// Parola/TOTP kodu hiçbir Playwright çağrısına parametre olmaz (support/empty-tenant.ts: exposeFunction; G-09), bu yüzden rapor/trace sır içermez.
-test.use(localClient("198.51.100.12"));
+// Parola/TOTP kodu hiçbir Playwright çağrısına parametre olmaz (support/empty-tenant.ts: exposeFunction; G-09) → adım başlıkları/rapor temiz.
+// Trace KAPALI: trace DOM anlık görüntüsü input değerini (`__playwright_value_`, parola alanı dahil) ve ağ kaydı giriş isteği gövdesini
+// saklar; başarısız testte parola trace.zip'e (CI artifact) düşerdi (T-279 SR @70003ef). Hata kanıtı: ekran görüntüsü + hata bağlamı.
+test.use({ ...localClient("198.51.100.12"), trace: "off" });
 
 const OUT = ".artifacts/t-250";
 const BARCODE = "8690000000019";
