@@ -92,3 +92,23 @@ export {
   type PickNotFound,
   type PickReallocation,
 } from "./picking.ts";
+// Rehberli saha akışı: görev adım ilerlemesi (T-293; ADR-025). Stok değiştirmez; Kaydet `putaway`'i aynı istemci anahtarıyla çağırır. `parseRecordStepInput`/`plainDecimal` saf yardımcılardır (birim testi) ve burada YOKTUR.
+export {
+  GUIDED_TASK_KINDS,
+  RECORDABLE_STEPS,
+  SCAN_CODE_MAX,
+  TASK_PROGRESS_STEPS,
+  beginSave,
+  getTaskProgress,
+  nextTaskFor,
+  recordTaskStep,
+  resetTaskProgress,
+  savePutawayTask,
+  type NextTask,
+  type RecordStepResult,
+  type RecordableStep,
+  type StepRejectionReason,
+  type TaskProgressCallParams,
+  type TaskProgressStep,
+  type TaskProgressView,
+} from "./task-progress.ts";
