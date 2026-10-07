@@ -569,6 +569,22 @@ describe("MAJOR-1: MFA (TENANT_ADMIN istek sahibi) — worker MFA'yı yalnızca 
   const stamp = (id: string) =>
     q<{ posting_mfa_verified_at: Date | null; posting_idempotency_record_id: string | null }>(
       "SELECT posting_mfa_verified_at, posting_idempotency_record_id FROM public.documents WHERE id = $1", [id]).then((r) => r[0] as { posting_mfa_verified_at: Date | null; posting_idempotency_record_id: string | null });
+  /**
+   * 0024 damga bekçisi: kilit doluyken damga doğrudan değiştirilemez. Bayat/uyumsuz damga durumu kurmak için kilit + damgalar tek UPDATE'te temizlenir,
+   * sonra AYNI kilit/istek sahibi ve istenen damga tek UPDATE'te (NULL → dolu) yeniden yazılır. `mfaSql`: damga SQL ifadesi (null = mevcut değer),
+   * `recordId`: kayıt kimliği (null = mevcut değer).
+   */
+  const restamp = async (id: string, mfaSql: string | null, recordId: string | null): Promise<void> => {
+    const cur = (await q<{ job: string; by: string; rec: string; mfa: Date | null }>(
+      "SELECT posting_job_id AS job, posting_requested_by AS by, posting_idempotency_record_id AS rec, posting_mfa_verified_at AS mfa FROM public.documents WHERE id = $1", [id]))[0] as {
+      job: string; by: string; rec: string; mfa: Date | null;
+    };
+    await q("UPDATE public.documents SET posting_job_id = NULL, posting_requested_by = NULL, posting_mfa_verified_at = NULL, posting_idempotency_record_id = NULL WHERE id = $1", [id]);
+    await q(
+      `UPDATE public.documents SET posting_job_id = $2, posting_requested_by = $3, posting_idempotency_record_id = $4, posting_mfa_verified_at = ${mfaSql ?? "$5::timestamptz"} WHERE id = $1`,
+      mfaSql === null ? [id, cur.job, cur.by, recordId ?? cur.rec, cur.mfa] : [id, cur.job, cur.by, recordId ?? cur.rec],
+    );
+  };
   const failedWith = async (d: Doc, key: string, code: string): Promise<void> => {
     await newWorker();
     await waitFor(async () => (await docRow(d.id)).posting_job_id === null, "failure recorded");
@@ -623,7 +639,7 @@ describe("MAJOR-1: MFA (TENANT_ADMIN istek sahibi) — worker MFA'yı yalnızca 
 
   it("pencere dışı damga (süresi dolmuş) kalıcı FORBIDDEN/MFA_REQUIRED", async () => {
     const { d, key } = await adminRequest(true);
-    await q("UPDATE public.documents SET posting_mfa_verified_at = now() - interval '4 hours' WHERE id = $1", [d.id]);
+    await restamp(d.id, "now() - interval '4 hours'", null);
     await failedWith(d, key, "FORBIDDEN/MFA_REQUIRED");
   }, 120_000);
 
@@ -634,7 +650,7 @@ describe("MAJOR-1: MFA (TENANT_ADMIN istek sahibi) — worker MFA'yı yalnızca 
     const d = await mkApproved("STOCK_IN", many(250, () => ln(x, { targetLocationId: loc })));
     const key = uuid();
     await requestPost(d, pickerP(key));
-    await q("UPDATE public.documents SET posting_idempotency_record_id = $2 WHERE id = $1", [d.id, uuid()]);
+    await restamp(d.id, null, uuid());
     await newWorker();
     await waitFor(async () => (await docRow(d.id)).posting_job_id === null, "document released");
     await waitFor(async () => (await jobsOf(d.id))[0]?.state === "failed", "job failed (kalıcı)");
