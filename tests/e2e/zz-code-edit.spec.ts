@@ -1,7 +1,7 @@
 // T-257: kod değiştirme arayüzü (ürün / depo / lokasyon) 375 px mobil görünümde. Akış: kayıt oluştur → "Kodu değiştir" penceresi
 // (eski → yeni önizleme, "geçmiş hareketler etkilenmez" açıklaması) → değişti bildirimi + "Geri al" → sunucu reddi (CODE_TAKEN) neden +
 // sonraki eylemle pencerede kalır → ürün için ESKİ kodla arama yeni karta yönlenir ve "Bu kod X olarak değişti" der.
-// Ortak demo tenant'a yazar, ama kayıtlar kendi rastgele kodlarını taşır ve test sonunda arşivlenir (kolay kurulum rehberi etkin kayıt
+// Ortak demo tenant'a yalnızca mobile projesinde yazar (bkz. aşağıdaki not), ama kayıtlar kendi rastgele kodlarını taşır ve test sonunda arşivlenir (kolay kurulum rehberi etkin kayıt
 // sayar: z-easy-setup boş tenant varsayımı bozulmaz; arşivli kodlar DEPO-/URN- öneri sayacını etkilemez). Ekran görüntüleri
 // `.artifacts/t-257/` altına yazılır (git'e girmez).
 import { randomBytes } from "node:crypto";
@@ -61,6 +61,17 @@ test("kod değiştir: depo, lokasyon, ürün; eski kodla arama yeni karta yönle
   const tag = testInfo.project.name;
   await page.setViewportSize({ width: 375, height: 812 });
   await login(page);
+
+  // Ortak demo tenant'ı yalnızca SON proje (mobile) yazar (z-easy-setup ile aynı kural): ADET birimi gibi kalıcı kayıtlar, boş tenant
+  // bekleyen z-easy-setup'ın mobile koşusunu bozar. Masaüstü koşusu yazmaz; yalnızca ilgili ekranların taşmadığını ölçer.
+  if (tag !== "mobile") {
+    for (const route of ["/t/demo/warehouses", "/t/demo/items"]) {
+      await page.goto(route);
+      await page.waitForLoadState("networkidle");
+      await noHorizontalOverflow(page, `${route} (yazmayan koşu)`);
+    }
+    return;
+  }
 
   const id = rnd();
   const whCode = `KEW-${id}`;
