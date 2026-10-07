@@ -14,9 +14,9 @@
 // A-xx (OPEN_QUESTIONS): A-224-1 senkron üst sınır 200 satır (`TOO_MANY_LINES`; worker yolu yok, satırlar gruplar hâlinde ayrı ters kayıtlarla çevrilir);
 // A-224-2 `lines: "ALL"` = her satırın KALAN miktarı (kalanı 0 olanlar atlanır), miktarlar temel birimdedir (`base_quantity`; I-09);
 // A-224-3 durum değiştiren STOCK_MOVE (kaynak durum ≠ hedef durum) ters çevrilmez: `REVERSAL_BLOCKED/STATUS_CHANGE` (0020 tetikleyicisi `target_stock_status`'u
-// yalnız STOCK_MOVE'a bağlar; ters satır iki durumu taşıyamaz, Q-102); A-224-4 rezervasyonlar ters kayıtla yeniden kurulmaz/serbest bırakılmaz;
+// yalnız STOCK_MOVE'a bağlar; ters satır iki durumu taşıyamaz, Q-106); A-224-4 rezervasyonlar ters kayıtla yeniden kurulmaz/serbest bırakılmaz;
 // A-224-5 yalnız STOCK_IN/STOCK_OUT/STOCK_MOVE belgeleri ve YALNIZ `source_kind` boş olanlar ters çevrilir: saha akışından gelen belge (kabul, sipariş,
-// iade, sayım, görev) `REVERSAL_BLOCKED/SOURCE_LINKED` (bağlı kayıtlar kopmasın; düzeltme yolu Q-100); A-224-7 ters satır asıl satıra
+// iade, sayım, görev) `REVERSAL_BLOCKED/SOURCE_LINKED` (bağlı kayıtlar kopmasın; düzeltme yolu Q-104); A-224-7 ters satır asıl satıra
 // `document_lines.source_line_id` ile bağlanır (REVERSAL belgesinde bu sütun, `reversal_of_document_id` belgesinin satırını gösterir); A-224-8 ters satır
 // miktarı I-09'a uyar: tam satırda asıl miktar/birim kopyalanır, kısmi satırda asıl birimde tam bölünüyorsa o birim, bölünmüyorsa ürünün temel birimi (katsayı 1).
 import { randomUUID } from "node:crypto";
@@ -147,7 +147,7 @@ export function selectReversalLines(all: readonly SourceLine[], req: NormalizedR
 
 /** Ters çevrilecek miktarlarla asıl yönde plan kurulur (biçim/boyut doğrulaması `buildPostingPlan`'da), defter girdileri işaret değiştirir. */
 export function buildReversalPlan(kind: PostingKind, selection: readonly SelectedLine[]): PostingPlan {
-  // A-224-3: durum değiştiren taşıma ters çevrilmez (ters satır iki durumu taşıyamaz; Q-102).
+  // A-224-3: durum değiştiren taşıma ters çevrilmez (ters satır iki durumu taşıyamaz; Q-106).
   if (kind === "STOCK_MOVE" && selection.some((s) => s.line.sourceStatus !== s.line.targetStatus)) throw blocked("STATUS_CHANGE");
   const plan = buildPostingPlan(
     kind,
