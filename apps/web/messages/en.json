@@ -591,6 +591,12 @@
       "claimed": "You took a warehouse task.",
       "cancelled": "You cancelled a warehouse task.",
       "completed": "You completed a warehouse task."
+    },
+    "inbound_receipt": {
+      "created": "You created an expected delivery.",
+      "opened": "You opened an expected delivery for receiving.",
+      "cancelled": "You cancelled an expected delivery.",
+      "received": "You received goods against a delivery."
     }
   },
   "auditLog": {

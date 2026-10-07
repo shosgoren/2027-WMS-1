@@ -72,7 +72,7 @@ Q-75 | İade: sevke bağlama zorunluluğu, üst sınır, hedef lokasyon | Faz 3A
 Q-76 | Sayım: kör sayım, ikinci sayım, tolerans, terk süresi | Faz 3A planı | açık — A-136
 Q-77 | Etiket ölçüsü ve içerik alanları | Faz 3A planı | açık — A-137
 Q-78 | Rezervasyon tahsis önerisi politikası | Faz 3A planı | açık — A-138
-Q-79 | Saha belgeleri ve COUNT_ADJUSTMENT numara önekleri | Faz 3A planı | açık — A-139
+Q-79 | Saha belgeleri ve COUNT_ADJUSTMENT numara önekleri | Faz 3A planı | açık — A-139, A-305-1
 Q-80 | Sipariş durumları ve toplama görevlendirmesinin kapsamı | Faz 3A planı | açık — A-140
 Q-81 | 'Ürün bulunamadı' sonrası sayım görevi ve otomatik yeniden tahsis | Faz 3A planı | açık — A-141
 Q-82 | "Geri al" (undo) kapsamı ve yetkisi: hangi işlemler onay yerine 10 sn geri al ile telafi edilir; `reversal.create` izni olmayan rol (PICKER, COUNTER) kendi az önceki işlemini geri alabilmeli mi; bildirim kapandıktan sonra geri alma olağan ters kayıt akışına (onaylı) mı düşer? | T-262, ADR-024 (öneri), spec 08 §Kurallar, UX_NOVICE N-03 | açık — A-157
@@ -91,6 +91,7 @@ Q-94 | Ses sağlayıcısı (önceden üretilmiş klipler için sinirsel TTS ve g
 Q-95 | Sesli komut ve konuşan asistan hangi pakette; tenant başına TTS karakteri ve gerçek zamanlı dakika limitleri ve aşım davranışı | T-329, T-330, 4S | açık — A-171
 Q-96 | Yazma niyetinde sesli "onayla" yeterli mi, yoksa her zaman dokunuş mu gerekir (gürültülü zemin, yanlış tanıma riski)? | T-329, T-330, ADR-023 §3 | açık — A-172
 Q-97 | Mobil alt sekmeler: "Görevlerim" (T-304 ile ekran geldi) bağlanmalı mı ve "Tara" sekmesinin hedefi `/t/<slug>/field` mi yoksa doğrudan tarama ekranı mı? | T-254, T-304 | açık — A-188
+Q-98 | Kısmi/eksik kabulde (ör. G1 X 18/20) beklenen teslim `OPEN` kalır; pilot eksik kalanı nasıl kapatır — manuel "eksikle kapat" komutu mu, tedarikçi kapanışı mı, süre aşımı mı? Kapatılmamış belge açık beklenen miktar olarak görünmeye devam eder | T-305, T-313 | açık — A-305-5
 
 ## Varsayımlar
 A-01 | Neon pooler'ı transaction-mode PgBouncer'dır (kullanıcı kararı kaydı, 2026-10-05) — **teyit edildi 2026-10-05, sürüm hariç** (belge + T-005d koşu 3 çoklama gözlemi, https://github.com/shosgoren/2027-WMS-1/actions/runs/37388724069); PgBouncer sürümü gözlenemedi | Neon pooler türünü/kipini değiştirdiğini duyurana veya yeniden spike aksini gösterene kadar | Q-02
@@ -281,3 +282,13 @@ A-185 | (A-304-6) claimTask sarmalayıcı izni stock.view; tür izni (A-132) gö
 A-186 | (A-304-7) İptal gerekçesi 1–500 karakter, denetim karakteri yok, audit reason alanına | Gerekçe kuralı değişene kadar | — | T-304
 A-187 | (A-304-8) Sayfalama imleci created_at mikrosaniye metni + id, ?after= ile | Sayfalama sözleşmesi değişene kadar | — | T-304
 A-188 | (T-254 Bulgu 4) Alt sekme "Görevlerim" ve "Tara" tıklanamaz "Yakında" sekmesi olarak gösterilir (kapalı bayrak yerine) | Q-97 | T-254
+A-305-1 | Beklenen teslim (kabul belgesi) numarası `KBL-<YYYY>-<6 hane>`; `number_sequences` türü `INBOUND_RECEIPT` (migration 0022). Kartlarda önek tanımı yoktu (A-139 boş) | Q-79 | T-305
+A-305-2 | `createInboundReceipt`/`openInboundReceipt`/`cancelInboundReceipt` izni `document.create`; kabul `stock.post`; kalite onayı `document.approve` (A-132) | A-132 izin eşlemesi değişene kadar | — | T-305
+A-305-3 | Fazla kabul (`kabul toplamı > beklenen`) `VALIDATION_FAILED` ayrıntısız: `OVER_RECEIPT` `ERROR_DETAILS`'te yok (shared/errors, spec 15, mesajlar ayrı kartta) | A-133, Q-73 | T-305
+A-305-4 | Takipli (LOT/SERIAL) ürün kabulü bu kartta yok: `createInboundReceipt` bu ürünleri `VALIDATION_FAILED` ile reddeder (belge hiç açılmaz); lot/seri girdisi alınmaz | Takip modlu kabul kartı | — | T-305
+A-305-5 | Kısmi kabulde eksik kalan beklenen teslim `OPEN` kalır; tüm satırlar tamamlanınca `CLOSED`; "eksikle kapat" komutu kartta yok | Q-98 | T-305
+A-305-6 | Saha komutu başına ≤ 200 satır (primitif belge satırı dahil: hasarlı ayrımı ek satır doğurur); üstü `VALIDATION_FAILED`/`DOCUMENT_TOO_LARGE`; komutta aynı satır bir kez | A-142, A-07 | T-305
+A-305-7 | `putaway` `taskId` ile: görev PUTAWAY/REPUTAWAY, OPEN/ASSIGNED; ürün, kaynak lokasyon ve miktar görevle birebir (kısmi yerleştirme görevi tamamlamaz); başkasına atanmış görevi yalnız `document.approve` sahibi tamamlar | A-304-3 | T-305
+A-305-8 | `putaway` hedefi `STORAGE` ve kaynaktan farklı; kaynak lokasyon türü sınırsız (geri yerleştirme aynı komutla); miktar temel birimde | 06 §Mal kabul ve yerleştirme | — | T-305
+A-305-9 | Kalite onayı bekleyen karantina sayacı TEMEL birimde, (kabul satırı, lokasyon) kırılımında kabul girişi − onay çıkışıdır; onay satırları her zaman temel birimdedir. `dimensions` onayı (ürün, lokasyon) miktarını bekleyen kabul satırlarına FIFO (kabul `created_at`, kimlik, satır no) atfeder, artanı kaynaksız bırakır; ilgili kabul başlıkları kimliğe göre sıralı kilitlenir | A-132 | T-305
+A-305-10 | Görevsiz `putaway`, aynı (depo, ürün, kaynak lokasyon) için açık/atanmış PUTAWAY görevlerini FIFO (created_at, id) tamamlar: kalan miktar görev miktarını karşılıyorsa DONE ve düşülür, karşılamayan ilk görevde durur (görev miktarı sütunu UPDATE edilemez; kısmi yerleştirme görevi açık bırakır). Başkasına atanmış görev yalnız `document.approve` sahibince kapatılır, aksi atlanır | A-304-3, A-305-7 | — | T-305

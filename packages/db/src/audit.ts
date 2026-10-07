@@ -63,6 +63,11 @@ export const AUDIT_ACTIONS = [
   "warehouse_task.claimed",
   "warehouse_task.cancelled",
   "warehouse_task.completed",
+  // T-305: beklenen teslim (kabul belgesi) yaşam döngüsü ve fiziksel kabul; stok etkisi ayrıca `stock_document.posted` ile denetlenir.
+  "inbound_receipt.created",
+  "inbound_receipt.opened",
+  "inbound_receipt.cancelled",
+  "inbound_receipt.received",
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];

@@ -29,3 +29,21 @@ export {
   type TaskSourceKind,
   type TaskStatus,
 } from "./tasks.ts";
+// Mal kabul, kalite onayı ve yerleştirme (T-305). `field-posting.ts` saha komutlarının iç bileşik yardımcısıdır: bilerek burada YOKTUR.
+export {
+  approveQuality,
+  cancelInboundReceipt,
+  createInboundReceipt,
+  openInboundReceipt,
+  receiveGoods,
+  type ApproveQualityInput,
+  type CancelInboundReceiptInput,
+  type CreateInboundReceiptInput,
+  type InboundReceiptLineInput,
+  type QualityDimensionInput,
+  type QualityReceiptLineInput,
+  type ReceiptTransitionInput,
+  type ReceiveGoodsInput,
+  type ReceiveLineInput,
+} from "./receiving.ts";
+export { putaway, type PutawayInput } from "./putaway.ts";

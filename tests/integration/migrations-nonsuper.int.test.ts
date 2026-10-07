@@ -1557,5 +1557,46 @@ describe("0013–0014 — süper kullanıcı olmayan migrator", () => {
         expect((await migrateUp({ url: u, dir: thru20() })).applied).toEqual(["0020"]);
       });
     });
+    // ---- 0022 (T-305): kabul belgesi numara türü (number_sequences_kind_chk genişlemesi); süper kullanıcı olmayan migrator ----
+    describe("0022 inbound_receipt_numbering", () => {
+      let thru22Dir: string | undefined;
+      const thru22 = (): string => (thru22Dir ??= copyMigrations("0022"));
+      const ALL22 = [...ALL16, "0017", "0018", "0019", "0020", "0021", "0022"];
+      const kindDef = async (u: string): Promise<string> =>
+        withClient(u, async (c) => {
+          const r = await c.query<{ def: string }>("SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = 'number_sequences_kind_chk'");
+          expect(r.rows).toHaveLength(1);
+          return (r.rows[0] as { def: string }).def;
+        });
+      async function seedReceiptSequence(u: string): Promise<void> {
+        await freshTenant(u, async (c, t) => {
+          await c.query("INSERT INTO public.number_sequences (tenant_id, document_kind, period, next_value) VALUES ($1, 'INBOUND_RECEIPT', '2026', 2)", [t]);
+        });
+      }
+
+      it("ileri (0001–0022) → 0022 geri (to 0021) → ileri: parmak izi birebir; CHECK genişler/daralır; INBOUND_RECEIPT yalnızca ileri durumda yazılabilir", async () => {
+        await setProbeMemberships(STANDARD_GRANT);
+        const u = await freshDatabase();
+        expect((await migrateUp({ url: u, dir: thru22() })).applied).toEqual(ALL22);
+        const before = await digest16(u);
+        expect(await kindDef(u)).toContain("INBOUND_RECEIPT");
+        expect(await kindDef(u)).toContain("COUNT_ADJUSTMENT"); // 0017 değerleri korunur
+        await seedReceiptSequence(u);
+
+        // Satır varken staging geri alma reddedilir ve hiçbir şey değişmez.
+        await expect(migrateDown({ url: u, dir: thru22(), to: "0021", wmsEnv: "staging" })).rejects.toThrow(/0022_inbound_receipt_numbering down:.*INBOUND_RECEIPT/);
+        expect(await kindDef(u)).toContain("INBOUND_RECEIPT");
+
+        expect((await migrateDown({ url: u, dir: thru22(), to: "0021", wmsEnv: "ci" })).reverted).toEqual(["0022"]);
+        const down = await kindDef(u);
+        expect(down).not.toContain("INBOUND_RECEIPT");
+        expect(down).toContain("COUNT_ADJUSTMENT");
+        await expect(seedReceiptSequence(u)).rejects.toMatchObject({ code: "23514" }); // down'da tür kabul edilmez
+
+        expect((await migrateUp({ url: u, dir: thru22() })).applied).toEqual(["0022"]);
+        expect(await digest16(u)).toEqual(before);
+        await seedReceiptSequence(u); // ileri durumda yeniden yazılabilir
+      });
+    });
   });
 });
