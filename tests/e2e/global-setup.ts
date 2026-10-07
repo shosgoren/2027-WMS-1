@@ -3,6 +3,7 @@
 // Yerel yığın (compose postgres + pgbouncer ÖNCEDEN ayakta olmalı: `docker compose up -d --wait`):
 //   1. `pnpm db:migrate` (demo tenant satırı dahil; DEMO_MODE=1, WMS_ENV=staging)
 //   2. worker derlenir ve başlatılır; açılışta `demo.reseed` işi demo kullanıcılarını kurar ("demo.reseed done" günlüğü beklenir)
+//   2b. (T-279) boş tenant fikstürü: `apps/worker/e2e/empty-tenant.ts` alt süreci (depo/ürün yok; rastgele parola ortam değişkeniyle)
 //   3. web derlenir (E2E_SKIP_BUILD=1 ile atlanır) ve `next start` ile iç porta (PORT+1) açılır
 //   4. kendinden imzalı sertifikalı TLS ters vekili PORT'ta dinler (BETTER_AUTH_URL staging kipinde https ister)
 // Parolalar/sırlar her koşuda rastgele üretilir (ortamda yoksa); diske/loga yazılmaz. Yalnızca yerel veritabanına (loopback) bağlanır.
@@ -12,6 +13,8 @@ import http from "node:http";
 import https from "node:https";
 import { randomBytes } from "node:crypto";
 import path from "node:path";
+import { chromium } from "@playwright/test";
+import { acceptInviteAndEnrollMfa } from "./support/empty-tenant.ts";
 
 const ROOT = path.resolve(import.meta.dirname, "../..");
 const OUT = path.join(ROOT, ".artifacts/e2e");
@@ -143,6 +146,36 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | und
       return readFileSync(path.join(OUT, "worker.log"), "utf8").includes('"msg":"demo.reseed done"');
     });
 
+    // T-279: boş tenant fikstürü (depo/ürün yok). TENANT_ADMIN MFA ister (access.ts) ve demo alan adlı hesap MFA kuramaz; bu yüzden fikstür
+    // alt süreci demo alan adlı sahiple çalışma alanını kurar ve DEMO OLMAYAN bir e-postaya TENANT_ADMIN daveti yazar. Davet kabulü + MFA kurulumu
+    // web açıldıktan sonra uygulamanın gerçek ekranlarından yapılır (aşağıda). Parola/TOTP sırrı her koşuda rastgele; yalnızca bellekte/process.env.
+    const suffix = randomBytes(4).toString("hex");
+    const fixtureEnv: NodeJS.ProcessEnv = {
+      ...env,
+      E2E_EMPTY_EMAIL: `bos-${suffix}@${env.DEMO_EMAIL_DOMAIN}`, // yalnızca çalışma alanı sahibi (demo alan adlı)
+      E2E_EMPTY_INVITEE_EMAIL: `yonetici-${suffix}@example.test`, // demo olmayan TENANT_ADMIN
+      E2E_EMPTY_PASSWORD: randomBytes(18).toString("hex"),
+      E2E_EMPTY_SLUG: `bos-${suffix}`,
+    };
+    // Davet belirteci YALNIZCA stdout'tan belleğe alınır (dosyaya/loga yazılmaz); stderr günlük dosyasına gider.
+    const fixtureLog = openSync(path.join(OUT, "empty-tenant.log"), "w");
+    let inviteToken = "";
+    try {
+      const stdout = execFileSync("pnpm", ["--filter", "@wms/worker", "exec", "node", "e2e/empty-tenant.ts"], {
+        cwd: ROOT,
+        env: fixtureEnv,
+        stdio: ["ignore", "pipe", fixtureLog],
+        encoding: "utf8",
+      });
+      inviteToken = /^E2E_INVITE_TOKEN=(\S+)$/m.exec(stdout)?.[1] ?? "";
+    } catch (e) {
+      throw new Error("e2e: boş tenant fikstürü başarısız (bkz. .artifacts/e2e/empty-tenant.log)", { cause: e });
+    }
+    if (inviteToken === "") throw new Error("e2e: boş tenant fikstürü davet belirteci üretmedi (bkz. .artifacts/e2e/empty-tenant.log)");
+    process.env.E2E_EMPTY_SLUG = fixtureEnv.E2E_EMPTY_SLUG;
+    process.env.E2E_EMPTY_INVITEE_EMAIL = fixtureEnv.E2E_EMPTY_INVITEE_EMAIL;
+    process.env.E2E_EMPTY_PASSWORD = fixtureEnv.E2E_EMPTY_PASSWORD;
+
     const web = start("pnpm", ["--filter", "@wms/web", "exec", "next", "start", "-p", String(innerPort), "-H", "127.0.0.1"], env, "web.log");
     children.push(web);
     await waitFor("web hazır değil (bkz. .artifacts/e2e/web.log)", 120_000, async () => {
@@ -172,6 +205,23 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | und
         req.on("error", () => resolve(false));
       });
     });
+
+    // Davet kabulü + MFA kurulumu (gerçek ekranlar, izsiz ayrı bağlam; `acceptInviteAndEnrollMfa`). TOTP sırrı yalnızca process.env'e girer.
+    const browser = await chromium.launch();
+    try {
+      const enrolled = await acceptInviteAndEnrollMfa({
+        browser,
+        baseURL: `https://localhost:${port}`,
+        clientIp: "198.51.100.20",
+        inviteToken,
+        name: "E2E boş kiracı yöneticisi",
+        email: fixtureEnv.E2E_EMPTY_INVITEE_EMAIL as string,
+        password: fixtureEnv.E2E_EMPTY_PASSWORD as string,
+      });
+      process.env.E2E_EMPTY_TOTP_SECRET = enrolled.totpSecret;
+    } finally {
+      await browser.close();
+    }
   } catch (e) {
     await teardown();
     throw e;

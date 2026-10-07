@@ -17,9 +17,14 @@ function localClient(ip: string): { extraHTTPHeaders?: Record<string, string> } 
   return remoteBaseURL ? {} : { extraHTTPHeaders: { "x-e2e-client-ip": ip } };
 }
 
+// T-279: boş tenant fikstürü yalnızca yerel yığında (global-setup) kurulur; uzak hedefte (E2E_BASE_URL) o fikstüre bağlı spec dosyaları dışlanır
+// (atlama/skip değil: bu koşuda fikstür kavramı yoktur; demo kapsamı diğer spec dosyalarında sürer).
+const EMPTY_TENANT_SPECS = ["**/empty-tenant.spec.ts", "**/z-easy-setup.spec.ts"];
+
 export default defineConfig({
   testDir: "tests/e2e",
   testMatch: "**/*.spec.ts",
+  testIgnore: remoteBaseURL ? EMPTY_TENANT_SPECS : [],
   globalSetup: "./tests/e2e/global-setup.ts",
   outputDir: ".artifacts/e2e/test-results",
   reporter: [["list"], ["html", { outputFolder: ".artifacts/e2e/report", open: "never" }]],

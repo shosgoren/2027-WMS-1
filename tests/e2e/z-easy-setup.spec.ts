@@ -1,11 +1,17 @@
 // T-250: kolay kurulum — boş tenant'ta rehberle depo + raf + ürün (3 adım), kod önerisi, toplu raf önizleme/çakışma, yazdıkça arama,
 // ScanField ile ürün seçimi. 375x812 (ana akış) ve form açıkken 390x844 / 360x740'ta sayfa gövdesi kaymaz (el terminali kuralı).
-// Demo tenant yeni kurulumda boştur: ilk proje koşusu tam rehber akışını yürütür; aynı veritabanında sonraki koşu (diğer proje) rehberin
+// T-279: demo tenant T-223'ten beri dolu açılır (depo + ürün + stok); bu akış bu yüzden global-setup'ın kurduğu BOŞ fikstür tenant'ta koşar
+// (support/empty-tenant.ts; normal e-posta/parola girişi + TOTP: TENANT_ADMIN MFA ister). Uzak koşuda fikstür yoktur: dosya playwright.config.ts testIgnore ile dışlanır.
+// Fikstür tenant'ta ilk proje koşusu tam rehber akışını yürütür; aynı veritabanında sonraki koşu (diğer proje) rehberin
 // tamamlandığını doğrular ve arama/ölçüm adımlarını yineler. Ekran görüntüleri `.artifacts/t-250/` altına yazılır (git'e girmez).
-// DOSYA ADI `z-`: bu test ortak demo tenant'a depo/raf/ürün YAZAR; Playwright dosyaları alfabetik koşar, böylece diğer ekran testleri
-// (theme-admin vb.) boş demo tenant'la çalışmaya devam eder. Yerelde yeniden koşmak için veritabanı sıfırlanmalıdır (`down -v`).
+// Bu test yalnızca KENDİ fikstür tenant'ına yazar (demo tenant'a dokunmaz); dosya adındaki `z-` eski sıralama kuralından kalmadır. Her koşuda yeni
+// fikstür tenant kurulur, veritabanını sıfırlamak gerekmez.
 import { expect, test } from "@playwright/test";
 import type { Locator, Page } from "@playwright/test";
+import { localClient, loginEmptyTenant } from "./support/empty-tenant.ts";
+
+// Parola/TOTP kodu yazılan testler iz bırakmaz (G-09: Playwright izi eylem parametrelerini saklar); ekran görüntüsü yalnızca hatada (alanlar maskeli).
+test.use({ ...localClient("198.51.100.12"), trace: "off" });
 
 const OUT = ".artifacts/t-250";
 const BARCODE = "8690000000019";
@@ -55,19 +61,19 @@ async function inViewport(page: Page, locator: Locator, name: string): Promise<v
 
 
 /** El terminali kuralı: form açıkken sayfa gövdesi kaymaz (3 ekran boyutu). `treeHref` yoksa (henüz raf yok) oluşturucu atlanır. */
-async function measureForms(page: Page, tag: string, treeHref: string | null): Promise<void> {
+async function measureForms(page: Page, tag: string, treeHref: string | null, slug: string): Promise<void> {
   for (const vp of VIEWPORTS) {
     await test.step(`form açıkken kaymaz ${vp.width}x${vp.height}`, async () => {
       await page.setViewportSize(vp);
       const where = `${vp.width}x${vp.height}`;
-      await page.goto("/t/demo/warehouses?new=1");
+      await page.goto(`/t/${slug}/warehouses?new=1`);
       const wh = page.getByRole("dialog");
       await expect(wh.locator('input[name="code"]')).toHaveValue(/^DEPO-\d{2}$/);
       await noPageScroll(page, `depo formu ${where}`);
       await inViewport(page, wh.getByRole("button", { name: "Kaydet" }), `depo Kaydet ${where}`);
       await page.keyboard.press("Escape");
 
-      await page.goto("/t/demo/items?new=1");
+      await page.goto(`/t/${slug}/items?new=1`);
       const it = page.getByRole("dialog");
       await expect(it.locator('input[name="code"]')).toHaveValue(/^URN-\d{4}$/);
       await it.getByText("Gelişmiş ayarlar").click(); // en uzun hâl
@@ -93,11 +99,9 @@ test("kolay kurulum: rehberle depo + raf + ürün, öneri, önizleme, arama (mob
     await page.screenshot({ path: `${OUT}/${tag}-375-${name}.png`, fullPage: true });
   };
   await page.setViewportSize({ width: 375, height: 812 });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Yönetici olarak gir" }).click();
-  await expect(page).toHaveURL(/\/t\/demo$/);
+  const { slug } = await loginEmptyTenant(page);
 
-  await page.goto("/t/demo/warehouses");
+  await page.goto(`/t/${slug}/warehouses`);
   await expect(page.getByRole("heading", { level: 1, name: "Depo ve raflar" })).toBeVisible();
   const guide = page.getByTestId("setup-guide");
   const fresh = await page
@@ -106,7 +110,7 @@ test("kolay kurulum: rehberle depo + raf + ürün, öneri, önizleme, arama (mob
     .then(() => true)
     .catch(() => false);
 
-  // Ortak demo tenant'ı yalnızca SON proje (mobile) yazar: diğer ekran testleri (theme-admin) önceki projelerde boş tenant görür.
+  // Fikstür tenant'ı yalnızca SON proje (mobile) yazar: masaüstü koşusu boş tenant'ta rehberi ölçer, hiçbir şey kaydetmez.
   const writes = tag === "mobile";
   if (fresh && !writes) {
     // Yazmayan koşu: rehber boş tenant'ta doğru görünür, büyük düğme formu hazır kodla açar; hiçbir şey kaydedilmez.
@@ -120,7 +124,7 @@ test("kolay kurulum: rehberle depo + raf + ürün, öneri, önizleme, arama (mob
     await expect(dialog.locator('input[name="name"]')).toHaveValue("Ana depo");
     await touchTarget(dialog.getByRole("button", { name: "Kaydet" }), "depo formu: Kaydet");
     await page.keyboard.press("Escape");
-    await measureForms(page, tag, null);
+    await measureForms(page, tag, null, slug);
     return;
   }
   if (fresh) {
@@ -158,7 +162,7 @@ test("kolay kurulum: rehberle depo + raf + ürün, öneri, önizleme, arama (mob
     await bulk.getByRole("button", { name: "50 lokasyonu oluştur" }).click();
 
     // --- Adım 3: Ürün ekle (raflardan sonra ürün formu açılır) ---
-    await expect(page).toHaveURL(/\/t\/demo\/items/);
+    await expect(page).toHaveURL(new RegExp(`/t/${slug}/items`));
     const item = page.getByRole("dialog");
     await expect(item.locator('input[name="code"]')).toHaveValue("URN-0001");
     await expect(item.locator("#create-base-unit")).toContainText("ADET");
@@ -181,7 +185,7 @@ test("kolay kurulum: rehberle depo + raf + ürün, öneri, önizleme, arama (mob
     await expect(page.getByText("Barkod eklendi.")).toBeVisible();
 
     // Rehber tamamlandı: depo listesinde görünmez.
-    await page.goto("/t/demo/warehouses");
+    await page.goto(`/t/${slug}/warehouses`);
     await expect(page.getByTestId("warehouse-card")).toHaveCount(1);
     await page.waitForLoadState("networkidle");
     await expect(guide).toHaveCount(0);
@@ -193,7 +197,7 @@ test("kolay kurulum: rehberle depo + raf + ürün, öneri, önizleme, arama (mob
   }
 
   // --- Yazdıkça ürün arama + ScanField ---
-  await page.goto("/t/demo/items");
+  await page.goto(`/t/${slug}/items`);
   const search = page.getByRole("searchbox", { name: "Ürün ara" });
   await search.fill("Deneme");
   const option = page.getByRole("option").first();
@@ -204,7 +208,7 @@ test("kolay kurulum: rehberle depo + raf + ürün, öneri, önizleme, arama (mob
   await option.click();
   await expect(page).toHaveURL(/\/items\/[0-9a-f-]{36}$/);
 
-  await page.goto("/t/demo/items");
+  await page.goto(`/t/${slug}/items`);
   // T-274: barkod ayrı alana değil, tek arama alanına yazılır/okutulur; yazdıkça gelen tek sonuç ürünü seçer.
   await expect(page.getByLabel("Barkodla ürün bul")).toHaveCount(0);
   await page.getByRole("searchbox", { name: "Ürün ara" }).fill(BARCODE);
@@ -215,14 +219,14 @@ test("kolay kurulum: rehberle depo + raf + ürün, öneri, önizleme, arama (mob
   await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
 
   // Barkod okuyucu (klavye modu) değerin sonuna Enter gönderir: tek eşleşme doğrudan ürünü açar.
-  await page.goto("/t/demo/items");
+  await page.goto(`/t/${slug}/items`);
   const wedge = page.getByRole("searchbox", { name: "Ürün ara" });
   await wedge.fill(BARCODE);
   await wedge.press("Enter");
   await expect(page).toHaveURL(/\/items\/[0-9a-f-]{36}$/);
 
   // --- Çakışma: aynı aralık yeniden önizlenir, çakışanlar listelenir, oluşturma kapalı ---
-  await page.goto("/t/demo/warehouses");
+  await page.goto(`/t/${slug}/warehouses`);
   const treeHref = await page.getByRole("link", { name: "Lokasyonları aç" }).first().getAttribute("href");
   expect(treeHref).not.toBeNull();
   await page.goto(`${treeHref}?bulk=1`);
@@ -240,5 +244,5 @@ test("kolay kurulum: rehberle depo + raf + ürün, öneri, önizleme, arama (mob
   await loc.click();
   await expect(dlg.getByText(/Seçildi: A-02-01/)).toBeVisible();
 
-  await measureForms(page, tag, treeHref);
+  await measureForms(page, tag, treeHref, slug);
 });
