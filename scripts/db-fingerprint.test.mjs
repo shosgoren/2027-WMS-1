@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
+  CONTENT_TABLES,
   FINGERPRINT_SQL,
   FP_PREFIX,
   FingerprintError,
@@ -29,6 +30,7 @@ function makeFingerprint(over = {}) {
     tables: { "public.users": 3, "public.audit_logs": 10, "public.security_events": 7 },
     audit_logs: { count: 10, latest_at: "2026-10-06T09:00:00.000000Z", digest: d.audit },
     security_events: { count: 7, latest_at: "2026-10-06T09:59:58.000000Z", digest: d.sec },
+    content: Object.fromEntries(Object.keys(CONTENT_TABLES).map((t) => [t, { count: 4, digest: hex() }])),
     schema: { columns: 80, digest: d.schema },
     rls: { tables: 12, digest: d.rls },
     policies: { count: 9, digest: d.pol },
@@ -65,6 +67,24 @@ describe("compareFingerprints", () => {
     expect(r.equal).toBe(false);
     expect(r.sections.audit_logs_digest).toBe(false);
     expect(r.sections.audit_logs_count).toBe(true);
+  });
+
+  it("stok içeriği: satır sayısı aynı, özet farklı → FAIL; her içerik tablosu ayrı bölüm", () => {
+    for (const t of Object.keys(CONTENT_TABLES)) {
+      const a = makeFingerprint();
+      const b = structuredClone(a);
+      /** @type {any} */ (b.content)[t].digest = hex();
+      const r = compareFingerprints(a, b);
+      expect(r.equal).toBe(false);
+      expect(r.sections[`content_${t}`]).toBe(false);
+      expect(r.sections.table_counts).toBe(true);
+    }
+  });
+
+  it("içerik tablosu seti defter, bakiye, rezervasyon, belge ve seri/lot tablolarını kapsar", () => {
+    expect(Object.keys(CONTENT_TABLES)).toEqual(
+      expect.arrayContaining(["stock_ledger", "stock_balances", "reservations", "documents", "document_lines", "lots", "serials"]),
+    );
   });
 
   it.each([
@@ -143,6 +163,9 @@ describe("parseFingerprintOutput", () => {
     const bad = makeFingerprint();
     bad.audit_logs.digest = "xyz";
     expect(() => parseFingerprintOutput(`${FP_PREFIX}${JSON.stringify(bad)}`)).toThrow(/audit_logs/);
+    const noContent = makeFingerprint();
+    delete (/** @type {any} */ (noContent)).content.stock_ledger;
+    expect(() => parseFingerprintOutput(`${FP_PREFIX}${JSON.stringify(noContent)}`)).toThrow(/content\.stock_ledger/);
     const neg = makeFingerprint();
     neg.tables["public.users"] = -1;
     expect(() => parseFingerprintOutput(`${FP_PREFIX}${JSON.stringify(neg)}`)).toThrow(/tables/);
