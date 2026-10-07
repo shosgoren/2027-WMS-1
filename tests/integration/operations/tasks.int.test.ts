@@ -10,6 +10,7 @@ import { AppError } from "../../../packages/shared/src/errors.ts";
 import * as ops from "../../../packages/domain/src/operations/index.ts";
 import { assignTask, cancelTask, claimTask, listMyTasks, listTasks, type TaskKind } from "../../../packages/domain/src/operations/index.ts";
 import { completeTask, createTasks } from "../../../packages/domain/src/operations/tasks.ts";
+import { createWarehouse, setMembershipWarehouseScopes } from "../../../packages/domain/src/warehouse/index.ts";
 import { runTenantCommand } from "../../../packages/domain/src/identity/access.ts";
 import { mkMembership, mkUser, newRegistry, seedWorld, type TenantWorld } from "../fixtures/tenants.ts";
 import { readIntEnv } from "../harness/env.ts";
@@ -177,6 +178,54 @@ describe("görev komutları", () => {
     }
   });
 
+  it("iptal gerekçesi UTF-16 ölçülür (audit optText ile aynı): 300 emoji VALIDATION_FAILED (500 değil), 250 emoji geçer (MINOR-3)", async () => {
+    const [a, b] = await mkTasks(A, ["PICK", "PICK"]);
+    expect((await failure(cancelTask(admin(A), { taskId: a as string, expectedVersion: 1, reason: "😀".repeat(300) }))).code).toBe("VALIDATION_FAILED");
+    expect(await row(a as string)).toMatchObject({ status: "OPEN", version: 1 });
+    const edge = "😀".repeat(250);
+    expect(await cancelTask(admin(A), { taskId: b as string, expectedVersion: 1, reason: edge })).toEqual({ version: 2 });
+    expect((await audits(A.tenantId, "warehouse_task.cancelled", b as string))[0]?.reason).toBe(edge);
+  });
+
+  it("REMOVED üyeliğe atama NOT_FOUND; görev değişmez (ACTIVE süzgeci, MINOR-6)", async () => {
+    const removedUser = await mkUser(adm, reg, "A304 removed");
+    const removedMembership = await mkMembership(adm, A.tenantId, removedUser, { roles: ["PICKER"] });
+    const [id] = await mkTasks(A, ["PICK"]);
+    // Kontrol: aktifken aynı atama geçerli olurdu (süzgeç dışında ret nedeni yok).
+    await adm.query("UPDATE public.tenant_memberships SET status = 'REMOVED', removed_at = now() WHERE id = $1", [removedMembership]);
+    expect((await failure(assignTask(admin(A), { taskId: id as string, membershipId: removedMembership, expectedVersion: 1 }))).code).toBe("NOT_FOUND");
+    expect(await row(id as string)).toMatchObject({ status: "OPEN", version: 1, assigned_membership_id: null });
+    await adm.query("UPDATE public.tenant_memberships SET status = 'ACTIVE', removed_at = NULL WHERE id = $1", [removedMembership]);
+    expect(await assignTask(admin(A), { taskId: id as string, membershipId: removedMembership, expectedVersion: 1 })).toEqual({ version: 2 });
+  });
+
+  it("assignTask atananın depo kapsamını denetler: bayrak açık + kapsam dışı VALIDATION_FAILED; kapsamda/bayrak kapalı/TENANT_ADMIN geçer (MINOR-5)", async () => {
+    const w = await seedWorld(adm, reg, "S304");
+    const other = (await createWarehouse(admin(w), { code: `s${randomUUID().slice(0, 8)}`, name: "Kapsam" })).warehouseId;
+    const [inScope, outScope] = await runTenantCommand({ ...admin(w), permission: "stock.post" }, async (tx, m) =>
+      createTasks(tx, m, [{ warehouseId: w.warehouseId, kind: "PICK" }, { warehouseId: other, kind: "PICK" }]),
+    );
+    await setMembershipWarehouseScopes(admin(w), { membershipId: w.memberMembershipId, warehouseIds: [w.warehouseId] });
+    const prev = process.env.WAREHOUSE_SCOPE_ENABLED;
+    try {
+      // Bayrak kapalı: kapsam satırı yok sayılır.
+      delete process.env.WAREHOUSE_SCOPE_ENABLED;
+      expect(await assignTask(admin(w), { taskId: outScope as string, membershipId: w.memberMembershipId, expectedVersion: 1 })).toEqual({ version: 2 });
+      // Bayrak açık.
+      process.env.WAREHOUSE_SCOPE_ENABLED = "true";
+      const other2 = (await runTenantCommand({ ...admin(w), permission: "stock.post" }, (tx, m) => createTasks(tx, m, [{ warehouseId: other, kind: "PICK" }])))[0] as string;
+      expect((await failure(assignTask(admin(w), { taskId: other2, membershipId: w.memberMembershipId, expectedVersion: 1 }))).code).toBe("VALIDATION_FAILED");
+      expect(await row(other2)).toMatchObject({ status: "OPEN", version: 1, assigned_membership_id: null });
+      expect(await assignTask(admin(w), { taskId: inScope as string, membershipId: w.memberMembershipId, expectedVersion: 1 })).toEqual({ version: 2 });
+      // TENANT_ADMIN kapsam satırı olsa da geçer.
+      await setMembershipWarehouseScopes(admin(w), { membershipId: w.ownerMembershipId, warehouseIds: [w.warehouseId] });
+      expect(await assignTask(admin(w), { taskId: other2, membershipId: w.ownerMembershipId, expectedVersion: 1 })).toEqual({ version: 2 });
+    } finally {
+      if (prev === undefined) delete process.env.WAREHOUSE_SCOPE_ENABLED;
+      else process.env.WAREHOUSE_SCOPE_ENABLED = prev;
+    }
+  });
+
   it("completeTask (iç yardımcı): DONE + completed_at + audit; sonrasında komutlar DOCUMENT_STATE; eski sürüm VERSION_CONFLICT", async () => {
     const [id] = await mkTasks(A, ["PICK"]);
     const taskId = id as string;
@@ -242,5 +291,10 @@ describe("görev sorguları", () => {
     expect(counts.items.map((t) => t.id)).toEqual([made[5]]);
     expect((await failure(listTasks(admin(w), { limit: 0 }))).code).toBe("VALIDATION_FAILED");
     expect((await failure(listTasks(admin(w), { after: { createdKey: "bozuk", id: randomUUID() } }))).code).toBe("VALIDATION_FAILED");
+    // MINOR-2: biçim doğru ama takvimde olmayan zaman 500 değil VALIDATION_FAILED.
+    for (const createdKey of ["2026-02-31T00:00:00.000000Z", "2026-01-01T25:00:00.000000Z", "2026-13-01T00:00:00.000000Z"]) {
+      expect((await failure(listTasks(admin(w), { after: { createdKey, id: randomUUID() } }))).code).toBe("VALIDATION_FAILED");
+      expect((await failure(listMyTasks(picker(w), { after: { createdKey, id: randomUUID() } }))).code).toBe("VALIDATION_FAILED");
+    }
   });
 });

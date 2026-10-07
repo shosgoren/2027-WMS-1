@@ -288,6 +288,9 @@ export async function assignTask(params: TaskCallParams, input: AssignTaskInput)
     if (target.length === 0) throw new AppError("NOT_FOUND");
     const roles = target.flatMap((r) => (r.role_key === null ? [] : [r.role_key]));
     if (!hasPermission(roles, TASK_KIND_PERMISSION[task.kind])) throw new AppError("VALIDATION_FAILED");
+    // A-46: bayrak açıkken atanan kişinin depo kapsamı görevin deposunu içermeli (kapalıyken resolveWarehouseScope null döner).
+    const targetScope = await resolveWarehouseScope(tx, { ...m, membershipId, roles: roles as Membership["roles"] });
+    if (targetScope !== null && !targetScope.includes(task.warehouseId.toLowerCase())) throw new AppError("VALIDATION_FAILED");
     const newVersion = await setState(tx, m, task, next, membershipId);
     await appendAudit(tx, {
       action: "warehouse_task.assigned",
@@ -337,7 +340,7 @@ export async function claimTask(params: TaskCallParams, input: ClaimTaskInput): 
 export interface CancelTaskInput {
   readonly taskId: string;
   readonly expectedVersion: number;
-  /** Zorunlu gerekçe (1–500 karakter, denetim karakteri yok); audit `reason`. */
+  /** Zorunlu gerekçe (1–500 UTF-16 birimi, audit `optText` ile aynı ölçü; denetim karakteri yok); audit `reason`. */
   readonly reason: string;
   readonly requestId?: string | null;
 }
@@ -347,7 +350,7 @@ export async function cancelTask(params: TaskCallParams, input: CancelTaskInput)
   const taskId = uuid(input.taskId);
   const expectedVersion = version(input.expectedVersion);
   const reason = typeof input.reason === "string" ? input.reason.trim() : "";
-  if (reason === "" || Array.from(reason).length > REASON_MAX || CONTROL_RE.test(reason)) throw new AppError("VALIDATION_FAILED");
+  if (reason === "" || reason.length > REASON_MAX || CONTROL_RE.test(reason)) throw new AppError("VALIDATION_FAILED");
   return runTenantCommand({ ...params, permission: "document.approve" }, async (tx, m) => {
     const task = await lockTask(tx, m, taskId);
     const next = guardTransition(task, expectedVersion, "CANCEL");
@@ -379,9 +382,16 @@ export interface TaskPage {
   readonly next: TaskCursor | null;
 }
 
+/** Biçim doğru ama takvimde olmayan zaman (ör. 2026-02-31, 25:00) Postgres'te 500 verirdi; burada reddedilir. */
+export function isCalendarTime(key: string): boolean {
+  const d = new Date(`${key.slice(0, 23)}Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 23) === key.slice(0, 23);
+}
+
 function cursorOf(raw: TaskCursor | undefined): { key: string; id: string } | null {
   if (raw === undefined) return null;
   if (typeof raw.createdKey !== "string" || !CURSOR_TIME_RE.test(raw.createdKey)) throw new AppError("VALIDATION_FAILED");
+  if (!isCalendarTime(raw.createdKey)) throw new AppError("VALIDATION_FAILED");
   return { key: raw.createdKey, id: uuid(raw.id) };
 }
 

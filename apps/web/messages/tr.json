@@ -1145,7 +1145,7 @@
     "noEligible": "Bu görev türünü yapabilecek kişi yok. Önce ekip ekranından uygun rol ver.",
     "cancelTitle": "Görevi iptal et",
     "reasonLabel": "İptal gerekçesi",
-    "reasonHint": "Zorunlu; denetim kaydına yazılır. En çok 500 karakter.",
+    "reasonHint": "Zorunlu; denetim kaydına yazılır. En çok 500 karakter. Kişi adı, sağlık bilgisi gibi kişisel bilgi yazma.",
     "back": "Vazgeç",
     "submit": "Kaydet",
     "confirmCancel": "Görevi iptal et",

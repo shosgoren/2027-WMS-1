@@ -1,7 +1,7 @@
 // T-304 birim testleri: durum geçiş tablosu ve izin eşlemesi (DB'siz).
 import { describe, expect, it } from "vitest";
 import { ROLE_PERMISSIONS, hasPermission } from "../identity/permissions.ts";
-import { TASK_KIND_PERMISSION, TASK_KINDS, TASK_STATUSES, nextTaskStatus, type TaskEvent, type TaskStatus } from "./tasks.ts";
+import { cancelTask, isCalendarTime, REASON_MAX, TASK_KIND_PERMISSION, TASK_KINDS, TASK_STATUSES, nextTaskStatus, type TaskEvent, type TaskStatus } from "./tasks.ts";
 
 const EVENTS: readonly TaskEvent[] = ["ASSIGN", "CLAIM", "CANCEL", "COMPLETE"];
 
@@ -49,5 +49,24 @@ describe("TASK_KIND_PERMISSION (A-132)", () => {
     expect(ROLE_PERMISSIONS.PICKER.includes("document.approve")).toBe(false);
     expect(ROLE_PERMISSIONS.COUNTER.includes("document.approve")).toBe(false);
     expect(ROLE_PERMISSIONS.WAREHOUSE_MANAGER.includes("document.approve")).toBe(true);
+  });
+});
+
+describe("isCalendarTime (imleç zamanı, MINOR-2)", () => {
+  it("gerçek takvim zamanlarını kabul eder, olmayanları reddeder", () => {
+    expect(isCalendarTime("2026-02-28T23:59:59.123456Z")).toBe(true);
+    expect(isCalendarTime("2028-02-29T00:00:00.000000Z")).toBe(true);
+    for (const bad of ["2026-02-31T00:00:00.000000Z", "2027-02-29T00:00:00.000000Z", "2026-13-01T00:00:00.000000Z", "2026-01-01T24:00:00.000000Z", "2026-01-01T00:60:00.000000Z", "2026-00-10T00:00:00.000000Z"]) {
+      expect(isCalendarTime(bad), bad).toBe(false);
+    }
+  });
+});
+
+describe("cancelTask gerekçe uzunluğu (MINOR-3, audit optText ile aynı UTF-16 ölçüsü)", () => {
+  const params = { db: undefined as never, principal: { userId: "00000000-0000-4000-8000-000000000001", mfaVerified: true }, tenantSlug: "x" };
+  const input = { taskId: "00000000-0000-4000-8000-000000000002", expectedVersion: 1 };
+  it("300 emoji (600 UTF-16 birimi) veritabanına gitmeden VALIDATION_FAILED", async () => {
+    await expect(cancelTask(params, { ...input, reason: "😀".repeat(300) })).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+    await expect(cancelTask(params, { ...input, reason: "x".repeat(REASON_MAX + 1) })).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
   });
 });
