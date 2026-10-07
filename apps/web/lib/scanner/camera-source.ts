@@ -42,6 +42,13 @@ export function gs1CheckDigitValid(digits: string): boolean {
   return (10 - (sum % 10)) % 10 === Number(digits[digits.length - 1]);
 }
 
+/**
+ * Görünmeyen/yön değiştiren karakterler (ekranda başka bir kod gibi görünüp başka değer taşıyabilir): sıfır genişlikli (U+200B–200D, U+FEFF), çift yönlü denetim
+ * (U+202A–202E, U+2066–2069), satır/paragraf ayracı (U+2028/2029) ve eşi olmayan vekil (surrogate) çiftleri (`for…of` eşsiz vekili tek karakter verir).
+ */
+const INVISIBLE = (c: number): boolean =>
+  (c >= 0x200b && c <= 0x200d) || c === 0xfeff || (c >= 0x202a && c <= 0x202e) || (c >= 0x2066 && c <= 0x2069) || c === 0x2028 || c === 0x2029 || (c >= 0xd800 && c <= 0xdfff);
+
 const DIGIT_LENGTH: Readonly<Partial<Record<CameraSymbology, number>>> = { ean13: 13, ean8: 8, upca: 12 };
 // GS1 grup ayracı (GS, U+001D) yalnızca GS1 taşıyabilen sembolojilerde meşrudur.
 const GS = SCANNER_CONFIG.gs1Separator;
@@ -66,7 +73,7 @@ export function validateCameraRead(read: { readonly text: string; readonly forma
   for (const ch of text) {
     const c = ch.codePointAt(0) ?? 0;
     const control = c < 0x20 || (c >= 0x7f && c <= 0x9f);
-    if (c === 0xfffd || (control && !(gsAllowed && ch === GS))) return { ok: false, reason: "control_chars" };
+    if (c === 0xfffd || (control && !(gsAllowed && ch === GS)) || INVISIBLE(c)) return { ok: false, reason: "control_chars" };
   }
   const len = symbology === null ? undefined : DIGIT_LENGTH[symbology];
   if (len !== undefined) {
@@ -114,7 +121,7 @@ const MAX_FRAME_SIDE = 960;
 export function browserDecoderEnv(): DecoderEnv {
   return {
     nativeCtor: typeof window === "undefined" ? null : ((window as unknown as { BarcodeDetector?: NativeCtor }).BarcodeDetector ?? null),
-    loadWasm: loadZxingReader,
+    loadWasm: () => loadZxingReader(),
     makeCanvas: () => {
       const canvas = document.createElement("canvas");
       const ctx = canvas.getContext("2d", { willReadFrequently: true });
@@ -132,23 +139,45 @@ export function browserDecoderEnv(): DecoderEnv {
   };
 }
 
+/** Modül düzeyi tek örnek: `prepareZXingModule` aynı `overrides` nesnesiyle çağrılırsa kütüphane önbelleği tutar ve WASM yeniden derlenmez (T-286 MAJOR-1). */
+interface ZxingReaderModule {
+  prepareZXingModule(options: { overrides: { locateFile: (path: string, prefix: string) => string }; fireImmediately: true }): Promise<unknown>;
+  readBarcodes(frame: ImageData, options: { formats: string[]; tryHarder: boolean; maxNumberOfSymbols: number }): Promise<ReadonlyArray<{ text: string; format: string; isValid: boolean }>>;
+}
+type ZxingImporter = () => Promise<ZxingReaderModule>;
+let zxingOverrides: { locateFile: (path: string, prefix: string) => string } | null = null;
+let zxingReader: Promise<WasmReader> | null = null;
+
 /**
  * zxing-wasm'ı tembel yükler. VARSAYILAN `locateFile` WASM'ı üçüncü taraf CDN'den (jsDelivr) indirir; CSP'yi (`connect-src 'self'`) ve tedarik zincirini
- * bozacağından KULLANILMAZ: WASM paketten, bundler varlığı olarak kendi kaynağımızdan sunulur.
+ * bozacağından KULLANILMAZ: WASM paketten, bundler varlığı olarak kendi kaynağımızdan sunulur. Hazırlık (derleme) tarama ekranı kaç kez açılırsa açılsın TEK kez yapılır;
+ * hata olursa sonraki açılış yeniden dener.
  */
-async function loadZxingReader(): Promise<WasmReader> {
-  const mod = await import("zxing-wasm/reader");
-  const wasmUrl = new URL("zxing-wasm/reader/zxing_reader.wasm", import.meta.url).href;
-  await mod.prepareZXingModule({
-    overrides: { locateFile: (path: string, prefix: string) => (path.endsWith(".wasm") ? wasmUrl : prefix + path) },
-    fireImmediately: true,
+export function loadZxingReader(importer: ZxingImporter = () => import("zxing-wasm/reader") as unknown as Promise<ZxingReaderModule>): Promise<WasmReader> {
+  zxingReader ??= (async () => {
+    const mod = await importer();
+    if (zxingOverrides === null) {
+      const wasmUrl = new URL("zxing-wasm/reader/zxing_reader.wasm", import.meta.url).href;
+      zxingOverrides = { locateFile: (path, prefix) => (path.endsWith(".wasm") ? wasmUrl : prefix + path) };
+    }
+    await mod.prepareZXingModule({ overrides: zxingOverrides, fireImmediately: true });
+    return {
+      async read(frame: ImageData) {
+        return mod.readBarcodes(frame, { formats: [...WASM_FORMATS], tryHarder: true, maxNumberOfSymbols: 1 });
+      },
+    };
+  })().catch((e: unknown) => {
+    zxingReader = null;
+    zxingOverrides = null;
+    throw e;
   });
-  return {
-    async read(frame) {
-      const out = await mod.readBarcodes(frame, { formats: [...WASM_FORMATS], tryHarder: true, maxNumberOfSymbols: 1 });
-      return out.map((r) => ({ text: r.text, format: r.format, isValid: r.isValid }));
-    },
-  };
+  return zxingReader;
+}
+
+/** Yalnızca testler: modül düzeyi önbelleği sıfırlar. */
+export function resetZxingReaderForTest(): void {
+  zxingReader = null;
+  zxingOverrides = null;
 }
 
 async function nativeFormats(ctor: NativeCtor): Promise<string[]> {
@@ -267,6 +296,11 @@ export function platformOf(userAgent: string, maxTouchPoints = 0): Platform {
   // iPadOS Safari masaüstü gibi görünür (Macintosh + dokunmatik).
   if (/iphone|ipad|ipod/i.test(userAgent) || (/macintosh/i.test(userAgent) && maxTouchPoints > 1)) return "ios";
   return "other";
+}
+
+/** iPhone'da "Ana Ekrana Ekle" yolu tarayıcıya göre değişir: Safari'de Paylaş alt çubukta, iPhone Chrome'da (CriOS) adres çubuğundadır. */
+export function iosShareLocation(userAgent: string): "bottom" | "address" {
+  return /CriOS/i.test(userAgent) ? "address" : "bottom";
 }
 
 export function classifyCameraError(e: unknown): CameraFailure {

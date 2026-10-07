@@ -1472,7 +1472,9 @@
       "torchOn": "Torch on",
       "torchOff": "Torch off",
       "torchFailed": "The torch did not turn on. Move to a lit place or type the barcode.",
-      "installHint": "Add to home screen: Share > Add to Home Screen.",
+      "off": "Camera is off",
+      "installHintSafari": "Add to home screen: Share (bottom bar) > Add to Home Screen.",
+      "installHintChrome": "Add to home screen: Share (address bar) > Add to Home Screen.",
       "rejected": {
         "empty": "The read came back empty. Frame the barcode again.",
         "edge_space": "The read was damaged. Frame the barcode again.",
@@ -1483,9 +1485,9 @@
         "bad_checksum": "The barcode was misread. Add light, move back, try again."
       },
       "error": {
-        "denied_ios": "Camera is off. Settings > Safari (or your browser) > Camera, turn it on.",
-        "denied_android": "Camera is off. Settings > Apps > your browser > Permissions > Camera.",
-        "denied_other": "Camera is off. Use the lock icon in the address bar to allow it.",
+        "denied_ios": "Permission is off. Settings > Safari (or your browser) > Camera, turn it on.",
+        "denied_android": "Permission is off. Settings > Apps > your browser > Permissions > Camera.",
+        "denied_other": "Permission is off. Use the lock icon in the address bar to allow it.",
         "none": "No camera found. Type the barcode or use the reader trigger.",
         "busy": "The camera is open in another app. Close it, then Try again.",
         "insecure": "The camera needs an https connection. Tell your manager, type the barcode.",

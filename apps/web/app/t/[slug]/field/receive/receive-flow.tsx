@@ -9,7 +9,7 @@ import { useTranslations } from "next-intl";
 import { Banner, ChevronDown, CircleAlert, CircleCheck, PackagePlus, ScanField, ScanLine } from "@wms/ui";
 import { ScannerService, type ScanSource, type ScannerSource } from "../../../../../lib/scanner/scanner-core.ts";
 import { createKeystrokeSource } from "../../../../../lib/scanner/keystroke-source.ts";
-import { cameraFeedback, classifyCameraError, createFrameDecoder, openCamera, platformOf, startScanLoop } from "../../../../../lib/scanner/camera-source.ts";
+import { cameraFeedback, classifyCameraError, createFrameDecoder, iosShareLocation, openCamera, platformOf, startScanLoop } from "../../../../../lib/scanner/camera-source.ts";
 import type { CameraFailure, CameraSession, FrameDecoder, RejectReason } from "../../../../../lib/scanner/camera-source.ts";
 import { ErrorNotice, LineStatus, errorKeyOf, intOf, scanMismatch, submitWithKey, useKeyHolder, type ErrorInfo, type ReceiptDetail, type ReceiptLineView } from "../../receipts/receipt-form.tsx";
 import { receiveGoodsAction, resolveItemScanAction } from "../../receipts/actions.ts";
@@ -209,9 +209,10 @@ export function QtyStepper({ label, value, min, max, onChange }: { label: string
  * Tarama kaynakları: klavye kaması (DataWedge) ve kamera servis arkasındadır (ADR-010); etkin ekran tek dinleyicidir. `enabled=false` iken tarama iletilmez.
  * `camera(code)` kamera okumasını aynı servis yoluyla (`source: "camera"`) iletir.
  */
-export function useScanner(handler: (value: string, source: ScanSource) => void, enabled: boolean): { service: ScannerService | null; camera: (code: string) => void; dropped: boolean; clearDropped: () => void } {
+export function useScanner(handler: (value: string, source: ScanSource) => void, enabled: boolean): { service: ScannerService | null; camera: (code: string) => void; dropped: boolean; clearDropped: () => void; hardwareScans: number } {
   const [service, setService] = useState<ScannerService | null>(null);
   const [dropped, setDropped] = useState(false);
+  const [hardwareScans, setHardwareScans] = useState(0);
   const enabledRef = useRef(enabled);
   enabledRef.current = enabled;
   const ref = useRef(handler);
@@ -232,7 +233,10 @@ export function useScanner(handler: (value: string, source: ScanSource) => void,
     s.registerSource(cam);
     setService(s);
   }, []);
-  const stable = useCallback((v: string, src: ScanSource) => ref.current(v, src), []);
+  const stable = useCallback((v: string, src: ScanSource) => {
+    if (src === "keystroke") setHardwareScans((n) => n + 1);
+    ref.current(v, src);
+  }, []);
   useEffect(() => (service !== null && enabled ? service.onScan(stable) : undefined), [service, enabled, stable]);
   // Okuma kapalıyken (işlem sürüyor ya da uyarı açık) gelen kamera kodu SESSİZCE düşmez: kullanıcıya bildirilir (T-313 güvenlik MINOR).
   const camera = useCallback((code: string) => {
@@ -243,22 +247,30 @@ export function useScanner(handler: (value: string, source: ScanSource) => void,
     cameraEmit.current?.(code);
   }, []);
   const clearDropped = useCallback(() => setDropped(false), []);
-  return { service, camera, dropped, clearDropped };
+  return { service, camera, dropped, clearDropped, hardwareScans };
 }
 
-type CamPhase = { readonly phase: "starting" } | { readonly phase: "scanning" } | { readonly phase: "rejected"; readonly reason: RejectReason } | { readonly phase: "accepted" } | { readonly phase: "failed"; readonly failure: CameraFailure | "decoder" };
+type CamPhase =
+  | { readonly phase: "starting" }
+  | { readonly phase: "scanning" }
+  | { readonly phase: "rejected"; readonly reason: RejectReason }
+  | { readonly phase: "accepted"; readonly value: string }
+  | { readonly phase: "failed"; readonly failure: CameraFailure | "decoder" };
 
 /** Kamera yolu kurulabilir mi: `getUserMedia` var ya da güvenli olmayan bağlam (o durumda katman HTTPS rehberini gösterir). Yoksa donanım tetiği (el terminali). */
 const cameraPossible = (): boolean => typeof window !== "undefined" && typeof navigator !== "undefined" && (navigator.mediaDevices?.getUserMedia !== undefined || !window.isSecureContext);
 
-/** Okuma sonrası yeşil onayın görünür kaldığı süre (ms); akış bu sürede zaten durmuştur (çift okuma yok). */
-const ACCEPT_HOLD_MS = 350;
+/** Okumadan sonra katmanın açık kalma süreleri (ms): çözüm sürerken üst sınır, çözüldükten sonra, hiçbir şey olmuyorsa. */
+const ACCEPT_MAX_MS = 10_000;
+const ACCEPT_IDLE_MS = 1500;
+const ACCEPT_AFTER_RESOLVE_MS = 700;
 
 /**
  * Kamera katmanı (T-286): arka kamera + çözücü (yerleşik API ya da uygulama içi WASM, `camera-source.ts`). Yanlış okuma SATIR İÇİ gösterilir, katman ve kamera açık kalır;
- * doğru okuma yeşil onay + kısa bip + titreşimle bildirilir. Hata mesajı neden + sonraki eylemi söyler; "Elle gir" her durumda görünür.
+ * doğru okuma yeşil onay + okunan kod (çözülmüşse ürün adı) + kısa bip + titreşimle bildirilir. Hata mesajı neden + sonraki eylemi söyler; "Elle gir" her durumda görünür
+ * (kamera yoksa/izin yoksa birincil). Klavye kaması (el terminali) katman açıkken de çalışır: katman klavye kaynağını engellemez.
  */
-export function CameraOverlay({ onCode, onClose, onManual }: { onCode: (code: string) => void; onClose: () => void; onManual: () => void }) {
+export function CameraOverlay({ onCode, onClose, onManual, resolvedName }: { onCode: (code: string) => void; onClose: () => void; onManual: () => void; resolvedName?: string | undefined }) {
   const t = useTranslations("receiving");
   const video = useRef<HTMLVideoElement>(null);
   const onCodeRef = useRef(onCode);
@@ -271,7 +283,6 @@ export function CameraOverlay({ onCode, onClose, onManual }: { onCode: (code: st
   useEffect(() => {
     let cancelled = false;
     let stopLoop: (() => void) | null = null;
-    let hold: ReturnType<typeof setTimeout> | null = null;
     let cam: CameraSession | null = null;
     setState({ phase: "starting" });
     setTorch({ supported: false, on: false, failed: false });
@@ -288,7 +299,13 @@ export function CameraOverlay({ onCode, onClose, onManual }: { onCode: (code: st
       }
       session.current = cam;
       const v = video.current;
-      if (v === null) return;
+      if (v === null) {
+        // Katman yokken akış açık KALMAZ (MINOR-4): kamera hemen durdurulur.
+        cam.stop();
+        session.current = null;
+        setState({ phase: "failed", failure: "failed" });
+        return;
+      }
       v.srcObject = cam.stream;
       void v.play().catch(() => undefined);
       setTorch({ supported: cam.torchSupported, on: false, failed: false });
@@ -315,18 +332,18 @@ export function CameraOverlay({ onCode, onClose, onManual }: { onCode: (code: st
           setState({ phase: "rejected", reason });
         },
         onAccepted: (value) => {
-          // Tek kabul: döngü kendini durdurdu; akış da hemen kapanır (aynı kod ikinci kez gönderilemez).
+          // Tek kabul: döngü kendini durdurdu; akış da hemen kapanır (aynı kod ikinci kez gönderilemez). Katmanı kapatma kararı üsttedir (ürün çözülünce).
+          v.pause(); // son kare pencerede kalır (okunan barkod görünür)
           opened.stop();
           cameraFeedback("ok");
-          setState({ phase: "accepted" });
-          hold = setTimeout(() => onCodeRef.current(value), ACCEPT_HOLD_MS);
+          setState({ phase: "accepted", value });
+          onCodeRef.current(value);
         },
       });
     })();
     return () => {
       cancelled = true;
       if (stopLoop !== null) stopLoop();
-      if (hold !== null) clearTimeout(hold);
       cam?.stop();
       session.current = null;
     };
@@ -339,12 +356,13 @@ export function CameraOverlay({ onCode, onClose, onManual }: { onCode: (code: st
     void s.setTorch(next).then((ok) => setTorch((p) => ({ ...p, on: ok ? next : p.on, failed: !ok })));
   };
   const failed = state.phase === "failed";
+  const live = state.phase === "starting" || state.phase === "scanning" || state.phase === "rejected";
   const platform = typeof navigator === "undefined" ? "other" : platformOf(navigator.userAgent, navigator.maxTouchPoints);
   const failureKey = state.phase !== "failed" ? "" : state.failure === "denied" ? `denied_${platform}` : state.failure;
   const message = ((): { key: string; role: "status" | "alert"; tone: "plain" | "bad" | "good" } => {
     switch (state.phase) {
       case "starting":
-        return { key: "camera.starting", role: "status", tone: "plain" };
+        return { key: "camera.hint", role: "status", tone: "plain" };
       case "scanning":
         return { key: torch.failed ? "camera.torchFailed" : "camera.hint", role: torch.failed ? "alert" : "status", tone: "plain" };
       case "rejected":
@@ -360,10 +378,19 @@ export function CameraOverlay({ onCode, onClose, onManual }: { onCode: (code: st
     <p role={message.role} data-testid="camera-status" data-tone={message.tone} className={`flex min-w-0 items-start gap-2 break-words text-lg font-bold ${TONE[message.tone]}`}>
       {message.tone === "bad" ? <CircleAlert aria-hidden="true" className="mt-0.5 size-6 shrink-0" strokeWidth={2.25} /> : null}
       {message.tone === "good" ? <CircleCheck aria-hidden="true" className="mt-0.5 size-6 shrink-0" strokeWidth={2.25} /> : null}
-      <span className="min-w-0 flex-1">{t(message.key)}</span>
+      <span className="min-w-0 flex-1">
+        {t(message.key)}
+        {state.phase === "accepted" ? (
+          <span data-testid="camera-accepted-value" className="block truncate">
+            {resolvedName ?? state.value}
+          </span>
+        ) : null}
+      </span>
     </p>
   );
-  const btn = `flex min-h-12 min-w-12 flex-1 items-center whitespace-nowrap justify-center rounded-control border-2 border-on-accent bg-transparent px-3 text-base font-bold text-on-accent ${FOCUS}`;
+  const btn = `flex min-h-12 min-w-12 flex-1 items-center justify-center whitespace-nowrap rounded-control border-2 border-on-accent bg-transparent px-3 text-base font-bold text-on-accent ${FOCUS}`;
+  // İzin/kamera yokken "Elle gir" birincil (dolu), "Tekrar dene" ikincil (çerçeveli).
+  const primaryBtn = `flex min-h-12 min-w-12 basis-full items-center justify-center whitespace-nowrap rounded-control border-2 border-on-accent bg-on-accent px-3 text-base font-bold text-ink landscape:basis-auto ${FOCUS}`;
   return (
     <div
       role="dialog"
@@ -374,14 +401,30 @@ export function CameraOverlay({ onCode, onClose, onManual }: { onCode: (code: st
       data-decoder={decoderKind}
       className="fixed inset-0 z-40 grid grid-rows-[auto_minmax(0,1fr)_auto] gap-3 overflow-hidden bg-ink p-3 text-on-accent landscape:grid-cols-[minmax(0,1fr)_20rem] landscape:grid-rows-[minmax(0,1fr)_auto]"
     >
-      {failed ? null : <div className="row-start-1 landscape:col-start-2 landscape:self-center">{text}</div>}
+      <div className="row-start-1 landscape:col-start-2 landscape:self-center">{text}</div>
       <div data-testid="camera-viewport" className="relative row-start-2 min-h-0 min-w-0 overflow-hidden rounded-card bg-ink landscape:col-start-1 landscape:row-span-2 landscape:row-start-1">
         <video ref={video} muted playsInline data-testid="camera-video" className={`size-full object-cover ${failed ? "invisible" : ""}`} />
-        {failed ? <div className="absolute inset-0 flex items-center justify-center p-2">{text}</div> : null}
+        {live ? <div aria-hidden="true" data-testid="camera-reticle" className="pointer-events-none absolute inset-x-[10%] inset-y-[25%] rounded-card border-4 border-success" /> : null}
+        {state.phase === "starting" ? (
+          <p role="status" data-testid="camera-opening" className="absolute inset-x-0 top-1/2 mx-auto w-fit max-w-[90%] -translate-y-1/2 rounded-control bg-ink px-4 py-2 text-center text-lg font-bold text-on-accent">
+            {t("camera.starting")}
+          </p>
+        ) : null}
+        {failed ? (
+          <div data-testid="camera-off" className="absolute inset-0 flex flex-col items-center justify-center gap-2 p-2 text-center text-on-accent">
+            <ScanLine aria-hidden="true" className="size-14 text-border-strong" strokeWidth={1.75} />
+            <p className="text-lg font-bold">{t("camera.off")}</p>
+          </div>
+        ) : null}
       </div>
       <div className="row-start-3 flex min-w-0 flex-wrap gap-2 landscape:col-start-2 landscape:row-start-2 landscape:flex-col landscape:flex-nowrap">
+        {failed ? (
+          <button type="button" onClick={onManual} className={primaryBtn}>
+            {t("flow.manual")}
+          </button>
+        ) : null}
         {failed && state.failure !== "none" && state.failure !== "insecure" ? (
-          <button type="button" onClick={() => setAttempt((n) => n + 1)} className={`${btn} basis-full landscape:basis-auto`}>
+          <button type="button" onClick={() => setAttempt((n) => n + 1)} className={btn}>
             {t("camera.retry")}
           </button>
         ) : null}
@@ -390,9 +433,11 @@ export function CameraOverlay({ onCode, onClose, onManual }: { onCode: (code: st
             {torch.on ? t("camera.torchOff") : t("camera.torchOn")}
           </button>
         ) : null}
-        <button type="button" onClick={onManual} className={btn}>
-          {t("flow.manual")}
-        </button>
+        {failed ? null : (
+          <button type="button" onClick={onManual} className={btn}>
+            {t("flow.manual")}
+          </button>
+        )}
         <button type="button" onClick={onClose} className={btn}>
           {t("cancel")}
         </button>
@@ -401,18 +446,16 @@ export function CameraOverlay({ onCode, onClose, onManual }: { onCode: (code: st
   );
 }
 
-/**
- * Tarama paneli (tek yol): büyük okut ikonu + tek cümle; alt birincil düğme "Barkodu okut". ScanField (T-303) yalnızca "Elle gir" bağlantısıyla açılır
- * (ikincil); okuma hazır olduğunda `ready` vurgusu görünür.
- */
+
 const INSTALL_HINT_KEY = "wms.installHint.dismissed";
 
 /**
  * iPhone'da (tüm tarayıcılar WebKit) uygulama henüz ana ekrana eklenmemişse tek satır rehber: "Paylaş > Ana Ekrana Ekle". Kapatılınca (Tamam) bir daha gösterilmez.
  * Android'de tarayıcı kendi "Ana ekrana ekle" yolunu sunar (manifest, `app/manifest.ts`); rehber yalnızca iPhone içindir.
  */
-function useInstallHint(): { show: boolean; dismiss: () => void } {
+function useInstallHint(): { show: boolean; where: "bottom" | "address"; dismiss: () => void } {
   const [show, setShow] = useState(false);
+  const [where, setWhere] = useState<"bottom" | "address">("bottom");
   useEffect(() => {
     if (platformOf(navigator.userAgent, navigator.maxTouchPoints) !== "ios") return;
     const standalone = (navigator as unknown as { standalone?: boolean }).standalone === true || window.matchMedia("(display-mode: standalone)").matches;
@@ -422,6 +465,7 @@ function useInstallHint(): { show: boolean; dismiss: () => void } {
     } catch {
       dismissed = false; // depolama kapalı (gizli sekme): rehber her açılışta görünür, hata değildir
     }
+    setWhere(iosShareLocation(navigator.userAgent));
     setShow(!standalone && !dismissed);
   }, []);
   const dismiss = useCallback(() => {
@@ -432,9 +476,13 @@ function useInstallHint(): { show: boolean; dismiss: () => void } {
       // depolama kapalı: bu oturumda gizlenir
     }
   }, []);
-  return { show, dismiss };
+  return { show, where, dismiss };
 }
 
+/**
+ * Tarama paneli (tek yol): büyük okut ikonu + tek cümle; alt birincil düğme "Barkodu okut". ScanField (T-303) yalnızca "Elle gir" bağlantısıyla açılır
+ * (ikincil); okuma hazır olduğunda `ready` vurgusu görünür.
+ */
 export function ScanPanel({ service, prompt, last, lastName, ready, hue }: { service: ScannerService | null; prompt: string; last: string; lastName?: string; ready: boolean; hue: FlowHue }) {
   const t = useTranslations("receiving");
   const wrap = useRef<HTMLDivElement>(null);
@@ -474,7 +522,7 @@ export function ScanPanel({ service, prompt, last, lastName, ready, hue }: { ser
       </button>
       {install.show ? (
         <div data-testid="install-hint" className="flex w-full min-w-0 items-center gap-2 border-t-2 border-border pt-2 text-left">
-          <p className="min-w-0 flex-1 break-words text-base font-semibold text-ink">{t("camera.installHint")}</p>
+          <p className="min-w-0 flex-1 break-words text-base font-semibold text-ink">{t(install.where === "address" ? "camera.installHintChrome" : "camera.installHintSafari")}</p>
           <button type="button" onClick={install.dismiss} className={`flex min-h-12 min-w-12 shrink-0 items-center justify-center rounded-control border-2 border-border-strong px-3 text-base font-bold text-ink ${FOCUS}`}>
             {t("camera.ok")}
           </button>
@@ -484,22 +532,55 @@ export function ScanPanel({ service, prompt, last, lastName, ready, hue }: { ser
   );
 }
 
-/** Tarama adımının birincil düğmesi: kamera yolu kurulabiliyorsa kamera katmanını açar; yoksa okuyucuyu (el terminali tetiği) hazırlar ve yönerge gösterir. */
-export function useScanPrimary(camera: (code: string) => void): { ready: boolean; press: () => void; overlay: React.ReactNode } {
+/** Okuma sonucu (üst akıştan): kamera katmanı okunan kod çözülene kadar açık kalır ve ürün/lokasyon adını gösterir. */
+export interface ScanOutcome {
+  readonly busy: boolean;
+  readonly name: string | undefined;
+  readonly alerting: boolean;
+  /** Klavye kaması (el terminali) okutma sayısı: artınca kamera katmanı kapanır (iki kaynak aynı anda iş yapmaz). */
+  readonly hardwareScans: number;
+}
+
+/**
+ * Tarama adımının birincil düğmesi: kamera yolu kurulabiliyorsa kamera katmanını açar (telefon; T-286); kurulamıyorsa okuyucuyu (el terminali tetiği) hazırlar.
+ * El terminali (klavye kaması) kamera katmanı açıkken de açıkken de çalışır: kaynak servistedir, katmana bağlı değildir.
+ */
+export function useScanPrimary(camera: (code: string) => void, outcome: ScanOutcome): { ready: boolean; press: () => void; overlay: React.ReactNode } {
   const [cam, setCam] = useState(false);
   const [ready, setReady] = useState(false);
+  const [accepted, setAccepted] = useState(false);
   const wantManual = useRef(false);
   const onCode = useCallback(
     (code: string) => {
-      setCam(false);
+      setAccepted(true);
       camera(code);
     },
     [camera],
   );
+  const close = useCallback(() => {
+    setCam(false);
+    setAccepted(false);
+  }, []);
   const onManual = useCallback(() => {
     wantManual.current = true;
-    setCam(false);
-  }, []);
+    close();
+  }, [close]);
+  // Okuma kabul edildi: çözüm sürerken (busy) katman açık kalır (üst sınır ACCEPT_MAX_MS); çözülünce (ad geldi ya da hata uyarısı açıldı) kısa süre sonra,
+  // hiçbir şey olmuyorsa (okuma kapalı vb.) ACCEPT_IDLE_MS sonra kapanır.
+  useEffect(() => {
+    if (!accepted) return undefined;
+    const resolved = outcome.name !== undefined || outcome.alerting;
+    const ms = outcome.busy ? ACCEPT_MAX_MS : resolved ? ACCEPT_AFTER_RESOLVE_MS : ACCEPT_IDLE_MS;
+    const timer = setTimeout(close, ms);
+    return () => clearTimeout(timer);
+  }, [accepted, outcome.busy, outcome.name, outcome.alerting, close]);
+  // El terminali okutması geldi: kamera katmanını kapat (kod akışa zaten gitti).
+  const hw = useRef(outcome.hardwareScans);
+  useEffect(() => {
+    if (hw.current === outcome.hardwareScans) return;
+    hw.current = outcome.hardwareScans;
+    close();
+  }, [outcome.hardwareScans, close]);
   // "Elle gir": katman kapanınca tarama panelindeki ScanField elle giriş kipine geçer (aynı bileşen, ikinci bir giriş yolu yok).
   useEffect(() => {
     if (cam || !wantManual.current) return;
@@ -513,7 +594,7 @@ export function useScanPrimary(camera: (code: string) => void): { ready: boolean
       if (typeof navigator !== "undefined" && typeof navigator.vibrate === "function") navigator.vibrate(30);
     }
   };
-  return { ready, press, overlay: cam ? <CameraOverlay onCode={onCode} onClose={() => setCam(false)} onManual={onManual} /> : null };
+  return { ready, press, overlay: cam ? <CameraOverlay onCode={onCode} onClose={close} onManual={onManual} resolvedName={accepted ? outcome.name : undefined} /> : null };
 }
 
 /** Okuma kapalıyken gelen kod bildirimi (uyarı açıkken de görünür: üstte, `z-[60]`). */
@@ -625,8 +706,8 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
     },
     [busy, alert, slug, stage, picked, receipt],
   );
-  const { service: scanner, camera, dropped, clearDropped } = useScanner((v) => void onScanned(v), stage !== "done" && alert === null && !busy);
-  const scanPrimary = useScanPrimary(camera);
+  const { service: scanner, camera, dropped, clearDropped, hardwareScans } = useScanner((v) => void onScanned(v), stage !== "done" && alert === null && !busy);
+  const scanPrimary = useScanPrimary(camera, { busy, name: lastName, alerting: alert !== null, hardwareScans });
 
   async function confirm() {
     if (picked === null || busy) return;
@@ -680,6 +761,13 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
 
   const icon = <PackagePlus aria-hidden="true" className="size-6" />;
 
+  // Kamera katmanı aşama değişse de aynı konumda (kök parça, 2. çocuk) kalır: okunan ürün adı katmanda görünür, kamera yeniden açılmaz.
+  const withOverlay = (node: React.ReactNode): React.ReactElement => (
+    <>
+      {node}
+      {scanPrimary.overlay}
+    </>
+  );
   if (receipt.receivingLocations.length === 0) {
     return (
       <FlowShell hue="green" icon={icon} step={2} total={4} title={t("flow.noLocationTitle")} backHref={base} footer={<PrimaryLink href={base}>{t("flow.otherReceipt")}</PrimaryLink>}>
@@ -692,7 +780,7 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
 
   if (stage === "done" && done !== null) {
     const finished = open.length === 0 || (done.remaining === 0 && open.length <= 1);
-    return (
+    return withOverlay(
       <>
         <FlowShell
           hue="green"
@@ -725,7 +813,7 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
 
   if (stage === "qty" && picked !== null) {
     const max = intOf(picked.line.open);
-    return (
+    return withOverlay(
       <>
         <FlowShell
           hue="green"
@@ -820,13 +908,13 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
 
   // Tarama adımı (ya da tüm satırlar tamamsa bitiş).
   if (open.length === 0) {
-    return (
+    return withOverlay(
       <FlowShell hue="green" icon={icon} step={4} total={4} title={t("flow.receiptDone")} footer={<PrimaryLink href={base}>{t("flow.otherReceipt")}</PrimaryLink>}>
         <p className="text-base text-ink">{t("flow.allDone")}</p>
       </FlowShell>
     );
   }
-  return (
+  return withOverlay(
     <>
       <FlowShell
         hue="green"
@@ -854,7 +942,6 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
           </ul>
         </section>
       </FlowShell>
-      {scanPrimary.overlay}
       {alertView}
     </>
   );

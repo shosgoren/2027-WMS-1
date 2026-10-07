@@ -2,7 +2,7 @@
 // Tarayıcı olmadan (DecoderEnv enjekte) koşar; gerçek kamera akışı ve WASM çözümü e2e'dedir (tests/e2e/camera-scan.spec.ts).
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SCANNER_CONFIG } from "./scanner-config.ts";
-import { classifyCameraError, createFrameDecoder, gs1CheckDigitValid, platformOf, startScanLoop, symbologyOf, validateCameraRead } from "./camera-source.ts";
+import { classifyCameraError, createFrameDecoder, gs1CheckDigitValid, iosShareLocation, loadZxingReader, platformOf, resetZxingReaderForTest, startScanLoop, symbologyOf, validateCameraRead } from "./camera-source.ts";
 import type { DecoderEnv, FrameDecoder, RawRead, RejectReason, WasmReader } from "./camera-source.ts";
 
 describe("validateCameraRead (T-287g)", () => {
@@ -32,10 +32,26 @@ describe("validateCameraRead (T-287g)", () => {
     ["denetim karakteri", { text: "AB\u0000C", format: "Code128" }, "control_chars"],
     ["değiştirme karakteri (bozuk kodlama)", { text: "AB�C", format: "QRCode" }, "control_chars"],
     ["GS, Code39'da meşru değil", { text: "AB\u001dC", format: "Code39" }, "control_chars"],
+    ["bidi karakteri (U+202E)", { text: "AB\u202eC", format: "Code128" }, "control_chars"],
+    ["bidi karakteri (U+202A)", { text: "\u202aABC", format: "QRCode" }, "control_chars"],
+    ["bidi karakteri (U+2066)", { text: "AB\u2066C", format: "Code128" }, "control_chars"],
+    ["bidi karakteri (U+2069)", { text: "AB\u2069C", format: "Code128" }, "control_chars"],
+    ["sıfır genişlikli (U+200B)", { text: "AB\u200bC", format: "Code128" }, "control_chars"],
+    ["sıfır genişlikli (U+200C)", { text: "AB\u200cC", format: "Code128" }, "control_chars"],
+    ["sıfır genişlikli (U+200D)", { text: "AB\u200dC", format: "Code128" }, "control_chars"],
+    ["sıfır genişlikli (U+FEFF)", { text: "AB\ufeffC", format: "QRCode" }, "control_chars"],
+    ["satır ayracı (U+2028)", { text: "AB\u2028C", format: "QRCode" }, "control_chars"],
+    ["paragraf ayracı (U+2029)", { text: "AB\u2029C", format: "QRCode" }, "control_chars"],
+    ["eşsiz üst vekil (surrogate)", { text: "AB\ud800C", format: "QRCode" }, "control_chars"],
+    ["eşsiz alt vekil (surrogate)", { text: "AB\udc00C", format: "QRCode" }, "control_chars"],
     ["fazla uzun", { text: "A".repeat(SCANNER_CONFIG.maxLength + 1), format: "Code128" }, "too_long"],
   ];
   it.each(rejected)("reddeder: %s", (_n, read, reason) => {
     expect(validateCameraRead(read)).toEqual({ ok: false, reason });
+  });
+
+  it("geçerli vekil çifti (emoji) bozuk sayılmaz: yalnızca eşsiz vekil reddedilir", () => {
+    expect(validateCameraRead({ text: "AB\u{1F600}C", format: "QRCode" }).ok).toBe(true);
   });
 
   it("GS1 ayracı (GS) yalnızca Code128/QR/DataMatrix'te kabul edilir ve değer değiştirilmez", () => {
@@ -61,6 +77,10 @@ describe("cihaz ve hata sınıflaması", () => {
     expect(platformOf("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15", 5)).toBe("ios");
     expect(platformOf("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15", 0)).toBe("other");
     expect(platformOf("Mozilla/5.0 (Linux; Android 14; Pixel 7) Chrome/130")).toBe("android");
+  });
+  it("iosShareLocation: Safari alt çubuk, iPhone Chrome adres çubuğu", () => {
+    expect(iosShareLocation("Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1")).toBe("bottom");
+    expect(iosShareLocation("Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 CriOS/130.0 Mobile/15E148 Safari/604.1")).toBe("address");
   });
   it("classifyCameraError", () => {
     expect(classifyCameraError({ name: "NotAllowedError" })).toBe("denied");
@@ -215,5 +235,47 @@ describe("startScanLoop: tek uçuş, tek kabul, satır içi ret", () => {
     const after = d.calls;
     await vi.advanceTimersByTimeAsync(1000);
     expect(d.calls).toBe(after);
+  });
+});
+
+describe("loadZxingReader: hazırlık tek kez (T-286 MAJOR-1)", () => {
+  beforeEach(() => resetZxingReaderForTest());
+
+  function fakeModule() {
+    const seen: unknown[] = [];
+    const prepare = vi.fn((o: { overrides: unknown }) => {
+      seen.push(o.overrides);
+      return Promise.resolve({});
+    });
+    const importer = vi.fn(() => Promise.resolve({ prepareZXingModule: prepare, readBarcodes: () => Promise.resolve([]) }));
+    return { prepare, importer, seen };
+  }
+
+  it("iki tarama ekranı açılışında modül yalnızca bir kez hazırlanır ve içe aktarılır", async () => {
+    const { prepare, importer } = fakeModule();
+    const a = await loadZxingReader(importer);
+    const b = await loadZxingReader(importer);
+    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(importer).toHaveBeenCalledTimes(1);
+    expect(a).toBe(b);
+  });
+
+  it("hazırlık hata verirse önbellek temizlenir; yeniden denemede başarılı olur ve WASM adresi kendi kaynağımızdır", async () => {
+    const { prepare, importer, seen } = fakeModule();
+    prepare.mockRejectedValueOnce(new Error("ağ"));
+    await expect(loadZxingReader(importer)).rejects.toThrow("ağ");
+    await loadZxingReader(importer);
+    expect(prepare).toHaveBeenCalledTimes(2);
+    const o = seen.at(-1) as { locateFile: (p: string, prefix: string) => string };
+    expect(o.locateFile("zxing_reader.wasm", "https://cdn.example/")).not.toContain("cdn.example");
+    expect(o.locateFile("other.js", "pre/")).toBe("pre/other.js");
+  });
+
+  it("aynı overrides nesnesi yeniden kullanılır (kütüphane önbellek eşitliği)", async () => {
+    const { prepare, importer, seen } = fakeModule();
+    await loadZxingReader(importer);
+    await loadZxingReader(importer);
+    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(seen).toHaveLength(1);
   });
 });
