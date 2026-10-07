@@ -8,6 +8,7 @@
     "AC-08": 4,
     "AC-09": 14,
     "AC-18": 9,
+    "AC-21": 1,
     "AC-22": 6,
     "AC-23": 1,
     "AC-28": 59,
@@ -44,6 +45,7 @@
     "tests/integration/schema/documents-qa.int.test.ts": 27,
     "tests/integration/schema/phase2-catalog-qa.int.test.ts": 49,
     "tests/integration/schema/stock-guard-qa.int.test.ts": 51,
+    "tests/integration/stock/consistency-job.int.test.ts": 66,
     "tests/unit/ac/ac-28-lint.test.ts": 119
   }
 }

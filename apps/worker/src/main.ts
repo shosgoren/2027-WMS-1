@@ -9,6 +9,7 @@ import { createDeliverInvitationHandler } from "./jobs/deliver-invitation.js";
 import { DEMO_RESEED_SINGLETON_KEY, registerDemoReseed } from "./jobs/demo-reseed.js";
 import { createPostStockDocumentHandler } from "./jobs/post-stock-document.js";
 import { startQueueMaintenance } from "./jobs/queue-maintenance.js";
+import { consistencySingletonKey, createStockConsistencyHandler, startConsistencySchedule } from "./jobs/stock-consistency.js";
 import { createMailer, createSendEmailHandler } from "./jobs/send-email.js";
 import { createJsonLogger, createLifecycle, EXIT_FAILURE, parseShutdownTimeoutMs } from "./lifecycle.js";
 
@@ -34,9 +35,8 @@ const HANDLERS: { [T in JobType]?: JobHandler<T> } = {};
 // Koşullu/henüz yazılmamış türler açıkça listelenir: `demo.reseed` yalnızca demo açıkken (T-123: WMS_ENV local|staging +
 // DEMO_MODE=1 + DEMO_PASSWORD) kaydedilir; aksi halde bu türden işler tüketici gelene kadar kuyrukta bekler (kaybolmaz,
 // sahte başarıyla tamamlanmaz). Registry'ye yeni tür eklenirse burada karar verilmeden açılış düşer.
-// `stock.consistency.check` (T-225) handler'ı kendi kartında gelir; o zamana dek işler kuyrukta bekler (sahte başarı yok) ve
-// ilgili kart kendi türünü bu listeden çıkarır (ADR-019 §5). `stock.document.post` T-222 ile kaydedildi.
-const DEFERRED_JOB_TYPES: readonly JobType[] = ["demo.reseed", "stock.consistency.check"];
+// `stock.document.post` (T-222) ve `stock.consistency.check` (T-225) kaydedildi (ADR-019 §5).
+const DEFERRED_JOB_TYPES: readonly JobType[] = ["demo.reseed"];
 
 // Platform işleri (`enqueuePlatform`) için tenant bağlamı BOŞ `wms_app` transaction'ı (processed_events `tenant_id NULL`,
 // ADR-019 §2). `@wms/db` genel yüzeyinde bağlamsız transaction yoktur; `withUser` yalnızca `app.current_user_id` kurar
@@ -88,6 +88,9 @@ const db = createDbClient({ url: databaseUrl, poolMax: 10, prepare: false });
 
 // Eşik üstü belge işleme (T-222): istek sahibi adına tek transaction; `processed_events` aynı transaction'da (ADR-019 §2).
 HANDLERS["stock.document.post"] = createPostStockDocumentHandler({ db, consumeOnce: consumeOnce as unknown as ConsumeOnceFn, logger });
+
+// Tutarlılık denetimi (T-225): salt okur + alarm; `processed_events` aynı transaction'da (ADR-019 §2, §8).
+HANDLERS["stock.consistency.check"] = createStockConsistencyHandler({ consumeOnce: consumeOnce as unknown as ConsumeOnceFn, logger });
 
 const undecided = JOB_TYPES.filter((t) => HANDLERS[t] === undefined && !DEFERRED_JOB_TYPES.includes(t));
 if (undecided.length > 0) {
@@ -149,9 +152,20 @@ const demoSchedule = demo.startSchedule(() =>
   ),
 );
 
+// Tutarlılık zamanlayıcısı (T-225, A-74): açılışta bir kez + saatte bir; tenant listesi `wms_worker` + dar işlev, kuyruklama tenant başına `withSystemTenant`.
+const consistencySchedule = startConsistencySchedule({
+  listActiveTenantIds: (after, limit) => queue.listActiveTenantIds(after, limit),
+  enqueueFor: (tenantId) =>
+    withSystemTenant(db, tenantId, "stock.consistency.schedule", (tx) =>
+      queue.enqueue(tx, { type: "stock.consistency.check", payload: {}, singletonKey: consistencySingletonKey(tenantId) }),
+    ),
+  logger,
+});
+
 // Kapanış sırası: önce zamanlayıcı, sonra kuyruk (çalışan işler biter), sonra DB havuzu.
 lifecycle.register({ name: "demo-schedule", run: () => demoSchedule?.stop() });
 lifecycle.register({ name: "queue-maintenance", run: () => queueMaintenance.stop() });
+lifecycle.register({ name: "consistency-schedule", run: () => consistencySchedule.stop() });
 lifecycle.register({ name: "job-queue", run: () => queue.stop() });
 lifecycle.register({ name: "db", run: () => db.close() });
 lifecycle.register({ name: "worker-db", run: () => workerDb.close() });

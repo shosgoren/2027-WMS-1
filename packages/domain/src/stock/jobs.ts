@@ -19,7 +19,7 @@
 //   kilit/aktör/kayıt eşleşmesi); damga yoksa/geçersizse `false` → TENANT_ADMIN istek sahibinin işi worker'da `FORBIDDEN/MFA_REQUIRED` ile kalıcı başarısız olur
 //   (fail-closed; yetkili rol PICKER/WAREHOUSE_MANAGER için etkisiz). Damganın yazılması 0024 tetikleyicisiyle yalnızca tek yere (deferToWorker) kilitlidir.
 // A-222-4: askıda/kapanıştaki (geri alınabilir) kiracının işleme işi kalıcı başarısız sayılmaz, sonlandırma ertelenir (docs/OPEN_QUESTIONS.md A-222-4).
-import { currentTenantId } from "@wms/db";
+import { currentTenantId, setLocalReadOnly, setLocalTimeouts } from "@wms/db";
 import { AppError, type ErrorCode } from "@wms/shared/errors";
 import type { Logger } from "@wms/shared/log";
 import type { JobContext } from "@wms/shared/queue";
@@ -27,6 +27,16 @@ import { sql } from "drizzle-orm";
 import type { AccessDbClient, AccessTx } from "../identity/access.ts";
 import { STOCK_TIMEOUTS, executeStockCommand, type StockCommandApplied } from "./command.ts";
 import { encodeErrorCode, StoredRejectionError, type StockCommandResult } from "./idempotency.ts";
+import {
+  CONSISTENCY_CHUNK_SIZE,
+  ConsistencyAccumulator,
+  NIL_UUID,
+  checkDimensionChunk,
+  checkLocationLockChunk,
+  checkSerialChunk,
+  type ChunkResult,
+  type ConsistencyReport,
+} from "./consistency.ts";
 import { buildPostCommand } from "./posting.ts";
 
 /** `processed_events.consumer` adı. */
@@ -436,4 +446,108 @@ export async function finalizeFailedPostingJobs(deps: PostingSweepDeps): Promise
     }
   }
   return { finalized, deferred };
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// Tutarlılık denetimi (T-225; ADR-019 §8-§10, AC-21): SALT OKUR ve alarm verir; defter/bakiye/rezervasyon HİÇBİR koşulda değiştirilmez
+// (otomatik düzeltme yok, fark araştırılabilir kalır). Roller: `wms_app` + `ctx.inTenant` (→ withSystemTenant, "queue.stock.consistency.check").
+// - Denetim parçaları AYRI kısa transaction'lardır; her biri tenant satırı kilidinden (withSystemTenant) sonra `setLocalReadOnly` uygular.
+// - RUNNING satırı yok. Tamamlanan koşu tek SON transaction'da yazılır: `processed_events` (consumeOnce) + `stock_consistency_runs` +
+//   `stock_consistency_signals` birlikte (signals'ta tekilleştirme anahtarı yok: yeniden teslimde runs UNIQUE (tenant_id, job_id) 23505 hepsini geri alır).
+// - Beklenmeyen hata: koşu satırı YAZILMAZ; AYRI transaction'da tenant'sız `FAILED` sinyali; hata yayılır (pg-boss yeniden dener).
+// - Log: `stock.consistency.mismatch|failed` level=error (tenant kimliği + sayı; kişisel veri yok).
+// ---------------------------------------------------------------------------------------------------------------------------------
+
+/** `processed_events.consumer` adı. */
+export const CONSISTENCY_CONSUMER = "stock.consistency.check";
+
+/** Denetim parçası transaction'ı için sunucu tarafı sınırlar (okuma-yalnız; kilit beklemesi kısa tutulur). */
+const CONSISTENCY_TIMEOUTS = { lockTimeoutMs: 5000, statementTimeoutMs: 60_000 } as const;
+
+export interface ConsistencyCheckDeps {
+  readonly consumeOnce: ConsumeOnceFn;
+  readonly logger: Logger;
+  /** Test: saat enjeksiyonu. */
+  readonly now?: () => Date;
+}
+
+export type ConsistencyCheckContext = JobContext<"stock.consistency.check", AccessTx>;
+
+export type ConsistencyOutcome = { readonly status: "OK" | "MISMATCH"; readonly applied: boolean; readonly report: ConsistencyReport };
+
+/** Bir keyset denetimini, her parça AYRI salt-okur transaction'da olacak şekilde sonuna dek çalıştırır. */
+async function runChunks(
+  ctx: ConsistencyCheckContext,
+  acc: ConsistencyAccumulator,
+  kind: "dimensions" | "locks" | "serials",
+  fn: (tx: AccessTx, tenantId: string, after: string) => Promise<ChunkResult>,
+  tenant: { id?: string },
+): Promise<void> {
+  let after = NIL_UUID;
+  for (;;) {
+    const r = await ctx.inTenant(async (tx) => {
+      // Tenant satırı kilidi `withSystemTenant` içinde alınmıştır; yalnız SONRA salt-okur (ADR-019 §1 katman a).
+      await setLocalReadOnly(tx);
+      await setLocalTimeouts(tx, CONSISTENCY_TIMEOUTS);
+      const tenantId = await currentTenantId(tx);
+      if (tenantId === undefined) throw new AppError("INTERNAL");
+      tenant.id = tenantId;
+      return fn(tx, tenantId, after);
+    });
+    acc.add(kind, r);
+    // dimensions/locks: parça tam dolmadıysa küme bitti; serials: yalnız ihlalli seriler döner (`checked` < limit → bitti).
+    if (r.checked < CONSISTENCY_CHUNK_SIZE || r.last === null) return;
+    after = r.last;
+  }
+}
+
+/** Tutarlılık denetimi: bkz. bölüm başı. */
+export async function runConsistencyCheck(deps: ConsistencyCheckDeps, ctx: ConsistencyCheckContext): Promise<ConsistencyOutcome> {
+  const { logger } = deps;
+  const now = deps.now ?? (() => new Date());
+  const startedAt = now();
+  const acc = new ConsistencyAccumulator();
+  const tenant: { id?: string } = {};
+  try {
+    await runChunks(ctx, acc, "dimensions", (tx, t, a) => checkDimensionChunk(tx, t, a), tenant);
+    await runChunks(ctx, acc, "locks", (tx, t, a) => checkLocationLockChunk(tx, t, a), tenant);
+    await runChunks(ctx, acc, "serials", (tx, t, a) => checkSerialChunk(tx, t, a), tenant);
+    const report = acc.report();
+    const status = report.mismatchCount === 0 ? "OK" : "MISMATCH";
+    const finishedAt = now();
+    const applied = await ctx.inTenant(async (tx) => {
+      const tenantId = await currentTenantId(tx);
+      if (tenantId === undefined) throw new AppError("INTERNAL");
+      const once = await deps.consumeOnce(tx, CONSISTENCY_CONSUMER, ctx.jobId, async () => {
+        await tx.execute(
+          sql`INSERT INTO public.stock_consistency_runs (tenant_id, job_id, started_at, finished_at, status, checked_dimensions, mismatch_count, findings)
+              VALUES (${tenantId}::uuid, ${ctx.jobId}::uuid, ${startedAt.toISOString()}::timestamptz,
+                      ${finishedAt.toISOString()}::timestamptz, ${status}, ${report.checkedDimensions}::bigint, ${report.mismatchCount}::int,
+                      ${JSON.stringify(report.findings)}::jsonb)`,
+        );
+        await tx.execute(sql`INSERT INTO public.stock_consistency_signals (status, mismatch_count) VALUES (${status}, ${report.mismatchCount}::int)`);
+      });
+      return once.applied;
+    });
+    if (!applied) {
+      // Aynı işin yeniden teslimi: etki zaten yazılmış; yinelenen sinyal/alarm yok.
+      logger.info("stock.consistency.already_processed", { jobId: ctx.jobId });
+    } else if (status === "MISMATCH") {
+      logger.error("stock.consistency.mismatch", { jobId: ctx.jobId, tenantId: tenant.id, count: report.mismatchCount });
+    } else {
+      logger.info("stock.consistency.ok", { jobId: ctx.jobId, tenantId: tenant.id, checkedDimensions: report.checkedDimensions });
+    }
+    return { status, applied, report };
+  } catch (e) {
+    // Koşu satırı yazılmaz (yalnız tamamlanan koşu `stock_consistency_runs`'a girer). Tenant'sız FAILED sinyali AYRI transaction'da; yazılamazsa asıl hata yayılır.
+    let signalled = false;
+    try {
+      await ctx.inTenant((tx) => tx.execute(sql`INSERT INTO public.stock_consistency_signals (status, mismatch_count) VALUES ('FAILED', 0)`));
+      signalled = true;
+    } catch {
+      // asıl hata aşağıda loglanır ve yayılır
+    }
+    logger.error("stock.consistency.failed", { jobId: ctx.jobId, tenantId: tenant.id, signalled, reason: e instanceof Error ? e.name : "unknown" });
+    throw e;
+  }
 }
