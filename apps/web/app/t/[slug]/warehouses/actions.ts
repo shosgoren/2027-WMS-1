@@ -31,7 +31,7 @@ const textSchema = z.string().min(1).max(512);
 // `LocationKindValue` ile birebir olmalıdır (`satisfies` derleme zamanında zorlar).
 const kindSchema = z.enum(["RECEIVING", "STORAGE", "STAGING", "TRANSIT"] as const satisfies readonly LocationKindValue[]);
 
-// `autoCode` (T-250): kod kullanıcı tarafından değiştirilmedi; çakışmada sunucu sıradaki öneriyle yeniden dener.
+// `autoCode` (T-250): kod kullanıcı tarafından değiştirilmedi beyanı; sunucu kodun önerilen biçimde olduğunu da doğrular (T-259), çakışmada aynı önekle yeniden dener.
 const createWarehouseSchema = z.object({ slug: slugSchema, code: textSchema, name: textSchema, autoCode: z.boolean().optional() }).strict();
 const suggestCodeSchema = z.object({ slug: slugSchema, kind: z.enum(["warehouse", "location"]), warehouseId: idSchema.optional() }).strict();
 const bulkSpecShape = {
@@ -71,10 +71,13 @@ export async function createWarehouseAction(raw: unknown) {
   return guardedAction({ schema: createWarehouseSchema }, async (input, ctx) => {
     const params = await writeContext(input.slug, ctx);
     const create = (code: string) => createWarehouse(params, { code, name: input.name, requestId: ctx.requestId });
-    const r =
-      input.autoCode === true
-        ? await createWithSuggestedCode({ code: input.code, auto: true, suggest: () => suggestCode(params, { kind: "warehouse" }), create })
-        : await create(input.code);
+    const r = await createWithSuggestedCode({
+      kind: "warehouse",
+      code: input.code,
+      auto: input.autoCode === true,
+      suggest: (prefix) => suggestCode(params, { kind: "warehouse", prefix }),
+      create,
+    });
     return { warehouseId: r.warehouseId };
   })(raw);
 }
@@ -110,15 +113,13 @@ export async function createLocationAction(raw: unknown) {
     const params = await writeContext(input.slug, ctx);
     const create = (code: string) =>
       createLocation(params, { warehouseId: input.warehouseId, parentId: input.parentId, code, name: input.name, kind: input.kind, requestId: ctx.requestId });
-    const r =
-      input.autoCode === true
-        ? await createWithSuggestedCode({
-            code: input.code,
-            auto: true,
-            suggest: () => suggestCode(params, { kind: "location", warehouseId: input.warehouseId }),
-            create,
-          })
-        : await create(input.code);
+    const r = await createWithSuggestedCode({
+      kind: "location",
+      code: input.code,
+      auto: input.autoCode === true,
+      suggest: (prefix) => suggestCode(params, { kind: "location", warehouseId: input.warehouseId, prefix }),
+      create,
+    });
     return { locationId: r.locationId, depth: r.depth };
   })(raw);
 }
