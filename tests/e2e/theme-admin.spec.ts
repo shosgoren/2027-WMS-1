@@ -121,6 +121,7 @@ test("yönetim ekranları: Akış/Kokpit x 375/1280 px", async ({ page }) => {
           await page.goto("/t/demo/items");
           await expect(page.getByRole("heading", { level: 1, name: "Ürünler" })).toBeVisible();
           await expectBorderStrong(page, page.getByRole("searchbox", { name: "Ürün ara" }), "ürünler: arama");
+          await page.getByText("Gelişmiş", { exact: true }).click(); // T-274: durum seçimi "Gelişmiş" altında
           await expectBorderStrong(page, page.locator("#item-status"), "ürünler: durum seçimi");
           await expectFocusRing(page, page.locator("#item-status"), "ürünler: durum seçimi");
           await expectNoHorizontalOverflow(page, "ürünler");

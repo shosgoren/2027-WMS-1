@@ -164,6 +164,13 @@ test("kolay kurulum: rehberle depo + raf + ürün, öneri, önizleme, arama (mob
     await expect(item.locator("#create-base-unit")).toContainText("ADET");
     await expect(item.locator("#create-base-unit")).toBeDisabled(); // birim yok: ADET ilk ürünle kendiliğinden oluşur
     await expect(item.locator("details")).not.toHaveAttribute("open", ""); // gelişmiş ayarlar kapalı
+    // T-274 S-01: ürün adımında kurulum satırı "Sıradaki: ilk ürünü ekle" ve "Yeni ürün" ile AYNI eylemi (bu formu) açar; ikinci dolu düğme yok.
+    await page.keyboard.press("Escape");
+    await expect(item).toBeHidden();
+    const rowNext = page.getByTestId("setup-row");
+    await expect(rowNext).toHaveText("Sıradaki: ilk ürünü ekle");
+    await rowNext.click();
+    await expect(page.getByRole("dialog").locator('input[name="code"]')).toHaveValue("URN-0001");
     await item.locator('input[name="name"]').fill(ITEM_NAME);
     await noPageScroll(page, "ürün formu");
     await shot("item-form");
@@ -198,11 +205,21 @@ test("kolay kurulum: rehberle depo + raf + ürün, öneri, önizleme, arama (mob
   await expect(page).toHaveURL(/\/items\/[0-9a-f-]{36}$/);
 
   await page.goto("/t/demo/items");
-  await page.getByRole("button", { name: "Elle yaz" }).click();
-  await page.getByLabel("Barkodla ürün bul").fill(BARCODE);
-  await page.getByRole("button", { name: "Bul" }).click();
+  // T-274: barkod ayrı alana değil, tek arama alanına yazılır/okutulur; yazdıkça gelen tek sonuç ürünü seçer.
+  await expect(page.getByLabel("Barkodla ürün bul")).toHaveCount(0);
+  await page.getByRole("searchbox", { name: "Ürün ara" }).fill(BARCODE);
+  const byBarcode = page.getByRole("option").first();
+  await expect(byBarcode).toContainText(ITEM_NAME);
+  await byBarcode.click();
   await expect(page).toHaveURL(/\/items\/[0-9a-f-]{36}$/); // barkod doğrudan ürünü seçer
   await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+
+  // Barkod okuyucu (klavye modu) değerin sonuna Enter gönderir: tek eşleşme doğrudan ürünü açar.
+  await page.goto("/t/demo/items");
+  const wedge = page.getByRole("searchbox", { name: "Ürün ara" });
+  await wedge.fill(BARCODE);
+  await wedge.press("Enter");
+  await expect(page).toHaveURL(/\/items\/[0-9a-f-]{36}$/);
 
   // --- Çakışma: aynı aralık yeniden önizlenir, çakışanlar listelenir, oluşturma kapalı ---
   await page.goto("/t/demo/warehouses");

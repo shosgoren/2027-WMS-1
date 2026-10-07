@@ -26,6 +26,8 @@ const INPUT_CLS =
 export function Typeahead<T>({
   label,
   hint,
+  placeholder,
+  icon,
   name,
   defaultValue = "",
   search,
@@ -39,6 +41,10 @@ export function Typeahead<T>({
 }: {
   label: string;
   hint?: string;
+  /** Alanın örnek metni (isteğe bağlı; verilmezse yok). */
+  placeholder?: string;
+  /** Alanın solunda görünen simge (isteğe bağlı; ör. büyüteç). */
+  icon?: ReactNode;
   name?: string;
   defaultValue?: string;
   search: (q: string) => Promise<readonly T[]>;
@@ -124,39 +130,43 @@ export function Typeahead<T>({
           {label}
         </label>
         {hint ? <span className="text-sm text-ink-muted">{hint}</span> : null}
-        <input
-          id={id}
-          name={name}
-          type="search"
-          autoComplete="off"
-          maxLength={128}
-          value={q}
-          aria-autocomplete="list"
-          aria-controls={expanded ? listId : undefined}
-          aria-activedescendant={expanded && active >= 0 ? `${listId}-${active}` : undefined}
-          onChange={(e) => onChange(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "ArrowDown" && items.length > 0) {
-              e.preventDefault();
-              setOpen(true);
-              setActive((a) => Math.min(items.length - 1, a + 1));
-            } else if (e.key === "ArrowUp" && items.length > 0) {
-              e.preventDefault();
-              setActive((a) => Math.max(0, a - 1));
-            } else if (e.key === "Enter" && expanded && active >= 0 && items[active] !== undefined) {
-              e.preventDefault();
-              choose(items[active] as T);
-            } else if (e.key === "Enter" && name === undefined) {
-              // Üst formu (ör. toplu oluşturucu) yanlışlıkla göndermesin.
-              e.preventDefault();
-            } else if (e.key === "Escape" && expanded) {
-              e.stopPropagation();
-              e.preventDefault();
-              setOpen(false);
-            }
-          }}
-          className={INPUT_CLS}
-        />
+        <div className="relative min-w-0">
+          {icon ? <span aria-hidden="true" className="pointer-events-none absolute inset-y-0 left-4 flex items-center text-ink-muted">{icon}</span> : null}
+          <input
+            id={id}
+            name={name}
+            type="search"
+            placeholder={placeholder}
+            autoComplete="off"
+            maxLength={128}
+            value={q}
+            aria-autocomplete="list"
+            aria-controls={expanded ? listId : undefined}
+            aria-activedescendant={expanded && active >= 0 ? `${listId}-${active}` : undefined}
+            onChange={(e) => onChange(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "ArrowDown" && items.length > 0) {
+                e.preventDefault();
+                setOpen(true);
+                setActive((a) => Math.min(items.length - 1, a + 1));
+              } else if (e.key === "ArrowUp" && items.length > 0) {
+                e.preventDefault();
+                setActive((a) => Math.max(0, a - 1));
+              } else if (e.key === "Enter" && expanded && active >= 0 && items[active] !== undefined) {
+                e.preventDefault();
+                choose(items[active] as T);
+              } else if (e.key === "Enter" && name === undefined) {
+                // Üst formu (ör. toplu oluşturucu) yanlışlıkla göndermesin.
+                e.preventDefault();
+              } else if (e.key === "Escape" && expanded) {
+                e.stopPropagation();
+                e.preventDefault();
+                setOpen(false);
+              }
+            }}
+            className={icon ? `${INPUT_CLS} pl-12 placeholder:text-sm` : INPUT_CLS}
+          />
+        </div>
       </div>
       {expanded ? (
         items.length === 0 && !busy ? (

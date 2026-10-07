@@ -7,9 +7,9 @@ import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
-import { Banner, Button, EmptyState, TextField } from "@wms/ui";
+import { Banner, Button, ChevronDown, ChevronRight, CircleCheck, EmptyState, Search, TextField } from "@wms/ui";
 import { PageBody, Sheet } from "../easy-setup/sheet.tsx";
-import { SetupGuide, isSetupComplete, useSetupProgress } from "../easy-setup/setup-guide.tsx";
+import { isSetupComplete, useSetupProgress } from "../easy-setup/setup-guide.tsx";
 import { Typeahead } from "../easy-setup/typeahead.tsx";
 import { createItemAction, searchItemsAction, suggestItemCodeAction } from "./actions.ts";
 
@@ -96,6 +96,8 @@ export interface ItemListView {
   readonly name: string;
   readonly status: "ACTIVE" | "ARCHIVED";
   readonly baseUnitCode: string;
+  /** Arama eski kodla eşleştiyse o eski kod (T-257). */
+  readonly oldCode?: string;
 }
 
 /** Kod önerisi yanıt süresi sınırı; aşılırsa kod alanı açılır (T-259). */
@@ -300,6 +302,84 @@ function CreateItemDialog({ open, slug, units, returnTo, onClose, onDone }: { op
   );
 }
 
+type SetupStep = { readonly key: "warehouse" | "locations" | "items"; readonly done: boolean; readonly href: string | null };
+
+function setupSteps(slug: string, p: { hasWarehouse: boolean; hasLocation: boolean; hasItem: boolean; nextWarehouseId: string | null }): SetupStep[] {
+  const base = `/t/${encodeURIComponent(slug)}`;
+  return [
+    { key: "warehouse", done: p.hasWarehouse, href: `${base}/warehouses?new=1` },
+    { key: "locations", done: p.hasLocation, href: p.nextWarehouseId === null ? null : `${base}/warehouses/${encodeURIComponent(p.nextWarehouseId)}?bulk=1` },
+    { key: "items", done: p.hasItem, href: null },
+  ];
+}
+
+const ROW_CLS =
+  "flex min-h-12 w-full min-w-0 items-center gap-2 rounded-card border-2 border-border bg-surface px-3 text-left text-sm font-semibold text-ink focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus";
+
+/** Kurulum satırı: sıradaki adım tek satırda; ürün adımında satır "Yeni ürün" ile aynı eylemi açar (ikinci dolu düğme yok). */
+function SetupRow({ slug, progress, onCreate }: { slug: string; progress: { hasWarehouse: boolean; hasLocation: boolean; hasItem: boolean; nextWarehouseId: string | null }; onCreate: () => void }) {
+  const t = useTranslations("items.setup");
+  const steps = setupSteps(slug, progress);
+  const next = steps.find((s) => !s.done);
+  if (next === undefined) return null;
+  const label = next.key === "warehouse" ? t("warehouse") : next.key === "locations" ? t("locations") : t("item");
+  const chevron = <ChevronRight aria-hidden="true" className="size-5 shrink-0" />;
+  if (next.key === "items" || next.href === null) {
+    return (
+      <button type="button" data-testid="setup-row" onClick={onCreate} className={ROW_CLS}>
+        <span className="min-w-0 flex-1 break-words">{label}</span>
+        {chevron}
+      </button>
+    );
+  }
+  return (
+    <Link href={next.href} data-testid="setup-row" className={ROW_CLS}>
+      <span className="min-w-0 flex-1 break-words">{label}</span>
+      {chevron}
+    </Link>
+  );
+}
+
+/** Ürün yokken öğreten boş durum: sıralı kurulum adımları (adım + ipucu + ikincil metin bağlantısı); dolu düğme yok. */
+function SetupSteps({ slug, progress, onCreate }: { slug: string; progress: { hasWarehouse: boolean; hasLocation: boolean; hasItem: boolean; nextWarehouseId: string | null }; onCreate: () => void }) {
+  const t = useTranslations("items");
+  const tg = useTranslations("easySetup.guide");
+  const steps = setupSteps(slug, progress);
+  return (
+    <div data-testid="setup-steps" className="flex min-w-0 flex-col gap-3">
+      <h2 className="m-0 break-words text-lg font-bold text-ink">{t("empty")}</h2>
+      <p className="m-0 break-words text-base text-ink-muted">{t("setup.teach")}</p>
+      <ol aria-label={tg("listLabel")} className="m-0 flex min-w-0 list-none flex-col gap-5 p-0">
+        {steps.map((st, i) => {
+          const locked = st.key === "locations" && st.href === null && !st.done;
+          return (
+            <li key={st.key} data-done={st.done} className="flex min-w-0 items-start gap-3">
+              <span aria-hidden="true" className="flex size-8 shrink-0 items-center justify-center rounded-full bg-accent-soft text-sm font-bold text-accent-ink">
+                {st.done ? <CircleCheck className="size-5" /> : i + 1}
+              </span>
+              <span className="flex min-w-0 flex-1 flex-col">
+                <span className="break-words text-base font-semibold text-ink">
+                  {tg(`${st.key}.title`)} <span className="text-sm text-ink-muted">· {st.done ? tg("done") : tg("todo")}</span>
+                </span>
+                <span className="break-words text-sm text-ink-muted">{locked ? tg("locations.locked") : tg(`${st.key}.hint`)}</span>
+                {st.done || locked ? null : st.href === null ? (
+                  <button type="button" onClick={onCreate} className={`${LINK_CLS} self-start px-0! text-left`}>
+                    {tg(`${st.key}.action`)}
+                  </button>
+                ) : (
+                  <Link href={st.href} className={`${LINK_CLS} self-start px-0!`}>
+                    {tg(`${st.key}.action`)}
+                  </Link>
+                )}
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+    </div>
+  );
+}
+
 export function ItemsView({
   slug,
   canManage,
@@ -347,36 +427,53 @@ export function ItemsView({
     return s === "" ? base : `${base}?${s}`;
   };
 
+  const formRef = useRef<HTMLFormElement>(null);
+  const [submitting, setSubmitting] = useState(false);
+  // Aramanın sunucudaki karşılığı (GET `?q=&status=`): yalnızca adres üretir; arama kuralı sunucudadır.
+  const goSearch = (status: string): void => {
+    const form = formRef.current;
+    const q = form === null ? "" : String(new FormData(form).get("q") ?? "").trim();
+    const p = new URLSearchParams();
+    if (q !== "") p.set("q", q);
+    if (status !== "") p.set("status", status);
+    const s = p.toString();
+    router.push(s === "" ? base : `${base}?${s}`);
+  };
+  // Enter (klavye ya da barkod okuyucunun sonundaki Enter): tek eşleşme varsa doğrudan ürünü aç, yoksa/çoksa sonuç listesine git.
+  async function onSearchSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const q = String(new FormData(form).get("q") ?? "").trim();
+    const status = String(new FormData(form).get("status") ?? "");
+    if (q === "") {
+      goSearch(status);
+      return;
+    }
+    setSubmitting(true);
+    const r = await searchItemsAction({ slug, q, limit: 2 });
+    setSubmitting(false);
+    const hits = r.ok ? withRenamed(r.data) : [];
+    if (hits.length === 1 && hits[0] !== undefined) router.push(`${base}/${encodeURIComponent(hits[0].id)}`);
+    else goSearch(status);
+  }
+
   return (
     <>
       <PageBody hide={createOpen}>
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <h1 className="break-words text-2xl font-extrabold text-ink">{t("title")}</h1>
-          <p className="break-words text-base text-ink-muted">{t("intro")}</p>
-        </div>
-        <div className="flex w-full min-w-0 flex-col gap-1 sm:w-auto sm:*:shrink-0 sm:*:whitespace-nowrap">
-          <Button onClick={() => setCreateOpen(true)} disabled={!canManage} aria-describedby={canManage ? undefined : "item-locked"}>
-            {t("create")}
-          </Button>
-          {canManage ? null : (
-            <p id="item-locked" className="max-w-xs break-words text-sm text-ink-muted">
-              {t("lockedReason")}
-            </p>
-          )}
-        </div>
+      <div className="min-w-0">
+        <h1 className="break-words text-2xl font-extrabold text-ink phone:text-xl">{t("title")}</h1>
+        <p className="break-words text-base text-ink-muted phone:truncate phone:text-sm">{t("intro")}</p>
       </div>
 
-      {guide && progress !== null ? <SetupGuide slug={slug} progress={progress} /> : null}
-
-      <form method="get" action={base} role="search" aria-label={t("search.label")} className="flex min-w-0 flex-col gap-3 rounded-card border-2 border-border bg-surface p-4">
+      <form ref={formRef} method="get" action={base} role="search" aria-label={t("search.label")} aria-busy={submitting} onSubmit={(e) => void onSearchSubmit(e)} className="flex min-w-0 flex-col gap-2">
         <Typeahead<ItemHit>
           label={t("search.label")}
           hint={t("search.hint")}
+          placeholder={t("search.placeholder")}
+          icon={<Search aria-hidden="true" className="size-5" />}
           name="q"
           defaultValue={query.q}
           listLabel={te("searchSuggestLabel")}
-          scanLabel={te("scanLabel")}
           search={async (q) => {
             const r = await searchItemsAction({ slug, q, limit: 8 });
             return r.ok ? withRenamed(r.data) : [];
@@ -387,36 +484,42 @@ export function ItemsView({
             secondary: i.oldCode === undefined ? t("codeLabel", { code: i.code }) : t("renamedNote", { code: i.code, old: i.oldCode }),
           })}
           onSelect={(i) => router.push(`${base}/${encodeURIComponent(i.id)}`)}
-          scan={{
-            resolve: async (v) => {
-              const r = await searchItemsAction({ slug, q: v, limit: 2 });
-              return r.ok ? withRenamed(r.data) : [];
-            },
-          }}
         />
-        <div className="flex min-w-0 flex-col gap-1">
-          <label htmlFor="item-status" className="text-base font-semibold">
-            {t("search.status")}
-          </label>
-          <select id="item-status" name="status" defaultValue={query.status} className={SELECT_CLS}>
-            <option value="">{t("search.all")}</option>
-            <option value="ACTIVE">{t("status.ACTIVE")}</option>
-            <option value="ARCHIVED">{t("status.ARCHIVED")}</option>
-          </select>
-        </div>
-        <div className="flex flex-col gap-2 sm:flex-row">
-          <Button type="submit">{t("search.submit")}</Button>
-          {filtered ? (
-            <Link href={base} className={LINK_CLS}>
-              {t("search.clear")}
-            </Link>
-          ) : null}
-        </div>
+        <details className="group min-w-0" open={query.status !== "" ? true : undefined}>
+          <summary className="flex min-h-12 cursor-pointer list-none items-center gap-2 text-base font-semibold text-accent-ink focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus [&::-webkit-details-marker]:hidden">
+            <span className="min-w-0 flex-1">{t("search.advanced")}</span>
+            <ChevronDown aria-hidden="true" className="size-5 shrink-0 transition-transform group-open:rotate-180" />
+          </summary>
+          <div className="flex min-w-0 flex-col gap-1 pb-2">
+            <label htmlFor="item-status" className="text-base font-semibold">
+              {t("search.status")}
+            </label>
+            <select id="item-status" name="status" defaultValue={query.status} onChange={(e) => goSearch(e.target.value)} className={SELECT_CLS}>
+              <option value="">{t("search.all")}</option>
+              <option value="ACTIVE">{t("status.ACTIVE")}</option>
+              <option value="ARCHIVED">{t("status.ARCHIVED")}</option>
+            </select>
+          </div>
+        </details>
+        {filtered ? (
+          <Link href={base} className={`${LINK_CLS} self-start px-0!`}>
+            {t("search.clear")}
+          </Link>
+        ) : null}
       </form>
+
+      {/* Kurulum satırı (S-01): eylem gibi okunur, sağda şevron, doğrudan sıradaki adıma gider; ürün adımında "Yeni ürün" ile AYNI eylemi açar. */}
+      {guide && progress !== null ? <SetupRow slug={slug} progress={progress} onCreate={() => setCreateOpen(true)} /> : null}
 
       <section aria-label={t("listLabel")} className="flex min-w-0 flex-col gap-3">
         {items.length === 0 ? (
-          guide && !filtered ? null : <EmptyState title={filtered ? t("emptyFiltered") : t("empty")} description={filtered ? t("emptyFilteredAction") : canManage ? t("emptyAction") : t("emptyReadOnly")} />
+          guide && !filtered && progress !== null ? (
+            <SetupSteps slug={slug} progress={progress} onCreate={() => setCreateOpen(true)} />
+          ) : filtered ? (
+            <EmptyState title={query.q === "" ? t("emptyStatus") : t("emptyFiltered")} description={query.q === "" ? t("emptyStatusAction") : t("emptyFilteredAction")} />
+          ) : (
+            <EmptyState title={t("empty")} description={canManage ? t("emptyAction") : t("emptyReadOnly")} />
+          )
         ) : (
           <ul className="m-0 flex min-w-0 list-none flex-col gap-3 p-0">
             {items.map((it) => {
@@ -428,6 +531,7 @@ export function ItemsView({
                     <span className={`${BADGE} ${active ? "bg-accent-soft text-accent-ink" : "bg-locked-bg text-locked-ink"}`}>{active ? t("status.ACTIVE") : t("status.ARCHIVED")}</span>
                   </div>
                   <p className="min-w-0 break-all text-base text-ink-muted">{t("codeLabel", { code: it.code })}</p>
+                  {it.oldCode === undefined ? null : <p className="min-w-0 break-words text-sm font-semibold text-ink">{t("renamedNote", { code: it.code, old: it.oldCode })}</p>}
                   <p className="min-w-0 break-all text-sm text-ink-muted">{t("baseUnitLabel", { unit: it.baseUnitCode })}</p>
                   <div>
                     <Link href={`${base}/${encodeURIComponent(it.id)}`} className={LINK_CLS} aria-label={t("openFor", { name: it.name })}>
@@ -453,6 +557,18 @@ export function ItemsView({
         </nav>
       </section>
       </PageBody>
+
+      {/* Birincil eylem altta sabit (başparmak bölgesi); form açıkken gizli. */}
+      <div data-hide={createOpen} className="sticky bottom-0 z-10 -mx-4 mt-auto flex min-w-0 flex-col gap-1 border-t border-border bg-bg px-4 py-2 data-[hide=true]:hidden">
+        <Button onClick={() => setCreateOpen(true)} disabled={!canManage} aria-describedby={canManage ? undefined : "item-locked"}>
+          {t("create")}
+        </Button>
+        {canManage ? null : (
+          <p id="item-locked" className="break-words text-sm text-ink-muted">
+            {t("lockedReason")}
+          </p>
+        )}
+      </div>
 
       <CreateItemDialog
         open={createOpen}
