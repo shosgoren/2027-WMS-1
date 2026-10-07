@@ -7,7 +7,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useId, useRef, useState, useTransition } from "react";
 import { useTranslations } from "next-intl";
 import { Banner, CircleAlert, CircleCheck, PackagePlus, ScanField } from "@wms/ui";
-import { ScannerService, type ScanSource } from "../../../../../lib/scanner/scanner-service.ts";
+import { ScannerService, type ScanSource } from "../../../../../lib/scanner/scanner-core.ts";
 import { createKeystrokeSource } from "../../../../../lib/scanner/keystroke-source.ts";
 import { ErrorNotice, LineStatus, errorKeyOf, intOf, scanMismatch, submitWithKey, useKeyHolder, type ErrorInfo, type ReceiptDetail, type ReceiptLineView } from "../../receipts/receipt-form.tsx";
 import { receiveGoodsAction, resolveItemScanAction } from "../../receipts/actions.ts";
