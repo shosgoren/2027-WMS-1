@@ -5,7 +5,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
-import type { Locator, Page } from "@playwright/test";
+import type { Browser, Locator, Page } from "@playwright/test";
 import { T270_SIZES, chevronInfo, expectBand, itemsScreenChecks, metrics, smallTargets } from "./support/items-screen.ts";
 
 const OUT = process.env.T254_OUT ?? path.resolve(import.meta.dirname, "../../.artifacts/t-254");
@@ -23,7 +23,7 @@ async function height(locator: Locator): Promise<number> {
   return box?.height ?? 0;
 }
 
-test("telefon kabuğu: ana ekran tek ekran, menü, alt sekme; masaüstü korunur", async ({ page }, testInfo) => {
+test("telefon kabuğu: ana ekran tek ekran, menü, alt sekme; masaüstü korunur", async ({ page, browser }, testInfo) => {
   mkdirSync(OUT, { recursive: true });
   const rows: string[] = [];
   const tag = testInfo.project.name;
@@ -156,6 +156,9 @@ test("telefon kabuğu: ana ekran tek ekran, menü, alt sekme; masaüstü korunur
   await expect(page.getByRole("heading", { level: 1, name: "Ne yapmak istiyorsun?" })).toBeVisible();
   await expect(page.getByText("Yapmak istediğin işe dokun.")).toBeVisible();
   await page.screenshot({ path: path.join(OUT, `${tag}-masaustu-ana-ekran.png`) });
+
+  // T-292: aynı oturumla yatay telefon (844x390, dokunmatik) ve karşılaştırma boyutları.
+  await landscapePhoneChecks(browser, page, tag);
 
   // Gerçek çıkış (telefon menüsünden).
   await page.setViewportSize({ width: 390, height: 664 });
@@ -486,4 +489,52 @@ async function zeroStateChecks(page: Page): Promise<void> {
     await page.screenshot({ path: path.join(outHome, `final-home-zero-${tag}-${w}x${h}.png`) });
   }
   writeFileSync(path.join(OUT_T270, `metrics-home-zero-state-${tag}.json`), JSON.stringify(rows, null, 2));
+}
+
+// T-292: yatay telefon. `phone` varyantı iki koşulda da (dar ekran YA DA dokunmatik + alçak ekran) TÜM telefon sınıflarını uygulamalı.
+// Demo girişi hız sınırlı olduğundan yeni giriş yapılmaz: T-254 testinin oturumu, dokunmatik + mobil yeni bağlama taşınır; boyutlar
+// setViewportSize ile değişir. Ölçülen değerler: ana başlık/selam yazı boyutu, alt sekme, taşma. Görüntüler `.artifacts/t-292/` altına (git'e girmez).
+const OUT_T292 = process.env.T292_OUT ?? path.resolve(import.meta.dirname, "../../.artifacts/t-292");
+
+async function landscapePhoneChecks(browser: Browser, source: Page, tag: string): Promise<void> {
+  mkdirSync(OUT_T292, { recursive: true });
+  const { baseURL, ignoreHTTPSErrors, locale, extraHTTPHeaders } = test.info().project.use;
+  const context = await browser.newContext({
+    baseURL,
+    ignoreHTTPSErrors,
+    locale,
+    extraHTTPHeaders,
+    hasTouch: true,
+    isMobile: true,
+    storageState: await source.context().storageState(),
+  });
+  try {
+    const page = await context.newPage();
+    const fontSize = (selector: string): Promise<string> =>
+      page.evaluate<string>(`getComputedStyle(document.querySelector(${JSON.stringify(selector)})).fontSize`);
+    const cases = [
+      { name: "yatay-844x390", width: 844, height: 390, phone: true },
+      { name: "yatay-740x360", width: 740, height: 360, phone: true },
+      { name: "dikey-390x844", width: 390, height: 844, phone: true },
+      { name: "masaustu-1280x800", width: 1280, height: 800, phone: false },
+    ] as const;
+    for (const c of cases) {
+      await page.setViewportSize({ width: c.width, height: c.height });
+      await page.goto("/t/demo");
+      await expect(page.getByRole("heading", { level: 1, name: "Ne yapmak istiyorsun?" })).toBeVisible();
+      expect(await fontSize("main h1"), `${c.name}: ana başlık yazı boyutu`).toBe(c.phone ? "20px" : "36px");
+      expect(await fontSize("main header p"), `${c.name}: selam yazı boyutu`).toBe(c.phone ? "14px" : "20px");
+      const m = await metrics(page);
+      expect(m.scrollWidth, `${c.name}: yatay taşma yok`).toBeLessThanOrEqual(m.clientWidth);
+      if (c.phone) {
+        await expect(page.getByTestId("bottom-nav"), `${c.name}: alt sekme görünür`).toBeVisible();
+        await expect(page.getByTestId("app-bar"), `${c.name}: üst çubuk görünür`).toBeVisible();
+      } else {
+        await expect(page.getByTestId("bottom-nav"), `${c.name}: alt sekme yok`).toBeHidden();
+      }
+      await page.screenshot({ path: path.join(OUT_T292, `${tag}-${c.name}.png`) });
+    }
+  } finally {
+    await context.close();
+  }
 }
