@@ -93,7 +93,13 @@ export async function enterDemoShared(page: Page, label: "Yönetici"): Promise<v
     return;
   }
   if (!existsSync(STATE_FILE)) throw new Error("e2e: paylaşılan demo oturumu yok (global-setup yönetici girişini yapmadı)");
-  const state = JSON.parse(readFileSync(STATE_FILE, "utf8")) as { cookies: Parameters<ReturnType<Page["context"]>["addCookies"]>[0] };
+  let state: { cookies: Parameters<ReturnType<Page["context"]>["addCookies"]>[0] };
+  try {
+    state = JSON.parse(readFileSync(STATE_FILE, "utf8")) as typeof state;
+  } catch {
+    // G-09: ayrıştırma hatasının mesajı dosya içeriğinden (çerez) parça taşıyabilir; sabit metinle sarılır.
+    throw new Error("e2e: paylaşılan demo oturumu okunamadı (dosya bozuk)");
+  }
   await page.context().addCookies(state.cookies);
   await page.goto("/t/demo");
 }
