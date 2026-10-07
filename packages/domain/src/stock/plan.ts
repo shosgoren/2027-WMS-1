@@ -170,6 +170,20 @@ export function buildPostingPlan(kind: PostingKind, lines: readonly PostingLine[
   return { entries, dimensions, locationIds, serialIds, outTotals, net };
 }
 
+// --- rezervasyon talep kaynağı (T-306; ADR-017 §7, ADR-021 §4) --------------------------------------------------------------
+/**
+ * Rezervasyonun talep kaynağı: belge satırı YA DA sipariş satırı (DB: `reservations_source_xor_chk`, tam olarak biri dolu). Ayrımlı birleşim: iki
+ * kimlik sütunu ayrı alanlar olarak taşınmaz, böylece ikisini karıştırmak ya da ikisini birden vermek tip düzeyinde mümkün değildir.
+ */
+export type ReservationSource =
+  | { readonly kind: "DOCUMENT_LINE"; readonly lineId: string }
+  | { readonly kind: "ORDER_LINE"; readonly lineId: string };
+
+/** `reservations` sütun çifti (INSERT için): biri dolu, diğeri `null`. */
+export function sourceColumns(s: ReservationSource): { readonly document_line_id: string | null; readonly order_line_id: string | null } {
+  return s.kind === "DOCUMENT_LINE" ? { document_line_id: s.lineId, order_line_id: null } : { document_line_id: null, order_line_id: s.lineId };
+}
+
 // --- rezervasyon bölüştürme (T-221; saf) ----------------------------------------------------------------------------------
 /** Bir rezervasyon dilimi: kimlik + aktif miktar (1e-6 ölçekli). */
 export interface ReservationSlice {
