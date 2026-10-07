@@ -75,9 +75,9 @@
   --color-cat-orange-ink: #8a3b06;
   --color-cat-teal-bg: #d9f3ee;
   --color-cat-teal-ink: #0b5f55;
-  --color-cat-purple-bg: #ece6fb;
-  --color-cat-purple-ink: #5428a8;
-  --color-cat-sky-bg: #dcedfb;
+  --color-cat-purple-bg: #f0e5fb;
+  --color-cat-purple-ink: #6a1fb0;
+  --color-cat-sky-bg: #d5eefd;
   --color-cat-sky-ink: #0b5688;
   --color-cat-rose-bg: #fde6ec;
   --color-cat-rose-ink: #9b1c3d;
@@ -85,9 +85,9 @@
   --color-cat-amber-ink: #6e4a00;
   --color-cat-cyan-bg: #d8f1f6;
   --color-cat-cyan-ink: #0a5766;
-  --color-cat-indigo-bg: #e4e6fb;
-  --color-cat-indigo-ink: #3a3fa3;
-  --color-cat-slate-bg: #e4e9f0;
+  --color-cat-indigo-bg: #ebe5fc;
+  --color-cat-indigo-ink: #47299c;
+  --color-cat-slate-bg: #ece9f0;
   --color-cat-slate-ink: #34445e;
   --color-cat-lilac-bg: #f6e5f4;
   --color-cat-lilac-ink: #7a2a73;
@@ -151,7 +151,9 @@ html {
 /* Masaüstü/tablet: döşemede sağ ok yok; üst düğmeler ve yetki notu telefona özgü (telefon bloğu aşağıda geçersiz kılar). */
 .tile-chevron,
 .top-rows,
-.locked-note {
+.my-tasks-row,
+.locked-note,
+.soon-note {
   display: none;
 }
 
@@ -213,7 +215,6 @@ html {
 
   .task-grid-fill > .task-item {
     grid-row: var(--row);
-    container-type: size;
   }
 
   .top-rows {
@@ -277,21 +278,52 @@ html {
     order: 99;
   }
 
+  /* Açık listelerde satırlar KOMPAKT ve nötr (döşeme gibi dokunmaya çağırmaz): 60 px, gölgesiz, tek açıklama paneli boşluğu doldurur. */
   .task-grid:has(.soon-toggle[open]) > .soon-item,
   .task-grid:has(.locked-toggle[open]) > .locked-item {
     display: flex;
-    flex: 1 1 0%;
-    min-height: 4rem;
-    max-height: 7.5rem;
-  }
-
-  .task-grid:has(.locked-toggle[open]) > .locked-item {
-    max-height: 5.5rem;
-  }
-
-  .task-grid:has(.locked-toggle[open]) > .locked-note {
-    display: block;
     flex: none;
+    height: 3.75rem;
+  }
+
+  .task-grid:has(.locked-toggle[open]) > .locked-note,
+  .task-grid:has(.soon-toggle[open]) > .soon-note {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem;
+    min-height: 5rem;
+    padding: 1rem;
+    text-align: center;
+    border-radius: 1rem;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+  }
+
+  .top-rows details[open] .row-lock {
+    display: none;
+  }
+
+  /* "Görevlerim" özeti (saha rolleri): ızgaranın üstünde esnek satır; döşemeler en çok 140 px, altta. */
+  .task-grid-card {
+    grid-template-rows: auto minmax(5rem, 1fr) repeat(var(--rows), minmax(5.5rem, 8.75rem));
+    min-height: calc(var(--rows) * 6rem + 11rem);
+  }
+
+  .task-grid-card > .my-tasks-row {
+    display: flex;
+    grid-row: 2;
+  }
+
+  .task-grid-card > .my-tasks-row > .my-tasks,
+  .task-grid-card > .my-tasks-row > [role="alert"] {
+    flex: 1 1 auto;
+  }
+
+  .task-grid:has(.top-rows details[open]) > .my-tasks-row {
+    display: none;
   }
 
   /* Döşeme: tek sütun yatay satır (ikon dairesi solda, başlık + açıklama, sağ ok). Boyutlar görünür yüksekliğe göre ölçeklenir
@@ -350,57 +382,32 @@ html {
     min-height: 4.5rem;
   }
 
-  /* "Yakında" ve yetkisiz işler listesi: sıkı satır; küçük ikon dairesi + başlık (+ küçük nötr etiket). Yetkisiz işlerde gerekçe
-     cümlesi bir kez `.locked-note`ta; döşemedeki tekrarı gizli. */
+  /* "Yakında" ve yetkisiz işler: kompakt, gölgesiz, nötr satırlar (tıklanamaz; renk yalnız küçük ikon dairesinde). Gerekçe cümlesi
+     bir kez panelde; satırlardaki tekrarı gizli. */
   .task-grid .task-tile[data-state="soon"],
   .task-grid .task-tile[data-state="locked"] {
     gap: 0.75rem;
     min-height: 0;
-    padding: 0.5rem 0.75rem;
+    padding: 0.375rem 0.75rem;
+    box-shadow: none;
+    border-width: 1px;
   }
 
   .task-grid .task-tile[data-state="soon"] .tile-badge,
   .task-grid .task-tile[data-state="locked"] .tile-badge {
-    width: 2.5rem;
-    height: 2.5rem;
+    width: 2.25rem;
+    height: 2.25rem;
   }
 
   .task-grid .task-tile[data-state="soon"] .tile-title,
   .task-grid .task-tile[data-state="locked"] .tile-title {
-    font-size: 1rem;
+    color: var(--color-ink-muted);
+    font-size: 0.9375rem;
   }
 
   .task-grid .task-tile[data-state="soon"] .tile-desc,
   .task-grid .task-tile[data-state="locked"] .tile-desc,
   .task-grid .task-tile[data-state="soon"] .tile-chevron {
     display: none;
-  }
-
-  /* Az iş (örn. toplayıcı: 2): döşeme çok yükselirse yatay satır yerine dikey, ortalı büyük düğme; ikon ve başlık kutuya göre ölçeklenir. */
-  @container (min-height: 12rem) {
-    .task-grid .task-tile {
-      flex-direction: column;
-      justify-content: center;
-      gap: 1rem;
-      text-align: center;
-    }
-
-    .task-grid .tile-badge {
-      width: clamp(5rem, 34cqh, 8rem);
-      height: clamp(5rem, 34cqh, 8rem);
-    }
-
-    .task-grid .tile-body {
-      flex: 0 1 auto;
-      align-items: center;
-    }
-
-    .task-grid .tile-title {
-      font-size: clamp(1.25rem, 7cqh, 1.75rem);
-    }
-
-    .task-grid .tile-chevron {
-      display: none;
-    }
   }
 }

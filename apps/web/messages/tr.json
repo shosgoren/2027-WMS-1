@@ -435,6 +435,11 @@
     "soonLabel": "Yakında",
     "soonWarehouse": "Bu iş depo kurulumundan sonra açılacak.",
     "soonScreen": "Bu ekran yakında açılacak.",
+    "myTasks": {
+      "title": "Görevlerim",
+      "assigned": "Sana atanmış {count} iş",
+      "empty": "Şu an sana atanmış iş yok."
+    },
     "lockedList": {
       "toggle": "Yetkin olmayan işler ({count})"
     },

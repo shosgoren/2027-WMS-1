@@ -2,11 +2,14 @@ import type { ComponentType, CSSProperties, ReactNode } from "react";
 import { getTranslations } from "next-intl/server";
 import {
   ArrowLeftRight,
+  Banner,
   Boxes,
   ChevronDown,
   ChevronRight,
   ClipboardCheck,
+  Clock,
   History,
+  ListChecks,
   Lock,
   MapPinned,
   PackagePlus,
@@ -27,9 +30,16 @@ import {
 // açılır; açılan liste alttan yukarı dolar ve kapatma düğmesi başparmağa yakın (altta) durur. Ekran okuyucu/odak sırası DOM
 // sırasıdır. Masaüstü/tablet yerleşimi `md:`/`lg:` ızgarasıdır (düğmeler gizli, tüm iş döşemeleri görünür).
 
+/** Saha rolleri için "Görevlerim" özeti (gerçek `listMyTasks` sayımı; sahte veri yok, G-07). Hata: sunucu mesajı + kod (yutulmaz). */
+export type MyTasksSummary =
+  | { readonly kind: "count"; readonly count: number; readonly more: boolean }
+  | { readonly kind: "error"; readonly message: string; readonly code: string };
+
 export interface TaskMenuProps {
   readonly slug: string;
   readonly allowed: { readonly usersManage: boolean; readonly settingsManage: boolean; readonly auditView: boolean; readonly stockView: boolean };
+  /** Verilirse (yalnız saha rolleri) ızgaranın üstünde telefon özet kartı çizilir. */
+  readonly myTasks?: MyTasksSummary;
 }
 
 export type TaskKey = "members" | "settings" | "audit" | "items" | "warehouses" | "receive" | "issue" | "transfer" | "count" | "lookup" | "undo";
@@ -168,7 +178,7 @@ export function TaskTile({ name, hue, title, description, href, locked, soon }: 
   );
 }
 
-export async function TaskMenu({ slug, allowed }: TaskMenuProps) {
+export async function TaskMenu({ slug, allowed, myTasks }: TaskMenuProps) {
   const t = await getTranslations("home");
   const base = `/t/${encodeURIComponent(slug)}` as const;
   const hrefs: Partial<Record<TaskKey, { allowed: boolean; href: `/${string}` }>> = {
@@ -188,6 +198,7 @@ export async function TaskMenu({ slug, allowed }: TaskMenuProps) {
   // Telefonda tek sütun, eşit yükseklikli yatay satırlar; en çok 6 izinli iş için alttan yukarı doldurma (CSS değişkenleri `--rows`,
   // `--row`). Daha çok iş olursa doldurma kapanır ve içerik alanı kayar (takip: 2 sütun).
   const reverse = active.length >= 1 && active.length <= 6;
+  const hasCard = reverse && myTasks !== undefined;
   const gridStyle = reverse ? ({ "--rows": active.length } as CSSProperties) : undefined;
   const items: ReactNode[] = [];
 
@@ -197,7 +208,7 @@ export async function TaskMenu({ slug, allowed }: TaskMenuProps) {
         {locked.length > 0 ? (
           <details className="locked-toggle" name="task-more">
             <summary className={ROW}>
-              <Lock aria-hidden="true" className="size-5 shrink-0 text-ink-muted" />
+              <Lock aria-hidden="true" className="row-lock size-5 shrink-0 text-ink-muted" />
               <span className="when-closed min-w-0 flex-1 truncate">{t("lockedList.toggle", { count: locked.length })}</span>
               <span className="when-open min-w-0 flex-1 truncate">{t("soonList.back")}</span>
               <ChevronDown aria-hidden="true" className="row-chevron size-5 shrink-0" />
@@ -221,10 +232,39 @@ export async function TaskMenu({ slug, allowed }: TaskMenuProps) {
       </li>,
     );
   }
+  if (hasCard && myTasks !== undefined) {
+    const mt = myTasks;
+    items.push(
+      <li key="my-tasks" className="my-tasks-row min-w-0">
+        {mt.kind === "error" ? (
+          <Banner kind="warning">
+            <p>{mt.message}</p>
+            <p className="mt-1 text-sm">{mt.code}</p>
+          </Banner>
+        ) : mt.count > 0 ? (
+          <a href={`${base}/field/tasks`} data-testid="my-tasks-card" className={`my-tasks ${FOCUS} flex min-h-16 w-full items-center gap-4 rounded-2xl border-2 border-border bg-surface p-4 text-ink shadow-card`}>
+            <span aria-hidden="true" className="my-tasks-count text-6xl font-extrabold leading-none">
+              {mt.more ? `${mt.count}+` : mt.count}
+            </span>
+            <span className="flex min-w-0 flex-1 flex-col">
+              <span className="text-sm font-semibold text-ink-muted">{t("myTasks.title")}</span>
+              <span className="break-words text-lg font-bold">{t("myTasks.assigned", { count: mt.more ? `${mt.count}+` : String(mt.count) })}</span>
+            </span>
+            <ChevronRight aria-hidden="true" className="size-6 shrink-0" />
+          </a>
+        ) : (
+          <p data-testid="my-tasks-empty" className="my-tasks my-tasks-empty m-0 flex min-h-16 flex-col items-center justify-center gap-3 rounded-2xl border border-border bg-surface px-4 text-center text-base font-semibold text-ink-muted">
+            <ListChecks aria-hidden="true" className="size-10" />
+            {t("myTasks.empty")}
+          </p>
+        )}
+      </li>,
+    );
+  }
   active.forEach((d, i) => {
     const h = hrefs[d.key];
     if (h === undefined) return;
-    const row = reverse ? ({ "--row": active.length + 1 - i } as CSSProperties) : undefined;
+    const row = reverse ? ({ "--row": active.length + (hasCard ? 2 : 1) - i } as CSSProperties) : undefined;
     items.push(
       <li key={d.key} className="task-item flex min-w-0" style={row}>
         <TaskTile name={d.key} hue={d.hue} title={t(`tasks.${d.key}.title`)} description={t(`tasks.${d.key}.description`)} href={h.href} />
@@ -233,8 +273,9 @@ export async function TaskMenu({ slug, allowed }: TaskMenuProps) {
   });
   if (locked.length > 0) {
     items.push(
-      <li key="locked-note" className="locked-note min-w-0 px-1 text-sm font-semibold text-ink">
-        {t("lockedReason")}
+      <li key="locked-note" className="locked-note min-w-0 text-base font-semibold text-ink">
+        <Lock aria-hidden="true" className="size-10 text-ink-muted" />
+        <span className="break-words">{t("lockedReason")}</span>
       </li>,
     );
   }
@@ -242,6 +283,14 @@ export async function TaskMenu({ slug, allowed }: TaskMenuProps) {
     items.push(
       <li key={d.key} className="locked-item flex min-w-0">
         <TaskTile name={d.key} hue={d.hue} title={t(`tasks.${d.key}.title`)} locked={{ reason: t("lockedReason") }} />
+      </li>,
+    );
+  }
+  if (soon.length > 0) {
+    items.push(
+      <li key="soon-note" className="soon-note min-w-0 text-base font-semibold text-ink">
+        <Clock aria-hidden="true" className="size-10 text-ink-muted" />
+        <span className="break-words">{t("soonWarehouse")}</span>
       </li>,
     );
   }
@@ -257,7 +306,7 @@ export async function TaskMenu({ slug, allowed }: TaskMenuProps) {
     <ul
       aria-label={t("tasksLabel")}
       style={gridStyle}
-      className={`task-grid m-0 grid min-w-0 list-none grid-cols-1 gap-4 p-0 md:grid-cols-2 lg:grid-cols-3 phone:grid-cols-1 phone:gap-2 ${reverse ? "task-grid-fill" : ""}`}
+      className={`task-grid m-0 grid min-w-0 list-none grid-cols-1 gap-4 p-0 md:grid-cols-2 lg:grid-cols-3 phone:grid-cols-1 phone:gap-2 ${reverse ? "task-grid-fill" : ""} ${hasCard ? "task-grid-card" : ""}`}
     >
       {items}
     </ul>

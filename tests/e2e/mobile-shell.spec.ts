@@ -118,14 +118,15 @@ test("telefon kabuğu: ana ekran tek ekran, menü, alt sekme; masaüstü korunur
     expect(await smallTargets(page, "body"), `${size.name}: 48 px altı dokunma hedefi`).toEqual([]);
   }
 
-  // Alt sekme çubuğu: 4 sekme, ana sayfa geçerli, Tara saha ekranına gider, Görevlerim tıklanamaz.
+  // Alt sekme çubuğu: 4 sekme, ana sayfa geçerli, Tara saha ekranına gider, Görevlerim görev listesine gider (T-270).
   await page.setViewportSize({ width: 390, height: 664 });
   await page.goto("/t/demo");
   const nav = page.getByTestId("bottom-nav");
   await expect(nav.getByRole("link", { name: "Ana sayfa" })).toHaveAttribute("aria-current", "page");
   await expect(nav.getByRole("link", { name: "Tara" })).toHaveAttribute("href", "/t/demo/field");
-  await expect(nav.getByRole("link", { name: "Görevlerim" })).toHaveCount(0);
-  await expect(nav.getByRole("group", { name: "Görevlerim" })).toHaveAttribute("aria-disabled", "true");
+  // T-270 (Supervisor kararı): "Görevlerim" artık gerçek ekrana (T-304) bağlı; tıklanamaz/Yakında durumu kalktı.
+  await expect(nav.getByRole("link", { name: "Görevlerim" })).toHaveAttribute("href", "/t/demo/field/tasks");
+  await expect(nav.getByRole("group", { name: "Görevlerim" })).toHaveCount(0);
   await expect(nav.getByRole("button", { name: "Menü" })).toBeVisible();
 
   // Menü: Akış/Kokpit, çalışma alanı, "Giriş yapan", Yardım ve Çıkış erişilebilir; hedefler >= 48 px.
@@ -223,8 +224,7 @@ async function homeLayout(page: Page, itemSelector: string): Promise<HomeLayout>
     const parts = [box(document.querySelector('main header')), ...tiles];
     const top = document.querySelector('.top-rows');
     if (top && visible(top)) parts.push(box(top));
-    const note = document.querySelector('.locked-note');
-    if (note && visible(note)) parts.push(box(note));
+    for (const sel of ['.locked-note', '.soon-note', '.my-tasks-row']) { const n = document.querySelector(sel); if (n && visible(n)) parts.push(box(n)); }
     const topY = bar.b, bottom = nav.y;
     const spans = parts.map((p) => [Math.max(p.y, topY), Math.min(p.b, bottom)]).sort((a, b) => a[0] - b[0]);
     let covered = 0, cur = null;
@@ -257,13 +257,13 @@ test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş al
       const where = `${role.shot} ${size.width}x${size.height}`;
       expect(L.tiles.length, `${where}: görünür döşeme sayısı (izinli işler)`).toBe(activeCount);
 
-      // Eşit ızgara: tüm genişlik ve yükseklikler ±2 px; yükseklik >= 88 px (5 döşemede <= 140 px; az döşemede içerik ölçeklenir).
+      // Eşit ızgara: tüm genişlik ve yükseklikler ±2 px; yükseklik 88-140 px (her rol).
       const ws = L.tiles.map((t) => t.w);
       const hs = L.tiles.map((t) => t.h);
       expect(Math.max(...ws) - Math.min(...ws), `${where}: genişlik farkı`).toBeLessThanOrEqual(2);
       expect(Math.max(...hs) - Math.min(...hs), `${where}: yükseklik farkı`).toBeLessThanOrEqual(2);
       expect(Math.min(...hs), `${where}: en küçük döşeme yüksekliği`).toBeGreaterThanOrEqual(88);
-      if (activeCount >= 5) expect(Math.max(...hs), `${where}: en büyük döşeme yüksekliği`).toBeLessThanOrEqual(140);
+      expect(Math.max(...hs), `${where}: en büyük döşeme yüksekliği`).toBeLessThanOrEqual(140);
 
       // Başparmak bölgesi: ızgara alt sekmeye yaslı (<= 16 px), boş dikey alan <= %15, ilk iş en alt satırda.
       const gridBottom = Math.max(...L.tiles.map((t) => t.y + t.h));
@@ -290,6 +290,19 @@ test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş al
       // Üst düğme etiketleri kesilmez (…).
       const cut = await page.evaluate<string[]>(`[...document.querySelectorAll('.top-rows .when-closed')].filter((e) => e.getBoundingClientRect().width > 0 && e.scrollWidth > e.clientWidth).map((e) => e.textContent)`);
       expect(cut, `${where}: kesilen üst düğme etiketi`).toEqual([]);
+
+      // "Görevlerim" özeti yalnız saha rolünde: gerçek sayı + tek dokunuşla görev listesi, ya da sakin boş durum satırı.
+      if (isAdmin) await expect(page.locator(".my-tasks-row")).toBeHidden();
+      else {
+        const card = page.getByTestId("my-tasks-card");
+        if ((await card.count()) > 0) {
+          await expect(card).toHaveAttribute("href", "/t/demo/field/tasks");
+          await expect(card).toContainText(/Sana atanmış \d+\+? iş/);
+        } else {
+          await expect(page.getByTestId("my-tasks-empty")).toHaveText("Şu an sana atanmış iş yok.");
+        }
+        expect(await smallTargets(page, ".my-tasks-row"), `${where}: Görevlerim özeti dokunma hedefi`).toEqual([]);
+      }
 
       // Üst düğmeler: kapalı, görünür alanda; toplayıcıda yetkisiz işler tek satırda (varsayılan kapalı).
       await expect(soonRow).toContainText("Yakında gelecekler (6)");
@@ -323,7 +336,13 @@ test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş al
       const closeBox = await soonRow.boundingBox();
       expect(O.navTop - ((closeBox?.y ?? 0) + (closeBox?.height ?? 0)), `${where}: kapatma düğmesi alt sekmeye yakın`).toBeLessThanOrEqual(16);
       expect(closeBox?.height ?? 0, `${where}: kapatma düğmesi dokunma yüksekliği`).toBeGreaterThanOrEqual(48);
-      for (const t of O.tiles) expect(t.h, `${where}: açık liste satır yüksekliği`).toBeGreaterThanOrEqual(56);
+      for (const t of O.tiles) {
+        expect(t.h, `${where}: açık liste satır yüksekliği`).toBeGreaterThanOrEqual(56);
+        expect(t.h, `${where}: açık liste satır yüksekliği (kompakt)`).toBeLessThanOrEqual(64);
+      }
+      const rowFlat = await page.evaluate<string[]>(`[...document.querySelectorAll('.soon-item > [data-state]')].map((e) => getComputedStyle(e).boxShadow)`);
+      for (const sh of rowFlat) expect(sh, `${where}: Yakında satırı gölgesiz`).toBe("none");
+      await expect(page.locator(".soon-note")).toContainText("Bu iş depo kurulumundan sonra açılacak.");
       const titles = await page.evaluate<number[]>(`[...document.querySelectorAll('.soon-item .tile-title')].map((e) => Math.round(e.getBoundingClientRect().height / parseFloat(getComputedStyle(e).lineHeight)))`);
       for (const lines of titles) expect(lines, `${where}: Yakında başlığı en çok 2 satır`).toBeLessThanOrEqual(2);
       expect(await smallTargets(page, "body"), `${where}: Yakında listesi 48 px altı hedef`).toEqual([]);
@@ -331,13 +350,23 @@ test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş al
       await soonRow.click();
       await expect(tasks.locator('a[data-state="active"]').first()).toBeVisible();
 
-      // Toplayıcı: yetkisiz işler listesi bir kez gerekçe cümlesi + 3 iş adı; açılınca kapatma düğmesi altta.
-      if (!isAdmin && size.width === 390) {
+      // Toplayıcı: yetkisiz işler listesi bir kez gerekçe cümlesi + 3 kompakt iş; kapatma düğmesinde kilit ikonu yok; boş alan <= %15.
+      if (!isAdmin) {
         await lockedRow.click();
         await expect(page.locator(".locked-note")).toHaveText("Bu iş için yetkin yok. Sorumluna sorabilirsin.");
         const lockedCards = tasks.locator('[data-state="locked"]');
         await expect(lockedCards).toHaveCount(3);
         for (const name of ["Ekibimi yönet", "Ayarlar", "Kim ne yaptı?"]) await expect(lockedCards.filter({ hasText: name })).toBeVisible();
+        await expect(page.locator(".locked-toggle .row-lock")).toBeHidden();
+        const LO = await homeLayout(page, ".task-grid > .locked-item > [data-state]");
+        expect(LO.tiles.length, `${where}: açık yetkisiz listede görünür iş`).toBe(3);
+        expect(LO.emptyRatio, `${where}: yetkisiz liste açıkken boş alan oranı`).toBeLessThanOrEqual(0.15);
+        for (const t of LO.tiles) {
+          expect(t.h, `${where}: yetkisiz satır yüksekliği`).toBeGreaterThanOrEqual(56);
+          expect(t.h, `${where}: yetkisiz satır yüksekliği (kompakt)`).toBeLessThanOrEqual(64);
+        }
+        const lockedFlat = await page.evaluate<string[]>(`[...document.querySelectorAll('.locked-item > [data-state]')].map((e) => getComputedStyle(e).boxShadow)`);
+        for (const sh of lockedFlat) expect(sh, `${where}: yetkisiz satır gölgesiz`).toBe("none");
         await page.screenshot({ path: path.join(OUT_T270, `final-${tag}-${role.shot}-${size.width}-yetkisiz-acik.png`) });
         await lockedRow.click();
         await expect(lockedCards.first()).toBeHidden();

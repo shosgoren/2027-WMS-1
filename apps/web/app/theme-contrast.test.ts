@@ -36,6 +36,26 @@ export function contrast(a: string, b: string): number {
   return (hi + 0.05) / (lo + 0.05);
 }
 
+function lab(hex: string): [number, number, number] {
+  const lin = (i: number) => {
+    const c = parseInt(hex.slice(i, i + 2), 16) / 255;
+    return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  };
+  const [r, g, b] = [lin(1), lin(3), lin(5)] as [number, number, number];
+  const f = (t: number) => (t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116);
+  const x = f((r * 0.4124 + g * 0.3576 + b * 0.1805) / 0.95047);
+  const y = f(r * 0.2126 + g * 0.7152 + b * 0.0722);
+  const z = f((r * 0.0193 + g * 0.1192 + b * 0.9505) / 1.08883);
+  return [116 * y - 16, 500 * (x - y), 200 * (y - z)];
+}
+
+/** CIE76 renk farkı (algısal yakınlık için kaba ama yeterli ölçü). */
+export function deltaE76(a: string, b: string): number {
+  const [l1, a1, b1] = lab(a);
+  const [l2, a2, b2] = lab(b);
+  return Math.hypot(l1 - l2, a1 - a2, b1 - b2);
+}
+
 const T = 4.5;
 const U = 3;
 // [ön plan, zemin, eşik] — palette.md §7.1 sırası, 41 çift.
@@ -126,6 +146,15 @@ describe("iş kategorisi renk tonları (T-270)", () => {
     for (const view of [flow, cockpit]) {
       expect(bgs).not.toContain(view.get("accent-soft"));
       expect(inks).not.toContain(view.get("accent-ink"));
+    }
+  });
+
+  it("hiçbir ton seçili alt sekme mavisine algısal olarak yakın değildir (CIE76 dE: zemin >= 5, ikon rengi >= 20)", () => {
+    for (const view of [flow, cockpit]) {
+      for (const h of CAT_HUES) {
+        expect(deltaE76(categoryExtra.get(`cat-${h}-bg`) as string, view.get("accent-soft") as string), `${h} zemin`).toBeGreaterThanOrEqual(5);
+        expect(deltaE76(categoryExtra.get(`cat-${h}-ink`) as string, view.get("accent-ink") as string), `${h} ikon`).toBeGreaterThanOrEqual(20);
+      }
     }
   });
 

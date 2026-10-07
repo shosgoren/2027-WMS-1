@@ -8,7 +8,8 @@ import { listMyActionsToday } from "@wms/domain/audit/today";
 import { getAppDb } from "@wms/db";
 import { getMembershipSummary } from "@wms/domain/identity/member-queries";
 import { hasPermission } from "@wms/domain/identity/permissions";
-import { TaskMenu } from "./task-menu.tsx";
+import { TASK_LIST_LIMIT_MAX, listMyTasks } from "@wms/domain/operations";
+import { TaskMenu, type MyTasksSummary } from "./task-menu.tsx";
 
 export const dynamic = "force-dynamic";
 
@@ -48,6 +49,26 @@ export default async function TenantHomePage({ params }: { params: Promise<{ slu
   }
   const errKey = ["FORBIDDEN", "RATE_LIMITED", "TENANT_SUSPENDED", "TENANT_CLOSING", "VALIDATION_FAILED"].includes(todayError ?? "") ? (todayError as string).toLowerCase() : "internal";
   const ts = await getTranslations("serverErrors");
+  // Saha rolleri (yönetim yetkisi olmayanlar) için "Görevlerim" özeti: mevcut domain sorgusu (`listMyTasks`: tenant bağlamı, `stock.view`,
+  // depo kapsamı domain'de). Sayım yalnız BANA ATANMIŞ (ASSIGNED) görevlerdir; liste tek sayfaya sığmazsa "n+" gösterilir. Hata bu bölümle
+  // sınırlıdır (ana ekran düşmez): sunucu hatası + kod gösterilir.
+  let myTasks: MyTasksSummary | undefined;
+  if (!hasPermission(current.roles, "users.manage")) {
+    try {
+      const mine = await listMyTasks({ db: getAppDb(), principal, tenantSlug: slug }, { limit: TASK_LIST_LIMIT_MAX });
+      myTasks = { kind: "count", count: mine.items.filter((x) => x.status === "ASSIGNED").length, more: mine.next !== null };
+    } catch (e) {
+      if (e instanceof AppError) {
+        if (e.code === "NOT_FOUND") notFound();
+        if (e.code === "UNAUTHENTICATED") redirect(`/login?next=${encodeURIComponent(`/t/${slug}`)}`);
+        if (e.code === "FORBIDDEN" && e.detail === "MFA_REQUIRED") redirect(`/mfa?next=${encodeURIComponent(`/t/${slug}`)}`);
+      }
+      console.error(JSON.stringify({ level: "error", msg: "home my tasks failed", error: e instanceof Error ? e.name : typeof e, code: e instanceof AppError ? e.code : undefined }));
+      const code = e instanceof AppError ? e.code : "INTERNAL";
+      const key = ["FORBIDDEN", "RATE_LIMITED", "TENANT_SUSPENDED", "TENANT_CLOSING", "VALIDATION_FAILED"].includes(code) ? code.toLowerCase() : "internal";
+      myTasks = { kind: "error", message: `${ts(key)} ${ts(`${key}Action`)}`, code: ts("code", { code }) };
+    }
+  }
   const firstName = summary.userName.trim().split(/\s+/)[0] ?? summary.userName;
 
   return (
@@ -60,6 +81,7 @@ export default async function TenantHomePage({ params }: { params: Promise<{ slu
       </header>
       <TaskMenu
         slug={slug}
+        myTasks={myTasks}
         allowed={{
           usersManage: hasPermission(current.roles, "users.manage"),
           settingsManage: hasPermission(current.roles, "settings.manage"),
