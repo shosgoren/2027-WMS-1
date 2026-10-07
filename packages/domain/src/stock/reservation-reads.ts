@@ -128,10 +128,17 @@ export interface AllocationBalanceRow {
  * Ürünlerin AVAILABLE, ACTIVE lokasyondaki ve kullanılabilir miktarı > 0 olan boyutları (kilitsiz okuma; yalnızca ÖNERİ içindir — kural 5 ve yeterlilik
  * kilit altında `allocateInTx`'te yeniden uygulanır). `pick_blocked`/tür/sayım süzgeci çağıranda (saf `isAllocationCandidate`), böylece elenen aday görünür kalır.
  */
-export async function readAllocationBalances(tx: AccessTx, tenantId: string, itemIds: readonly string[]): Promise<AllocationBalanceRow[]> {
+export async function readAllocationBalances(
+  tx: AccessTx,
+  tenantId: string,
+  itemIds: readonly string[],
+  /** Çağıranın depo kapsamı (`resolveWarehouseScope`): `null` = kısıtsız; dizi = yalnızca bu depolardaki lokasyonlar döner (kapsam dışı stok görünmez; T-306 MAJOR-1). */
+  warehouseScope: readonly string[] | null,
+): Promise<AllocationBalanceRow[]> {
   const tenant = uuid(tenantId);
   const items = itemIds.map(uuid);
-  if (items.length === 0) return [];
+  const scope = warehouseScope === null ? null : warehouseScope.map(uuid);
+  if (items.length === 0 || (scope !== null && scope.length === 0)) return [];
   const rows = await tx.execute<{
     item_id: string; location_id: string; lot_id: string | null; serial_id: string | null; stock_status: StockDimensionKey["stockStatus"];
     inventory_owner_id: string | null; handling_unit_id: string | null; code: string; kind: string; pick_blocked: boolean; counting: boolean; available: string;
@@ -145,6 +152,7 @@ export async function readAllocationBalances(tx: AccessTx, tenantId: string, ite
           JOIN public.locations l ON l.tenant_id = d.tenant_id AND l.id = d.location_id
          WHERE b.tenant_id = ${tenant}::uuid AND d.item_id = ANY(${pgUuidArray(items)}::uuid[])
            AND d.stock_status = 'AVAILABLE' AND l.status = 'ACTIVE' AND b.quantity - b.reserved_quantity > 0
+           AND (${scope === null}::boolean OR l.warehouse_id = ANY(${pgUuidArray(scope ?? [])}::uuid[]))
          ORDER BY d.item_id, l.code, d.id`,
   );
   return rows.map((r) => ({

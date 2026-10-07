@@ -27,7 +27,7 @@ import { sql } from "drizzle-orm";
 import type { StockDimensionKey } from "@wms/db";
 import { AppError } from "@wms/shared/errors";
 import type { AccessTx } from "../identity/access.ts";
-import { pgUuidArray } from "../warehouse/scope.ts";
+import { pgUuidArray, resolveWarehouseScope } from "../warehouse/scope.ts";
 import {
   EMPTY_LOCK_PLAN,
   SYNC_POST_MAX_LINES,
@@ -47,6 +47,8 @@ import { suggestAllocation, type AllocationCandidate } from "./allocation.ts";
 import { createTasks, type NewTaskInput } from "./tasks.ts";
 
 const CUSTOMER_REF_MAX = 100;
+/** Sistem üretimi sipariş numarası çakışmasında aynı transaction'da en çok deneme (T-306 MAJOR-2). */
+const GENERATED_NUMBER_ATTEMPTS = 5;
 const ORDER_NUMBER_MAX = 40;
 const REASON_MAX = 500;
 const CONTROL_RE = /\p{C}/u;
@@ -270,20 +272,25 @@ export async function createSalesOrder(params: StockDocCallParams, input: Create
       plan: async () => emptyPlan([]),
       apply: async (tx, _locked, ctx) => {
         const resolved = await resolveBaseQuantities(tx, ctx.tenantId, lines);
-        let orderNumber = number;
-        if (orderNumber === null) {
-          const year = (await tenantToday(tx, ctx.tenantId)).slice(0, 4);
-          orderNumber = `SIP-${year}-${randomUUID().replaceAll("-", "").slice(0, 8).toUpperCase()}`;
-        }
-        const taken = await tx.execute<{ id: string }>(
-          sql`SELECT id FROM public.sales_orders WHERE tenant_id = ${ctx.tenantId}::uuid AND number = ${orderNumber}`,
-        );
-        if (taken[0] !== undefined) throw new AppError("VALIDATION_FAILED", { detail: "CODE_TAKEN" });
+        // Numara çakışması istisna DEĞİL: `ON CONFLICT DO NOTHING` (23505 transaction'ı bozmaz, istemci anahtarına kalıcı ret yazılmaz — T-306 MAJOR-2/MINOR-1).
+        // Müşteri numarası çakışırsa `CODE_TAKEN`; sistem üretimi numara çakışırsa aynı transaction'da yeni numara (sınırlı: GENERATED_NUMBER_ATTEMPTS).
+        const year = number === null ? (await tenantToday(tx, ctx.tenantId)).slice(0, 4) : "";
         const orderId = randomUUID();
-        await tx.execute(
-          sql`INSERT INTO public.sales_orders (tenant_id, id, number, customer_ref, created_by)
-              VALUES (${ctx.tenantId}::uuid, ${orderId}::uuid, ${orderNumber}, ${customerRef}, ${ctx.userId}::uuid)`,
-        );
+        let orderNumber: string | null = null;
+        for (let attempt = 0; attempt < (number === null ? GENERATED_NUMBER_ATTEMPTS : 1) && orderNumber === null; attempt++) {
+          const candidate = number ?? `SIP-${year}-${randomUUID().replaceAll("-", "").slice(0, 8).toUpperCase()}`;
+          const ins = await tx.execute<{ id: string }>(
+            sql`INSERT INTO public.sales_orders (tenant_id, id, number, customer_ref, created_by)
+                VALUES (${ctx.tenantId}::uuid, ${orderId}::uuid, ${candidate}, ${customerRef}, ${ctx.userId}::uuid)
+                ON CONFLICT ON CONSTRAINT sales_orders_tenant_number_key DO NOTHING
+                RETURNING id`,
+          );
+          if (ins[0] !== undefined) orderNumber = candidate;
+        }
+        if (orderNumber === null) {
+          if (number !== null) throw new AppError("VALIDATION_FAILED", { detail: "CODE_TAKEN" });
+          throw new AppError("INTERNAL"); // üretilen numara art arda çakıştı (olasılık ihmal edilebilir); kalıcı ret yazılmaz
+        }
         await insertLines(tx, ctx.tenantId, orderId, 1, resolved);
         return {
           result: { documentId: orderId, documentNumber: orderNumber },
@@ -433,9 +440,9 @@ function parseOverrides(raw: unknown): { lineId: string; allocations: { location
 }
 
 /** Ürünler için A-138 adayları (kilitsiz okuma; kural 5 süzgeci `isAllocationCandidate`'te ve kilit altında `allocateInTx`'te yeniden uygulanır). */
-async function readCandidates(tx: AccessTx, tenantId: string, itemIds: readonly string[]): Promise<Map<string, AllocationCandidate[]>> {
+async function readCandidates(tx: AccessTx, tenantId: string, itemIds: readonly string[], scope: readonly string[] | null): Promise<Map<string, AllocationCandidate[]>> {
   const out = new Map<string, AllocationCandidate[]>();
-  for (const r of await readAllocationBalances(tx, tenantId, itemIds)) {
+  for (const r of await readAllocationBalances(tx, tenantId, itemIds, scope)) {
     const list = out.get(r.key.itemId) ?? [];
     list.push({ key: r.key, locationCode: r.locationCode, locationKind: r.locationKind, pickBlocked: r.pickBlocked, counting: r.counting, available: toMicro(r.available) });
     out.set(r.key.itemId, list);
@@ -471,7 +478,9 @@ export async function reserveOrder(params: StockDocCallParams, input: ReserveOrd
         const lines = await readLines(tx, m.tenantId, orderId);
         const known = new Set(lines.map((l) => l.id.toLowerCase()));
         if (overrides.some((o) => !known.has(o.lineId))) throw invalid();
-        const candidates = await readCandidates(tx, m.tenantId, [...new Set(lines.map((l) => l.itemId.toLowerCase()))]);
+        // Depo kapsamı (T-306 MAJOR-1): kapsam dışı depodaki stok ÖNERİLMEZ ve varlığı sızdırılmaz (resolveWarehouseScope ile aynı anlam; `null` = kısıtsız).
+        const scope = await resolveWarehouseScope(tx, m);
+        const candidates = await readCandidates(tx, m.tenantId, [...new Set(lines.map((l) => l.itemId.toLowerCase()))], scope);
         const overrideOf = new Map(overrides.map((o) => [o.lineId, o]));
         const out: PlannedLine[] = [];
         for (const l of lines) {

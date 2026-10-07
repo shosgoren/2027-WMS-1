@@ -33,7 +33,7 @@
     "tests/integration/ac/ac-23-concurrent-consumers.int.test.ts": 11,
     "tests/integration/ac/ac-28-runtime.int.test.ts": 16,
     "tests/integration/audit-immutability.int.test.ts": 43,
-    "tests/integration/operations/orders.int.test.ts": 127,
+    "tests/integration/operations/orders.int.test.ts": 148,
     "tests/integration/operations/receiving.int.test.ts": 124,
     "tests/integration/schema/documents-qa.int.test.ts": 27,
     "tests/integration/schema/phase2-catalog-qa.int.test.ts": 49,

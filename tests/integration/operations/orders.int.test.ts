@@ -25,7 +25,7 @@ import {
   updateDraftOrder,
 } from "../../../packages/domain/src/operations/index.ts";
 import { approveDocument, createStockDocument, postDocument, type DocumentLineInput, type StockDocCallParams } from "../../../packages/domain/src/stock/index.ts";
-import { newRegistry, seedWorld, type TenantWorld } from "../fixtures/tenants.ts";
+import { mkMembership, mkUser, newRegistry, seedWorld, type TenantWorld } from "../fixtures/tenants.ts";
 import { readIntEnv } from "../harness/env.ts";
 
 const env = readIntEnv(process.env);
@@ -75,25 +75,25 @@ async function mkItem(scale = 0): Promise<string> {
   ]);
   return id;
 }
-async function mkLoc(kind: "RECEIVING" | "STORAGE" | "STAGING" = "STORAGE", code = `L-${hex(10)}`): Promise<string> {
+async function mkLoc(kind: "RECEIVING" | "STORAGE" | "STAGING" = "STORAGE", code = `L-${hex(10)}`, warehouseId = A.warehouseId): Promise<string> {
   const id = uuid();
   await q("INSERT INTO public.locations (tenant_id, id, warehouse_id, parent_id, code, name, depth, kind) VALUES ($1,$2,$3,NULL,$4,'T306 lok',0,$5)", [
-    A.tenantId, id, A.warehouseId, code, kind,
+    A.tenantId, id, warehouseId, code, kind,
   ]);
   return id;
 }
 const ln = (item: string, qty: string, extra: Partial<DocumentLineInput> = {}): DocumentLineInput => ({
   itemId: item, unitId: A.unitId, quantity: qty, conversionFactor: "1", baseQuantity: qty, ...extra,
 });
-async function postDoc(kind: "STOCK_IN" | "STOCK_OUT" | "STOCK_MOVE", lines: DocumentLineInput[]): Promise<void> {
-  const c = await createStockDocument(ownerP(), { kind, warehouseId: A.warehouseId, lines });
+async function postDoc(kind: "STOCK_IN" | "STOCK_OUT" | "STOCK_MOVE", lines: DocumentLineInput[], warehouseId = A.warehouseId): Promise<void> {
+  const c = await createStockDocument(ownerP(), { kind, warehouseId, lines });
   const id = c.documentId as string;
   await approveDocument(ownerP(), { documentId: id, expectedVersion: 1 });
   const v = (await q<{ version: number }>("SELECT version FROM public.documents WHERE id = $1", [id]))[0] as { version: number };
   await postDocument(ownerP(), { documentId: id, expectedVersion: v.version });
 }
-const stockIn = (item: string, loc: string, qty: string, status: "AVAILABLE" | "QUARANTINE" | "DAMAGED" = "AVAILABLE") =>
-  postDoc("STOCK_IN", [ln(item, qty, { targetLocationId: loc, stockStatus: status })]);
+const stockIn = (item: string, loc: string, qty: string, status: "AVAILABLE" | "QUARANTINE" | "DAMAGED" = "AVAILABLE", warehouseId = A.warehouseId) =>
+  postDoc("STOCK_IN", [ln(item, qty, { targetLocationId: loc, stockStatus: status })], warehouseId);
 
 interface Order {
   id: string;
@@ -670,21 +670,154 @@ describe("eşzamanlılık (bariyerli, olasılıksız)", () => {
     }
   }, 120_000);
 
-  it("reserveOrder ile cancelSalesOrder eşzamanlı (aynı sipariş): seri çalışır, deadlock yok, rezerve = Σ ACTIVE", async () => {
+  it("reserveOrder ile cancelSalesOrder eşzamanlı (aynı sipariş): bariyerle GERÇEKTEN örtüşür, seri çalışır, deadlock yok, rezerve = Σ ACTIVE", async () => {
     const X = await mkItem();
     const R = await mkLoc("STORAGE");
     await stockIn(X, R, "6");
     const o = await mkOrder([{ item: X, qty: "4" }]);
-    await reserveOrder(ownerP(), { orderId: o.id, overrides: [{ lineId: o.lineIds[0] as string, allocations: [{ dimension: { locationId: R }, quantity: "2" }] }] });
+    const L = o.lineIds[0] as string;
+    await reserveOrder(ownerP(), { orderId: o.id, overrides: [{ lineId: L, allocations: [{ dimension: { locationId: R }, quantity: "2" }] }] });
     const v = (await orderRow(o.id)).version;
-    const settled = await Promise.allSettled([
-      reserveOrder(ownerP(uuid(), { retry: ONCE }), { orderId: o.id }),
-      cancelSalesOrder(ownerP(uuid(), { retry: ONCE }), { orderId: o.id, expectedVersion: v }),
-    ]);
-    for (const s of settled) {
-      if (s.status === "rejected") expect(["VERSION_CONFLICT", "VALIDATION_FAILED"]).toContain((s.reason as AppError).code); // yalnızca iş kuralı reddi; 40P01/INTERNAL değil
+    const hold = new pg.Client({ connectionString: env.databaseUrlDirect });
+    hold.on("error", () => undefined);
+    await hold.connect();
+    try {
+      const pid = Number((await hold.query<{ p: number }>("SELECT pg_backend_pid() AS p")).rows[0]?.p);
+      await hold.query("BEGIN");
+      // İki komut da planı bitirip (kilitsiz) bloklanana dek bırakılmaz: biri başlık kilidinde, öteki ortak bakiye/rezervasyon kilidinde bekler.
+      await hold.query("SELECT 1 FROM public.sales_orders WHERE tenant_id=$1 AND id=$2 FOR UPDATE", [A.tenantId, o.id]);
+      const p1 = reserveOrder(ownerP(uuid(), { retry: ONCE }), { orderId: o.id });
+      const p2 = cancelSalesOrder(ownerP(uuid(), { retry: ONCE }), { orderId: o.id, expectedVersion: v });
+      await untilBlocked(pid, 2);
+      await hold.query("COMMIT");
+      const settled = await Promise.allSettled([p1, p2]);
+      for (const st of settled) {
+        if (st.status === "rejected") expect(["VERSION_CONFLICT", "VALIDATION_FAILED"]).toContain((st.reason as AppError).code); // iş kuralı reddi; 40P01/INTERNAL değil
+      }
+      expect(settled.some((st) => st.status === "fulfilled")).toBe(true);
+      expect(await reservedOf(X)).toBe(await activeSum(L));
+      await reservedMatches(X);
+    } finally {
+      await hold.query("ROLLBACK").catch(() => undefined);
+      await hold.end();
     }
-    expect(await reservedOf(X)).toBe(await activeSum(o.lineIds[0] as string));
-    await reservedMatches(X);
+  }, 120_000);
+});
+
+describe("depo kapsamı (T-306 MAJOR-1; flag WAREHOUSE_SCOPE_ENABLED)", () => {
+  afterAll(async () => {
+    delete process.env.WAREHOUSE_SCOPE_ENABLED;
+    await adm.query("DELETE FROM public.membership_warehouse_scopes WHERE tenant_id = $1 AND membership_id <> $2", [A.tenantId, A.ownerMembershipId]);
+  });
+  it("kapsamlı yönetici yalnızca kendi deposundan tahsis alır; kapsam dışı stok önerilmez/sızmaz; replay saklı sonucu döner; kapsamsız yönetici öteki depodan alır", async () => {
+    const WB = uuid();
+    await q("INSERT INTO public.warehouses (tenant_id, id, code, name) VALUES ($1,$2,$3,'T306 depo B')", [A.tenantId, WB, `W${hex(6)}`]);
+    const mgrUser = await mkUser(adm, reg, "A306 mgr");
+    const mgrMembership = await mkMembership(adm, A.tenantId, mgrUser, { roles: ["WAREHOUSE_MANAGER"] });
+    const free = await mkUser(adm, reg, "A306 mgr2");
+    await mkMembership(adm, A.tenantId, free, { roles: ["WAREHOUSE_MANAGER"] }); // kapsam satırı yok → kısıtsız
+    await q("INSERT INTO public.membership_warehouse_scopes (tenant_id, membership_id, warehouse_id) VALUES ($1,$2,$3)", [A.tenantId, mgrMembership, A.warehouseId]);
+    process.env.WAREHOUSE_SCOPE_ENABLED = "true";
+    const mgr = (key: string = uuid()) => callP(A, mgrUser, key, {});
+    const X = await mkItem();
+    // B deposu: daha çok stok ve alfabetik olarak önde (A-138 tek başına B'yi seçerdi); A deposu: yetecek kadar.
+    const inB = await mkLoc("STORAGE", `0B-${hex(6)}`, WB);
+    const inA = await mkLoc("STORAGE", `Z-${hex(6)}`);
+    await stockIn(X, inB, "10", "AVAILABLE", WB);
+    await stockIn(X, inA, "5");
+    const o = await mkOrder([{ item: X, qty: "4" }]);
+    const L = o.lineIds[0] as string;
+    const key = uuid();
+    const r1 = await reserveOrder(mgr(key), { orderId: o.id });
+    expect(r1.lines).toEqual([{ lineId: L, lineNo: 1, quantity: n(4) }]);
+    expect((await reservationsOf(L)).map((r) => [r.location_id, r.quantity])).toEqual([[inA, n(4)]]);
+    expect(await bal(X, inB, "AVAILABLE")).toBe(n(10));
+    expect(Number(await reservedOf(X))).toBe(4);
+    // Replay: saklı sonuç (FORBIDDEN/yeni tahsis değil).
+    const r2 = await reserveOrder(mgr(key), { orderId: o.id });
+    expect(r2.replayed).toBe(true);
+    expect(r2.lines).toEqual(r1.lines);
+    expect(await activeSum(L)).toBe(n(4));
+    // Kapsam dışı depoda stok olsa bile öneri yok: yalnızca B'de stoğu olan ürün için tahsissiz kalır, hata/sızıntı yok.
+    const Y = await mkItem();
+    await stockIn(Y, await mkLoc("STORAGE", `0Y-${hex(6)}`, WB), "5", "AVAILABLE", WB);
+    const oy = await mkOrder([{ item: Y, qty: "2" }]);
+    expect((await reserveOrder(mgr(), { orderId: oy.id })).lines).toEqual([{ lineId: oy.lineIds[0] as string, lineNo: 1, quantity: n(0) }]);
+    expect(await reservedOf(Y)).toBe(n(0));
+    // Elle B deposuna tahsis → FORBIDDEN/WAREHOUSE_OUT_OF_SCOPE (açık kapsam ihlali).
+    const e = await failure(reserveOrder(mgr(), { orderId: oy.id, overrides: [{ lineId: oy.lineIds[0] as string, allocations: [{ dimension: { locationId: (await q<{ id: string }>("SELECT id FROM public.locations WHERE warehouse_id=$1 LIMIT 1", [WB]))[0]?.id as string }, quantity: "2" }] }] }));
+    expect(codeOf(e)).toBe("FORBIDDEN/WAREHOUSE_OUT_OF_SCOPE");
+    // Kısıtsız yönetici (kapsam satırı yok) aynı ürünü B deposundan alır: süzgeç gerçekten kapsamdan geliyor.
+    const unrestricted = callP(A, free, uuid(), {});
+    expect((await reserveOrder(unrestricted, { orderId: oy.id })).lines).toEqual([{ lineId: oy.lineIds[0] as string, lineNo: 1, quantity: n(2) }]);
+  }, 120_000);
+});
+
+describe("sipariş numarası çakışması (T-306 MAJOR-2, MINOR-1)", () => {
+  const setup = async (skips: number): Promise<void> => {
+    await adm.query("CREATE TABLE public.t306_skip (n int NOT NULL)");
+    await adm.query("INSERT INTO public.t306_skip VALUES ($1)", [skips]);
+    await adm.query("GRANT SELECT, UPDATE ON public.t306_skip TO PUBLIC");
+    await adm.query(`CREATE FUNCTION public.t306_skip_number() RETURNS trigger LANGUAGE plpgsql AS $fn$
+      BEGIN
+        IF NEW.number LIKE 'SIP-%' AND (SELECT n FROM public.t306_skip) > 0 THEN
+          UPDATE public.t306_skip SET n = n - 1;
+          RETURN NULL; -- ON CONFLICT DO NOTHING ile aynı gözlenebilir sonuç: satır eklenmedi
+        END IF;
+        RETURN NEW;
+      END $fn$`);
+    await adm.query("CREATE TRIGGER t306_skip_number BEFORE INSERT ON public.sales_orders FOR EACH ROW EXECUTE FUNCTION public.t306_skip_number()");
+  };
+  const teardown = async (): Promise<void> => {
+    await adm.query("DROP TRIGGER IF EXISTS t306_skip_number ON public.sales_orders");
+    await adm.query("DROP FUNCTION IF EXISTS public.t306_skip_number()");
+    await adm.query("DROP TABLE IF EXISTS public.t306_skip");
+  };
+  it("üretilen numara çakışırsa aynı transaction'da yeni numarayla başarır; sınır aşılırsa kalıcı ret yazılmaz (aynı anahtar sonra başarılı)", async () => {
+    const X = await mkItem();
+    await setup(2);
+    try {
+      const r = await createSalesOrder(ownerP(), { lines: [{ itemId: X, unitId: A.unitId, quantity: "1" }] });
+      expect(r.documentNumber).toMatch(/^SIP-\d{4}-[0-9A-F]{8}$/);
+      expect((await q("SELECT 1 FROM public.sales_orders WHERE id=$1", [r.documentId])).length).toBe(1);
+      await adm.query("UPDATE public.t306_skip SET n = 5"); // 5 deneme de çakışır
+      const key = uuid();
+      expect((await failure(createSalesOrder(ownerP(key), { lines: [{ itemId: X, unitId: A.unitId, quantity: "1" }] }))).code).toBe("INTERNAL");
+      await adm.query("UPDATE public.t306_skip SET n = 0");
+      const again = await createSalesOrder(ownerP(key), { lines: [{ itemId: X, unitId: A.unitId, quantity: "1" }] });
+      expect(again.replayed).toBe(false); // ret anahtara yazılmamıştı
+      expect(again.documentNumber).toMatch(/^SIP-/);
+      // Müşteri numarası ise (tetikleyici yalnızca SIP- üretilenleri atlar) çakışma CODE_TAKEN kalır.
+    } finally {
+      await teardown();
+    }
+  });
+  it("aynı müşteri numarasıyla eşzamanlı iki oluşturma: biri başarılı, öteki CODE_TAKEN (INTERNAL/23505 değil)", async () => {
+    const X = await mkItem();
+    const num = `MUS-${hex(10)}`;
+    const hold = new pg.Client({ connectionString: env.databaseUrlDirect });
+    hold.on("error", () => undefined);
+    await hold.connect();
+    try {
+      const pid = Number((await hold.query<{ p: number }>("SELECT pg_backend_pid() AS p")).rows[0]?.p);
+      await hold.query("BEGIN");
+      await hold.query("SELECT set_config('app.current_tenant_id', $1, true)", [A.tenantId]);
+      await hold.query("INSERT INTO public.sales_orders (tenant_id, id, number, created_by) VALUES ($1,$2,$3,$4)", [A.tenantId, uuid(), num, A.ownerUserId]);
+      const mk = () => createSalesOrder(ownerP(uuid(), { retry: ONCE }), { number: num, lines: [{ itemId: X, unitId: A.unitId, quantity: "1" }] });
+      const p1 = mk();
+      const p2 = mk();
+      await untilBlocked(pid, 2); // ikisi de eklenmemiş (bekleyen) aynı numaranın dizin girdisinde
+      await hold.query("ROLLBACK"); // numara boşalır: tam olarak biri kazanır
+      const settled = await Promise.allSettled([p1, p2]);
+      const ok = settled.filter((x) => x.status === "fulfilled");
+      const bad = settled.filter((x): x is PromiseRejectedResult => x.status === "rejected");
+      expect(ok).toHaveLength(1);
+      expect(bad).toHaveLength(1);
+      expect(codeOf(bad[0]?.reason as AppError)).toBe("VALIDATION_FAILED/CODE_TAKEN");
+      expect((await q("SELECT 1 FROM public.sales_orders WHERE tenant_id=$1 AND number=$2", [A.tenantId, num])).length).toBe(1);
+    } finally {
+      await hold.query("ROLLBACK").catch(() => undefined);
+      await hold.end();
+    }
   }, 120_000);
 });
