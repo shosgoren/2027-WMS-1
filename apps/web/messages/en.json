@@ -327,6 +327,8 @@
     "validation_failed_document_too_largeAction": "Split the document into several documents.",
     "validation_failed_document_state": "The document's status does not allow this action.",
     "validation_failed_document_stateAction": "Refresh the page and check the document's current status.",
+    "validation_failed_scan_mismatch": "The scanned location or product does not match the task.",
+    "validation_failed_scan_mismatchAction": "Scan the location and product shown on the task and try again.",
     "validation_failed_idempotency_key_required": "The request key is missing.",
     "validation_failed_idempotency_key_requiredAction": "Refresh the page and send the action again.",
     "forbidden_warehouse_out_of_scope": "This warehouse is outside your scope.",
@@ -604,6 +606,12 @@
       "updated": "You updated a draft order.",
       "cancelled": "You cancelled an order.",
       "line_cancelled": "You cancelled an order line."
+    },
+    "pick_assignment": {
+      "created": "You created a picking assignment."
+    },
+    "pick": {
+      "not_found": "You reported a product as not found while picking; the location was flagged for counting."
     }
   },
   "auditLog": {

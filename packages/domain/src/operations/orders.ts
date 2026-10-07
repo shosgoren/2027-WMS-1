@@ -24,7 +24,7 @@
 // `reserveOrder` çağrısı audit yazmaz (durum değişimi yok; idempotency kaydı yine tutulur).
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
-import type { StockDimensionKey } from "@wms/db";
+import { appendAudit, type StockDimensionKey } from "@wms/db";
 import { AppError } from "@wms/shared/errors";
 import type { AccessTx } from "../identity/access.ts";
 import { pgUuidArray, resolveWarehouseScope } from "../warehouse/scope.ts";
@@ -39,7 +39,7 @@ import {
   type StockCommandResult,
   type StockDocCallParams,
 } from "../stock/index.ts";
-import { readAllocationBalances, readOrderReservedSums, readReservationPlanRows, uniqueKeys, type ReservationPlanRow } from "../stock/reservation-reads.ts";
+import { readAllocationBalances, readFreeAtDimensions, readOrderReservedSums, readReservationPlanRows, uniqueKeys, type ReservationPlanRow } from "../stock/reservation-reads.ts";
 import { allocateInTx, releaseSelected, type AllocationRequest } from "../stock/reservations.ts";
 import { dimensionIdentity, fromMicro, toMicro } from "../stock/plan.ts";
 import { baseQuantityOf, decimalToMicro, documentState, emptyPlan, microToDecimal, tenantToday, tooLarge, uuidOf, DECIMAL_RE } from "./field-posting.ts";
@@ -459,100 +459,182 @@ async function locationWarehouses(tx: AccessTx, tenantId: string, ids: readonly 
 }
 
 /**
- * `document.approve`: siparişin tahsis edilmemiş açık miktarını belirli stok boyutlarına bağlar (sert tahsis). Sonuç `reservationIds` (yeni satırlar) +
- * `lines[{lineId, lineNo, quantity}]` (BU çağrıda tahsis edilen toplam; 0 = tahsissiz). Yetersiz stok ret değildir (öneri yolu); elle zorlanan
- * (`overrides`) kural 5'e uymayan/yetmeyen boyut `INSUFFICIENT_STOCK`. Sipariş OPEN olmalı (aksi `DOCUMENT_STATE`).
+ * Sipariş tahsisi komut gövdesi (plan + apply): `reserveOrder` (tüm satırlar) ve `reallocateOrderLine` (tek satır, T-307) AYNI kodu kullanır;
+ * kilit sırası ikisinde de stok → sipariş başlığı → görev (REPUTAWAY uzlaştırması). `onlyLineId` verilirse yalnızca o satır planlanır.
  */
+function reserveSpec(orderId: string, overrides: ReturnType<typeof parseOverrides>, onlyLineId: string | null, requestId: string | null | undefined): Pick<CommandSpec<unknown>, "plan" | "apply"> {
+  let planned: readonly PlannedLine[] = [];
+  return {
+    plan: async (tx, _i, m): Promise<StockCommandPlan> => {
+      await readOrder(tx, m.tenantId, orderId);
+      const lines = (await readLines(tx, m.tenantId, orderId)).filter((l) => onlyLineId === null || l.id.toLowerCase() === onlyLineId);
+      if (onlyLineId !== null && lines.length === 0) throw new AppError("NOT_FOUND");
+      const known = new Set(lines.map((l) => l.id.toLowerCase()));
+      if (overrides.some((o) => !known.has(o.lineId))) throw invalid();
+      // Depo kapsamı (T-306 MAJOR-1): kapsam dışı depodaki stok ÖNERİLMEZ ve varlığı sızdırılmaz (resolveWarehouseScope ile aynı anlam; `null` = kısıtsız).
+      const scope = await resolveWarehouseScope(tx, m);
+      const candidates = await readCandidates(tx, m.tenantId, [...new Set(lines.map((l) => l.itemId.toLowerCase()))], scope);
+      const overrideOf = new Map(overrides.map((o) => [o.lineId, o]));
+      const out: PlannedLine[] = [];
+      for (const l of lines) {
+        const itemId = l.itemId.toLowerCase();
+        const ov = overrideOf.get(l.id.toLowerCase());
+        const need = unreservedOf(l);
+        if (ov !== undefined) {
+          out.push({
+            lineId: l.id,
+            itemId,
+            clamp: false,
+            allocations: ov.allocations.map((a) => ({
+              key: { itemId, locationId: a.locationId, lotId: a.lotId, serialId: a.serialId, stockStatus: a.stockStatus, inventoryOwnerId: a.inventoryOwnerId, handlingUnitId: a.handlingUnitId },
+              qty: decimalToMicro(a.quantity),
+            })),
+          });
+        } else if (need > 0n) {
+          const pool = candidates.get(itemId) ?? [];
+          out.push({ lineId: l.id, itemId, clamp: true, allocations: suggestAllocation(pool, need) });
+        } else {
+          out.push({ lineId: l.id, itemId, clamp: true, allocations: [] });
+        }
+        // Aynı ürünün sonraki satırı aynı boş miktarı ikinci kez önermesin: bu satırın önerisi/elle tahsisi adaylardan düşülür.
+        const last = out[out.length - 1] as PlannedLine;
+        const pool = candidates.get(itemId) ?? [];
+        for (const a of last.allocations) {
+          const c = pool.find((x) => dimensionIdentity(x.key) === dimensionIdentity(a.key));
+          if (c !== undefined) pool[pool.indexOf(c)] = { ...c, available: c.available - a.qty };
+        }
+      }
+      planned = out;
+      const keys = uniqueKeys(out.flatMap((p) => p.allocations.map((a) => a.key)));
+      const locationIds = [...new Set(keys.map((k) => k.locationId))].sort();
+      const warehouseIds = await locationWarehouses(tx, m.tenantId, locationIds);
+      return { warehouseIds, locks: { ...EMPTY_LOCK_PLAN, locationIds, dimensions: keys } };
+    },
+    apply: async (tx, locked, ctx) => {
+      const h = await lockOrder(tx, ctx.tenantId, orderId);
+      if (h.status !== "OPEN") throw documentState();
+      // Kilitten SONRA yeniden oku (T-253): kapasite = açık − Σ ACTIVE, başlık kilidi altındaki değerle.
+      const lines = await readLines(tx, ctx.tenantId, orderId);
+      const byId = new Map(lines.map((l) => [l.id.toLowerCase(), l]));
+      const requests: (AllocationRequest & { readonly lineId: string })[] = [];
+      for (const p of planned) {
+        const l = byId.get(p.lineId.toLowerCase());
+        if (l === undefined) throw new AppError("VERSION_CONFLICT", { retryable: true }); // plandan sonra satır kümesi değişti
+        if (p.allocations.length === 0) continue;
+        requests.push({ lineId: l.id, source: { kind: "ORDER_LINE", lineId: l.id.toLowerCase() }, itemId: p.itemId, allocations: p.allocations, capacity: unreservedOf(l), clamp: p.clamp });
+      }
+      const out = await allocateInTx(tx, locked, ctx.tenantId, requests, { warehouseId: null, expiresAt: null });
+      await reconcileStagedReputaway(tx, ctx.tenantId, ctx.userId, requests.flatMap((r) => r.allocations.map((a) => a.key)), out.reservationIds.length > 0, requestId ?? null);
+      const allocatedOf = new Map(requests.map((r, i) => [r.lineId.toLowerCase(), out.allocated[i] as bigint]));
+      const total = out.allocated.reduce((a, x) => a + x, 0n);
+      return {
+        result: {
+          documentId: orderId,
+          reservationIds: out.reservationIds,
+          lines: planned.map((p) => {
+            const l = byId.get(p.lineId.toLowerCase()) as OrderLine;
+            return { lineId: l.id, lineNo: l.lineNo, quantity: fromMicro(allocatedOf.get(l.id.toLowerCase()) ?? 0n) };
+          }),
+        },
+        audit:
+          out.reservationIds.length === 0
+            ? null
+            : auditOf("reservation.created", "sales_order", orderId, requestId, {
+                allocationCount: out.reservationIds.length,
+                quantity: fromMicro(total),
+                overridden: overrides.length > 0,
+                ...(onlyLineId === null ? {} : { reallocatedLineId: onlyLineId }),
+              }),
+      };
+    },
+  };
+}
+
+/**
+ * Serbest STAGING stoğu ile açık `REPUTAWAY` görevleri (T-306 MINOR-4 → T-307): sipariş iptali sevk alanında serbest mal bırakır ve `REPUTAWAY` görevi açar;
+ * o mal yeni bir siparişe tahsis edilirse görev miktarı serbest miktarı aşar (rezerve mal geri yerleştirilemez: `INSUFFICIENT_STOCK`). Tahsisten sonra,
+ * dokunulan STAGING boyutlarının açık görevleri FIFO (created_at, id) serbest miktara sığdığı kadar KALIR; sığmayan görev `CANCELLED` olur (audit) ve
+ * en az bir görev iptal edildiyse artan serbest mal için TEK yeni `REPUTAWAY` görevi açılır (mal görevsiz kalmaz). Stok kilitleri alınmıştır (kilit sırası:
+ * stok → sipariş başlığı → görev). Görev durum SQL'i `tasks.ts` durum tablosunun (OPEN/ASSIGNED → CANCELLED) birebir aynısıdır; DB tetikleyicisi ikinci savunmadır.
+ */
+async function reconcileStagedReputaway(
+  tx: AccessTx,
+  tenantId: string,
+  userId: string,
+  keys: readonly StockDimensionKey[],
+  anyAllocated: boolean,
+  requestId: string | null,
+): Promise<void> {
+  if (!anyAllocated || keys.length === 0) return;
+  const unique = uniqueKeys(keys);
+  const staging = await tx.execute<{ id: string }>(
+    sql`SELECT id FROM public.locations WHERE tenant_id = ${tenantId}::uuid AND kind = 'STAGING' AND id = ANY(${pgUuidArray([...new Set(unique.map((k) => k.locationId))])}::uuid[])`,
+  );
+  const stagingIds = new Set(staging.map((r) => r.id.toLowerCase()));
+  const plain = unique.filter((k) => stagingIds.has(k.locationId.toLowerCase()) && k.stockStatus === "AVAILABLE" && k.lotId === null && k.serialId === null);
+  if (plain.length === 0) return;
+  const free = await readFreeAtDimensions(tx, tenantId, plain);
+  for (const k of plain) {
+    const freeMicro = toMicro(free.get(dimensionIdentity(k)) ?? "0");
+    const open = await tx.execute<{ id: string; warehouse_id: string; quantity: string | null; status: string }>(
+      sql`SELECT id, warehouse_id, quantity::text AS quantity, status FROM public.warehouse_tasks
+           WHERE tenant_id = ${tenantId}::uuid AND kind = 'REPUTAWAY' AND status IN ('OPEN', 'ASSIGNED')
+             AND location_id = ${k.locationId}::uuid AND item_id = ${k.itemId}::uuid
+           ORDER BY created_at, id FOR UPDATE`,
+    );
+    let kept = 0n;
+    let cancelled = 0;
+    let warehouseId: string | null = null;
+    for (const t of open) {
+      const q = t.quantity === null ? 0n : toMicro(t.quantity);
+      if (kept + q <= freeMicro) {
+        kept += q;
+        continue;
+      }
+      const upd = await tx.execute<{ version: number }>(
+        sql`UPDATE public.warehouse_tasks SET status = 'CANCELLED'
+             WHERE tenant_id = ${tenantId}::uuid AND id = ${t.id}::uuid AND status IN ('OPEN', 'ASSIGNED') RETURNING version`,
+      );
+      if (upd[0] === undefined) throw new AppError("INTERNAL"); // kilit altında olmaz; sessiz no-op yok
+      await appendAudit(tx, {
+        action: "warehouse_task.cancelled",
+        actorUserId: userId,
+        entityType: "warehouse_task",
+        entityId: t.id,
+        requestId,
+        reason: "Sevk alanındaki mal siparişe tahsis edildi; geri yerleştirme görevi miktarı serbest stoğu aştı.",
+        changeSummary: { from_status: t.status, to_status: "CANCELLED", version: Number(upd[0].version), cause: "RESERVED_BY_ORDER" },
+      });
+      warehouseId = t.warehouse_id;
+      cancelled++;
+    }
+    const leftover = freeMicro - kept;
+    if (cancelled > 0 && leftover > 0n && warehouseId !== null) {
+      await createTasks(tx, { tenantId, userId }, [{ warehouseId, kind: "REPUTAWAY", locationId: k.locationId, itemId: k.itemId, quantity: microToDecimal(leftover) }], requestId);
+    }
+  }
+}
+
+/** `document.approve`: bkz. `reserveSpec`. Sonuç `reservationIds` (yeni satırlar) + `lines[{lineId, lineNo, quantity}]` (BU çağrıda tahsis edilen toplam; 0 = tahsissiz). Sipariş OPEN olmalı (aksi `DOCUMENT_STATE`). */
 export async function reserveOrder(params: StockDocCallParams, input: ReserveOrderInput): Promise<Done> {
   const orderId = uuidOf(input.orderId);
   const overrides = parseOverrides(input.overrides);
   const hashInput = { orderId, overrides };
-  let planned: readonly PlannedLine[] = [];
   return completed(
-    await run(params, {
-      commandType: "sales_order.reserve",
-      permission: "document.approve",
-      input: hashInput,
-      plan: async (tx, _i, m): Promise<StockCommandPlan> => {
-        await readOrder(tx, m.tenantId, orderId);
-        const lines = await readLines(tx, m.tenantId, orderId);
-        const known = new Set(lines.map((l) => l.id.toLowerCase()));
-        if (overrides.some((o) => !known.has(o.lineId))) throw invalid();
-        // Depo kapsamı (T-306 MAJOR-1): kapsam dışı depodaki stok ÖNERİLMEZ ve varlığı sızdırılmaz (resolveWarehouseScope ile aynı anlam; `null` = kısıtsız).
-        const scope = await resolveWarehouseScope(tx, m);
-        const candidates = await readCandidates(tx, m.tenantId, [...new Set(lines.map((l) => l.itemId.toLowerCase()))], scope);
-        const overrideOf = new Map(overrides.map((o) => [o.lineId, o]));
-        const out: PlannedLine[] = [];
-        for (const l of lines) {
-          const itemId = l.itemId.toLowerCase();
-          const ov = overrideOf.get(l.id.toLowerCase());
-          const need = unreservedOf(l);
-          if (ov !== undefined) {
-            out.push({
-              lineId: l.id,
-              itemId,
-              clamp: false,
-              allocations: ov.allocations.map((a) => ({
-                key: { itemId, locationId: a.locationId, lotId: a.lotId, serialId: a.serialId, stockStatus: a.stockStatus, inventoryOwnerId: a.inventoryOwnerId, handlingUnitId: a.handlingUnitId },
-                qty: decimalToMicro(a.quantity),
-              })),
-            });
-          } else if (need > 0n) {
-            const pool = candidates.get(itemId) ?? [];
-            out.push({ lineId: l.id, itemId, clamp: true, allocations: suggestAllocation(pool, need) });
-          } else {
-            out.push({ lineId: l.id, itemId, clamp: true, allocations: [] });
-          }
-          // Aynı ürünün sonraki satırı aynı boş miktarı ikinci kez önermesin: bu satırın önerisi/elle tahsisi adaylardan düşülür.
-          const last = out[out.length - 1] as PlannedLine;
-          const pool = candidates.get(itemId) ?? [];
-          for (const a of last.allocations) {
-            const c = pool.find((x) => dimensionIdentity(x.key) === dimensionIdentity(a.key));
-            if (c !== undefined) pool[pool.indexOf(c)] = { ...c, available: c.available - a.qty };
-          }
-        }
-        planned = out;
-        const keys = uniqueKeys(out.flatMap((p) => p.allocations.map((a) => a.key)));
-        const locationIds = [...new Set(keys.map((k) => k.locationId))].sort();
-        const warehouseIds = await locationWarehouses(tx, m.tenantId, locationIds);
-        return { warehouseIds, locks: { ...EMPTY_LOCK_PLAN, locationIds, dimensions: keys } };
-      },
-      apply: async (tx, locked, ctx) => {
-        const h = await lockOrder(tx, ctx.tenantId, orderId);
-        if (h.status !== "OPEN") throw documentState();
-        // Kilitten SONRA yeniden oku (T-253): kapasite = açık − Σ ACTIVE, başlık kilidi altındaki değerle.
-        const lines = await readLines(tx, ctx.tenantId, orderId);
-        const byId = new Map(lines.map((l) => [l.id.toLowerCase(), l]));
-        const requests: (AllocationRequest & { readonly lineId: string })[] = [];
-        for (const p of planned) {
-          const l = byId.get(p.lineId.toLowerCase());
-          if (l === undefined) throw new AppError("VERSION_CONFLICT", { retryable: true }); // plandan sonra satır kümesi değişti
-          if (p.allocations.length === 0) continue;
-          requests.push({ lineId: l.id, source: { kind: "ORDER_LINE", lineId: l.id.toLowerCase() }, itemId: p.itemId, allocations: p.allocations, capacity: unreservedOf(l), clamp: p.clamp });
-        }
-        const out = await allocateInTx(tx, locked, ctx.tenantId, requests, { warehouseId: null, expiresAt: null });
-        const allocatedOf = new Map(requests.map((r, i) => [r.lineId.toLowerCase(), out.allocated[i] as bigint]));
-        const total = out.allocated.reduce((a, x) => a + x, 0n);
-        return {
-          result: {
-            documentId: orderId,
-            reservationIds: out.reservationIds,
-            lines: planned.map((p) => {
-              const l = byId.get(p.lineId.toLowerCase()) as OrderLine;
-              return { lineId: l.id, lineNo: l.lineNo, quantity: fromMicro(allocatedOf.get(l.id.toLowerCase()) ?? 0n) };
-            }),
-          },
-          audit:
-            out.reservationIds.length === 0
-              ? null
-              : auditOf("reservation.created", "sales_order", orderId, input.requestId, {
-                  allocationCount: out.reservationIds.length,
-                  quantity: fromMicro(total),
-                  overridden: overrides.length > 0,
-                }),
-        };
-      },
-    }),
+    await run(params, { commandType: "sales_order.reserve", permission: "document.approve", input: hashInput, ...reserveSpec(orderId, overrides, null, input.requestId) }),
+  );
+}
+
+/**
+ * İÇ (T-307; `index.ts`'ten dışa AÇILMAZ): "ürün bulunamadı" sonrası yeniden tahsis — tek sipariş satırı, A-138 öneri yolu, `stock.post` izniyle (toplamayı
+ * yapan personel `document.approve` sahibi olmayabilir; satırın kapasitesi kadar tahsis eder, başka satıra/siparişe dokunmaz). `pick_blocked` lokasyonlar
+ * öneri ve kilit altı süzgecinde elenir (16 kural 9). Ayrı `executeStockCommand` çağrısıdır: yeni anahtar, ayrı idempotency kaydı.
+ */
+export async function reallocateOrderLine(params: StockDocCallParams, input: { readonly orderId: string; readonly lineId: string; readonly requestId?: string | null }): Promise<Done> {
+  const orderId = uuidOf(input.orderId);
+  const lineId = uuidOf(input.lineId);
+  return completed(
+    await run(params, { commandType: "sales_order.reallocate_line", permission: "stock.post", input: { orderId, lineId }, ...reserveSpec(orderId, [], lineId, input.requestId) }),
   );
 }
 
