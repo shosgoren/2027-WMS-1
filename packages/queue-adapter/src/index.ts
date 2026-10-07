@@ -174,7 +174,19 @@ export interface JobQueueOptions {
 export { consumeOnce, deliverExternalOnce } from "./consume.ts";
 export type { ConsumeOnceResult, ExternalOnceContext } from "./consume.ts";
 
-export interface PgBossJobQueue extends JobQueue<TenantTx> {
+/** İlk sayfa için `after` sentineli (sıfır UUID); `wms_probe.active_tenant_ids` `NULL` kabul etmez (ADR-019 §1). */
+export const ACTIVE_TENANTS_FIRST_PAGE = "00000000-0000-0000-0000-000000000000";
+export const ACTIVE_TENANTS_MAX_PAGE = 500;
+
+/**
+ * Yalnızca zamanlayıcıya verilen dar arayüz (T-225; `JobQueue` sözleşmesine EKLENMEZ): kuyruğun `wms_worker` bağlantısıyla
+ * `wms_probe.active_tenant_ids` çağrılır (başka sorgu yok). Keyset: `after` = önceki sayfanın son kimliği (ilk sayfa: `ACTIVE_TENANTS_FIRST_PAGE`).
+ */
+export interface ActiveTenantLister {
+  listActiveTenantIds(after: string, limit: number): Promise<readonly string[]>;
+}
+
+export interface PgBossJobQueue extends JobQueue<TenantTx>, ActiveTenantLister {
   /** Bağlanır ve şemanın kurulu olduğunu doğrular (`migrate: false`). Tekrar çağrı aynı sözü döndürür. */
   start(): Promise<void>;
 }
@@ -199,6 +211,8 @@ async function tenantOf(tx: TenantTx): Promise<string> {
 function envelopeOf(job: Job, tenantId: string | null): Envelope {
   return { v: 1, tenantId, actorUserId: job.actorUserId ?? null, payload: job.payload };
 }
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Tenant'a ve türe kapsamlı anahtar: bir tenant başkasının işini anahtar tahminiyle engelleyemez. */
 function scopedKey(tenantId: string | null, key: string): string {
@@ -344,6 +358,17 @@ export function createJobQueue(options: JobQueueOptions): PgBossJobQueue {
         }
         return results;
       });
+    },
+    async listActiveTenantIds(after, limit) {
+      if (!ready) throw new Error("job queue is not started; call start() before listActiveTenantIds");
+      if (!UUID_RE.test(after)) throw new QueueError("VALIDATION_FAILED", "after must be a UUID (use the zero UUID for the first page)");
+      if (!Number.isInteger(limit) || limit < 1 || limit > ACTIVE_TENANTS_MAX_PAGE) {
+        throw new QueueError("VALIDATION_FAILED", "limit must be an integer between 1 and 500");
+      }
+      const { rows } = await boss
+        .getDb()
+        .executeSql("SELECT t.id::text AS id FROM wms_probe.active_tenant_ids($1::uuid, $2::integer) AS t(id)", [after, limit]);
+      return rows.map((r: { id: string }) => r.id);
     },
     async stop() {
       if (starting === undefined) return;

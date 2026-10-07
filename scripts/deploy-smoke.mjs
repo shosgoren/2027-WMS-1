@@ -189,6 +189,8 @@ export const ALLOWED_MSGS = new Set([
   "job types without handler", "demo disabled", "demo.reseed done", "demo.reseed failed", "demo.reseed enqueued",
   "demo.reseed enqueue failed", "email sent", "email.send failed", "invitation email sent", "invitation.deliver failed",
   "invitation.deliver skipped", "job handler failed (permanent)", "job handler failed (transient; will retry)", "shutdown started", "shutdown complete",
+  "stock.consistency.scheduled", "stock.consistency.schedule_incomplete", "stock.consistency.schedule_list_failed",
+  "stock.consistency.schedule_enqueue_failed", "stock.consistency.schedule_failed",
   "shutdown completed with errors", "shutdown hook failed", "shutdown timed out", "forced exit", "uncaught exception", "unhandled rejection",
   // Sabit iletiler (parantez/büyük harf içerir; tam eşleşme):
   "BETTER_AUTH_URL not set (warning); invitation.deliver jobs will fail until configured",
