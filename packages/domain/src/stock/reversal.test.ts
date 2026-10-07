@@ -1,13 +1,14 @@
 // T-224: ters kayıt saf mantığı (kalan hesabı, satır seçimi, ters defter girdileri, bakiye yeterliliği, girdi doğrulaması). Veritabanı yok.
 import { describe, expect, it } from "vitest";
 import { AppError } from "@wms/shared/errors";
-import { dimensionIdentity } from "./plan.ts";
+import { dimensionIdentity, toMicro } from "./plan.ts";
 import {
   REVERSAL_MAX_LINES,
   assertReversalCovered,
   buildReversalPlan,
   normalizeReversalInput,
   remainingMicro,
+  reversalLineQuantity,
   reversalStateAfter,
   selectReversalLines,
   type BalanceSnapshot,
@@ -133,12 +134,38 @@ describe("buildReversalPlan", () => {
     expect(mv.entries[1]?.key.locationId).toBe(L2);
     expect([...mv.net.values()].reduce((a, b) => a + b, 0n)).toBe(0n);
   });
-  it("durum değiştiren hareketin tersi iki boyutu birlikte geri alır", () => {
-    const mv = buildReversalPlan(
-      "STOCK_MOVE",
-      selectReversalLines([src(1, { sourceLocationId: L1, targetLocationId: L1, sourceStatus: "AVAILABLE", targetStatus: "QUARANTINE" })], "ALL"),
-    );
-    expect(mv.entries.map((e) => [e.key.stockStatus, e.delta])).toEqual([["AVAILABLE", 100_000_000n], ["QUARANTINE", -100_000_000n]]);
+  it("durum değiştiren taşıma ters çevrilmez: REVERSAL_BLOCKED/STATUS_CHANGE (A-224-3); aynı durumlu taşıma çevrilir", () => {
+    const sel = selectReversalLines([src(1, { sourceLocationId: L1, targetLocationId: L1, sourceStatus: "AVAILABLE", targetStatus: "QUARANTINE" })], "ALL");
+    expect(codeOf(fail(() => buildReversalPlan("STOCK_MOVE", sel)))).toBe("REVERSAL_BLOCKED/STATUS_CHANGE");
+    expect(() => buildReversalPlan("STOCK_MOVE", selectReversalLines([src(1, { sourceLocationId: L1, targetLocationId: L2 })], "ALL"))).not.toThrow();
+  });
+});
+
+describe("reversalLineQuantity (I-09, A-224-8)", () => {
+  const BASE_UNIT = "00000000-0000-4000-8000-0000000000f9";
+  const l = (over: Partial<SourceLine>) => src(1, over);
+  it("tam satır: asıl miktar, birim ve katsayı aynen", () => {
+    expect(reversalLineQuantity(l({ quantity: "4", conversionFactor: "25", baseQuantity: "100" }), 100_000_000n, BASE_UNIT)).toEqual({
+      unitId: l({}).unitId, quantity: "4", conversionFactor: "25",
+    });
+  });
+  it("kısmi satır, tam bölünüyorsa asıl birimde (50/25 = 2)", () => {
+    expect(reversalLineQuantity(l({ quantity: "4", conversionFactor: "25", baseQuantity: "100" }), 50_000_000n, BASE_UNIT)).toEqual({
+      unitId: l({}).unitId, quantity: "2.000000", conversionFactor: "25",
+    });
+  });
+  it("kısmi satır, bölünmüyorsa temel birim ve katsayı 1 (değer uydurulmaz, 0.000001'e zorlanmaz)", () => {
+    const r = reversalLineQuantity(l({ quantity: "4", conversionFactor: "25", baseQuantity: "100" }), 7_000_001n, BASE_UNIT);
+    expect(r).toEqual({ unitId: BASE_UNIT, quantity: "7.000001", conversionFactor: "1.000000" });
+    const tiny = reversalLineQuantity(l({ quantity: "1", conversionFactor: "1000000", baseQuantity: "1000000" }), 1n, BASE_UNIT);
+    expect(tiny).toEqual({ unitId: BASE_UNIT, quantity: "0.000001", conversionFactor: "1.000000" });
+  });
+  it("seçilen her durumda base = round(quantity × katsayı, 6) (özellik)", () => {
+    for (const [q, cf, base, take] of [["3", "0.333333", "1", 400_000n], ["7", "1.5", "10.5", 3_500_000n], ["2", "3", "6", 1_000_001n], ["5", "0.1", "0.5", 123_456n]] as const) {
+      const r = reversalLineQuantity(l({ quantity: q, conversionFactor: cf, baseQuantity: base }), take, BASE_UNIT);
+      const back = (toMicro(r.quantity) * toMicro(r.conversionFactor) + 500_000n) / 1_000_000n;
+      expect(back).toBe(take);
+    }
   });
 });
 

@@ -13,9 +13,12 @@
 //
 // A-xx (OPEN_QUESTIONS): A-224-1 senkron üst sınır 200 satır (`TOO_MANY_LINES`; worker yolu yok, satırlar gruplar hâlinde ayrı ters kayıtlarla çevrilir);
 // A-224-2 `lines: "ALL"` = her satırın KALAN miktarı (kalanı 0 olanlar atlanır), miktarlar temel birimdedir (`base_quantity`; I-09);
-// A-224-3 ters belge satırı yalnızca kaynak boyut durumunu taşır (0020 tetikleyicisi `target_stock_status`'u yalnız STOCK_MOVE'a bağlar), karşı boyut
-// defterdedir; A-224-4 rezervasyonlar ters kayıtla yeniden kurulmaz/serbest bırakılmaz (rezervasyon önce serbest bırakılmalı); A-224-5 yalnız
-// STOCK_IN/STOCK_OUT/STOCK_MOVE belgeleri ters çevrilir (COUNT_ADJUSTMENT/saha belgeleri 3A kartlarında).
+// A-224-3 durum değiştiren STOCK_MOVE (kaynak durum ≠ hedef durum) ters çevrilmez: `REVERSAL_BLOCKED/STATUS_CHANGE` (0020 tetikleyicisi `target_stock_status`'u
+// yalnız STOCK_MOVE'a bağlar; ters satır iki durumu taşıyamaz, Q-102); A-224-4 rezervasyonlar ters kayıtla yeniden kurulmaz/serbest bırakılmaz;
+// A-224-5 yalnız STOCK_IN/STOCK_OUT/STOCK_MOVE belgeleri ve YALNIZ `source_kind` boş olanlar ters çevrilir: saha akışından gelen belge (kabul, sipariş,
+// iade, sayım, görev) `REVERSAL_BLOCKED/SOURCE_LINKED` (bağlı kayıtlar kopmasın; düzeltme yolu Q-100); A-224-7 ters satır asıl satıra
+// `document_lines.source_line_id` ile bağlanır (REVERSAL belgesinde bu sütun, `reversal_of_document_id` belgesinin satırını gösterir); A-224-8 ters satır
+// miktarı I-09'a uyar: tam satırda asıl miktar/birim kopyalanır, kısmi satırda asıl birimde tam bölünüyorsa o birim, bölünmüyorsa ürünün temel birimi (katsayı 1).
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import type { LockedState } from "@wms/db";
@@ -30,6 +33,8 @@ import { assertSerialUnique } from "./rules.ts";
 
 /** A-224-1: tek ters kayıtta en çok 200 satır (A-07 senkron sınırı ile aynı). */
 export const REVERSAL_MAX_LINES = 200;
+/** Denetim kaydına satır dökümü konan en çok satır (`changeSummary` 8 KB sınırı). */
+const AUDIT_LINES_MAX = 60;
 const REASON_MAX = 500;
 const KINDS: ReadonlySet<string> = new Set(["STOCK_IN", "STOCK_OUT", "STOCK_MOVE"]);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -38,7 +43,7 @@ const CONTROL_RE = /\p{C}/u;
 const MICRO = 1_000_000n;
 
 const documentState = (): AppError => new AppError("VALIDATION_FAILED", { detail: "DOCUMENT_STATE" });
-const blocked = (detail: "EXCEEDS_REMAINING" | "STOCK_USED" | "STOCK_RESERVED" | "SERIAL_IN_USE"): AppError => new AppError("REVERSAL_BLOCKED", { detail });
+const blocked = (detail: "EXCEEDS_REMAINING" | "STOCK_USED" | "STOCK_RESERVED" | "SERIAL_IN_USE" | "SOURCE_LINKED" | "STATUS_CHANGE"): AppError => new AppError("REVERSAL_BLOCKED", { detail });
 
 // --- girdi (saf) ----------------------------------------------------------------------------------------------------------
 
@@ -142,6 +147,8 @@ export function selectReversalLines(all: readonly SourceLine[], req: NormalizedR
 
 /** Ters çevrilecek miktarlarla asıl yönde plan kurulur (biçim/boyut doğrulaması `buildPostingPlan`'da), defter girdileri işaret değiştirir. */
 export function buildReversalPlan(kind: PostingKind, selection: readonly SelectedLine[]): PostingPlan {
+  // A-224-3: durum değiştiren taşıma ters çevrilmez (ters satır iki durumu taşıyamaz; Q-102).
+  if (kind === "STOCK_MOVE" && selection.some((s) => s.line.sourceStatus !== s.line.targetStatus)) throw blocked("STATUS_CHANGE");
   const plan = buildPostingPlan(
     kind,
     selection.map((s) => ({ ...s.line, baseQuantity: fromMicro(s.micro) })),
@@ -262,15 +269,15 @@ export async function reverseDocument(params: StockDocCallParams, input: Reverse
     ...(params.timeouts === undefined ? {} : { timeouts: params.timeouts }),
     ...(params.logger === undefined ? {} : { logger: params.logger }),
     plan: async (tx, _i, m): Promise<StockCommandPlan> => {
-      const head = await tx.execute<{ warehouse_id: string; kind: string; version: number | string }>(
-        sql`SELECT warehouse_id, kind, version FROM public.documents WHERE tenant_id = ${m.tenantId}::uuid AND id = ${documentId}::uuid`,
+      const head = await tx.execute<{ warehouse_id: string; kind: string; version: number | string; source_kind: string | null }>(
+        sql`SELECT warehouse_id, kind, version, source_kind FROM public.documents WHERE tenant_id = ${m.tenantId}::uuid AND id = ${documentId}::uuid`,
       );
       const h = head[0];
       if (h === undefined) throw new AppError("NOT_FOUND");
       const document = { id: documentId, expectedVersion: Number(h.version) };
       // Plan iş kuralı denetlemez: geçersiz seçim/tür → yalnızca belge kilidi; `apply` reddeder (yeniden oynatma saklı sonuca ulaşır).
       let built: PostingPlan | undefined;
-      if (KINDS.has(h.kind)) {
+      if (KINDS.has(h.kind) && h.source_kind === null) {
         try {
           built = buildReversalPlan(h.kind as PostingKind, selectReversalLines(await loadSourceLines(tx, m.tenantId, documentId), req.lines));
         } catch (e) {
@@ -289,12 +296,14 @@ export async function reverseDocument(params: StockDocCallParams, input: Reverse
       const header = await readDocumentHeader(tx, ctx.tenantId, documentId); // belge kilitli
       assertNotProcessing(header); // işleme kilidi (M-6): ters kayıt reddedilir
       if (header.status !== "POSTED" || !KINDS.has(header.kind)) throw documentState(); // DRAFT/APPROVED/CANCELLED, ters kaydın ters kaydı, desteklenmeyen tür
+      // B-1 (A-224-5): saha akışından gelen belge (`source_kind` dolu) ters çevrilmez; bağlı sipariş/rezervasyon/kabul/sayım kayıtları kopmasın.
+      if ((await readSourceKind(tx, ctx.tenantId, documentId)) !== null) throw blocked("SOURCE_LINKED");
       const kind = header.kind as PostingKind;
       const selection = selectReversalLines(await loadSourceLines(tx, ctx.tenantId, documentId), req.lines);
       const plan = buildReversalPlan(kind, selection);
       assertCovered(plan, locked);
 
-      await assertItemScale(tx, ctx.tenantId, selection);
+      const baseUnitByItem = await assertItemScale(tx, ctx.tenantId, selection);
       // Stok doğan (artan) boyutlar: lokasyon ve ürün ACTIVE kalmalı (arşivli lokasyonda pozitif stok oluşamaz; T-243). Kilitten SONRA, FOR SHARE.
       const receiving = plan.entries.filter((e) => e.delta > 0n).map((e) => e.key);
       await assertLocationsActiveInWarehouse(tx, ctx.tenantId, [...new Set(receiving.map((k) => k.locationId))].sort(), header.warehouseId);
@@ -331,7 +340,7 @@ export async function reverseDocument(params: StockDocCallParams, input: Reverse
         sql`INSERT INTO public.documents (tenant_id, id, kind, type_version_id, warehouse_id, business_date, reversal_of_document_id, reason, created_by)
             VALUES (${ctx.tenantId}::uuid, ${reversalId}::uuid, 'REVERSAL', ${typeVersionId}::uuid, ${header.warehouseId}::uuid, ${businessDate}::date, ${documentId}::uuid, ${req.reason}, ${ctx.userId}::uuid)`,
       );
-      const reversalLineIdBySource = await insertReversalLines(tx, ctx.tenantId, reversalId, selection);
+      const reversalLineIdBySource = await insertReversalLines(tx, ctx.tenantId, reversalId, selection, baseUnitByItem);
       await writeLedger(tx, ctx.tenantId, reversalId, businessDate, ctx.userId, plan, dimIdByIdentity, reversalLineIdBySource);
       await writeBalances(tx, ctx.tenantId, netByDimensionId);
       const states = await advanceSourceLines(tx, ctx.tenantId, documentId, selection);
@@ -358,6 +367,10 @@ export async function reverseDocument(params: StockDocCallParams, input: Reverse
             reversalOfDocumentId: documentId,
             kind,
             lineCount: selection.length,
+            // M-2: asıl satır kimlikleri ve miktarlar (8 KB denetim sınırı: çok satırda yalnız sayı; tam bağ ters belge satırlarındaki `source_line_id`'dedir).
+            ...(selection.length <= AUDIT_LINES_MAX
+              ? { lines: selection.map((s) => ({ sourceLineId: s.line.lineId, quantity: fromMicro(s.micro) })) }
+              : { linesOmitted: selection.length }),
             fullyReversedLines: [...states.values()].filter((s) => s.status === "FULL").length,
             ledgerRows: plan.entries.length,
             warehouseId: header.warehouseId,
@@ -380,26 +393,46 @@ export interface ReversalCapacityLine {
   readonly reversedQuantity: string;
   /** `base_quantity − reversed_quantity`. */
   readonly remaining: string;
-  /** Şu an bakiye/rezervasyona göre en çok ters çevrilebilecek miktar (bilgi amaçlı, kilitsiz okuma; karar `reverseDocument`'ta kilit altında verilir). */
+  /** Şu an en çok ters çevrilebilecek miktar: bakiye − rezerve (aynı boyutu paylaşan satırlar sırayla paylaşır), arşivli lokasyon/ürün, seri çakışması ve durum değiştiren taşıma hesaba katılır. */
   readonly maxReversible: string;
+  /** Her zaman `true`: kilitsiz okuma, bilgi amaçlıdır; karar `reverseDocument`'ta kilit altında verilir (UI "en çok X" yerine "yaklaşık" göstermelidir). */
+  readonly estimated: true;
 }
 
-/** `reversal.create`: POSTED belgenin satır başına kalan ve şu an geri alınabilir miktarı (Senaryo C "kalan X; en çok X"). Aynı boyutu paylaşan satırlar ayrı ayrı hesaplanır. */
+/**
+ * `reversal.create`: POSTED belgenin satır başına kalan ve şu an geri alınabilir miktarı (Senaryo C "kalan X; en çok X"). `source_kind` dolu belge
+ * `REVERSAL_BLOCKED/SOURCE_LINKED` (B-1). Aynı azalan boyutu paylaşan satırlar satır sırasıyla kullanılabilirden payını alır (m-3).
+ */
 export async function getReversalCapacity(params: Omit<StockDocCallParams, "clientKey">, documentId: string): Promise<ReversalCapacityLine[]> {
   if (typeof documentId !== "string" || !UUID_RE.test(documentId)) throw new AppError("VALIDATION_FAILED");
   const id = documentId.toLowerCase();
   return runTenantQuery({ ...params, permission: "reversal.create" }, async (tx, m) => {
-    const head = await tx.execute<{ warehouse_id: string; kind: string; status: string }>(
-      sql`SELECT warehouse_id, kind, status FROM public.documents WHERE tenant_id = ${m.tenantId}::uuid AND id = ${id}::uuid`,
+    const head = await tx.execute<{ warehouse_id: string; kind: string; status: string; source_kind: string | null }>(
+      sql`SELECT warehouse_id, kind, status, source_kind FROM public.documents WHERE tenant_id = ${m.tenantId}::uuid AND id = ${id}::uuid`,
     );
     const h = head[0];
     if (h === undefined) throw new AppError("NOT_FOUND");
     await assertWarehouseVisible(tx, m, [h.warehouse_id]); // kapsam dışı belge varlık sızdırmaz
     if (h.status !== "POSTED" || !KINDS.has(h.kind)) throw documentState();
-    const rows = await tx.execute<{ id: string; line_no: number; base_quantity: string; reversed_quantity: string; available: string | null }>(
-      // Azalan boyut: STOCK_IN/STOCK_MOVE'da hedef boyut (durum: hedef ?? kaynak). STOCK_OUT'ta azalan boyut yok (satır serbest).
+    if (h.source_kind !== null) throw blocked("SOURCE_LINKED");
+    type Row = {
+      id: string; line_no: number; base_quantity: string; reversed_quantity: string; status_change: boolean;
+      dim_id: string | null; available: string | null; receiving_blocked: boolean;
+    };
+    const rows = await tx.execute<Row>(
+      // Azalan boyut: STOCK_IN/STOCK_MOVE'da hedef boyut (durum: hedef ?? kaynak). Artan boyut: STOCK_OUT/STOCK_MOVE'da kaynak; lokasyon/ürün ACTIVE değilse
+      // ya da seri başka yerde pozitifse geri yazılamaz (reverseDocument ile aynı kurallar, kilitsiz).
       sql`SELECT l.id, l.line_no, l.base_quantity::text AS base_quantity, l.reversed_quantity::text AS reversed_quantity,
-                 CASE WHEN ${h.kind} = 'STOCK_OUT' THEN NULL ELSE GREATEST(COALESCE(b.quantity - b.reserved_quantity, 0), 0)::text END AS available
+                 (l.target_stock_status IS NOT NULL AND l.target_stock_status <> l.stock_status) AS status_change,
+                 d.id AS dim_id,
+                 CASE WHEN ${h.kind} = 'STOCK_OUT' THEN NULL ELSE GREATEST(COALESCE(b.quantity - b.reserved_quantity, 0), 0)::text END AS available,
+                 (${h.kind} <> 'STOCK_IN' AND (
+                    EXISTS (SELECT 1 FROM public.locations sl WHERE sl.tenant_id = l.tenant_id AND sl.id = l.source_location_id AND sl.status <> 'ACTIVE')
+                    OR EXISTS (SELECT 1 FROM public.items it WHERE it.tenant_id = l.tenant_id AND it.id = l.item_id AND it.status <> 'ACTIVE')
+                    OR (l.serial_id IS NOT NULL AND ${h.kind} = 'STOCK_OUT' AND EXISTS (
+                         SELECT 1 FROM public.stock_balances sb JOIN public.stock_dimensions sd ON sd.tenant_id = sb.tenant_id AND sd.id = sb.stock_dimension_id
+                          WHERE sb.tenant_id = l.tenant_id AND sd.serial_id = l.serial_id AND sb.quantity > 0))
+                 )) AS receiving_blocked
             FROM public.document_lines l
             LEFT JOIN public.stock_dimensions d ON d.tenant_id = l.tenant_id AND d.item_id = l.item_id AND d.location_id = l.target_location_id
                  AND d.lot_id IS NOT DISTINCT FROM l.lot_id AND d.serial_id IS NOT DISTINCT FROM l.serial_id
@@ -408,9 +441,16 @@ export async function getReversalCapacity(params: Omit<StockDocCallParams, "clie
             LEFT JOIN public.stock_balances b ON b.tenant_id = d.tenant_id AND b.stock_dimension_id = d.id
            WHERE l.tenant_id = ${m.tenantId}::uuid AND l.document_id = ${id}::uuid ORDER BY l.line_no`,
     );
+    const left = new Map<string, bigint>(); // azalan boyut → kalan kullanılabilir (satır sırasıyla tüketilir)
     return rows.map((r) => {
       const remaining = remainingMicro({ baseQuantity: r.base_quantity, reversedQuantity: r.reversed_quantity });
-      const max = r.available === null ? remaining : (() => { const a = toMicro(r.available); return a < remaining ? a : remaining; })();
+      let max = remaining;
+      if (r.status_change || r.receiving_blocked) max = 0n;
+      else if (r.available !== null && r.dim_id !== null) {
+        const avail = left.get(r.dim_id) ?? toMicro(r.available);
+        max = avail < remaining ? avail : remaining;
+        left.set(r.dim_id, avail - max);
+      } else if (r.available !== null) max = 0n; // azalan boyut yok = hiç stok yok
       return {
         lineId: r.id,
         lineNo: Number(r.line_no),
@@ -418,6 +458,7 @@ export async function getReversalCapacity(params: Omit<StockDocCallParams, "clie
         reversedQuantity: r.reversed_quantity,
         remaining: fromMicro(remaining),
         maxReversible: fromMicro(max),
+        estimated: true as const,
       };
     });
   });
@@ -425,11 +466,11 @@ export async function getReversalCapacity(params: Omit<StockDocCallParams, "clie
 
 // --- yardımcılar ---------------------------------------------------------------------------------------------------------------
 
-/** Ters miktar ürünün ondalık ölçeğine uymalı (örn. ölçek 0 ürünü 0,5 ters çevrilemez; A-87). */
-async function assertItemScale(tx: AccessTx, tenantId: string, selection: readonly SelectedLine[]): Promise<void> {
+/** Ters miktar ürünün ondalık ölçeğine uymalı (örn. ölçek 0 ürünü 0,5 ters çevrilemez; A-87). Dönen: ürün → temel birim (ters satır miktarı için). */
+async function assertItemScale(tx: AccessTx, tenantId: string, selection: readonly SelectedLine[]): Promise<Map<string, string>> {
   const ids = [...new Set(selection.map((s) => s.line.itemId.toLowerCase()))];
-  const rows = await tx.execute<{ id: string; quantity_scale: number }>(
-    sql`SELECT id, quantity_scale FROM public.items WHERE tenant_id = ${tenantId}::uuid AND id = ANY(${pgUuidArray(ids)}::uuid[])`,
+  const rows = await tx.execute<{ id: string; quantity_scale: number; base_unit_id: string }>(
+    sql`SELECT id, quantity_scale, base_unit_id FROM public.items WHERE tenant_id = ${tenantId}::uuid AND id = ANY(${pgUuidArray(ids)}::uuid[])`,
   );
   const scale = new Map(rows.map((r) => [r.id.toLowerCase(), Number(r.quantity_scale)]));
   for (const s of selection) {
@@ -437,6 +478,15 @@ async function assertItemScale(tx: AccessTx, tenantId: string, selection: readon
     if (sc === undefined) throw new AppError("NOT_FOUND");
     if (s.micro % 10n ** BigInt(6 - sc) !== 0n) throw new AppError("VALIDATION_FAILED", { detail: "QUANTITY_SCALE" });
   }
+  return new Map(rows.map((r) => [r.id.toLowerCase(), r.base_unit_id]));
+}
+
+async function readSourceKind(tx: AccessTx, tenantId: string, documentId: string): Promise<string | null> {
+  const rows = await tx.execute<{ source_kind: string | null }>(
+    sql`SELECT source_kind FROM public.documents WHERE tenant_id = ${tenantId}::uuid AND id = ${documentId}::uuid`,
+  );
+  if (rows[0] === undefined) throw new AppError("NOT_FOUND");
+  return rows[0].source_kind;
 }
 
 /** Tenant saat diliminde bugün (A-71: iş tarihi bugünden ileri olamaz; ters kayıt bugünün tarihiyle yazılır). */
@@ -457,51 +507,73 @@ async function systemTypeVersionId(tx: AccessTx): Promise<string> {
 }
 
 /**
- * REVERSAL belgesinin satırları: asıl satırın tersi yönde (kaynak ↔ hedef). Miktar temel birimden asıl birime çevrilip yuvarlanır (A-224-2: `base_quantity`
- * yetkilidir, `quantity` gösterim değeridir); tam satır ters çevriliyorsa asıl miktar aynen kopyalanır. Satır kimliği asıl satıra eşlenir (defter FK'si).
+ * Ters satır miktarı (A-224-8, I-09: `base = round(quantity × katsayı, 6)` korunur, değer uydurulmaz): tam satırda asıl miktar/birim/katsayı aynen kopyalanır;
+ * kısmi satırda asıl birimde `quantity = round(base/katsayı)` geri çarpımda tam `base`'i veriyorsa o birim, vermiyorsa ürünün temel birimi (katsayı 1,
+ * miktar = base). Saf.
  */
-async function insertReversalLines(tx: AccessTx, tenantId: string, reversalId: string, selection: readonly SelectedLine[]): Promise<Map<string, string>> {
+export function reversalLineQuantity(
+  line: Pick<SourceLine, "quantity" | "conversionFactor" | "baseQuantity" | "unitId">,
+  micro: bigint,
+  baseUnitId: string,
+): { readonly unitId: string; readonly quantity: string; readonly conversionFactor: string } {
+  if (micro === toMicro(line.baseQuantity)) return { unitId: line.unitId, quantity: line.quantity, conversionFactor: line.conversionFactor };
+  const cf = toMicro(line.conversionFactor);
+  const q = (micro * MICRO + cf / 2n) / cf;
+  if (q > 0n && (q * cf + MICRO / 2n) / MICRO === micro) return { unitId: line.unitId, quantity: fromMicro(q), conversionFactor: line.conversionFactor };
+  return { unitId: baseUnitId, quantity: fromMicro(micro), conversionFactor: fromMicro(MICRO) };
+}
+
+/**
+ * REVERSAL belgesinin satırları: asıl satırın tersi yönde (kaynak ↔ hedef), `source_line_id` = asıl satır (M-2, A-224-7). Durum değiştiren taşıma buraya
+ * gelmez (A-224-3), bu yüzden `stock_status` iki uçta aynıdır. Satır kimliği asıl satıra eşlenir (defter FK'si).
+ */
+async function insertReversalLines(
+  tx: AccessTx,
+  tenantId: string,
+  reversalId: string,
+  selection: readonly SelectedLine[],
+  baseUnitByItem: ReadonlyMap<string, string>,
+): Promise<Map<string, string>> {
   const idBySource = new Map<string, string>();
   const rows = selection.map((s, i) => {
     const id = randomUUID();
     idBySource.set(s.line.lineId.toLowerCase(), id);
-    const base = toMicro(s.line.baseQuantity);
-    const cf = toMicro(s.line.conversionFactor);
-    let q = s.micro === base ? toMicro(s.line.quantity) : (s.micro * MICRO + cf / 2n) / cf;
-    if (q <= 0n) q = 1n;
+    const baseUnit = baseUnitByItem.get(s.line.itemId.toLowerCase());
+    if (baseUnit === undefined) throw new AppError("INTERNAL");
+    const qn = reversalLineQuantity(s.line, s.micro, baseUnit);
     return {
       id,
       line_no: i + 1,
       item_id: s.line.itemId,
-      unit_id: s.line.unitId,
-      quantity: fromMicro(q),
-      conversion_factor: s.line.conversionFactor,
+      unit_id: qn.unitId,
+      quantity: qn.quantity,
+      conversion_factor: qn.conversionFactor,
       base_quantity: fromMicro(s.micro),
       source_location_id: s.line.targetLocationId,
       target_location_id: s.line.sourceLocationId,
       lot_id: s.line.lotId,
       serial_id: s.line.serialId,
-      // A-224-3: ters belge satırının durumu = geri alınan hareketin son durumu; karşı boyut defterdedir.
       stock_status: s.line.targetStatus,
       inventory_owner_id: s.line.inventoryOwnerId,
       handling_unit_id: s.line.handlingUnitId,
+      source_line_id: s.line.lineId,
     };
   });
   await tx.execute(
     sql`INSERT INTO public.document_lines
           (tenant_id, id, document_id, line_no, item_id, unit_id, quantity, conversion_factor, base_quantity,
-           source_location_id, target_location_id, lot_id, serial_id, stock_status, inventory_owner_id, handling_unit_id)
+           source_location_id, target_location_id, lot_id, serial_id, stock_status, inventory_owner_id, handling_unit_id, source_line_id)
         SELECT ${tenantId}::uuid, w.id, ${reversalId}::uuid, w.line_no, w.item_id, w.unit_id, w.quantity, w.conversion_factor, w.base_quantity,
-               w.source_location_id, w.target_location_id, w.lot_id, w.serial_id, w.stock_status, w.inventory_owner_id, w.handling_unit_id
+               w.source_location_id, w.target_location_id, w.lot_id, w.serial_id, w.stock_status, w.inventory_owner_id, w.handling_unit_id, w.source_line_id
           FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb)
                AS w(id uuid, line_no int, item_id uuid, unit_id uuid, quantity numeric, conversion_factor numeric, base_quantity numeric,
-                    source_location_id uuid, target_location_id uuid, lot_id uuid, serial_id uuid, stock_status text, inventory_owner_id uuid, handling_unit_id uuid)
+                    source_location_id uuid, target_location_id uuid, lot_id uuid, serial_id uuid, stock_status text, inventory_owner_id uuid, handling_unit_id uuid, source_line_id uuid)
          ORDER BY w.line_no`,
   );
   return idBySource;
 }
 
-/** Defter satırları (açık sütun listesi; nedeni `REVERSAL`). Defter satırı REVERSAL belgesinin satırına bağlanır; asıl satıra bağlantı `reversal_of_document_id` + satır sırasıdır. */
+/** Defter satırları (açık sütun listesi; nedeni `REVERSAL`). Defter satırı REVERSAL belgesinin satırına bağlanır (FK); o satır `source_line_id` ile asıl satıra bağlıdır. */
 async function writeLedger(
   tx: AccessTx,
   tenantId: string,

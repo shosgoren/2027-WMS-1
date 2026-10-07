@@ -45,6 +45,8 @@ export const ERROR_DETAILS = [
   "STOCK_RESERVED",
   "SERIAL_IN_USE",
   "TOO_MANY_LINES",
+  "SOURCE_LINKED",
+  "STATUS_CHANGE",
 ] as const;
 export type ErrorDetail = (typeof ERROR_DETAILS)[number];
 
@@ -71,6 +73,8 @@ export const ERROR_DETAIL_CODE: Readonly<Record<ErrorDetail, ErrorCode>> = {
   STOCK_RESERVED: "REVERSAL_BLOCKED",
   SERIAL_IN_USE: "REVERSAL_BLOCKED",
   TOO_MANY_LINES: "VALIDATION_FAILED",
+  SOURCE_LINKED: "REVERSAL_BLOCKED",
+  STATUS_CHANGE: "REVERSAL_BLOCKED",
 };
 
 export const HTTP_STATUS: Readonly<Record<ErrorCode, number>> = {

@@ -17,6 +17,12 @@ import {
   type ReverseDocumentInput,
   type StockDocCallParams,
 } from "../../../packages/domain/src/stock/index.ts";
+import {
+  approveQuality,
+  createInboundReceipt,
+  openInboundReceipt,
+  receiveGoods,
+} from "../../../packages/domain/src/operations/index.ts";
 import { newRegistry, seedWorld, type TenantWorld } from "../fixtures/tenants.ts";
 import { readIntEnv } from "../harness/env.ts";
 
@@ -173,7 +179,7 @@ describe("Senaryo C (16-stock-effects) — AC-06", () => {
 
     // Kullanıcıya "kalan X; en çok X": kapasite okuması
     const cap = await getReversalCapacity(ownerP(null), g1.id);
-    expect(cap).toEqual([{ lineId: g1Line, lineNo: 1, baseQuantity: "100.000000", reversedQuantity: "0.000000", remaining: "100.000000", maxReversible: "40.000000" }]);
+    expect(cap).toEqual([{ lineId: g1Line, lineNo: 1, baseQuantity: "100.000000", reversedQuantity: "0.000000", remaining: "100.000000", maxReversible: "40.000000", estimated: true }]);
 
     // Satır 1: tamamını ters çevir → ret, hiçbir satır yazılmaz
     const before = await reversalLedgerCount(x);
@@ -286,7 +292,7 @@ describe("hareket türleri", () => {
     expect(await lineRow(out.lineIds[0] as string)).toMatchObject({ reversal_status: "FULL" });
   });
 
-  it("STOCK_MOVE ters kaydı iki boyutu birlikte geri alır (lokasyon ve durum değişimi)", async () => {
+  it("STOCK_MOVE ters kaydı iki boyutu birlikte geri alır (lokasyon); durum değiştiren taşıma reddedilir", async () => {
     const x = await mkItem();
     const a = await mkLoc();
     const b = await mkLoc();
@@ -301,12 +307,17 @@ describe("hareket türleri", () => {
       { quantity: "-7.000000", reason: "REVERSAL" },
       { quantity: "7.000000", reason: "REVERSAL" },
     ]);
-    // durum değiştiren taşıma (AVAILABLE → QUARANTINE)
+    // durum değiştiren taşıma (AVAILABLE → QUARANTINE) ters çevrilmez (M-1, A-224-3): hiçbir şey yazılmaz
     const sm = await mkPosted("STOCK_MOVE", [ln(x, { sourceLocationId: a, targetLocationId: a, targetStockStatus: "QUARANTINE", ...qty("5") })]);
     expect(await bal({ item: x, loc: a, status: "QUARANTINE" })).toBe("5.000000");
-    await reverse(sm.id, "ALL");
-    expect(await bal({ item: x, loc: a, status: "QUARANTINE" })).toBe("0.000000");
-    expect(await bal({ item: x, loc: a })).toBe("10.000000");
+    const before = await reversalLedgerCount(x);
+    expect(codeOf(await failure(reverse(sm.id, "ALL")))).toBe("REVERSAL_BLOCKED/STATUS_CHANGE");
+    expect(codeOf(await failure(reverse(sm.id, [{ lineId: sm.lineIds[0] as string, quantity: "1" }])))).toBe("REVERSAL_BLOCKED/STATUS_CHANGE");
+    expect((await getReversalCapacity(ownerP(null), sm.id))[0]?.maxReversible).toBe("0.000000");
+    expect(await bal({ item: x, loc: a, status: "QUARANTINE" })).toBe("5.000000");
+    expect(await bal({ item: x, loc: a })).toBe("5.000000");
+    expect(await reversalLedgerCount(x)).toBe(before);
+    expect(await reversalDocsOf(sm.id)).toEqual([]);
     expect(await ledgerMatchesBalances(x)).toBe(true);
   });
 
@@ -357,6 +368,7 @@ describe("bağımlı işlem denetimi: rezervasyon ve seri", () => {
     const out = await mkPosted("STOCK_OUT", [ln(x, { sourceLocationId: b, serialId: s, ...qty("1") })]);
     await mkPosted("STOCK_IN", [ln(x, { targetLocationId: c, serialId: s, ...qty("1") })]); // aynı seri yeniden girdi
     expect(codeOf(await failure(reverse(out.id, "ALL")))).toBe("REVERSAL_BLOCKED/SERIAL_IN_USE");
+    expect((await getReversalCapacity(ownerP(null), out.id))[0]?.maxReversible).toBe("0.000000"); // m-3: seri çakışması hesaba katılır
     expect(await bal({ item: x, loc: b, serial: s })).toBe("0.000000");
     expect(await ledgerMatchesBalances(x)).toBe(true);
   });
@@ -368,6 +380,7 @@ describe("bağımlı işlem denetimi: rezervasyon ve seri", () => {
     const out = await mkPosted("STOCK_OUT", [ln(x, { sourceLocationId: loc, ...qty("5") })]);
     await q("UPDATE public.locations SET status = 'ARCHIVED', archived_at = now() WHERE id = $1", [loc]);
     expect(codeOf(await failure(reverse(out.id, "ALL")))).toBe("VALIDATION_FAILED/IN_USE");
+    expect((await getReversalCapacity(ownerP(null), out.id))[0]).toMatchObject({ maxReversible: "0.000000", estimated: true }); // m-3: arşiv hesaba katılır
     expect(await bal({ item: x, loc })).toBe("0.000000");
   });
 });
@@ -426,6 +439,160 @@ describe("A-224-1: 200 satır üstü", () => {
     const ids = (await q<{ id: string }>("SELECT id FROM public.document_lines WHERE document_id = $1 ORDER BY line_no", [docId])).map((r) => r.id);
     expect(codeOf(await failure(reverse(docId, ids.map((lineId) => ({ lineId, quantity: "1" })))))).toBe("VALIDATION_FAILED/TOO_MANY_LINES");
     expect(await reversalDocsOf(docId)).toEqual([]);
+  });
+});
+
+/** Bakım yolu simülasyonu: süper kullanıcı, ENABLE ORIGIN tetikleyicilerini atlayarak yazar (yalnız fikstür: belgeyi saha kaynağına bağlar). */
+async function bypassGuardsUpdate(text: string, params: unknown[]): Promise<void> {
+  await adm.query("BEGIN");
+  try {
+    await adm.query("SET LOCAL session_replication_role = replica");
+    await adm.query(text, params);
+    await adm.query("COMMIT");
+  } catch (e) {
+    await adm.query("ROLLBACK").catch(() => undefined);
+    throw e;
+  }
+}
+
+describe("B-1: saha akışından gelen belge (source_kind dolu) ters çevrilmez", () => {
+  it.each(["INBOUND_RECEIPT", "SALES_ORDER", "CUSTOMER_RETURN", "COUNT_SESSION", "TASK"])("%s kaynaklı belge → REVERSAL_BLOCKED/SOURCE_LINKED, hiçbir şey yazılmaz", async (kind) => {
+    const x = await mkItem();
+    const loc = await mkLoc();
+    const d = await mkApproved("STOCK_IN", [ln(x, { targetLocationId: loc, ...qty("10") })]);
+    await bypassGuardsUpdate("UPDATE public.documents SET source_kind = $2, source_id = $3 WHERE id = $1", [d.id, kind, uuid()]);
+    expect((await post(d)).status).toBe("POSTED");
+    const e = await failure(reverse(d.id, "ALL"));
+    expect(codeOf(e)).toBe("REVERSAL_BLOCKED/SOURCE_LINKED");
+    expect(e.httpStatus).toBe(409);
+    expect(codeOf(await failure(reverse(d.id, [{ lineId: d.lineIds[0] as string, quantity: "1" }])))).toBe("REVERSAL_BLOCKED/SOURCE_LINKED");
+    expect(codeOf(await failure(getReversalCapacity(ownerP(null), d.id)))).toBe("REVERSAL_BLOCKED/SOURCE_LINKED");
+    expect(await bal({ item: x, loc })).toBe("10.000000");
+    expect(await reversalDocsOf(d.id)).toEqual([]);
+    expect(await lineRow(d.lineIds[0] as string)).toMatchObject({ reversed_quantity: "0.000000", reversal_status: "NONE" });
+    expect(await auditCount(d.id)).toBe(0);
+  });
+
+  it("GERÇEK kabul + kalite onayı: kabul ve onay belgeleri reddedilir; bekleyen karantina, bakiyeler, kabul belgesi ve görevler değişmez", async () => {
+    await q("UPDATE public.tenant_settings SET receiving_qc_enabled = true WHERE tenant_id = $1", [A.tenantId]);
+    try {
+      const x = await mkItem();
+      const kabul = await mkLoc("RECEIVING");
+      const c = await createInboundReceipt(ownerP(), {
+        warehouseId: A.warehouseId,
+        supplierRef: "T224-TED",
+        lines: [{ itemId: x, unitId: A.unitId, expectedQuantity: "10" }],
+      });
+      const receiptId = c.documentId as string;
+      await openInboundReceipt(ownerP(), { receiptId, expectedVersion: 1 });
+      const lineId = (await q<{ id: string }>("SELECT id FROM public.inbound_receipt_lines WHERE receipt_id = $1", [receiptId]))[0]?.id as string;
+      const rcv = await receiveGoods(pickerP(), { receiptId, lines: [{ lineId, received: "10", locationId: kabul }] });
+      const qc = await approveQuality(ownerP(), { receiptId, lines: [{ lineId, locationId: kabul, quantity: "4" }] }); // 6 hâlâ bekliyor
+      expect(rcv.status).toBe("POSTED");
+      expect(qc.status).toBe("POSTED");
+
+      /** `pendingQuarantine` ile aynı formül (kabul girişleri − onay çıkışları, kabul satırı kırılımında), bağımsız SQL. */
+      const pending = async (): Promise<string> =>
+        (await q<{ p: string }>(
+          `SELECT COALESCE(sum(CASE WHEN d.kind = 'STOCK_IN' THEN dl.base_quantity ELSE -dl.base_quantity END), 0)::text AS p
+             FROM public.document_lines dl JOIN public.documents d ON d.tenant_id = dl.tenant_id AND d.id = dl.document_id
+            WHERE d.tenant_id = $1 AND d.status = 'POSTED' AND dl.source_line_id = $2 AND dl.stock_status = 'QUARANTINE'
+              AND (d.kind = 'STOCK_IN' OR (d.kind = 'STOCK_MOVE' AND dl.target_stock_status = 'AVAILABLE'))`,
+          [A.tenantId, lineId]))[0]?.p as string;
+      const snapshot = async () => ({
+        pending: await pending(),
+        kar: await bal({ item: x, loc: kabul, status: "QUARANTINE" }),
+        kul: await bal({ item: x, loc: kabul }),
+        receipt: (await q("SELECT status, version FROM public.inbound_receipts WHERE id = $1", [receiptId]))[0],
+        receiptLine: (await q("SELECT received_quantity::text AS r, damaged_quantity::text AS d FROM public.inbound_receipt_lines WHERE id = $1", [lineId]))[0],
+        tasks: (await q<{ n: string }>("SELECT count(*)::text AS n FROM public.warehouse_tasks WHERE tenant_id = $1 AND source_kind = 'INBOUND_RECEIPT' AND source_id = $2", [A.tenantId, receiptId]))[0]?.n,
+        ledger: (await q<{ n: string }>("SELECT count(*)::text AS n FROM public.stock_ledger l JOIN public.stock_dimensions d ON d.tenant_id=l.tenant_id AND d.id=l.stock_dimension_id WHERE l.tenant_id=$1 AND d.item_id=$2", [A.tenantId, x]))[0]?.n,
+      });
+      const before = await snapshot();
+      expect(before).toMatchObject({ pending: "6.000000", kar: "6.000000", kul: "4.000000" });
+
+      for (const docId of [rcv.documentId as string, qc.documentId as string]) {
+        expect(codeOf(await failure(reverse(docId, "ALL")))).toBe("REVERSAL_BLOCKED/SOURCE_LINKED");
+        expect(await reversalDocsOf(docId)).toEqual([]);
+      }
+      expect(await snapshot()).toEqual(before);
+      // sayaç sağlam: kalan 6 hâlâ onaylanabilir, fazlası onaylanamaz
+      const rest = await approveQuality(ownerP(), { receiptId });
+      expect(rest.status).toBe("POSTED");
+      expect(await pending()).toBe("0.000000");
+      expect(await bal({ item: x, loc: kabul })).toBe("10.000000");
+    } finally {
+      await q("UPDATE public.tenant_settings SET receiving_qc_enabled = false WHERE tenant_id = $1", [A.tenantId]);
+    }
+  });
+});
+
+describe("M-2 / m-2 / m-3: satır bağı, denetim, I-09 miktarı, kapasite", () => {
+  it("ters satır asıl satıra source_line_id ile bağlıdır; audit asıl satır kimlikleri ve miktarlarını taşır", async () => {
+    const x = await mkItem();
+    const loc = await mkLoc();
+    const g = await mkPosted("STOCK_IN", [ln(x, { targetLocationId: loc, ...qty("10") }), ln(x, { targetLocationId: loc, ...qty("6") })]);
+    const r = await reverse(g.id, [{ lineId: g.lineIds[0] as string, quantity: "3" }, { lineId: g.lineIds[1] as string, quantity: "6" }]);
+    const rl = await q<{ source_line_id: string; base_quantity: string }>("SELECT source_line_id, base_quantity::text AS base_quantity FROM public.document_lines WHERE document_id = $1 ORDER BY line_no", [r.documentId]);
+    expect(rl).toEqual([
+      { source_line_id: g.lineIds[0], base_quantity: "3.000000" },
+      { source_line_id: g.lineIds[1], base_quantity: "6.000000" },
+    ]);
+    const cs = (await q<{ change_summary: { lines?: { sourceLineId: string; quantity: string }[] } }>(
+      "SELECT change_summary FROM public.audit_logs WHERE tenant_id=$1 AND action='stock_document.reversed' AND entity_id=$2", [A.tenantId, g.id]))[0]?.change_summary;
+    expect(cs?.lines).toEqual([
+      { sourceLineId: g.lineIds[0], quantity: "3.000000" },
+      { sourceLineId: g.lineIds[1], quantity: "6.000000" },
+    ]);
+  });
+
+  it("çok satırlı belge (70 satır): audit boyut sınırını aşmaz (yalnız sayı), tam bağ ters belge satırlarındadır", async () => {
+    const x = await mkItem();
+    const loc = await mkLoc();
+    const g = await mkPosted("STOCK_IN", Array.from({ length: 70 }, () => ln(x, { targetLocationId: loc, ...qty("1") })));
+    const r = await reverse(g.id, "ALL");
+    expect(r.lines).toHaveLength(70);
+    const cs = (await q<{ change_summary: Record<string, unknown> }>("SELECT change_summary FROM public.audit_logs WHERE tenant_id=$1 AND action='stock_document.reversed' AND entity_id=$2", [A.tenantId, g.id]))[0]?.change_summary;
+    expect(cs).toMatchObject({ lineCount: 70, linesOmitted: 70 });
+    expect(cs).not.toHaveProperty("lines");
+    const linked = await q<{ n: string }>("SELECT count(DISTINCT source_line_id)::text AS n FROM public.document_lines WHERE document_id = $1 AND source_line_id IS NOT NULL", [r.documentId]);
+    expect(linked[0]?.n).toBe("70");
+    expect(await bal({ item: x, loc })).toBe("0.000000");
+  });
+
+  it("I-09: kısmi satırda tam bölünüyorsa asıl birim; bölünmüyorsa ürünün temel birimi ve katsayı 1 (0,000001'e zorlama yok)", async () => {
+    const x = await mkItem();
+    const loc = await mkLoc();
+    const g = await mkPosted("STOCK_IN", [ln(x, { targetLocationId: loc, unitId: A.boxUnitId, quantity: "34", conversionFactor: "3", baseQuantity: "102" })]);
+    const lid = g.lineIds[0] as string;
+    const rows = async (docId: unknown) =>
+      q<{ unit_id: string; quantity: string; conversion_factor: string; base_quantity: string }>(
+        "SELECT unit_id, quantity::text AS quantity, conversion_factor::text AS conversion_factor, base_quantity::text AS base_quantity FROM public.document_lines WHERE document_id = $1", [docId]);
+    const a = await reverse(g.id, [{ lineId: lid, quantity: "51" }]); // 51/3 = 17 koli (tam)
+    expect(await rows(a.documentId)).toEqual([{ unit_id: A.boxUnitId, quantity: "17.000000", conversion_factor: "3.000000", base_quantity: "51.000000" }]);
+    const b = await reverse(g.id, [{ lineId: lid, quantity: "10" }]); // 10/3 = 3,333333 → geri çarpım 9,999999 ≠ 10 → temel birim
+    expect(await rows(b.documentId)).toEqual([{ unit_id: A.unitId, quantity: "10.000000", conversion_factor: "1.000000", base_quantity: "10.000000" }]);
+    const c = await reverse(g.id, "ALL"); // kalan 41: 41/3 tam değil → temel birim
+    expect(await rows(c.documentId)).toEqual([{ unit_id: A.unitId, quantity: "41.000000", conversion_factor: "1.000000", base_quantity: "41.000000" }]);
+    expect(await lineRow(lid)).toMatchObject({ reversed_quantity: "102.000000", reversal_status: "FULL" });
+    // tüm ters satırlarda base = round(quantity × katsayı, 6) (I-09)
+    const bad = await q<{ n: string }>(
+      `SELECT count(*)::text AS n FROM public.document_lines l JOIN public.documents d ON d.tenant_id = l.tenant_id AND d.id = l.document_id
+        WHERE d.reversal_of_document_id = $1 AND round(l.quantity * l.conversion_factor, 6) <> l.base_quantity`, [g.id]);
+    expect(bad[0]?.n).toBe("0");
+  });
+
+  it("kapasite aynı boyutu paylaşan satırları birlikte hesaplar (toplam kullanılabilir iki satıra tekrar sayılmaz)", async () => {
+    const x = await mkItem();
+    const loc = await mkLoc();
+    const g = await mkPosted("STOCK_IN", [ln(x, { targetLocationId: loc, ...qty("5") }), ln(x, { targetLocationId: loc, ...qty("5") })]);
+    await mkPosted("STOCK_OUT", [ln(x, { sourceLocationId: loc, ...qty("6") })]); // bakiye 4
+    const cap = await getReversalCapacity(ownerP(null), g.id);
+    expect(cap.map((c) => c.maxReversible)).toEqual(["4.000000", "0.000000"]);
+    expect(cap.every((c) => c.estimated)).toBe(true);
+    expect(codeOf(await failure(reverse(g.id, "ALL")))).toBe("REVERSAL_BLOCKED/STOCK_USED");
+    await reverse(g.id, [{ lineId: g.lineIds[0] as string, quantity: "4" }]); // tahmin doğrulanır
+    expect(await bal({ item: x, loc })).toBe("0.000000");
   });
 });
 
