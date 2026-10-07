@@ -13,6 +13,9 @@ const baseURL = remoteBaseURL || `https://localhost:${port}`;
 export default defineConfig({
   testDir: "tests/e2e",
   testMatch: "**/*.spec.ts",
+  // Staging koşusunda (E2E_BASE_URL) doğrudan yerel veritabanı gerektiren fikstür spec'i çalıştırılmaz: zzz-receiving, migration rolüyle yerel compose
+  // DB'ye SQL fikstürü yazar (T-313); uzak hedefte böyle bir bağlantı yoktur. Yerel koşuda hariç tutma yoktur.
+  testIgnore: process.env.E2E_BASE_URL?.trim() ? ["**/zzz-receiving.spec.ts"] : [],
   globalSetup: "./tests/e2e/global-setup.ts",
   outputDir: ".artifacts/e2e/test-results",
   reporter: [["list"], ["html", { outputFolder: ".artifacts/e2e/report", open: "never" }]],

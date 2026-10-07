@@ -88,7 +88,7 @@ async function db<T = Row>(text: string, params: unknown[] = [], url: string | u
 async function seed(): Promise<Fx> {
   // Bu spec yerel yığına (compose DB + migration rolü) SQL fikstürü yazar; E2E_BASE_URL (staging) koşusunda uygulanamaz. `test.skip` guard tarafından
   // yasak (G-11) olduğundan sessizce atlanmaz, açık hatayla durur: staging koşusu bu dosyayı hariç tutmalıdır (örn. `--grep-invert`).
-  if (process.env.E2E_BASE_URL?.trim()) throw new Error("e2e: zzz-receiving yerel yığın ister (E2E_BASE_URL ile staging'de fikstür yazılamaz); bu dosyayı staging koşusundan hariç tut");
+  if (process.env.E2E_BASE_URL?.trim()) throw new Error("e2e: zzz-receiving yerel yığın ister (E2E_BASE_URL ile staging'de fikstür yazılamaz); bu dosyayı staging koşusundan hariç tut (playwright.config.ts testIgnore bunu E2E_BASE_URL varken yapar)");
   const n = names(randomUUID().replaceAll("-", "").slice(0, 6).toUpperCase());
   run = n.run;
   CODES = n.codes;

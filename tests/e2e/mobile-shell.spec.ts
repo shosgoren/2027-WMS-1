@@ -381,7 +381,9 @@ test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş al
       expect(Math.max(...ws) - Math.min(...ws), `${where}: genişlik farkı`).toBeLessThanOrEqual(2);
       expect(Math.max(...hs) - Math.min(...hs), `${where}: yükseklik farkı`).toBeLessThanOrEqual(2);
       expect(Math.min(...hs), `${where}: en küçük döşeme yüksekliği`).toBeGreaterThanOrEqual(88);
-      expect(Math.max(...hs), `${where}: en büyük döşeme yüksekliği`).toBeLessThanOrEqual(140);
+      // Tek sütun ≤ 140 px; 2 sütunda döşeme en çok kare: yükseklik ≤ genişlik (DESIGN_REVIEW §7.4.1; alt piksel toleransı 0.5).
+      if (twoCol) expect(Math.max(...hs), `${where}: 2 sütun döşeme en çok kare (yükseklik ≤ genişlik ${Math.min(...ws)})`).toBeLessThanOrEqual(Math.min(...ws) + 0.5);
+      else expect(Math.max(...hs), `${where}: en büyük döşeme yüksekliği`).toBeLessThanOrEqual(140);
 
       // Başparmak bölgesi: ızgara alt sekmeye yaslı (<= 16 px), boş dikey alan <= %15, ilk iş en alt satırda.
       const gridBottom = Math.max(...L.tiles.map((t) => t.y + t.h));
@@ -396,7 +398,7 @@ test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş al
       const admin = [idx("/audit"), idx("/members"), idx("/settings")].filter((i) => i >= 0);
       expect(field.length, `${where}: saha işleri görünür`).toBe(2);
       if (admin.length > 0) expect(Math.max(...field), `${where}: saha işleri yönetimden önce`).toBeLessThan(Math.min(...admin));
-      expect(hrefs[0], `${where}: ilk döşeme saha işi`).toMatch(/\/(warehouses|items)$/);
+      expect(hrefs[0], `${where}: ilk döşeme saha işi`).toMatch(/\/(warehouses|items|field\/receive)$/); // T-313: "Depoya mal geldi" (saha işi, TASKS sırasında ilk) etkinleşti; niyet aynı: ilk döşeme saha işi
 
       // Kategori rengi yalnız ikon dairesinde: döşeme zemini beyaz (yüzey), ikon dairesi zemini döşemeden farklı.
       const tints = await page.evaluate<string[]>(`[...document.querySelectorAll('.task-grid > .task-item > [data-state] .tile-badge')].map((b) => getComputedStyle(b.closest('[data-state]')).backgroundColor + '|' + getComputedStyle(b).backgroundColor)`);

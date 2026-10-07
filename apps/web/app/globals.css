@@ -219,13 +219,25 @@ html {
      en üstteki son döşeme tam genişlik (`--col: 1 / -1`). Döşeme aynı biçemde (ikon dairesi + başlık), açıklama ve şevron gizli. */
   .task-grid.task-grid-2col {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    grid-template-rows: auto repeat(var(--rows), minmax(4.5rem, 8.75rem));
+    /* Satır tavanı = döşeme genişliği (en çok kare, DESIGN_REVIEW §7.4.1): (görünüm genişliği − 1.5rem kenar boşluğu (phone:px-3 × 2) − 0.5rem aralık) / 2. */
+    grid-template-rows: auto repeat(var(--rows), minmax(4.5rem, calc((100dvw - 2rem) / 2)));
     align-content: end;
     min-height: 0;
   }
 
+  /* İkon dairesi ve başlık döşemeye göre ölçeklenir (döşeme genişliği ≈ 45 dvw). */
+  .task-grid.task-grid-2col .tile-badge {
+    width: clamp(3rem, min(17dvw, 10dvh), 5.5rem);
+    height: clamp(3rem, min(17dvw, 10dvh), 5.5rem);
+  }
+
   .task-grid.task-grid-2col > .top-rows {
     grid-column: 1 / -1;
+  }
+
+  /* 2 sütunda üst düğme biraz daha yüksek (56 px, başparmak için rahat); boşluk oranı hesabında düğme alanı içeriktir. */
+  .task-grid.task-grid-2col > .top-rows > button {
+    min-height: 3.5rem;
   }
 
   .task-grid.task-grid-2col > .task-item {
@@ -235,9 +247,9 @@ html {
   .task-grid.task-grid-2col .task-tile {
     flex-direction: column;
     align-items: flex-start;
-    justify-content: flex-start;
+    justify-content: space-between;
     gap: 0.5rem;
-    padding: 0.625rem 0.75rem;
+    padding: 0.75rem 0.75rem 0.625rem;
   }
 
   .task-grid.task-grid-2col .tile-body {
@@ -246,6 +258,8 @@ html {
   }
 
   .task-grid.task-grid-2col .tile-title {
+    font-size: clamp(1.0625rem, min(4.8dvw, 2.7dvh), 1.5rem);
+    line-height: 1.15;
     display: -webkit-box;
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 2;
