@@ -72,7 +72,7 @@ REVOKE ALL ON TABLE public.warehouse_task_progress FROM PUBLIC;
 -- Yalnızca wms_app; kimlik sütunları (tenant_id, task_id, created_at) UPDATE listesinde yok.
 GRANT SELECT, DELETE ON public.warehouse_task_progress TO wms_app;
 GRANT INSERT (tenant_id, task_id, membership_id, task_version, step, location_id, item_id, quantity, save_client_key) ON public.warehouse_task_progress TO wms_app;
-GRANT UPDATE (step, location_id, item_id, quantity, save_client_key, updated_at) ON public.warehouse_task_progress TO wms_app;
+GRANT UPDATE (step, location_id, quantity, save_client_key, updated_at) ON public.warehouse_task_progress TO wms_app;
 
 -- Doğrulama: RLS, tek politika, wms_app yalnız DML, başka hiçbir rol/PUBLIC yetkisi yok.
 DO $verify$
