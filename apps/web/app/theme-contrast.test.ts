@@ -88,21 +88,17 @@ describe("palet kontrastı (palette.md §7)", () => {
   }
 });
 
-// --- T-270 (ADR-020 ek, kural 8): iş kategorisi renk ailesi ---
-// Döşeme zemini = açık `*-bg` (ya da `accent-soft`), ikon/başlık = aynı ailenin `*-ink`'i; ikon beyaz rozet (`surface`) üstünde de durur.
-// Metin (başlık, açıklama) ≥4,5:1 ve ikon ≥3:1: ikon çiftleri de 4,5:1 ile denetlenir (daha sıkı). Yeni `count-*` çifti `globals.css`
-// içindeki AYRI ikinci `@theme` bloğundan okunur (palette.md §2 tablosu 28 belirteçle sabit; tablo güncellemesi ADR-020 ekinde takip).
-const CATEGORY_PAIRS: ReadonlyArray<readonly [string, string, number]> = [
-  ["success-ink", "success-bg", T], ["success-ink", "surface", T], ["ink", "success-bg", T],
-  ["warning-ink", "warning-bg", T], ["warning-ink", "surface", T], ["ink", "warning-bg", T],
-  ["info-ink", "info-bg", T], ["info-ink", "surface", T], ["ink", "info-bg", T],
-  ["count-ink", "count-bg", T], ["count-ink", "surface", T], ["ink", "count-bg", T],
-  ["accent-ink", "accent-soft", T], ["accent-ink", "surface", T], ["ink", "accent-soft", T],
-  ["undo-ink", "undo-bg", T], ["undo-ink", "surface", T], ["ink", "undo-bg", T],
-  ["ink-muted", "locked-bg", T], ["ink", "surface", T],
-  ["success-ink", "success-bg", U], ["warning-ink", "warning-bg", U], ["info-ink", "info-bg", U],
-  ["count-ink", "count-bg", U], ["accent-ink", "accent-soft", U], ["undo-ink", "undo-bg", U], ["ink-muted", "locked-bg", U],
-];
+// --- T-270 (ADR-020 ek, kural 8): iş kategorisi renk tonları (`cat-*`, durum anlam renklerinden ayrı) ---
+// Döşeme beyaz (`surface`); renk yalnız ikon dairesinde: `cat-<ton>-ink` ikon/metin, `cat-<ton>-bg` daire zemini. İkon çifti de
+// 4,5:1 ile denetlenir (3:1 ikon eşiğinden sıkı). Belirteçler `globals.css` içindeki AYRI ikinci `@theme` bloğundan okunur
+// (palette.md §2 tablosu 28 belirteçle sabit; tablo güncellemesi ADR-020 ekinde takip).
+const CAT_HUES = ["green", "orange", "teal", "purple", "sky", "rose", "amber", "cyan", "indigo", "slate", "lilac"] as const;
+const CATEGORY_PAIRS: ReadonlyArray<readonly [string, string, number]> = CAT_HUES.flatMap((h) => [
+  [`cat-${h}-ink`, `cat-${h}-bg`, T] as const,
+  [`cat-${h}-ink`, `cat-${h}-bg`, U] as const,
+  [`cat-${h}-ink`, "surface", T] as const,
+  ["ink", `cat-${h}-bg`, T] as const,
+]);
 
 function secondThemeBlock(): string {
   const first = css.indexOf("@theme");
@@ -116,10 +112,25 @@ const categoryExtra = tokens(secondThemeBlock());
 const categoryFlow = new Map([...flow, ...categoryExtra]);
 const categoryCockpit = new Map([...cockpit, ...categoryExtra]);
 
-describe("iş kategorisi renk ailesi (T-270)", () => {
-  it("yeni belirteçler yalnız ikinci @theme bloğundadır ve count-ink/count-bg'dir", () => {
-    expect([...categoryExtra.keys()].sort()).toEqual(["count-bg", "count-ink"]);
-    expect(flow.has("count-ink")).toBe(false);
+describe("iş kategorisi renk tonları (T-270)", () => {
+  it("yeni belirteçler yalnız ikinci @theme bloğundadır: 11 ton x (bg, ink)", () => {
+    expect([...categoryExtra.keys()].sort()).toEqual(CAT_HUES.flatMap((h) => [`cat-${h}-bg`, `cat-${h}-ink`]).sort());
+    expect([...flow.keys()].some((k) => k.startsWith("cat-"))).toBe(false);
+  });
+
+  it("tonlar birbirinden ve seçili alt sekme mavisinden (accent-soft) farklıdır", () => {
+    const bgs = CAT_HUES.map((h) => categoryExtra.get(`cat-${h}-bg`));
+    expect(new Set(bgs).size).toBe(CAT_HUES.length);
+    const inks = CAT_HUES.map((h) => categoryExtra.get(`cat-${h}-ink`));
+    expect(new Set(inks).size).toBe(CAT_HUES.length);
+    for (const view of [flow, cockpit]) {
+      expect(bgs).not.toContain(view.get("accent-soft"));
+      expect(inks).not.toContain(view.get("accent-ink"));
+    }
+  });
+
+  it("tonlar pastel: zemin göreli parlaklığı >= 0,80", () => {
+    for (const h of CAT_HUES) expect(luminance(categoryExtra.get(`cat-${h}-bg`) as string), h).toBeGreaterThanOrEqual(0.8);
   });
 
   for (const [view, map] of [["Akış", categoryFlow], ["Kokpit", categoryCockpit]] as const) {

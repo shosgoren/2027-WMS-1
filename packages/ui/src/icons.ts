@@ -6,6 +6,7 @@ export {
   ArrowDownToLine,
   ArrowLeftRight,
   ArrowUpFromLine,
+  Boxes,
   ChevronDown,
   ChevronRight,
   CircleAlert,

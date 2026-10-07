@@ -435,6 +435,9 @@
     "soonLabel": "Coming soon",
     "soonWarehouse": "This task will open after warehouse setup.",
     "soonScreen": "This screen will open soon.",
+    "lockedList": {
+      "toggle": "Tasks you cannot use ({count})"
+    },
     "soonList": {
       "toggle": "Coming soon ({count})",
       "back": "Back to tasks"
@@ -445,7 +448,7 @@
         "description": "Decide who can do which tasks"
       },
       "settings": {
-        "title": "Workspace settings",
+        "title": "Settings",
         "description": "Name, language and time zone"
       },
       "audit": {

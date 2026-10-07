@@ -209,27 +209,33 @@ interface HomeLayout {
   readonly navTop: number;
   readonly areaTop: number;
   readonly emptyRatio: number;
+  readonly lastBottom: number;
 }
 
-async function homeLayout(page: Page): Promise<HomeLayout> {
+/** Görünür döşeme/satır kutuları ve boş dikey alan oranı (selam + üst düğmeler + görünür öğelerin birleşimi dışında kalan alan). */
+async function homeLayout(page: Page, itemSelector: string): Promise<HomeLayout> {
   return page.evaluate<HomeLayout>(`(() => {
     const box = (el) => { const b = el.getBoundingClientRect(); return { x: b.x, y: b.y, w: b.width, h: b.height, b: b.y + b.height }; };
+    const visible = (el) => { const b = el.getBoundingClientRect(); return b.width > 0 && b.height > 0; };
     const bar = box(document.querySelector('[data-testid="app-bar"]'));
     const nav = box(document.querySelector('[data-testid="bottom-nav"]'));
-    const tiles = [...document.querySelectorAll('.task-grid > .task-item > [data-state]')].map((el) => ({ href: el.getAttribute('href') || '', ...box(el) }));
+    const tiles = [...document.querySelectorAll(${JSON.stringify(itemSelector)})].filter(visible).map((el) => ({ href: el.getAttribute('href') || '', ...box(el) }));
     const parts = [box(document.querySelector('main header')), ...tiles];
-    const toggle = document.querySelector('.soon-toggle');
-    if (toggle) parts.push(box(toggle));
-    const top = bar.b, bottom = nav.y;
-    const spans = parts.map((p) => [Math.max(p.y, top), Math.min(p.b, bottom)]).sort((a, b) => a[0] - b[0]);
+    const top = document.querySelector('.top-rows');
+    if (top && visible(top)) parts.push(box(top));
+    const note = document.querySelector('.locked-note');
+    if (note && visible(note)) parts.push(box(note));
+    const topY = bar.b, bottom = nav.y;
+    const spans = parts.map((p) => [Math.max(p.y, topY), Math.min(p.b, bottom)]).sort((a, b) => a[0] - b[0]);
     let covered = 0, cur = null;
     for (const [s, e] of spans) { if (cur && s <= cur[1]) cur[1] = Math.max(cur[1], e); else { if (cur) covered += cur[1] - cur[0]; cur = [s, e]; } }
     if (cur) covered += cur[1] - cur[0];
-    return { tiles: tiles.map((t) => ({ href: t.href, x: t.x, y: t.y, w: t.w, h: t.h })), navTop: nav.y, areaTop: top, emptyRatio: (bottom - top - covered) / (bottom - top) };
+    const all = [...tiles, ...(top && visible(top) ? [box(top)] : [])];
+    return { tiles: tiles.map((t) => ({ href: t.href, x: t.x, y: t.y, w: t.w, h: t.h })), navTop: nav.y, areaTop: topY, emptyRatio: (bottom - topY - covered) / (bottom - topY), lastBottom: Math.max(...all.map((p) => p.b)) };
   })()`);
 }
 
-test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş alan, saha işi önce, Yakında listesi", async ({ page }) => {
+test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş alan, saha işi önce, Yakında ve yetkisiz işler listeleri", async ({ page }) => {
   mkdirSync(OUT_T270, { recursive: true });
   const tag = test.info().project.name;
   for (const role of T270_ROLES) {
@@ -238,37 +244,61 @@ test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş al
     await page.getByRole("button", { name: `${role.label} olarak gir` }).click();
     await expect(page).toHaveURL(/\/t\/demo$/);
     const tasks = page.getByRole("list", { name: "İşler" });
+    const isAdmin = role.shot === "admin";
+    const activeCount = isAdmin ? 5 : 2; // toplayıcı: yalnız Depo ve raflar + Ürünlerim izinli; 3 yönetim işi yetkisiz
+    const soonRow = page.locator(".soon-toggle > summary");
+    const lockedRow = page.locator(".locked-toggle > summary");
 
     for (const size of T270_SIZES) {
       await page.setViewportSize({ width: size.width, height: size.height });
       await page.goto("/t/demo");
       await expect(tasks).toBeVisible();
-      const L = await homeLayout(page);
+      const L = await homeLayout(page, ".task-grid > .task-item > [data-state]");
       const where = `${role.shot} ${size.width}x${size.height}`;
-      expect(L.tiles.length, `${where}: görünür döşeme sayısı (etkin + kilitli)`).toBe(5);
+      expect(L.tiles.length, `${where}: görünür döşeme sayısı (izinli işler)`).toBe(activeCount);
 
-      // Eşit ızgara: tüm genişlik ve yükseklikler ±2 px; yükseklik 88-140 px.
+      // Eşit ızgara: tüm genişlik ve yükseklikler ±2 px; yükseklik >= 88 px (5 döşemede <= 140 px; az döşemede içerik ölçeklenir).
       const ws = L.tiles.map((t) => t.w);
       const hs = L.tiles.map((t) => t.h);
       expect(Math.max(...ws) - Math.min(...ws), `${where}: genişlik farkı`).toBeLessThanOrEqual(2);
       expect(Math.max(...hs) - Math.min(...hs), `${where}: yükseklik farkı`).toBeLessThanOrEqual(2);
       expect(Math.min(...hs), `${where}: en küçük döşeme yüksekliği`).toBeGreaterThanOrEqual(88);
-      expect(Math.max(...hs), `${where}: en büyük döşeme yüksekliği`).toBeLessThanOrEqual(140);
+      if (activeCount >= 5) expect(Math.max(...hs), `${where}: en büyük döşeme yüksekliği`).toBeLessThanOrEqual(140);
 
       // Başparmak bölgesi: ızgara alt sekmeye yaslı (<= 16 px), boş dikey alan <= %15, ilk iş en alt satırda.
       const gridBottom = Math.max(...L.tiles.map((t) => t.y + t.h));
       expect(L.navTop - gridBottom, `${where}: ızgara alt kenarı ile alt sekme arası`).toBeLessThanOrEqual(16);
       expect(L.emptyRatio, `${where}: boş dikey alan oranı`).toBeLessThanOrEqual(0.15);
-      const lowest = Math.max(...L.tiles.map((t) => t.y));
-      expect(L.tiles[0]?.y, `${where}: ilk (en öncelikli) döşeme en alt satırda`).toBe(lowest);
+      expect(L.tiles[0]?.y, `${where}: ilk (en öncelikli) döşeme en alt satırda`).toBe(Math.max(...L.tiles.map((t) => t.y)));
 
-      // Sıra: saha işleri (depo, ürün) yönetim işlerinden (denetim, ekip, ayarlar) önce — rol fark etmez.
+      // Sıra: saha işleri (depo, ürün) yönetim işlerinden önce; ilk döşeme saha işi.
       const hrefs = L.tiles.map((t) => t.href);
       const idx = (suffix: string) => hrefs.findIndex((h) => h.endsWith(suffix));
       const field = [idx("/warehouses"), idx("/items")].filter((i) => i >= 0);
       const admin = [idx("/audit"), idx("/members"), idx("/settings")].filter((i) => i >= 0);
-      expect(Math.max(...field), `${where}: saha işleri yönetimden önce`).toBeLessThan(admin.length > 0 ? Math.min(...admin) : 99);
+      expect(field.length, `${where}: saha işleri görünür`).toBe(2);
+      if (admin.length > 0) expect(Math.max(...field), `${where}: saha işleri yönetimden önce`).toBeLessThan(Math.min(...admin));
       expect(hrefs[0], `${where}: ilk döşeme saha işi`).toMatch(/\/(warehouses|items)$/);
+
+      // Kategori rengi yalnız ikon dairesinde: döşeme zemini beyaz (yüzey), ikon dairesi zemini döşemeden farklı.
+      const tints = await page.evaluate<string[]>(`[...document.querySelectorAll('.task-grid > .task-item > [data-state] .tile-badge')].map((b) => getComputedStyle(b.closest('[data-state]')).backgroundColor + '|' + getComputedStyle(b).backgroundColor)`);
+      for (const t of tints) {
+        const [tileBg, circleBg] = t.split("|");
+        expect(circleBg, `${where}: ikon dairesi döşemeden farklı renkte`).not.toBe(tileBg);
+      }
+
+      // Üst düğme etiketleri kesilmez (…).
+      const cut = await page.evaluate<string[]>(`[...document.querySelectorAll('.top-rows .when-closed')].filter((e) => e.getBoundingClientRect().width > 0 && e.scrollWidth > e.clientWidth).map((e) => e.textContent)`);
+      expect(cut, `${where}: kesilen üst düğme etiketi`).toEqual([]);
+
+      // Üst düğmeler: kapalı, görünür alanda; toplayıcıda yetkisiz işler tek satırda (varsayılan kapalı).
+      await expect(soonRow).toContainText("Yakında gelecekler (6)");
+      if (isAdmin) await expect(lockedRow).toHaveCount(0);
+      else {
+        await expect(lockedRow).toContainText("Yetkin olmayan işler (3)");
+        await expect(tasks.locator('[data-state="locked"]').first()).toBeHidden();
+        await expect(page.locator(".locked-note")).toBeHidden();
+      }
 
       // Dokunma hedefleri ve taşma.
       expect(await smallTargets(page, "body"), `${where}: 48 px altı dokunma hedefi`).toEqual([]);
@@ -276,27 +306,43 @@ test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş al
       expect(m.scrollWidth, `${where}: yatay taşma`).toBeLessThanOrEqual(m.clientWidth);
       expect(m.scrollHeight, `${where}: sayfa gövdesi kaymaz`).toBeLessThanOrEqual(m.innerHeight);
       await page.screenshot({ path: path.join(OUT_T270, `final-${tag}-${role.shot}-${size.width}.png`) });
-    }
 
-    // "Yakında" döşeme değildir: varsayılan kapalı tek satır; açılınca 6 iş listelenir, "İşlere dön" ile kapanır.
-    await page.setViewportSize({ width: 390, height: 844 });
-    await page.goto("/t/demo");
-    const toggle = page.locator(".soon-toggle > summary");
-    await expect(toggle).toContainText("Yakında gelecekler (6)");
-    expect(await height(toggle), `${role.shot}: Yakında satırı dokunma yüksekliği`).toBeGreaterThanOrEqual(48);
-    await expect(tasks.locator('[data-state="soon"]').first()).toBeHidden();
-    await toggle.click();
-    await expect(toggle).toContainText("İşlere dön");
-    await expect(tasks.locator('[data-state="soon"]')).toHaveCount(6);
-    for (const card of await tasks.locator('[data-state="soon"]').all()) {
-      await expect(card).toBeVisible();
-      await expect(card).toContainText("Yakında");
+      // "Yakında" açık: tam 6 iş, alttan yukarı dolu (boş alan <= %15), kapatma düğmesi başparmağa yakın (alt sekmenin hemen üstü).
+      await soonRow.click();
+      await expect(soonRow).toContainText("İşlere dön");
+      const cards = tasks.locator('[data-state="soon"]');
+      await expect(cards).toHaveCount(6);
+      for (const card of await cards.all()) {
+        await expect(card).toBeVisible();
+        await expect(card).toContainText("Yakında");
+      }
+      await expect(tasks.locator('a[data-state="active"]').first()).toBeHidden();
+      const O = await homeLayout(page, ".task-grid > .soon-item > [data-state]");
+      expect(O.tiles.length, `${where}: açık listede görünür iş`).toBe(6);
+      expect(O.emptyRatio, `${where}: Yakında açıkken boş alan oranı`).toBeLessThanOrEqual(0.15);
+      const closeBox = await soonRow.boundingBox();
+      expect(O.navTop - ((closeBox?.y ?? 0) + (closeBox?.height ?? 0)), `${where}: kapatma düğmesi alt sekmeye yakın`).toBeLessThanOrEqual(16);
+      expect(closeBox?.height ?? 0, `${where}: kapatma düğmesi dokunma yüksekliği`).toBeGreaterThanOrEqual(48);
+      for (const t of O.tiles) expect(t.h, `${where}: açık liste satır yüksekliği`).toBeGreaterThanOrEqual(56);
+      const titles = await page.evaluate<number[]>(`[...document.querySelectorAll('.soon-item .tile-title')].map((e) => Math.round(e.getBoundingClientRect().height / parseFloat(getComputedStyle(e).lineHeight)))`);
+      for (const lines of titles) expect(lines, `${where}: Yakında başlığı en çok 2 satır`).toBeLessThanOrEqual(2);
+      expect(await smallTargets(page, "body"), `${where}: Yakında listesi 48 px altı hedef`).toEqual([]);
+      await page.screenshot({ path: path.join(OUT_T270, `final-${tag}-${role.shot}-${size.width}-yakinda-acik.png`) });
+      await soonRow.click();
+      await expect(tasks.locator('a[data-state="active"]').first()).toBeVisible();
+
+      // Toplayıcı: yetkisiz işler listesi bir kez gerekçe cümlesi + 3 iş adı; açılınca kapatma düğmesi altta.
+      if (!isAdmin && size.width === 390) {
+        await lockedRow.click();
+        await expect(page.locator(".locked-note")).toHaveText("Bu iş için yetkin yok. Sorumluna sorabilirsin.");
+        const lockedCards = tasks.locator('[data-state="locked"]');
+        await expect(lockedCards).toHaveCount(3);
+        for (const name of ["Ekibimi yönet", "Ayarlar", "Kim ne yaptı?"]) await expect(lockedCards.filter({ hasText: name })).toBeVisible();
+        await page.screenshot({ path: path.join(OUT_T270, `final-${tag}-${role.shot}-${size.width}-yetkisiz-acik.png`) });
+        await lockedRow.click();
+        await expect(lockedCards.first()).toBeHidden();
+      }
     }
-    await expect(tasks.locator('a[data-state="active"]').first()).toBeHidden();
-    expect(await smallTargets(page, "body"), `${role.shot}: Yakında listesi 48 px altı hedef`).toEqual([]);
-    await page.screenshot({ path: path.join(OUT_T270, `final-${tag}-${role.shot}-yakinda-390.png`) });
-    await toggle.click();
-    await expect(tasks.locator('a[data-state="active"]').first()).toBeVisible();
 
     await page.getByTestId("app-bar-menu").click();
     await page.getByRole("button", { name: "Çıkış yap" }).click();

@@ -9,7 +9,7 @@ import { openAppMenu } from "./app-bar.tsx";
 
 // Telefon alt sekme çubuğu (T-254): başparmak erişimi, her sekme >= 48 px, güvenli alan boşluğu. Yalnız telefonda görünür
 // (`phone-only`). Saha ekranlarında (T-303) kendi alt eylem çubuğu vardır; çakışmasın diye orada çizilmez.
-// "Görevlerim" için henüz ekran/yetki modeli yok: tıklanamaz ve "Yakında" etiketiyle gösterilir (sahte işlev yok, G-07).
+// "Görevlerim" için henüz ekran/yetki modeli yok: tıklanamaz; "yakında" durumu tek satırlık etikette küçük nötr nokta + erişilebilir ad ile gösterilir (sahte işlev yok, G-07).
 
 const ICON = { className: "size-6", strokeWidth: 2, "aria-hidden": true } as const;
 const FOCUS = "focus-visible:outline-3 focus-visible:outline-offset-[-3px] focus-visible:outline-focus";
@@ -40,10 +40,12 @@ export function BottomNav({ slug }: { slug: string }) {
     >
       {link(base, t("home"), <House {...ICON} />, pathname === base)}
       {link(`${base}/field`, t("scan"), <ScanLine {...ICON} />, false)}
-      <span role="group" aria-disabled="true" aria-label={t("tasks")} tabIndex={0} className={`${TAB} ${FOCUS} text-ink-muted`}>
-        <ListChecks {...ICON} />
+      <span role="group" aria-disabled="true" aria-label={`${t("tasks")}, ${t("soon")}`} tabIndex={0} className={`${TAB} ${FOCUS} text-ink-muted`}>
+        <span className="relative flex">
+          <ListChecks {...ICON} />
+          <span aria-hidden="true" className="absolute -right-1 -top-0.5 size-2 rounded-full bg-border-strong" />
+        </span>
         <span className="max-w-full truncate">{t("tasks")}</span>
-        <span className="text-[0.625rem] font-semibold leading-none">{t("soon")}</span>
       </span>
       <button type="button" aria-haspopup="dialog" onClick={openAppMenu} className={`${TAB} ${FOCUS} cursor-pointer text-ink`}>
         <Menu {...ICON} />

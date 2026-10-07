@@ -1,15 +1,14 @@
-import type { ComponentType, ReactNode } from "react";
+import type { ComponentType, CSSProperties, ReactNode } from "react";
 import { getTranslations } from "next-intl/server";
 import {
   ArrowLeftRight,
+  Boxes,
   ChevronDown,
   ChevronRight,
   ClipboardCheck,
-  Clock,
   History,
   Lock,
   MapPinned,
-  Package,
   PackagePlus,
   Settings2,
   Truck,
@@ -23,9 +22,10 @@ import {
 // tıklanamaz "yakında" öğesidir (sahte işlev yok, G-07).
 //
 // Sıra TEK KAYNAKTA (`TASKS`): saha işleri önce, yönetim işleri sonra (saha cihazı); aynı grupta liste sırası geçerlidir.
-// Telefonda ızgara alttan yukarı dolar (başparmak bölgesi): ilk sıradaki iş en alt satırda, yetim kalan son döşeme en üstte tam
-// genişliktedir. Ekran okuyucu/odak sırası DOM sırasıdır (önce saha işleri). "Yakında" öğeleri telefonda ızgarada yer kaplamaz;
-// tek satırlık düğmeyle (details) ayrı liste olarak açılır. Masaüstü/tablet yerleşimi `md:`/`lg:` ızgarasıdır.
+// Telefonda ızgara alttan yukarı dolar (başparmak bölgesi): ilk sıradaki iş en alt satırda. İzinli işler döşemedir; yetkisiz işler
+// ve "Yakında" işleri ızgarada yer kaplamaz: üstteki iki tek satırlık düğmeyle (details, birlikte yalnız biri açık) ayrı liste olarak
+// açılır; açılan liste alttan yukarı dolar ve kapatma düğmesi başparmağa yakın (altta) durur. Ekran okuyucu/odak sırası DOM
+// sırasıdır. Masaüstü/tablet yerleşimi `md:`/`lg:` ızgarasıdır (düğmeler gizli, tüm iş döşemeleri görünür).
 
 export interface TaskMenuProps {
   readonly slug: string;
@@ -34,28 +34,28 @@ export interface TaskMenuProps {
 
 export type TaskKey = "members" | "settings" | "audit" | "items" | "warehouses" | "receive" | "issue" | "transfer" | "count" | "lookup" | "undo";
 export type TaskGroup = "field" | "admin";
-/** İş kategorisi renk ailesi (ADR-020 kural 8). Renk tek taşıyıcı değildir: her döşemede ikon + metin vardır. */
-export type TaskTone = "inbound" | "outbound" | "move" | "count" | "catalog" | "undo" | "admin";
+/** İş kategorisi renk tonu (ADR-020 kural 8): durum anlam renklerinden AYRI `cat-*` belirteçleri. Renk tek taşıyıcı değildir: ikon + metin var. */
+export type CatHue = "green" | "orange" | "teal" | "purple" | "sky" | "rose" | "amber" | "cyan" | "indigo" | "slate" | "lilac";
 
 export interface TaskDef {
   readonly key: TaskKey;
   readonly group: TaskGroup;
-  readonly tone: TaskTone;
+  readonly hue: CatHue;
 }
 
 /** Görev tanımları — sıra kaynağı. Yeni iş eklerken yalnızca bu listeye ve `ICONS`'a eklenir. */
 export const TASKS: readonly TaskDef[] = [
-  { key: "receive", group: "field", tone: "inbound" },
-  { key: "issue", group: "field", tone: "outbound" },
-  { key: "transfer", group: "field", tone: "move" },
-  { key: "count", group: "field", tone: "count" },
-  { key: "lookup", group: "field", tone: "catalog" },
-  { key: "warehouses", group: "field", tone: "catalog" },
-  { key: "items", group: "field", tone: "catalog" },
-  { key: "undo", group: "field", tone: "undo" },
-  { key: "audit", group: "admin", tone: "admin" },
-  { key: "members", group: "admin", tone: "admin" },
-  { key: "settings", group: "admin", tone: "admin" },
+  { key: "receive", group: "field", hue: "green" },
+  { key: "issue", group: "field", hue: "orange" },
+  { key: "transfer", group: "field", hue: "teal" },
+  { key: "count", group: "field", hue: "purple" },
+  { key: "lookup", group: "field", hue: "sky" },
+  { key: "warehouses", group: "field", hue: "cyan" },
+  { key: "items", group: "field", hue: "amber" },
+  { key: "undo", group: "field", hue: "rose" },
+  { key: "audit", group: "admin", hue: "lilac" },
+  { key: "members", group: "admin", hue: "indigo" },
+  { key: "settings", group: "admin", hue: "slate" },
 ];
 
 const RANK: Record<TaskGroup, number> = { field: 0, admin: 1 };
@@ -78,7 +78,7 @@ const ICONS: Record<TaskKey, ComponentType<IconProps>> = {
   members: Users,
   settings: Settings2,
   audit: History,
-  items: Package,
+  items: Boxes,
   warehouses: Warehouse,
   receive: PackagePlus,
   issue: Truck,
@@ -93,43 +93,29 @@ function TaskIcon({ name, className }: { name: TaskKey; className: string }): Re
   return <Icon className={className} strokeWidth={2} aria-hidden="true" />;
 }
 
-// Tam sınıf adları (Tailwind kaynak taraması için sabit dizgi). Döşeme zemini = açık `*-bg`, ikon = aynı ailenin koyu `*-ink`'i.
-const TONE: Record<TaskTone, { tile: string; icon: string; chip: string }> = {
-  inbound: { tile: "border-transparent bg-success-bg", icon: "bg-surface text-success-ink", chip: "bg-success-bg text-success-ink" },
-  outbound: { tile: "border-transparent bg-warning-bg", icon: "bg-surface text-warning-ink", chip: "bg-warning-bg text-warning-ink" },
-  move: { tile: "border-transparent bg-info-bg", icon: "bg-surface text-info-ink", chip: "bg-info-bg text-info-ink" },
-  count: { tile: "border-transparent bg-count-bg", icon: "bg-surface text-count-ink", chip: "bg-count-bg text-count-ink" },
-  catalog: { tile: "border-transparent bg-accent-soft", icon: "bg-surface text-accent-ink", chip: "bg-accent-soft text-accent-ink" },
-  undo: { tile: "border-transparent bg-undo-bg", icon: "bg-surface text-undo-ink", chip: "bg-undo-bg text-undo-ink" },
-  admin: { tile: "border-border bg-surface", icon: "bg-locked-bg text-ink-muted", chip: "bg-locked-bg text-ink-muted" },
+// Tam sınıf adları (Tailwind kaynak taraması için sabit dizgi). Döşeme beyaz (`surface`); renk yalnız ikon dairesinde:
+// açık `cat-*-bg` zemin + aynı tonun koyu `cat-*-ink` ikonu. `icon` = yalnız ikon rengi (önizleme şeridi).
+const HUE: Record<CatHue, { circle: string; icon: string }> = {
+  green: { circle: "bg-cat-green-bg text-cat-green-ink", icon: "text-cat-green-ink" },
+  orange: { circle: "bg-cat-orange-bg text-cat-orange-ink", icon: "text-cat-orange-ink" },
+  teal: { circle: "bg-cat-teal-bg text-cat-teal-ink", icon: "text-cat-teal-ink" },
+  purple: { circle: "bg-cat-purple-bg text-cat-purple-ink", icon: "text-cat-purple-ink" },
+  sky: { circle: "bg-cat-sky-bg text-cat-sky-ink", icon: "text-cat-sky-ink" },
+  rose: { circle: "bg-cat-rose-bg text-cat-rose-ink", icon: "text-cat-rose-ink" },
+  amber: { circle: "bg-cat-amber-bg text-cat-amber-ink", icon: "text-cat-amber-ink" },
+  cyan: { circle: "bg-cat-cyan-bg text-cat-cyan-ink", icon: "text-cat-cyan-ink" },
+  indigo: { circle: "bg-cat-indigo-bg text-cat-indigo-ink", icon: "text-cat-indigo-ink" },
+  slate: { circle: "bg-cat-slate-bg text-cat-slate-ink", icon: "text-cat-slate-ink" },
+  lilac: { circle: "bg-cat-lilac-bg text-cat-lilac-ink", icon: "text-cat-lilac-ink" },
 };
 
-// Telefon ızgarası: 1. satır "Yakında" düğmesi (otomatik yükseklik), altında N eşit satır. Sınıflar Tailwind kaynak taraması için
-// sabit dizgidir (en çok 6 iş); en az yükseklik = N x 4,5 rem + aralıklar + düğme (3,5 rem).
-const GRID_ROWS: Record<number, string> = {
-  1: "phone:grid-rows-[auto_repeat(1,minmax(0,1fr))] phone:min-h-[calc(4.5rem+3.5rem)]",
-  2: "phone:grid-rows-[auto_repeat(2,minmax(0,1fr))] phone:min-h-[calc(9.5rem+3.5rem)]",
-  3: "phone:grid-rows-[auto_repeat(3,minmax(0,1fr))] phone:min-h-[calc(14.5rem+3.5rem)]",
-  4: "phone:grid-rows-[auto_repeat(4,minmax(0,1fr))] phone:min-h-[calc(19.5rem+3.5rem)]",
-  5: "phone:grid-rows-[auto_repeat(5,minmax(0,1fr))] phone:min-h-[calc(24.5rem+3.5rem)]",
-  6: "phone:grid-rows-[auto_repeat(6,minmax(0,1fr))] phone:min-h-[calc(29.5rem+3.5rem)]",
-};
-// Satır numarası = 1 (düğme) + N - sıra: ilk iş (sıra 0) en alt satırda.
-const ROW_START: Record<number, string> = {
-  2: "phone:row-start-2",
-  3: "phone:row-start-3",
-  4: "phone:row-start-4",
-  5: "phone:row-start-5",
-  6: "phone:row-start-6",
-  7: "phone:row-start-7",
-};
-
-const TILE_BASE = "task-tile relative flex min-h-12 min-w-0 w-full flex-col gap-3 rounded-card border-2 p-4 text-left shadow-card";
+const TILE_BASE = "task-tile relative flex min-h-12 min-w-0 w-full flex-col gap-3 rounded-card border-2 border-border bg-surface p-4 text-left text-ink shadow-card";
 const FOCUS = "focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus";
+const ROW = `${FOCUS} flex min-h-12 cursor-pointer list-none items-center gap-2 rounded-2xl border border-border bg-surface px-3 text-sm font-bold text-ink`;
 
 export interface TaskTileProps {
   readonly name: TaskKey;
-  readonly tone: TaskTone;
+  readonly hue: CatHue;
   readonly title: string;
   readonly description?: string;
   /** Yalnızca uygulama içi yol (sabit önekten üretilir). */
@@ -140,49 +126,43 @@ export interface TaskTileProps {
   readonly soon?: { readonly label: string };
 }
 
-/** İş döşemesi. Durum `data-state`te (active | locked | soon); kategori rengi `TONE`, ikon + metin her zaman var. */
-export function TaskTile({ name, tone: toneKey, title, description, href, locked, soon }: TaskTileProps): ReactNode {
-  const tone = TONE[toneKey];
-  const head = (extra: ReactNode, badgeClass: string) => (
+/** İş döşemesi. Durum `data-state`te (active | locked | soon); renk yalnız ikon dairesinde, ikon + metin her zaman var. */
+export function TaskTile({ name, hue, title, description, href, locked, soon }: TaskTileProps): ReactNode {
+  const h = HUE[hue];
+  const head = (extra: ReactNode, circle: string) => (
     <span className="tile-head flex items-start justify-between gap-2">
-      <span aria-hidden="true" className={`tile-badge flex size-14 shrink-0 items-center justify-center rounded-full ${badgeClass}`}>
+      <span aria-hidden="true" className={`tile-badge flex size-14 shrink-0 items-center justify-center rounded-full ${circle}`}>
         <TaskIcon name={name} className="size-6" />
       </span>
       {extra}
     </span>
   );
-  const body = (text: string | undefined, textClass: string) => (
+  const body = (text: string | undefined) => (
     <span className="tile-body flex min-w-0 flex-col gap-1">
       <span className="tile-title break-words text-xl font-bold">{title}</span>
-      {text ? <span className={`tile-desc break-words text-base ${textClass}`}>{text}</span> : null}
+      {text ? <span className="tile-desc break-words text-base">{text}</span> : null}
     </span>
   );
   if (soon) {
     return (
-      <div role="group" aria-disabled="true" aria-label={title} data-state="soon" tabIndex={0} className={`${TILE_BASE} ${FOCUS} border-dashed border-border bg-surface text-ink`}>
-        {head(
-          <span className="inline-flex min-h-8 items-center gap-1 rounded-control bg-accent-soft px-3 text-sm font-semibold text-accent-ink">
-            <Clock aria-hidden="true" className="size-4" />
-            {soon.label}
-          </span>,
-          tone.chip,
-        )}
-        {body(description, "")}
+      <div role="group" aria-disabled="true" aria-label={title} data-state="soon" tabIndex={0} className={`${TILE_BASE} ${FOCUS}`}>
+        {head(<span className="tile-soon inline-flex min-h-6 items-center rounded-control bg-locked-bg px-2 text-xs font-semibold text-ink-muted">{soon.label}</span>, h.circle)}
+        {body(description)}
       </div>
     );
   }
   if (locked) {
     return (
-      <div role="group" aria-disabled="true" aria-label={title} data-state="locked" tabIndex={0} className={`${TILE_BASE} ${FOCUS} border-dashed border-border bg-locked-bg text-locked-ink`}>
-        {head(<Lock aria-hidden="true" className="tile-lock size-6 shrink-0 text-locked-ink" />, `${tone.icon} opacity-80`)}
-        {body(locked.reason, "")}
+      <div role="group" aria-disabled="true" aria-label={title} data-state="locked" tabIndex={0} className={`${TILE_BASE} ${FOCUS} bg-locked-bg text-locked-ink`}>
+        {head(<Lock aria-hidden="true" className="tile-lock size-6 shrink-0 text-locked-ink" />, "bg-surface text-locked-ink")}
+        {body(locked.reason)}
       </div>
     );
   }
   return (
-    <a href={href} data-state="active" data-tone={toneKey} className={`${TILE_BASE} ${FOCUS} ${tone.tile} text-ink`}>
-      {head(null, tone.icon)}
-      {body(description, "")}
+    <a href={href} data-state="active" data-hue={hue} className={`${TILE_BASE} ${FOCUS}`}>
+      {head(null, h.circle)}
+      {body(description)}
       <ChevronRight aria-hidden="true" className="tile-chevron size-6 shrink-0" />
     </a>
   );
@@ -201,53 +181,74 @@ export async function TaskMenu({ slug, allowed }: TaskMenuProps) {
     warehouses: { allowed: true, href: `${base}/warehouses` },
   };
   const ordered = orderTasks(TASKS);
-  const tiles = ordered.filter((d) => hrefs[d.key] !== undefined);
+  const real = ordered.filter((d) => hrefs[d.key] !== undefined);
+  const active = real.filter((d) => hrefs[d.key]?.allowed === true);
+  const locked = real.filter((d) => hrefs[d.key]?.allowed !== true);
   const soon = ordered.filter((d) => hrefs[d.key] === undefined);
-  // Telefonda tek sütun, eşit yükseklikli yatay satırlar; en çok 6 iş için alttan yukarı doldurma. Daha çok iş olursa doldurma
-  // kapanır ve içerik alanı kayar (takip: 2 sütun).
-  const reverse = tiles.length >= 1 && tiles.length <= 6;
+  // Telefonda tek sütun, eşit yükseklikli yatay satırlar; en çok 6 izinli iş için alttan yukarı doldurma (CSS değişkenleri `--rows`,
+  // `--row`). Daha çok iş olursa doldurma kapanır ve içerik alanı kayar (takip: 2 sütun).
+  const reverse = active.length >= 1 && active.length <= 6;
+  const gridStyle = reverse ? ({ "--rows": active.length } as CSSProperties) : undefined;
   const items: ReactNode[] = [];
 
-  if (soon.length > 0) {
+  if (locked.length > 0 || soon.length > 0) {
     items.push(
-      <li key="soon-toggle" className={`soon-row min-w-0 ${reverse ? "phone:row-start-1" : ""}`}>
-        <details className="soon-toggle">
-          <summary className={`${FOCUS} flex min-h-12 cursor-pointer list-none items-center gap-2 rounded-2xl border-2 border-dashed border-border bg-surface px-3 text-sm font-bold text-ink`}>
-            <Clock aria-hidden="true" className="size-5 shrink-0 text-accent-ink" />
-            <span className="soon-when-closed min-w-0 flex-1 truncate">{t("soonList.toggle", { count: soon.length })}</span>
-            <span className="soon-when-open min-w-0 flex-1 truncate">{t("soonList.back")}</span>
-            <span aria-hidden="true" className="soon-chips flex shrink-0 items-center gap-1">
-              {soon.map((d) => (
-                <span key={d.key} className={`flex size-7 items-center justify-center rounded-full ${TONE[d.tone].chip}`}>
-                  <TaskIcon name={d.key} className="size-4" />
-                </span>
-              ))}
-            </span>
-            <ChevronDown aria-hidden="true" className="soon-chevron size-5 shrink-0" />
-          </summary>
-        </details>
+      <li key="more" className="top-rows min-w-0">
+        {locked.length > 0 ? (
+          <details className="locked-toggle" name="task-more">
+            <summary className={ROW}>
+              <Lock aria-hidden="true" className="size-5 shrink-0 text-ink-muted" />
+              <span className="when-closed min-w-0 flex-1 truncate">{t("lockedList.toggle", { count: locked.length })}</span>
+              <span className="when-open min-w-0 flex-1 truncate">{t("soonList.back")}</span>
+              <ChevronDown aria-hidden="true" className="row-chevron size-5 shrink-0" />
+            </summary>
+          </details>
+        ) : null}
+        {soon.length > 0 ? (
+          <details className="soon-toggle" name="task-more">
+            <summary className={ROW}>
+              <span className="when-closed min-w-0 flex-1 truncate">{t("soonList.toggle", { count: soon.length })}</span>
+              <span className="when-open min-w-0 flex-1 truncate">{t("soonList.back")}</span>
+              <span aria-hidden="true" className="soon-preview flex shrink-0 items-center gap-0.5">
+                {soon.map((d) => (
+                  <TaskIcon key={d.key} name={d.key} className={`size-3.5 ${HUE[d.hue].icon}`} />
+                ))}
+              </span>
+              <ChevronDown aria-hidden="true" className="row-chevron size-5 shrink-0" />
+            </summary>
+          </details>
+        ) : null}
       </li>,
     );
   }
-  tiles.forEach((d, i) => {
+  active.forEach((d, i) => {
     const h = hrefs[d.key];
     if (h === undefined) return;
-    const title = t(`tasks.${d.key}.title`);
-    const pos = reverse ? (ROW_START[1 + tiles.length - i] ?? "") : "";
+    const row = reverse ? ({ "--row": active.length + 1 - i } as CSSProperties) : undefined;
     items.push(
-      <li key={d.key} className={`task-item flex min-w-0 ${pos}`}>
-        {h.allowed ? (
-          <TaskTile name={d.key} tone={d.tone} title={title} description={t(`tasks.${d.key}.description`)} href={h.href} />
-        ) : (
-          <TaskTile name={d.key} tone={d.tone} title={title} locked={{ reason: t("lockedReason") }} />
-        )}
+      <li key={d.key} className="task-item flex min-w-0" style={row}>
+        <TaskTile name={d.key} hue={d.hue} title={t(`tasks.${d.key}.title`)} description={t(`tasks.${d.key}.description`)} href={h.href} />
       </li>,
     );
   });
+  if (locked.length > 0) {
+    items.push(
+      <li key="locked-note" className="locked-note min-w-0 px-1 text-sm font-semibold text-ink">
+        {t("lockedReason")}
+      </li>,
+    );
+  }
+  for (const d of locked) {
+    items.push(
+      <li key={d.key} className="locked-item flex min-w-0">
+        <TaskTile name={d.key} hue={d.hue} title={t(`tasks.${d.key}.title`)} locked={{ reason: t("lockedReason") }} />
+      </li>,
+    );
+  }
   for (const d of soon) {
     items.push(
       <li key={d.key} className="soon-item flex min-w-0">
-        <TaskTile name={d.key} tone={d.tone} title={t(`tasks.${d.key}.title`)} description={t("soonWarehouse")} soon={{ label: t("soonLabel") }} />
+        <TaskTile name={d.key} hue={d.hue} title={t(`tasks.${d.key}.title`)} description={t("soonWarehouse")} soon={{ label: t("soonLabel") }} />
       </li>,
     );
   }
@@ -255,7 +256,8 @@ export async function TaskMenu({ slug, allowed }: TaskMenuProps) {
   return (
     <ul
       aria-label={t("tasksLabel")}
-      className={`task-grid m-0 grid min-w-0 list-none grid-cols-1 gap-4 p-0 md:grid-cols-2 lg:grid-cols-3 phone:grid-cols-1 phone:gap-2 ${reverse ? (GRID_ROWS[tiles.length] ?? "") : ""}`}
+      style={gridStyle}
+      className={`task-grid m-0 grid min-w-0 list-none grid-cols-1 gap-4 p-0 md:grid-cols-2 lg:grid-cols-3 phone:grid-cols-1 phone:gap-2 ${reverse ? "task-grid-fill" : ""}`}
     >
       {items}
     </ul>

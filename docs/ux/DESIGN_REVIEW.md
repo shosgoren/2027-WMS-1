@@ -22,15 +22,15 @@
 | D-02 | Başparmak bölgesi | Izgara alt kenarı ile alt sekme üstü arası boşluk; en öncelikli işin konumu | Boşluk ≤ 16 px ve ilk öncelikli döşeme en alt satırda | Boşluk 17–32 px ya da öncelikli iş en altta değil | > 32 px |
 | D-03 | Boş alan oranı | İçerik alanında selam, Yakında satırı ve ızgara kutularının birleşimi dışında kalan dikey piksel / içerik alanı | ≤ %15 | %16–25 | > %25 |
 | D-04 | Döşeme yüksekliği | En küçük/en büyük döşeme yüksekliği | 88–140 px | 80–87 ya da 141–180 px | < 80 ya da > 180 px |
-| D-05 | İkon anlamı ve kategori rengi | Her döşemede ikon + görünür metin; ikonlar birbirinden farklı; kategori → renk eşlemesi: giriş success, çıkış warning, taşıma info, sayım mor, katalog/depo accent, yönetim nötr | Tüm döşemeler eşlemeye uyar, 0 yinelenen ikon, metinsiz döşeme yok | 1 yinelenen ikon ya da 1 yanlış eşleme | ≥ 2 sorun ya da yalnız renk anlam taşıyor |
-| D-06 | Yumuşak ton | Döşeme yüzeyi ve ikon zemini yalnız `*-bg`/`accent-soft`/`surface` belirteçleri; dolu (doygun) anlam rengi zemin yok; marka mavisi yalnız birincil eylem/seçili sekme/logo | Hepsi uyar; hesaplanan zemin göreli parlaklığı ≥ 0,80 | 1 sapma | ≥ 2 sapma |
-| D-07 | Hiyerarşi ve sıra | Saha işleri yönetim işlerinden önce (DOM sırası); PICKER'da ilk döşeme saha işi; selam ≤ 2 satır; Yakında döşeme olarak yer kaplamıyor | Hepsi doğru | 1 sapma | ≥ 2 sapma |
+| D-05 | İkon anlamı ve kategori rengi | Her döşemede ikon + görünür metin; ikonlar birbirinden farklı; her ETKİN döşeme (yönetim dahil) kendi `cat-*` tonunu taşır, tonlar birbirinden ve seçili sekme mavisinden (`accent-soft`) farklı: giriş green, çıkış orange, taşıma teal, sayım purple, nerede sky, düzelt rose, Ürünlerim amber, Depo cyan, Ekip indigo, Ayarlar slate, Kim ne yaptı lilac | Tüm döşemeler eşlemeye uyar, 0 yinelenen ikon, metinsiz döşeme yok | 1 yinelenen ikon ya da 1 yanlış eşleme | ≥ 2 sorun ya da yalnız renk anlam taşıyor |
+| D-06 | Yumuşak ton | TEK döşeme biçemi: beyaz (`surface`) döşeme + `cat-*-bg` ikon dairesi içinde koyu `cat-*-ink` ikon; döşeme zemini boyanmaz; dolu (doygun) anlam rengi zemin yok; marka mavisi yalnız birincil eylem/seçili sekme/logo; daire zemini göreli parlaklığı ≥ 0,80 | Hepsi uyar | 1 sapma | ≥ 2 sapma |
+| D-07 | Hiyerarşi ve sıra | Saha işleri yönetim işlerinden önce (DOM sırası); PICKER'da ilk döşeme saha işi; yetkisiz işler PICKER'da üstte TEK kapalı satırda (gerekçe cümlesi açılınca bir kez); selam ≤ 2 satır; Yakında döşeme olarak yer kaplamıyor; açık listeler alttan yukarı dolu, kapatma düğmesi altta | Hepsi doğru | 1 sapma | ≥ 2 sapma |
 | D-08 | Dokunma hedefi | Görünür tüm etkileşimli öğelerin boyutu ve komşu aralığı | Hepsi ≥ 48×48 px, aralık ≥ 8 px | 44–47 px | < 44 px |
 | D-09 | Taşma ve okunurluk (360/390/430) | Yatay taşma; sayfa dikey kayması; döşeme başlığı kesilmesi (`scrollWidth > clientWidth` ya da `…`) | 0 taşma, 0 kayma, 0 kesilen başlık | 1 başlık 3 satır | taşma/kayma/kesilme var |
 | D-10 | Kontrast | `theme-contrast.test.ts`: metin ≥ 4,5:1, ikon ≥ 3:1 (Akış + Kokpit); belirteç dışı hex yok | Test yeşil, yeni çiftlerin tümü listede | — | Test kırmızı ya da çift eksik |
 | D-11 | Dil ve hata | Görünür tüm metin i18n anahtarı (TR+EN eşit); sunucu hatası kod + sonraki eylemle gösterilir; alan kuralı UI'da yeniden yazılmamış | 0 sabit metin, hata yolu mevcut | 1 sabit metin | ≥ 2 ya da hata yutuluyor |
 
-Not (D-04): ölçüm boyutları yukarıdaki üç boyuttur. Görünür yüksekliği < 700 px olan telefonlarda (Safari araç çubukları açık, 390×664) T-254 "kaydırmasız sığma" kuralı önceliklidir; alt sınır 72 px'e iner (bu boyutta yalnız D-01, D-03 ve D-08 yeniden ölçülür).
+Not (D-04, düzeltme turu): üst sınır (140 px) ≥ 5 izinli döşemede uygulanır; 2 döşemeli PICKER ekranında döşeme yüksekliği ≥ 88 px ve içerik kutuya göre ölçeklenir (≥ 192 px kutuda dikey, ortalı büyük düğme). Ölçüm boyutları yukarıdaki üç boyuttur. Görünür yüksekliği < 700 px olan telefonlarda (Safari araç çubukları açık, 390×664) T-254 "kaydırmasız sığma" kuralı önceliklidir; alt sınır 72 px'e iner (bu boyutta yalnız D-01, D-03 ve D-08 yeniden ölçülür).
 
 Not (D-01): kartın "tek sayıda döşeme" kuralı gereği son döşeme tam genişlik olabilir; bu durumda eşitlik **yükseklik** (±2 px) ve her satırın tam genişliği doldurması ile ölçülür, yetim = satırda boşluk bırakan döşeme. 1 sütunlu aday tüm satırlarda aynı genişlik olduğundan bu ölçütten etkilenmez.
 
@@ -63,3 +63,11 @@ Tarih 2026-10-07. Puanlayan: **uygulayıcı (aday seçimi için)**; ayrı denet�
 
 D-04 kısa ekran notu uygulandı (390×664 kaydırmasız sığma, alt sınır 72 px); mevcut `mobile-shell` döngüsünün 5 etkin döşeme için bu boyutta geçtiği doğrulandı.
 
+
+## 6. Düzeltme turu (bağımsız inceleme sonrası)
+
+Bağımsız tasarım denetimi (Supervisor): ölçülen 18 ölçüt üzerinden 13/18, karar **geçmez**. Yukarıdaki §5 uygulayıcı özpuanı (22/22) fazla iyimserdi: ölçüt tablosu doğruydu ama renk yönü (kullanıcının "turuncu, yeşil, yumuşak" isteği), PICKER ekranı, açık "Yakında" listesi ve ince biçim bulguları kapsanmamıştı. Bu nedenle özpuan aday seçimi dışında karar kanıtı sayılmaz.
+
+Giderilen maddeler: (P1.1) döşeme biçemi tek ve beyaz, renk yalnız ikon dairesinde, her etkin döşeme (yönetim dahil) kendi `cat-*` tonunda, tonlar durum anlamından ayrı ve seçili sekme mavisinden farklı; (P1.2) PICKER'da yetkisiz işler üstte tek kapalı satır, gerekçe cümlesi bir kez; (P1.3) açık "Yakında" listesi alttan yukarı dolu (boş alan ≤ %15), kapatma düğmesi altta, "Yakında" etiketi küçük ve nötr, başlıklar ≤ 2 satır; (P2.4) üst düğmeler düz açık kenarlıklı, önizleme renkli ikonlar küçük ve dairesiz; (P2.5) tall döşemede dikey büyük ikon + başlık; (P2.6) "Ayarlar" kısa etiketi; (P3.7) Ürünlerim ikonu `Boxes`; (P3.8) Görevlerim sekmesi tek satır + küçük nokta (erişilebilir ad "Görevlerim, Yakında"). Ölçümler `mobile-shell` T-270 testindedir (3 boyut x 2 rol, açık ve kapalı).
+
+İkinci bağımsız inceleme bekleniyor; puan kaydı o incelemeden sonra yazılır.
