@@ -144,16 +144,23 @@ describe("tam plan: belge, lokasyon, boyut/bakiye, rezervasyon", () => {
   it("seri kilidi bayrak AÇIKKEN (0015, Q-56/A-122) wms_app satırı kilitler: state.serials döner, kilit gerçekten tutulur (55P03), satır değişmez", async () => {
     const before = await admin.query("SELECT * FROM public.serials WHERE id = $1", [A.serialId]);
     let concurrent: string | undefined;
+    let concurrentShare: string | undefined;
     const state = await withSerialFlag("true", () =>
       run(empty({ serialIds: [A.serialId] }), async () => {
         // Kilit işlem boyunca tutulur: ikinci bağlantı NOWAIT ile aynı satırı kilitleyemez.
-        concurrent = await admin.query("SELECT 1 FROM public.serials WHERE id = $1 FOR UPDATE NOWAIT", [A.serialId]).then(
+        concurrent = await admin.query("SELECT 1 FROM public.serials WHERE id = $1 FOR NO KEY UPDATE NOWAIT", [A.serialId]).then(
+          () => "acquired",
+          (e: { code?: string }) => e.code,
+        );
+        // T-256: NO KEY UPDATE probu yalnız KEY SHARE'e düşüşü yakalar; FOR SHARE'e düşüşü (paylaşımlı kilit) bu ikinci prob yakalar.
+        concurrentShare = await admin.query("SELECT 1 FROM public.serials WHERE id = $1 FOR SHARE NOWAIT", [A.serialId]).then(
           () => "acquired",
           (e: { code?: string }) => e.code,
         );
       }),
     );
     expect(concurrent).toBe("55P03");
+    expect(concurrentShare).toBe("55P03");
     expect(state.serials).toEqual([{ id: A.serialId, itemId: before.rows[0].item_id, serialNo: before.rows[0].serial_no, lotId: before.rows[0].lot_id }]);
     const after = await admin.query("SELECT * FROM public.serials WHERE id = $1", [A.serialId]);
     expect(after.rows).toEqual(before.rows);
