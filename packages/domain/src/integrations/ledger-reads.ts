@@ -53,3 +53,13 @@ export async function selectUnsyncedLedger(
          LIMIT ${limit}`,
   );
 }
+
+/** `pos` bu tenant'ta var olan bir defter satırının (created_xid, id) konumu mu ve sonuçlanmış mı (`created_xid < pg_snapshot_xmin`). */
+export async function ledgerPositionIsFinal(tx: AccessTx, tenantId: string, pos: { readonly xid: string; readonly id: string }): Promise<boolean> {
+  const r = await tx.execute(
+    sql`SELECT 1 AS one FROM public.stock_ledger
+         WHERE tenant_id = ${tenantId}::uuid AND id = ${pos.id}::uuid AND created_xid::text = ${pos.xid}
+           AND created_xid < pg_snapshot_xmin(pg_current_snapshot())`,
+  );
+  return r[0] !== undefined;
+}

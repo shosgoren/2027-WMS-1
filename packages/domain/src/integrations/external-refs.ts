@@ -5,8 +5,8 @@
 // - İki yönlü tekillik DB'dedir (`external_refs_entity_key`, `external_refs_external_key`); aynı dış kimlik başka varlığa ya da
 //   varlık başka dış kimliğe bağlıysa `ExternalRefConflictError` (`reason = "EXTERNAL_REF_CONFLICT"`; A-252-3).
 // - Yetki: `settings.manage` (yalnız TENANT_ADMIN; `integration.manage` izni yok, A-252-2). Yazma aynı transaction'da audit (I-12).
-// - Varlığın aynı tenant'ta varlığı RLS altında burada doğrulanır (polimorfik tabloda bileşik FK yok, A-252-1). PARTY için tablo
-//   yoktur: doğrulama kapalıdır (A-252-4).
+// - Varlığın aynı tenant'ta varlığı RLS altında burada doğrulanır (polimorfik tabloda bileşik FK yok, A-252-1). PARTY: cari tablosu yok;
+//   komut VALIDATION_FAILED ile reddeder (kapalı bayrak, A-252-4; DB CHECK listesinde kalır).
 // - İmleç = (created_xid, id) sırası (A-252-5); ilerleme `GREATEST` mantığıyla idempotenttir, geri gitmez (DB tetikleyicisi de reddeder).
 // - `listUnsynced` yalnız `created_xid < pg_snapshot_xmin` olan (sonuçlanmış) defter satırlarını döndürür: düşük xid'li bir işlem
 //   daha geç commit olsa da imleç onu atlayamaz (A-252-6).
@@ -14,25 +14,24 @@ import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { appendAudit } from "@wms/db";
 import { AppError } from "@wms/shared/errors";
-import { ledgerEntryExists, selectUnsyncedLedger } from "./ledger-reads.ts";
+import { ledgerEntryExists, ledgerPositionIsFinal, selectUnsyncedLedger } from "./ledger-reads.ts";
 import { runTenantCommand, runTenantQuery, type AccessTx, type TenantAccessParams } from "../identity/access.ts";
 
 export type IntegrationCallParams = Omit<TenantAccessParams, "permission" | "recentAuth">;
 
-export const EXTERNAL_REF_ENTITY_TYPES = ["ITEM", "UNIT", "WAREHOUSE", "LOCATION", "PARTY", "DOCUMENT", "LEDGER_ENTRY"] as const;
+export const EXTERNAL_REF_ENTITY_TYPES = ["ITEM", "UNIT", "WAREHOUSE", "LOCATION", "DOCUMENT", "LEDGER_ENTRY"] as const;
 export type ExternalRefEntityType = (typeof EXTERNAL_REF_ENTITY_TYPES)[number];
 
 /** Desteklenen dışa aktarım akışları (A-252-5). */
 export const SYNC_STREAMS = ["LEDGER"] as const;
 export type SyncStream = (typeof SYNC_STREAMS)[number];
 
-/** Varlık tablosu (sabit beyaz liste; kullanıcı girdisi SQL'e girmez). PARTY için tablo yok (A-252-4). */
+/** Varlık tablosu (sabit beyaz liste; kullanıcı girdisi SQL'e girmez). */
 const ENTITY_TABLE: Readonly<Record<ExternalRefEntityType, string | null>> = {
   ITEM: "items",
   UNIT: "units",
   WAREHOUSE: "warehouses",
   LOCATION: "locations",
-  PARTY: null,
   DOCUMENT: "documents",
   LEDGER_ENTRY: null, // defter tablosu SQL'i ledger-reads.ts'tedir (dosya düzeyli stok SQL bekçisi)
 };
@@ -160,7 +159,8 @@ export async function linkExternalRef(params: IntegrationCallParams, input: Link
         entityType: "external_ref",
         entityId: ref.id,
         requestId: input.requestId ?? null,
-        changeSummary: { system: sys, linkedEntityType: type, linkedEntityId: entityId, externalId, change },
+        // Dış kimlik (ERP kaydı olabilir) audit'e yazılmaz (G-09); yalnız iç tanımlayıcılar.
+        changeSummary: { system: sys, linkedEntityType: type, linkedEntityId: entityId, change },
       });
     };
     if (ins[0] !== undefined) {
@@ -265,7 +265,7 @@ export interface AdvanceSyncCursorInput extends SyncCursorInput {
   readonly to: SyncPosition;
 }
 /**
- * İmleci ileri alır. İdempotent: aynı/daha geri konum (tekrar teslim, yarış) imleci DEĞİŞTİRMEZ ve `advanced: false` döner;
+ * İmleci ileri alır; hedef, aynı tenant'ın sonuçlanmış defter satırı (created_xid, id) olmalıdır, değilse `VALIDATION_FAILED`. İdempotent: aynı/daha geri konum (tekrar teslim, yarış) imleci DEĞİŞTİRMEZ ve `advanced: false` döner;
  * her durumda dönen `cursor` kayıtlı güncel konumdur.
  */
 export async function advanceSyncCursor(
@@ -276,6 +276,8 @@ export async function advanceSyncCursor(
   const st = stream(input.stream);
   const to = position(input.to);
   return runTenantCommand({ ...params, permission: "settings.manage" }, async (tx, m) => {
+    // Hedef konum bu tenant'ın SONUÇLANMIŞ bir defter satırı olmalı; gelecekteki/uydurma xid imleci kalıcı kilitlerdi (güvenlik MAJOR-1).
+    if (!(await ledgerPositionIsFinal(tx, m.tenantId, to))) throw new AppError("VALIDATION_FAILED");
     const r = await tx.execute<RawCursor>(
       sql`INSERT INTO public.sync_cursors (tenant_id, id, system, stream, cursor_xid, cursor_id)
           VALUES (${m.tenantId}::uuid, ${randomUUID()}::uuid, ${sys}, ${st}, ${to.xid}::bigint, ${to.id}::uuid)

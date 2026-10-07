@@ -89,6 +89,18 @@ async function asApp<T>(tenant: string | null, fn: (q: (t: string, p?: unknown[]
     await appPg.query("ROLLBACK");
   }
 }
+/** Tenant'ın defter satırı konumları (created_xid, id) sırasıyla (fikstür satırları; migration rolüyle okunur). */
+async function positions(w: TenantWorld): Promise<{ xid: string; id: string }[]> {
+  const r = await adm.query<{ xid: string; id: string }>("SELECT created_xid::text AS xid, id FROM public.stock_ledger WHERE tenant_id = $1", [w.tenantId]);
+  return r.rows.sort((a, b) => (BigInt(a.xid) === BigInt(b.xid) ? (a.id < b.id ? -1 : 1) : BigInt(a.xid) < BigInt(b.xid) ? -1 : 1));
+}
+/** İlerletilebilir (sonuçlanmış) konumlar hazır olana dek bekler. */
+async function finalPositions(w: TenantWorld): Promise<{ xid: string; id: string }[]> {
+  const ps = await positions(w);
+  const s0 = `T252X${rnd()}`;
+  await eventually(() => listUnsynced(admin(w), { system: s0, stream: "LEDGER", after: SYNC_START }), (v) => v.entries.length === ps.length);
+  return ps;
+}
 async function eventually<T>(fn: () => Promise<T>, ok: (v: T) => boolean): Promise<T> {
   let last = await fn();
   for (let i = 0; i < 50 && !ok(last); i++) {
@@ -113,6 +125,12 @@ describe("T-252 external_refs — bağlama ve iki yönlü tekillik", () => {
     const omitted = await linkExternalRef(admin(A), { system: s, entityType: "ITEM", entityId: A.itemId, externalId: x });
     expect(omitted.ref.externalCode).toBe("K1");
     expect(await auditCount(A.tenantId, first.ref.id)).toBe(1);
+    // G-09: dış kimlik/dış kod audit değişiklik özetine yazılmaz.
+    const sum = await adm.query<{ s: string }>("SELECT change_summary::text AS s FROM public.audit_logs WHERE tenant_id = $1 AND entity_id = $2", [A.tenantId, first.ref.id]);
+    expect(sum.rows).toHaveLength(1);
+    expect(sum.rows[0]?.s).not.toContain(x);
+    expect(sum.rows[0]?.s).not.toContain("K1");
+    expect(JSON.parse(sum.rows[0]?.s ?? "{}")).toMatchObject({ system: s, linkedEntityType: "ITEM", linkedEntityId: A.itemId });
   });
 
   it("dış kod farkı: aynı eşleme güncellenir (version+1, synced_at ilerler), audit yazılır", async () => {
@@ -174,14 +192,15 @@ describe("T-252 external_refs — bağlama ve iki yönlü tekillik", () => {
     await expect(adm.query("INSERT INTO public.external_refs (tenant_id, system, entity_type, entity_id, external_id) VALUES ($1, $2, 'ITEM', $3, $4)", [A.tenantId, s, A.itemId, ext()])).rejects.toMatchObject({ code: "23505", constraint: "external_refs_entity_key" });
   });
 
-  it("doğrulama: entity_type beyaz liste (komut + DB CHECK), varlık yoksa NOT_FOUND, PARTY varlık denetimsiz bağlanır", async () => {
+  it("doğrulama: entity_type beyaz liste (komut + DB CHECK), varlık yoksa NOT_FOUND, PARTY komutta reddedilir (cari tablosu yok, A-252-4)", async () => {
     const s = sys();
     expect((await fail(linkExternalRef(admin(A), { system: s, entityType: "SUPPLIER" as never, entityId: A.itemId, externalId: ext() }))).code).toBe("VALIDATION_FAILED");
     expect((await fail(linkExternalRef(admin(A), { system: "logo", entityType: "ITEM", entityId: A.itemId, externalId: ext() }))).code).toBe("VALIDATION_FAILED");
     expect((await fail(linkExternalRef(admin(A), { system: s, entityType: "ITEM", entityId: A.itemId, externalId: "   " }))).code).toBe("VALIDATION_FAILED");
     expect((await fail(linkExternalRef(admin(A), { system: s, entityType: "ITEM", entityId: randomUUID(), externalId: ext() }))).code).toBe("NOT_FOUND");
-    const party = await linkExternalRef(admin(A), { system: s, entityType: "PARTY", entityId: randomUUID(), externalId: ext() });
-    expect(party.created).toBe(true);
+    // PARTY: cari tablosu gelene dek komut reddeder (kapalı bayrak); DB CHECK listesinde kalır (migration değişmez).
+    expect((await fail(linkExternalRef(admin(A), { system: s, entityType: "PARTY" as never, entityId: randomUUID(), externalId: ext() }))).code).toBe("VALIDATION_FAILED");
+    await adm.query("INSERT INTO public.external_refs (tenant_id, system, entity_type, entity_id, external_id) VALUES ($1, $2, 'PARTY', $3, 'p-1')", [A.tenantId, s, randomUUID()]);
     await expect(adm.query("INSERT INTO public.external_refs (tenant_id, system, entity_type, entity_id, external_id) VALUES ($1, $2, 'SUPPLIER', $3, 'x')", [A.tenantId, s, randomUUID()])).rejects.toMatchObject({ code: "23514" });
   });
 
@@ -202,6 +221,9 @@ describe("T-252 external_refs — bağlama ve iki yönlü tekillik", () => {
     expect((await fail(linkExternalRef(picker(A), { system: s, entityType: "ITEM", entityId: A.itemId, externalId: ext() }))).code).toBe("FORBIDDEN");
     expect((await fail(resolveByExternalId(picker(A), { system: s, entityType: "ITEM", externalId: ext() }))).code).toBe("FORBIDDEN");
     expect((await fail(advanceSyncCursor(picker(A), { system: s, stream: "LEDGER", to: SYNC_START }))).code).toBe("FORBIDDEN");
+    expect((await fail(listUnsynced(picker(A), { system: s, stream: "LEDGER", after: SYNC_START }))).code).toBe("FORBIDDEN");
+    expect((await fail(getSyncCursor(picker(A), { system: s, stream: "LEDGER" }))).code).toBe("FORBIDDEN");
+    expect((await fail(resolveByEntity(picker(A), { system: s, entityType: "ITEM", entityId: A.itemId }))).code).toBe("FORBIDDEN");
   });
 });
 
@@ -238,6 +260,23 @@ describe("T-252 tenant izolasyonu", () => {
     expect(await resolveByExternalId(admin(A), { system: s, entityType: "ITEM", externalId: x })).toMatchObject({ entityId: A.itemId });
   });
 
+  it("B, A'nın hiçbir türdeki varlığını bağlayamaz (tüm entity_type'lar için NOT_FOUND) ve satır oluşmaz", async () => {
+    const s = sys();
+    const aEntities = [
+      ["ITEM", A.itemId],
+      ["UNIT", A.unitId],
+      ["WAREHOUSE", A.warehouseId],
+      ["LOCATION", A.rootLocationId],
+      ["DOCUMENT", A.documentId],
+      ["LEDGER_ENTRY", A.ledgerId],
+    ] as const;
+    for (const [entityType, entityId] of aEntities) {
+      expect((await fail(linkExternalRef(admin(B), { system: s, entityType, entityId, externalId: ext() }))).code, entityType).toBe("NOT_FOUND");
+    }
+    const n = await adm.query("SELECT count(*)::int AS n FROM public.external_refs WHERE tenant_id = $1 AND system = $2", [B.tenantId, s]);
+    expect(n.rows[0]).toEqual({ n: 0 });
+  });
+
   it("wms_app doğrudan SQL: A bağlamında B satırı görünmez/yazılamaz; bağlamsız 0 satır; B anahtarlı INSERT RLS hatası", async () => {
     const s = sys();
     await linkExternalRef(admin(B), { system: s, entityType: "ITEM", entityId: B.itemId, externalId: ext() });
@@ -253,7 +292,9 @@ describe("T-252 tenant izolasyonu", () => {
 
   it("imleçler tenant'a özeldir", async () => {
     const s = sys();
-    const pos = { xid: "5", id: randomUUID() };
+    const ps = await finalPositions(A);
+    const pos = ps[ps.length - 1];
+    if (pos === undefined) throw new Error("defter satırı yok");
     await advanceSyncCursor(admin(A), { system: s, stream: "LEDGER", to: pos });
     expect(await getSyncCursor(admin(B), { system: s, stream: "LEDGER" })).toEqual(SYNC_START);
     expect(await getSyncCursor(admin(A), { system: s, stream: "LEDGER" })).toEqual(pos);
@@ -280,34 +321,84 @@ describe("T-252 en az yetki (wms_app)", () => {
 describe("T-252 sync_cursors", () => {
   it("ilerleme idempotent: aynı konum tekrarında advanced=false ve imleç/updated_at sabit; geri konum imleci değiştirmez", async () => {
     const s = sys();
-    const p1 = { xid: "10", id: "00000000-0000-4000-8000-000000000001" };
-    const p2 = { xid: "10", id: "00000000-0000-4000-8000-000000000002" };
-    const p3 = { xid: "11", id: "00000000-0000-4000-8000-000000000000" };
+    const ps = await finalPositions(A);
+    const [p1, p2] = [ps[0], ps[1]];
+    if (p1 === undefined || p2 === undefined) throw new Error("en az 2 defter satırı gerekir");
     expect(await getSyncCursor(admin(A), { system: s, stream: "LEDGER" })).toEqual(SYNC_START);
     expect(await advanceSyncCursor(admin(A), { system: s, stream: "LEDGER", to: p2 })).toEqual({ advanced: true, cursor: p2 });
     const t0 = (await adm.query("SELECT updated_at FROM public.sync_cursors WHERE tenant_id = $1 AND system = $2", [A.tenantId, s])).rows[0] as { updated_at: Date };
     expect(await advanceSyncCursor(admin(A), { system: s, stream: "LEDGER", to: p2 })).toEqual({ advanced: false, cursor: p2 });
     expect(await advanceSyncCursor(admin(A), { system: s, stream: "LEDGER", to: p1 })).toEqual({ advanced: false, cursor: p2 });
-    expect(await advanceSyncCursor(admin(A), { system: s, stream: "LEDGER", to: SYNC_START })).toEqual({ advanced: false, cursor: p2 });
     const t1 = (await adm.query("SELECT updated_at FROM public.sync_cursors WHERE tenant_id = $1 AND system = $2", [A.tenantId, s])).rows[0] as { updated_at: Date };
     expect(t1.updated_at).toEqual(t0.updated_at);
-    expect(await advanceSyncCursor(admin(A), { system: s, stream: "LEDGER", to: p3 })).toEqual({ advanced: true, cursor: p3 });
-    expect(await getSyncCursor(admin(A), { system: s, stream: "LEDGER" })).toEqual(p3);
+    expect(await getSyncCursor(admin(A), { system: s, stream: "LEDGER" })).toEqual(p2);
+    // Başlangıç konumu gerçek bir defter satırı değildir: reddedilir.
+    expect((await fail(advanceSyncCursor(admin(A), { system: s, stream: "LEDGER", to: SYNC_START }))).code).toBe("VALIDATION_FAILED");
+  });
+
+  it("MAJOR-1: hedef konum var olan, aynı tenant'ın sonuçlanmış defter satırı olmalı (yok / gelecekteki xid / başka tenant / xid uyuşmaz / sonuçlanmamış)", async () => {
+    const s = sys();
+    const ps = await finalPositions(A);
+    const real = ps[0];
+    const bReal = (await finalPositions(B))[0];
+    if (real === undefined || bReal === undefined) throw new Error("defter satırı yok");
+    const bad = async (to: { xid: string; id: string }, why: string): Promise<void> => {
+      expect((await fail(advanceSyncCursor(admin(A), { system: s, stream: "LEDGER", to }))).code, why).toBe("VALIDATION_FAILED");
+      expect(await getSyncCursor(admin(A), { system: s, stream: "LEDGER" }), `${why}: imleç değişmemeli`).toEqual(SYNC_START);
+    };
+    await bad({ xid: real.xid, id: randomUUID() }, "var olmayan satır");
+    await bad({ xid: String(BigInt(real.xid) + 1_000_000n), id: real.id }, "gelecekteki xid (gerçek satır kimliğiyle)");
+    await bad({ xid: "999999999999999999", id: randomUUID() }, "uydurma 18 haneli xid");
+    await bad(bReal, "başka tenant'ın defter satırı");
+    const n = await adm.query("SELECT count(*)::int AS n FROM public.sync_cursors WHERE tenant_id = $1 AND system = $2", [A.tenantId, s]);
+    expect(n.rows[0]).toEqual({ n: 0 });
+    // Geçerli konum kabul edilir (kontrol).
+    expect((await advanceSyncCursor(admin(A), { system: s, stream: "LEDGER", to: real })).advanced).toBe(true);
+  });
+
+  it("MAJOR-1: sonuçlanmamış (xmin altında olmayan) defter satırına ilerletme reddedilir; işlem bitince kabul edilir", async () => {
+    const s = sys();
+    const old = new pg.Client({ connectionString: env.databaseUrlDirect });
+    old.on("error", () => undefined);
+    await old.connect();
+    let D: TenantWorld;
+    try {
+      await old.query("BEGIN");
+      await old.query("SELECT pg_current_xact_id()");
+      D = await seedWorld(adm, reg, "D");
+      const p = (await positions(D))[0];
+      if (p === undefined) throw new Error("defter satırı yok");
+      expect((await fail(advanceSyncCursor(admin(D), { system: s, stream: "LEDGER", to: p }))).code).toBe("VALIDATION_FAILED");
+    } finally {
+      await old.query("ROLLBACK").catch(() => undefined);
+      await old.end();
+    }
+    const p = (await positions(D))[0];
+    if (p === undefined) throw new Error("defter satırı yok");
+    const ok = await eventually(
+      () => advanceSyncCursor(admin(D), { system: s, stream: "LEDGER", to: p }).then(() => true, () => false),
+      (v) => v,
+    );
+    expect(ok).toBe(true);
   });
 
   it("eşzamanlı ilerletmede sonuç en büyük konumdur (satır başına tek imleç)", async () => {
     const s = sys();
-    const ps = [3, 9, 5, 7].map((n) => ({ xid: String(n), id: randomUUID() }));
-    await Promise.all(ps.map((to) => advanceSyncCursor(admin(A), { system: s, stream: "LEDGER", to })));
-    expect((await getSyncCursor(admin(A), { system: s, stream: "LEDGER" })).xid).toBe("9");
+    const ps = await finalPositions(A);
+    const last = ps[ps.length - 1];
+    if (last === undefined) throw new Error("defter satırı yok");
+    await Promise.all([...ps, ...ps].map((to) => advanceSyncCursor(admin(A), { system: s, stream: "LEDGER", to })));
+    expect(await getSyncCursor(admin(A), { system: s, stream: "LEDGER" })).toEqual(last);
     const n = await adm.query("SELECT count(*)::int AS n FROM public.sync_cursors WHERE tenant_id = $1 AND system = $2", [A.tenantId, s]);
     expect(n.rows[0]).toEqual({ n: 1 });
   });
 
   it("DB geriye gitmeyi reddeder (23514); updated_at/yabancı sütun yazılamaz (42501); DELETE yok", async () => {
     const s = sys();
-    await advanceSyncCursor(admin(A), { system: s, stream: "LEDGER", to: { xid: "50", id: randomUUID() } });
-    const back = await asApp(A.tenantId, (q) => q("UPDATE public.sync_cursors SET cursor_xid = 49 WHERE system = $1", [s]));
+    const last = (await finalPositions(A)).pop();
+    if (last === undefined) throw new Error("defter satırı yok");
+    await advanceSyncCursor(admin(A), { system: s, stream: "LEDGER", to: last });
+    const back = await asApp(A.tenantId, (q) => q("UPDATE public.sync_cursors SET cursor_xid = cursor_xid - 1 WHERE system = $1", [s]));
     expect(back).toMatchObject({ ok: false, code: "23514" });
     const same = await asApp(A.tenantId, (q) => q("UPDATE public.sync_cursors SET cursor_xid = cursor_xid WHERE system = $1", [s]));
     expect(same).toMatchObject({ ok: true });
