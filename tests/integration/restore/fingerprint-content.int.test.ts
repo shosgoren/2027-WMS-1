@@ -8,7 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDbClient } from "../../../packages/db/src/index.ts";
 import { DB_CLIENT_SETTINGS, type DbClient } from "../../../packages/db/src/client.ts";
 import { approveDocument, createStockDocument, postDocument, type StockDocCallParams } from "../../../packages/domain/src/stock/index.ts";
-import { cleanupRegistry, newRegistry, seedWorld, type TenantWorld } from "../fixtures/tenants.ts";
+import { newRegistry, seedWorld, type TenantWorld } from "../fixtures/tenants.ts";
 import { readIntEnv } from "../harness/env.ts";
 import { CONTENT_TABLES, FINGERPRINT_SQL, compareFingerprints, parseFingerprintOutput } from "../../../scripts/db-fingerprint.mjs";
 import { CONSISTENCY_ZERO_COUNTERS, STOCK_CONSISTENCY_SQL, consistencyProblems, parseConsistencyOutput } from "../../../scripts/restore-drill.mjs";
@@ -35,34 +35,70 @@ async function runSql(c: pg.Client, sql: string, prefix: string): Promise<string
   }
   throw new Error("çıktı satırı yok");
 }
-/**
- * Tenant bağlamlı (transaction-local, G-02) fikstür yazımı. `tamper`: commit-zamanı tutarlılık tetikleyicilerini
- * (stock_balances_assert / reservations_assert, 0013) yalnızca bu transaction'da kapatır: bozuk "restore edilmiş kopya"
- * durumunu üretmek içindir (gerçek veritabanı bu bozulmayı normalde reddeder; restore kaynağı bozuksa yine de yakalanmalı).
- */
-async function tx(statements: [string, unknown[]][], tamper = false): Promise<void> {
+/** BEGIN/COMMIT sarmalayıcısız gövde: çağıranın açık transaction'ı içinde (ve ROLLBACK ile biten) koşmak için. */
+const unwrap = (sql: string): string => sql.replace(/^BEGIN[^\n]*\n/, "").replace(/\nCOMMIT;\n$/, "\n");
+const ASSERT_TRIGGERS = [
+  ["stock_balances", "stock_balances_assert"],
+  ["reservations", "reservations_assert"],
+] as const;
+
+/** ROLLBACK hatası asıl hatayı gizlemez (AggregateError). */
+async function rollbackKeeping(original: unknown): Promise<void> {
+  try {
+    await adm.query("ROLLBACK");
+  } catch (rb) {
+    throw new AggregateError([original, rb], "ROLLBACK başarısız (asıl hata ilk öğe)");
+  }
+}
+
+/** Tenant bağlamlı (transaction-local, G-02) kalıcı fikstür yazımı (yalnızca kurulum/temizlik; DDL yok). */
+async function tx(statements: [string, unknown[]][]): Promise<void> {
   await adm.query("BEGIN");
   try {
     await adm.query("SELECT set_config('app.current_tenant_id', $1, true)", [A.tenantId]);
-    if (tamper) {
-      await adm.query("ALTER TABLE public.stock_balances DISABLE TRIGGER stock_balances_assert");
-      await adm.query("ALTER TABLE public.reservations DISABLE TRIGGER reservations_assert");
-    }
     for (const [sql, params] of statements) await adm.query(sql, params);
-    if (tamper) {
-      await adm.query("ALTER TABLE public.stock_balances ENABLE TRIGGER stock_balances_assert");
-      await adm.query("ALTER TABLE public.reservations ENABLE TRIGGER reservations_assert");
-    }
     await adm.query("COMMIT");
   } catch (e) {
-    await adm.query("ROLLBACK");
+    await rollbackKeeping(e);
     throw e;
   }
+}
+
+/**
+ * Bozuk "restore edilmiş kopya" simülasyonu: HİÇBİR ŞEY KALICI DEĞİLDİR (veri ve DDL aynı transaction'da, ROLLBACK ile biter).
+ * Commit-zamanı tutarlılık tetikleyicileri (0013; `ENABLE ALWAYS`) yalnız bu transaction'da kapatılır, yazımdan sonra
+ * `ENABLE ALWAYS` ile geri açılır (ROLLBACK zaten tamamını geri alır). `fn` içinde parmak izi/tutarlılık gövdeleri
+ * (`unwrap`) bu transaction'ın değişikliklerini görür. Bu DDL yöntemi yalnız test içindir; üretim betiğine kopyalanmaz.
+ */
+async function withTamperedCopy(statements: [string, unknown[]][], fn: () => Promise<void>, ddl: string[] = []): Promise<void> {
+  await adm.query("BEGIN");
+  try {
+    await adm.query("SELECT set_config('app.current_tenant_id', $1, true)", [A.tenantId]);
+    for (const [t, trg] of ASSERT_TRIGGERS) await adm.query(`ALTER TABLE public.${t} DISABLE TRIGGER ${trg}`);
+    for (const d of ddl) await adm.query(d);
+    for (const [sql, params] of statements) await adm.query(sql, params);
+    for (const [t, trg] of ASSERT_TRIGGERS) await adm.query(`ALTER TABLE public.${t} ENABLE ALWAYS TRIGGER ${trg}`);
+    await fn();
+  } catch (e) {
+    await rollbackKeeping(e);
+    throw e;
+  }
+  await adm.query("ROLLBACK");
+}
+async function triggerModes(): Promise<Record<string, string>> {
+  const r = await adm.query<{ tgname: string; tgenabled: string }>(
+    "SELECT tgname, tgenabled FROM pg_trigger WHERE tgname = ANY($1::text[])",
+    [ASSERT_TRIGGERS.map(([, g]) => g)],
+  );
+  return Object.fromEntries(r.rows.map((x) => [x.tgname, x.tgenabled]));
 }
 const setBal = (set: string): [string, unknown[]] => [`UPDATE public.stock_balances SET ${set} WHERE tenant_id=$1 AND stock_dimension_id=$2`, [A.tenantId, dimensionId]];
 const setRes = (set: string): [string, unknown[]] => [`UPDATE public.reservations SET ${set} WHERE tenant_id=$1 AND stock_dimension_id=$2`, [A.tenantId, dimensionId]];
 const fingerprint = async () => parseFingerprintOutput(await runSql(adm, FINGERPRINT_SQL, "FP:"));
 const consistency = async () => parseConsistencyOutput(await runSql(adm, STOCK_CONSISTENCY_SQL, "SC:"));
+// Açık (rollback'li) transaction içinde koşan sürümler:
+const fingerprintIn = async () => parseFingerprintOutput(await runSql(adm, unwrap(FINGERPRINT_SQL), "FP:"));
+const consistencyIn = async () => parseConsistencyOutput(await runSql(adm, unwrap(STOCK_CONSISTENCY_SQL), "SC:"));
 
 beforeAll(async () => {
   app = createDbClient({ url: env.databaseUrl, poolMax: DB_CLIENT_SETTINGS.poolMax, prepare: env.prepare ?? DB_CLIENT_SETTINGS.prepare });
@@ -96,11 +132,14 @@ beforeAll(async () => {
   ]);
 }, 120_000);
 
+// Tenant satırları silinmez: posting audit_logs yazar (değişmez, FK) — stok testlerinin ortak kuralı. Yalnız rezervasyon kapatılır.
 afterAll(async () => {
-  await tx([setBal("reserved_quantity = 0"), setRes("status = 'RELEASED', closed_at = now()")]).catch(() => undefined);
-  await cleanupRegistry(adm, reg).catch(() => undefined);
-  await adm.end();
-  await app.close();
+  try {
+    await tx([setBal("reserved_quantity = 0"), setRes("status = 'RELEASED', closed_at = now()")]);
+  } finally {
+    await adm.end();
+    await app.close();
+  }
 }, 60_000);
 
 describe("restore içerik doğrulaması (T-284)", () => {
@@ -118,60 +157,45 @@ describe("restore içerik doğrulaması (T-284)", () => {
 
   it("tek bir bakiye miktarı değişir (satır sayısı aynı): parmak izi kırmızı, tutarlılık sorgusu ledger_ne_balance yakalar", async () => {
     const before = await fingerprint();
-    await tx([setBal("quantity = quantity + 1")], true);
-    try {
-      const after = await fingerprint();
+    await withTamperedCopy([setBal("quantity = quantity + 1")], async () => {
+      const after = await fingerprintIn();
       const r = compareFingerprints(before, after);
       expect(after.tables).toEqual(before.tables); // satır sayıları birebir aynı
       expect(r.equal).toBe(false);
       expect(r.sections.table_counts).toBe(true);
       expect(r.sections.content_stock_balances).toBe(false);
       expect(r.sections.content_stock_ledger).toBe(true);
-      expect(consistencyProblems(await consistency())).toEqual(["ledger_ne_balance=1"]);
-    } finally {
-      await tx([setBal("quantity = quantity - 1")], true);
-    }
+      expect(consistencyProblems(await consistencyIn())).toEqual(["ledger_ne_balance=1"]);
+    });
     expect(compareFingerprints(before, await fingerprint()).equal).toBe(true);
     expect(consistencyProblems(await consistency())).toEqual([]);
   });
 
   it("rezervasyon/reserved uyuşmazlığı yakalanır (reservations_ne_reserved); rezervasyon miktarı değişimi de parmak izine yansır", async () => {
     const before = await fingerprint();
-    await tx([setBal("reserved_quantity = 4")], true);
-    try {
-      expect(consistencyProblems(await consistency())).toEqual(["reservations_ne_reserved=1"]);
-      expect(compareFingerprints(before, await fingerprint()).sections.content_stock_balances).toBe(false);
-    } finally {
-      await tx([setBal("reserved_quantity = 3")], true);
-    }
-    await tx([setRes("quantity = 2")], true);
-    try {
-      const r = compareFingerprints(before, await fingerprint());
+    await withTamperedCopy([setBal("reserved_quantity = 4")], async () => {
+      expect(consistencyProblems(await consistencyIn())).toEqual(["reservations_ne_reserved=1"]);
+      expect(compareFingerprints(before, await fingerprintIn()).sections.content_stock_balances).toBe(false);
+    });
+    await withTamperedCopy([setRes("quantity = 2")], async () => {
+      const r = compareFingerprints(before, await fingerprintIn());
       expect(r.sections.content_reservations).toBe(false);
       expect(r.sections.table_counts).toBe(true);
-      expect(consistencyProblems(await consistency())).toEqual(["reservations_ne_reserved=1"]);
-    } finally {
-      await tx([setRes("quantity = 3")], true);
-    }
+      expect(consistencyProblems(await consistencyIn())).toEqual(["reservations_ne_reserved=1"]);
+    });
     expect(consistencyProblems(await consistency())).toEqual([]);
   });
 
-  it("CHECK kısıtları kaldırılmış (bozuk) kopyada reserved>miktar, negatif miktar ve negatif reserved yakalanır (işlem geri alınır)", async () => {
-    await adm.query("BEGIN");
-    try {
-      await adm.query("SELECT set_config('app.current_tenant_id', $1, true)", [A.tenantId]);
-      await adm.query("ALTER TABLE public.stock_balances DROP CONSTRAINT stock_balances_quantity_chk, DROP CONSTRAINT stock_balances_reserved_chk");
-      await adm.query("UPDATE public.stock_balances SET quantity = -2, reserved_quantity = -1 WHERE tenant_id=$1 AND stock_dimension_id=$2", [A.tenantId, dimensionId]);
-      const body = STOCK_CONSISTENCY_SQL.replace(/^BEGIN[^\n]*\n/, "").replace(/\nCOMMIT;\n$/, "\n");
-      const sc = parseConsistencyOutput(await runSql(adm, body, "SC:"));
+  it("CHECK kısıtları kaldırılmış (bozuk) kopyada reserved>miktar, negatif miktar ve negatif reserved yakalanır (işlem geri alınır; bu DDL yöntemi yalnız test içindir, üretim betiğine kopyalanmaz)", async () => {
+    const drop = ["ALTER TABLE public.stock_balances DROP CONSTRAINT stock_balances_quantity_chk, DROP CONSTRAINT stock_balances_reserved_chk"];
+    await withTamperedCopy([setBal("quantity = -2, reserved_quantity = -1")], async () => {
+      const sc = await consistencyIn();
       expect(sc.negative_quantity).toBe(1);
       expect(sc.negative_reserved).toBe(1);
-      await adm.query("UPDATE public.stock_balances SET quantity = 5, reserved_quantity = 6 WHERE tenant_id=$1 AND stock_dimension_id=$2", [A.tenantId, dimensionId]);
-      const sc2 = parseConsistencyOutput(await runSql(adm, body, "SC:"));
-      expect(sc2.reserved_gt_quantity).toBe(1);
-    } finally {
-      await adm.query("ROLLBACK");
-    }
+    }, drop);
+    await withTamperedCopy([setBal("quantity = 5, reserved_quantity = 6")], async () => {
+      expect((await consistencyIn()).reserved_gt_quantity).toBe(1);
+    }, drop);
     for (const k of CONSISTENCY_ZERO_COUNTERS) expect((await consistency())[k], k).toBe(0);
   });
 
@@ -180,5 +204,13 @@ describe("restore içerik doğrulaması (T-284)", () => {
     expect(text).not.toContain(dimensionId);
     expect(text).not.toContain(A.tenantId);
     expect(readFileSync(new URL("../../../scripts/lib/stock-consistency.sql", import.meta.url), "utf8")).not.toMatch(/\b(INSERT|UPDATE|DELETE|DROP|ALTER|TRUNCATE)\b/i);
+  });
+
+  it("simülasyon kalıcı DDL bırakmaz: tutarlılık tetikleyicileri 'A' (ENABLE ALWAYS) kalır, CHECK kısıtları yerinde", async () => {
+    expect(await triggerModes()).toEqual({ stock_balances_assert: "A", reservations_assert: "A" });
+    const chk = await adm.query<{ n: string }>(
+      "SELECT count(*)::text AS n FROM pg_constraint WHERE conname IN ('stock_balances_quantity_chk','stock_balances_reserved_chk')",
+    );
+    expect(chk.rows[0]?.n).toBe("2");
   });
 });

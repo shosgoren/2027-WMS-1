@@ -47,8 +47,12 @@ export const CONTENT_TABLES = Object.freeze({
   serials: ["id"],
 });
 
+const IDENT = /^[a-z_][a-z0-9_]*$/;
+
 /** @param {string} table @param {readonly string[]} keys */
 function contentSql(table, keys) {
+  // Tanımlayıcılar SQL metnine gömülür: yalnız sabit, güvenli adlar kabul edilir (enjeksiyon/yazım hatası savunması).
+  for (const id of [table, ...keys]) if (!IDENT.test(id)) throw new Error(`CONTENT_TABLES geçersiz tanımlayıcı: ${id}`);
   const keyText = keys.map((k) => `t.${k}::text`).join(" || '|' || ");
   const order = keys.map((k) => `x.${k}`).join(", ");
   const cols = keys.map((k) => `t.${k} AS ${k}`).join(", ");

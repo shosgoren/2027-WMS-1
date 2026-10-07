@@ -81,6 +81,10 @@ describe("compareFingerprints", () => {
     }
   });
 
+  it("CONTENT_TABLES tanımlayıcıları güvenli (^[a-z_][a-z0-9_]*$)", () => {
+    for (const [t, keys] of Object.entries(CONTENT_TABLES)) for (const id of [t, ...keys]) expect(id).toMatch(/^[a-z_][a-z0-9_]*$/);
+  });
+
   it("içerik tablosu seti defter, bakiye, rezervasyon, belge ve seri/lot tablolarını kapsar", () => {
     expect(Object.keys(CONTENT_TABLES)).toEqual(
       expect.arrayContaining(["stock_ledger", "stock_balances", "reservations", "documents", "document_lines", "lots", "serials"]),
