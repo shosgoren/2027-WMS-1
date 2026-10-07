@@ -118,3 +118,13 @@ export {
 export { assertLineRules, assertSerialUnique, assertSufficient, type BalanceView, type ItemInfo, type SerialInfo } from "./rules.ts";
 export { assertTracking, type TrackedLine, type TrackingMode } from "./tracking.ts";
 export { readAvailability, type AvailabilityFilter, type AvailabilityRow } from "./availability.ts";
+// T-224: ters kayıt (I-08, AC-06): kalan ters çevrilmemiş miktar sınırı, bağımlı işlem denetimi, `REVERSAL_BLOCKED`. Yazım reversal.ts'tedir (eslint STOCK_WRITE_FILES).
+export {
+  REVERSAL_MAX_LINES,
+  getReversalCapacity,
+  reverseDocument,
+  type ReverseDocumentInput,
+  type ReverseDocumentResult,
+  type ReverseLineRequest,
+  type ReversalCapacityLine,
+} from "./reversal.ts";
