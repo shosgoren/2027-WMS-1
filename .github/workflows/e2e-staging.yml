@@ -23,8 +23,7 @@ jobs:
     # Yalnızca main'deki iş akışı tanımı staging'e karşı koşar (deploy-staging.yml ile aynı desen).
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
-    # T-300: demo girişi istemci IP başına 10 / 10 dk; koşu 11 giriş yapar → en çok bir pencere (≈10 dk) beklenebilir (tests/e2e/support/demo-session.ts).
-    timeout-minutes: 40
+    timeout-minutes: 15
     env:
       E2E_BASE_URL: https://etkin-wms-staging.fly.dev
     steps:
