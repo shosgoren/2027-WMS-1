@@ -249,6 +249,7 @@ const LOADERS = [
   "audit/page.tsx",
   "items/page.tsx",
   "warehouses/page.tsx",
+  "import/page.tsx",
   "warehouses/[warehouseId]/page.tsx",
   // T-304: görev ekranları; üyelik/izin `listTasks`/`listMyTasks`/üyelik özeti ile sayfanın kendisinde çözülür.
   "tasks/page.tsx",
