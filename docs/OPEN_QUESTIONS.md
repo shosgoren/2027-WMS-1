@@ -90,6 +90,7 @@ Q-93 | Ses verisi KVKK: tarayıcı konuşma tanıma veya dış sağlayıcıya gi
 Q-94 | Ses sağlayıcısı (önceden üretilmiş klipler için sinirsel TTS ve gerçek zamanlı konuşma) seçimi ve API anahtarı — kullanıcı hesabı işi; adaylar yalnız seçenek, özellikleri doğrulanmadı | T-327, T-330, ADR-023 | açık — A-170
 Q-95 | Sesli komut ve konuşan asistan hangi pakette; tenant başına TTS karakteri ve gerçek zamanlı dakika limitleri ve aşım davranışı | T-329, T-330, 4S | açık — A-171
 Q-96 | Yazma niyetinde sesli "onayla" yeterli mi, yoksa her zaman dokunuş mu gerekir (gürültülü zemin, yanlış tanıma riski)? | T-329, T-330, ADR-023 §3 | açık — A-172
+Q-97 | Mobil alt sekmeler: "Görevlerim" (T-304 ile ekran geldi) bağlanmalı mı ve "Tara" sekmesinin hedefi `/t/<slug>/field` mi yoksa doğrudan tarama ekranı mı? | T-254, T-304 | açık — A-188
 
 ## Varsayımlar
 A-01 | Neon pooler'ı transaction-mode PgBouncer'dır (kullanıcı kararı kaydı, 2026-10-05) — **teyit edildi 2026-10-05, sürüm hariç** (belge + T-005d koşu 3 çoklama gözlemi, https://github.com/shosgoren/2027-WMS-1/actions/runs/37388724069); PgBouncer sürümü gözlenemedi | Neon pooler türünü/kipini değiştirdiğini duyurana veya yeniden spike aksini gösterene kadar | Q-02
@@ -264,3 +265,19 @@ A-169 | Ses kaydı saklanmaz; transkript yalnız istemci belleğinde, sunucuya/l
 A-170 | Ses sağlayıcısı seçilmedi: önceden üretilmiş klip seti boş, `VOICE_FEEDBACK_CLIPS_ENABLED` kapalı; sesli geri bildirim cihaz sentezi (TR sesi varsa) → ton + titreşim zinciriyle; konuşan asistan kartı başlamaz | Q-94 | T-327, T-330
 A-171 | 4S entitlement gelene kadar sesli komut `VOICE_COMMANDS_ENABLED` + `VOICE_COMMANDS_TENANTS` izin listesiyle, varsayılan kapalı (fail-closed); ölçüm/limit yok, bu yüzden asistan (T-330) 4S limitleri olmadan açılmaz | Q-95 | T-329, T-330
 A-172 | Sesli onay yalnız önizleme ekranda görünürken ve kapalı gramerde tam "onayla"/"onaylıyorum" eşleşmesiyle; model/AI onay veremez | Q-96 | T-329, T-330
+A-173 | (A-250-1) Kod biçimi ÖNEK-sıra; varsayılan önekler URN (ürün, 4 basamak), DEPO (depo, 2), LOK (lokasyon, 4). Öneri salt okunur; çakışmasızlık yazımda: kullanıcı kodu değiştirmediyse sunucu çakışmada sıradaki öneriyle yeniden dener; kullanıcının yazdığı kod sessizce değişmez (T-259 sunucu tarafı garanti) | Kullanıcı farklı kod biçimi bildirene kadar | — | T-250, T-259
+A-174 | (A-250-2) Toplu lokasyon oluşturmada tek komutta en çok 2.000 lokasyon | Pilot hacmi aşana kadar | — | T-250
+A-175 | (A-250-3) Toplu oluşturmada kod = ad, kayıtlar düz tek düzey; komut başına tek `location.created` audit satırı | Hiyerarşik toplu içe aktarma istenene kadar | — | T-250
+A-176 | (A-250-4) Toplu oluşturma idempotency anahtarı audit satırında saklanır, 7 gün aranır; aynı anahtar + farklı girdi → IDEMPOTENCY_MISMATCH | Ayrı idempotency tablosu gelene kadar | — | T-250
+A-177 | (A-250-5) Varsayılan birim ADET; tenant'ta hiç birim yoksa ilk ürünle ADET oluşturulur | Kullanıcı farklı varsayılan birim bildirene kadar | — | T-250
+A-178 | (A-257-1) Kod değiştirme geri alınabilir sayılır; onay sorusu yerine "Geri al" (aynı sunucu komutu; eski kod başkasına verildiyse ret) | Kod değişikliği geri alınamaz hâle gelene kadar | — | T-257
+A-179 | (A-257-2) e2e `zz-code-edit` ortak demo tenant'a yalnız son Playwright projesinde (mobile) yazar; kayıtlar rastgele kodlu, test sonunda arşivlenir | Ayrı e2e tenant'ı gelene kadar | — | T-257
+A-180 | (A-304-1) Atanan kişi tenant'ta ACTIVE olmalı ve görev türünün iznine sahip olmalı; yoksa NOT_FOUND, izin yoksa VALIDATION_FAILED | A-132 izin eşlemesi değişene kadar | — | T-304
+A-181 | (A-304-2) OPEN ve ASSIGNED görev yeniden atanabilir; üstlenme yalnız OPEN'dan | Görev yaşam döngüsü değişene kadar | — | T-304
+A-182 | (A-304-3) completeTask OPEN ve ASSIGNED görevi tamamlar; atanan kişi denetimini saha komutu yapar (T-305+) | T-305 saha komutları gelene kadar | — | T-304, T-305
+A-183 | (A-304-4) completeTask imzası (tx, taskId, expectedVersion, m, requestId?) — audit aktörü için m | İmza sözleşmesi değişene kadar | — | T-304
+A-184 | (A-304-5) Kontrol sırası: sonlanmış görev (DOCUMENT_STATE) → sürüm (VERSION_CONFLICT) → geçiş tablosu | Hata önceliği sözleşmesi değişene kadar | — | T-304
+A-185 | (A-304-6) claimTask sarmalayıcı izni stock.view; tür izni (A-132) görev okunduktan sonra komut içinde | A-132 izin eşlemesi değişene kadar | — | T-304
+A-186 | (A-304-7) İptal gerekçesi 1–500 karakter, denetim karakteri yok, audit reason alanına | Gerekçe kuralı değişene kadar | — | T-304
+A-187 | (A-304-8) Sayfalama imleci created_at mikrosaniye metni + id, ?after= ile | Sayfalama sözleşmesi değişene kadar | — | T-304
+A-188 | (T-254 Bulgu 4) Alt sekme "Görevlerim" ve "Tara" tıklanamaz "Yakında" sekmesi olarak gösterilir (kapalı bayrak yerine) | Q-97 | T-254

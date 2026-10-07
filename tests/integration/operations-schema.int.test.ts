@@ -65,6 +65,11 @@ function expectFail(r: Attempt, code: string, label = ""): void {
   expect(r.ok, `${label} beklenen ret (${code}) ama kabul edildi`).toBe(false);
   if (!r.ok) expect(r.code, `${label} ${r.message}`).toBe(code);
 }
+/** Ret nedeni: SQLSTATE aynı (23514) olsa da hata iletisi hangi emniyetin (kısıt adı / tetikleyici etiketi) çalıştığını ayırt eder. */
+function expectMessage(r: Attempt, fragment: string, label = ""): void {
+  expect(r.ok, `${label} beklenen ret ama kabul edildi`).toBe(false);
+  if (!r.ok) expect(r.message, label).toContain(fragment);
+}
 function expectOk(r: Attempt, label = ""): void {
   expect(r.ok, `${label} ${JSON.stringify(r)}`).toBe(true);
 }
@@ -747,28 +752,26 @@ describe("T-301 belge kaynak bağlantısı ve tenant_settings.receiving_qc_enabl
       );
     }
     // izinsiz çift (AVAILABLE>DAMAGED/BLOCKED) ve geçersiz değer
+    // NOT: BEFORE tetikleyici CHECK'ten önce çalışır; bu yüzden RESERVED gibi değer kümesi dışı değerler de burada TARGET_STATUS_TRANSITION ile
+    // reddedilir (CHECK gölgelenir). CHECK'in kendi başına çalıştığı aşağıdaki "tetikleyici devre dışı" durumunda ayrıca kanıtlanır.
     for (const v of ["DAMAGED", "BLOCKED", "RESERVED"]) {
-      expectFail(
-        await asApp(A.tenantId, async (q) => {
-          const d = randomUUID();
-          await q(insMoveDoc, [A.tenantId, d, A.warehouseId, randomUUID(), null, null]);
-          await q(withStatus(v), lineArgs(d));
-        }),
-        CHECK_VIOLATION,
-        `STOCK_MOVE izinsiz ${v}`,
-      );
+      const r = await asApp(A.tenantId, async (q) => {
+        const d = randomUUID();
+        await q(insMoveDoc, [A.tenantId, d, A.warehouseId, randomUUID(), null, null]);
+        await q(withStatus(v), lineArgs(d));
+      });
+      expectFail(r, CHECK_VIOLATION, `STOCK_MOVE izinsiz ${v}`);
+      expectMessage(r, "TARGET_STATUS_TRANSITION", `STOCK_MOVE izinsiz ${v}`);
     }
     // STOCK_IN + herhangi bir hedef durum (aynı durum dahil) reddedilir; NULL kabul
     for (const v of ["AVAILABLE", "QUARANTINE"]) {
-      expectFail(
-        await asApp(A.tenantId, async (q) => {
-          const d = randomUUID();
-          await q(insDoc, [A.tenantId, d, A.warehouseId, randomUUID(), null, null]);
-          await q(withStatus(v), lineArgs(d));
-        }),
-        CHECK_VIOLATION,
-        `STOCK_IN + ${v}`,
-      );
+      const r = await asApp(A.tenantId, async (q) => {
+        const d = randomUUID();
+        await q(insDoc, [A.tenantId, d, A.warehouseId, randomUUID(), null, null]);
+        await q(withStatus(v), lineArgs(d));
+      });
+      expectFail(r, CHECK_VIOLATION, `STOCK_IN + ${v}`);
+      expectMessage(r, "TARGET_STATUS_KIND", `STOCK_IN + ${v}`);
     }
     expectOk(
       await asApp(A.tenantId, async (q) => {
@@ -789,17 +792,26 @@ describe("T-301 belge kaynak bağlantısı ve tenant_settings.receiving_qc_enabl
       }),
       "UPDATE",
     );
-    expectFail(
-      await asApp(A.tenantId, async (q) => {
-        const d = randomUUID();
-        const l = randomUUID();
-        await q(insMoveDoc, [A.tenantId, d, A.warehouseId, randomUUID(), null, null]);
-        await q(insDocLine, [A.tenantId, l, d, A.itemNoneId, A.unitId, A.childLocationId, null]);
-        await q("UPDATE public.document_lines SET target_stock_status = 'BOGUS' WHERE tenant_id = $1 AND id = $2", [A.tenantId, l]);
-      }),
-      CHECK_VIOLATION,
-      "UPDATE geçersiz",
-    );
+    const bogusUpdate = async (q: Q): Promise<void> => {
+      const d = randomUUID();
+      const l = randomUUID();
+      await q(insMoveDoc, [A.tenantId, d, A.warehouseId, randomUUID(), null, null]);
+      await q(insDocLine, [A.tenantId, l, d, A.itemNoneId, A.unitId, A.childLocationId, null]);
+      await q("UPDATE public.document_lines SET target_stock_status = 'BOGUS' WHERE tenant_id = $1 AND id = $2", [A.tenantId, l]);
+    };
+    // Tetikleyici açıkken ret nedeni tetikleyicidir (CHECK gölgelenir).
+    const viaTrigger = await asApp(A.tenantId, bogusUpdate);
+    expectFail(viaTrigger, CHECK_VIOLATION, "UPDATE geçersiz");
+    expectMessage(viaTrigger, "TARGET_STATUS_TRANSITION", "UPDATE geçersiz (tetikleyici)");
+    // MINOR-2 (T-271): tetikleyici olmadan CHECK'in tek başına çalıştığı kanıtı. Tablo sahibi bağlantısı, aynı transaction'da tetikleyiciyi
+    // devre dışı bırakır (ROLLBACK ile geri alınır; DDL işlemseldir) ve reddi kısıt adı ile ayrı doğrular.
+    const viaCheck = await asAdmin(A.tenantId, async (q) => {
+      await q("ALTER TABLE public.document_lines DISABLE TRIGGER stock_move_target_status_guard");
+      await bogusUpdate(q);
+    });
+    expectFail(viaCheck, CHECK_VIOLATION, "UPDATE geçersiz (tetikleyicisiz)");
+    expectMessage(viaCheck, "document_lines_target_stock_status_chk", "UPDATE geçersiz (tetikleyicisiz)");
+    expect(viaCheck.ok ? "" : viaCheck.message).not.toContain("TARGET_STATUS_");
   });
 
   it("POSTED değişmezliği bozulmaz: POSTED belge satırında source_line_id değişimi 23514, belge başlığı değişimi 23514", async () => {

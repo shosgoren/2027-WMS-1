@@ -426,12 +426,20 @@ describe("T-248: hedef stok durumu ve STOCK_MOVE ile durum değişimi", () => {
     const x = await mkItem();
     const r1 = await mkLoc();
     const mv = (await createStockDocument(ownerP(), { kind: "STOCK_MOVE", warehouseId: A.warehouseId, lines: [ln(x, { sourceLocationId: r1, targetLocationId: r1, stockStatus: "QUARANTINE", targetStockStatus: "AVAILABLE" })] })).documentId as string;
-    const all = ["AVAILABLE", "QUARANTINE", "DAMAGED", "BLOCKED"] as const;
+    type PostingStatusArg = Parameters<typeof isStatusTransitionAllowed>[0];
+    // Durum kümesi sabit yazılmaz: CHECK tanımından (pg_constraint) okunur (T-271 MINOR-3); küme değişirse test kendiliğinden genişler.
+    const def = (await q<{ d: string }>("SELECT pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conname='document_lines_target_stock_status_chk' AND conrelid='public.document_lines'::regclass"))[0]?.d ?? "";
+    const all = [...def.matchAll(/'([A-Z_]+)'::text/g)].map((m) => m[1] as string);
+    expect(all.length, def).toBeGreaterThanOrEqual(4);
+    expect(new Set(all).size).toBe(all.length);
     expect(ALLOWED_STATUS_TRANSITION_PAIRS.length).toBe(2);
     for (const from of all) {
       for (const to of all) {
         const err = await appSqlError("UPDATE public.document_lines SET stock_status=$3, target_stock_status=$4 WHERE tenant_id=$1 AND document_id=$2", [A.tenantId, mv, from, to]);
-        expect([from, to, err === null]).toEqual([from, to, isStatusTransitionAllowed(from, to)]);
+        const allowed = isStatusTransitionAllowed(from as PostingStatusArg, to as PostingStatusArg);
+        expect([from, to, err === null]).toEqual([from, to, allowed]);
+        // Ret nedeni: yalnız tetikleyicinin geçiş reddi (SQLSTATE 23514 + TARGET_STATUS_TRANSITION); başka nedenle (CHECK, yetki...) ret sayılmaz.
+        if (!allowed) expect(err, `${from}>${to}`).toMatchObject({ code: "23514", message: expect.stringContaining("TARGET_STATUS_TRANSITION") });
       }
     }
   });

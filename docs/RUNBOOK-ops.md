@@ -52,3 +52,42 @@ yalnızca NOBYPASSRLS `wms_ops` rolüyle, açık tenant kimliğiyle ve denetim k
 ## Doğrulama
 `pnpm test:int tests/integration/schema/ops-role.int.test.ts` (rol nitelikleri, bağlamsız 0 satır, çapraz tenant yazma reddi, denetim zorunluluğu,
 defter/DDL 42501, 0009 ileri/geri/ileri).
+
+## 0020 TARGET_STATUS ihlali ile deploy durdu (T-258/T-271)
+Belirti: `pnpm db:migrate` / deploy `0020_target_status_guard: kuralı ihlal eden document_lines.target_stock_status satırı var; önce düzeltilmeli` ile durur.
+Migration tek transaction'dır; RAISE her şeyi geri alır (kısmi uygulanmış 0020 yoktur, FORCE RLS geri kurulur). Kural: hedef durum yalnız STOCK_MOVE belgesinde ve
+(aynı durum | QUARANTINE>AVAILABLE | AVAILABLE>QUARANTINE) çiftinde olabilir. Hiçbir adımda migration dosyasını veya bekçiyi gevşetmeyin; satır düzeltilir.
+1. **Ön sorgu (yalnız salt okunur; sayım + kimlik, kişisel veri seçmeyin).** Migration rolüyle; tablo sahibi FORCE RLS altındadır, bu yüzden tek transaction'da RLS'i
+   kapatıp okuyun ve bitince geri alın (işlem `ROLLBACK` ile biter, kalıcı değişiklik yok):
+   ```sql
+   BEGIN;
+   ALTER TABLE public.documents NO FORCE ROW LEVEL SECURITY;
+   ALTER TABLE public.document_lines NO FORCE ROW LEVEL SECURITY;
+   SELECT d.status AS belge_durumu, d.kind AS belge_turu, count(*) AS satir_sayisi
+     FROM public.document_lines l JOIN public.documents d ON d.tenant_id = l.tenant_id AND d.id = l.document_id
+    WHERE l.target_stock_status IS NOT NULL
+      AND (d.kind <> 'STOCK_MOVE' OR (l.target_stock_status <> l.stock_status
+           AND (l.stock_status || '>' || l.target_stock_status) NOT IN ('QUARANTINE>AVAILABLE','AVAILABLE>QUARANTINE')))
+    GROUP BY 1, 2;
+   -- kimlik listesi (tenant_id, document_id, line_id, belge durumu); ad/serbest metin/not seçmeyin:
+   SELECT l.tenant_id, l.document_id, l.id AS line_id, d.status, d.kind, l.stock_status, l.target_stock_status
+     FROM public.document_lines l JOIN public.documents d ON d.tenant_id = l.tenant_id AND d.id = l.document_id
+    WHERE l.target_stock_status IS NOT NULL
+      AND (d.kind <> 'STOCK_MOVE' OR (l.target_stock_status <> l.stock_status
+           AND (l.stock_status || '>' || l.target_stock_status) NOT IN ('QUARANTINE>AVAILABLE','AVAILABLE>QUARANTINE')))
+    ORDER BY 1, 2, 3 LIMIT 100;
+   ROLLBACK;  -- NO FORCE da geri alınır
+   ```
+   Çıktıyı yalnız sayım ve kimliklerle (UUID) rapora/destek kaydına yazın.
+2. **Belge durumu DRAFT ise:** uygulama yoluyla düzeltin (doğrudan SQL değil): ilgili tenant'ın yetkili kullanıcısı/uygulama komutuyla `updateDraft` ile satırın hedef durumunu
+   boşaltın veya izinli çifte getirin ya da taslağı iptal edin. Sonra ön sorguyu yeniden çalıştırın; 0 satır olunca `pnpm db:migrate`.
+3. **Belge durumu APPROVED/CANCELLED ise:** uygulama yolu yoktur (satır yalnız DRAFT'ta yazılır, 0012 koruması). POSTED ise I-08 gereği satır değiştirilmez: durun, Q ekleyin, kullanıcıya bildirin. Süper kullanıcı onarımı **veri değiştiren işlemdir; yalnızca kullanıcının
+   (veri sahibi/operatör sorumlusu) açık onayıyla** yapılır; onay ve kayıt numarası olmadan çalıştırılmaz. Onay sonrası:
+   a. Önce yedek/anlık görüntü alın (Neon dalı veya `pg_dump` yalnız etkilenen satırlar; çıktı repoya/loga girmez).
+   b. Tek transaction içinde, yalnız ön sorgudaki kimliklerle ve tenant bazında; `UPDATE ... SET target_stock_status = NULL WHERE (tenant_id, id) IN (...)`
+      (değerin önceki hâlini aynı transaction'da geçici tabloya veya destek kaydına kimlik + eski değer olarak yazın; geri dönüş buradandır).
+      APPROVED/CANCELLED belgede satır değişmezlik koruması varsa bunu atlatmak için `session_replication_role` DEĞİL, yalnız koruma tetikleyicisinin gerektirdiği
+      yolu (kullanıcı onayı + Supervisor kararı) kullanın; yol belirsizse durun ve `docs/OPEN_QUESTIONS.md`'ye Q ekleyin.
+   c. Aynı transaction'da ön sorguyu yeniden çalıştırın; sonuç 0 değilse `ROLLBACK`. 0 ise `COMMIT`.
+   d. **Geri dönüş:** hata fark edilirse kayıtlı kimlik + eski değerlerle ters `UPDATE` (yine onayla); onaydan önce `ROLLBACK` her şeyi geri alır.
+4. Deploy'u yeniden çalıştırın; `0020` uygulanınca `pnpm test:int tests/integration/stock/posting.int.test.ts` (4x4 eşitlik) ve operations-schema testi doğrulama içindir.
