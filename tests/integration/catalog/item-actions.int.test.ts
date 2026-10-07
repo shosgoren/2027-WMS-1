@@ -119,11 +119,16 @@ describe("items/actions.ts yetki ve köken (gerçek sorgu yolu)", () => {
     expect(factor.rows).toEqual([{ f: "12.500000" }]);
 
     as(A.ownerUserId);
-    const bc = await actions.addBarcodeAction!({ slug: A.slug, itemId, unitId: A.boxUnitId, barcode: `7${rnd()}${rnd()}`, quantity: "12" });
+    // K-1 (T-287): koli barkodunda adet katsayıdan gelir; barkoda ayrıca miktar (≠ 1) yazılırsa çifte sayım olurdu → reddedilir.
+    as(A.ownerUserId);
+    const dbl = await actions.addBarcodeAction!({ slug: A.slug, itemId, unitId: A.boxUnitId, barcode: `7${rnd()}${rnd()}`, quantity: "12" });
+    expect(dbl).toMatchObject({ ok: false, error: { code: "VALIDATION_FAILED", detail: "UNIT_CONVERSION_INVALID" } });
+    as(A.ownerUserId);
+    const bc = await actions.addBarcodeAction!({ slug: A.slug, itemId, unitId: A.boxUnitId, barcode: `7${rnd()}${rnd()}`, quantity: null });
     expect(bc.ok).toBe(true);
     barcodeId = (bc as { ok: true; data: { barcodeId: string } }).data.barcodeId;
-    const stored = await adm.query<{ quantity: string }>("SELECT quantity::text AS quantity FROM public.item_barcodes WHERE tenant_id = $1 AND id = $2", [A.tenantId, barcodeId]);
-    expect(stored.rows).toEqual([{ quantity: "12.000000" }]);
+    const stored = await adm.query<{ quantity: string | null }>("SELECT quantity::text AS quantity FROM public.item_barcodes WHERE tenant_id = $1 AND id = $2", [A.tenantId, barcodeId]);
+    expect(stored.rows).toEqual([{ quantity: null }]);
   });
 
   it("PICKER: her yazma eylemi FORBIDDEN, veritabanında ve denetim kaydında hiçbir değişiklik yok", async () => {

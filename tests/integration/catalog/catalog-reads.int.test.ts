@@ -158,13 +158,14 @@ describe("listItemConversions / listItemBarcodes", () => {
     expect(rows.map((r) => ({ unitId: r.unitId, factor: r.factor }))).toEqual([{ unitId: A.boxUnitId, factor: "12.5" }]);
   });
 
-  it("barkodlar: birim + miktar; birimsiz barkod temel birimi, miktarsız \"1\" gösterir; ambiguous yalnız aynı tenant'ta başka ACTIVE üründe kayıtlıysa", async () => {
+  it("barkodlar: birim + miktar (koli barkodunda adet katsayıdan gelir, miktar \"1\"); birimsiz barkod temel birimi, miktarsız \"1\" gösterir; ambiguous yalnız aynı tenant'ta başka ACTIVE üründe kayıtlıysa", async () => {
     const [x, y] = await mkItems(A, `B${rnd()}`, 2);
     const [bItem] = await mkItems(B, `B${rnd()}`, 1);
     const shared = `9${rnd()}${rnd()}`;
     const solo = `7${rnd()}${rnd()}`;
     await addBarcode(admin(A), { itemId: x as string, barcode: shared });
-    await addBarcode(admin(A), { itemId: y as string, barcode: shared, unitId: A.boxUnitId, quantity: "12" });
+    await setUnitConversion(admin(A), { itemId: y as string, unitId: A.boxUnitId, factor: "12" }); // K-1: koli barkodu önce katsayı ister
+    await addBarcode(admin(A), { itemId: y as string, barcode: shared, unitId: A.boxUnitId });
     await addBarcode(admin(A), { itemId: x as string, barcode: solo });
     await addBarcode(admin(B), { itemId: bItem as string, barcode: solo }); // başka tenant aynı barkod: A'yı etkilemez
     const xs = await listItemBarcodes(readOnly(), x as string);
@@ -176,7 +177,7 @@ describe("listItemConversions / listItemBarcodes", () => {
     );
     const ys = await listItemBarcodes(admin(A), y as string);
     expect(ys.map((r) => ({ barcode: r.barcode, unitId: r.unitId, quantity: r.quantity, ambiguous: r.ambiguous }))).toEqual([
-      { barcode: shared, unitId: A.boxUnitId, quantity: "12", ambiguous: true },
+      { barcode: shared, unitId: A.boxUnitId, quantity: "1", ambiguous: true },
     ]);
     // Diğer ürün arşivlenince (çözümleme onu görmez) belirsizlik kalkar.
     await archiveItem(admin(A), { itemId: y as string });

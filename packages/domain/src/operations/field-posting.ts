@@ -15,6 +15,7 @@ import { sql } from "drizzle-orm";
 import type { LockedState } from "@wms/db";
 import { AppError } from "@wms/shared/errors";
 import type { AccessTx } from "../identity/access.ts";
+import { toBase } from "../catalog/quantity.ts";
 import { pgUuidArray } from "../warehouse/scope.ts";
 import {
   EMPTY_LOCK_PLAN,
@@ -52,11 +53,13 @@ export function microToDecimal(n: bigint): string {
   if (n < 0n) throw new AppError("INTERNAL");
   return `${(n / MICRO).toString()}.${(n % MICRO).toString().padStart(6, "0")}`;
 }
-/** `quantity × factor` (her ikisi 6 basamak) → 6 basamağa YUVARLANMIŞ ondalık (SQL `round(q*f, 6)` ile aynı: yarım yukarı). */
+/**
+ * `quantity × factor` → temel birim miktarı, 6 basamaklı dizgi. TEK yol `catalog/quantity.ts` `toBase`'dir (T-287; K-3): sonuç 6 ondalığa
+ * inmiyorsa YUVARLANMAZ, `VALIDATION_FAILED`/`QUANTITY_SCALE` ile reddedilir (eskiden 6. basamağa yarım yukarı yuvarlanırdı). Ürün ölçeği
+ * denetimi (`quantity_scale`) çağıranda/posting çekirdeğinde ayrıca uygulanır.
+ */
 export function baseQuantityOf(quantity: string, factor: string): string {
-  const prod = decimalToMicro(quantity) * decimalToMicro(factor); // 1e-12 ölçekli
-  const rounded = (prod + MICRO / 2n) / MICRO;
-  return microToDecimal(rounded);
+  return microToDecimal(decimalToMicro(toBase(quantity, factor, 6)));
 }
 
 // --- belge spesifikasyonu --------------------------------------------------------------------------------------------------

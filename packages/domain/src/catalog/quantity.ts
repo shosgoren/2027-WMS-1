@@ -164,3 +164,48 @@ export function toBase(qty: string, factor: string, scale: number, options: { re
   if (placesOfCanonical(product) > scale) throw scaleError();
   return product;
 }
+
+/** Bileşik gösterimde kullanılan birim: `name` ekranda görünecek (yerelleştirilmiş) ad, `factor` 1 birimin temel birim karşılığı. */
+export interface CompoundUnit {
+  readonly name: string;
+  readonly factor: string;
+}
+
+/**
+ * Temel birim miktarını "2 koli + 3 adet" biçiminde yazar (T-287e; K-3: kısmi koli bileşik girişle ifade edilir). Yalnız GÖSTERİM içindir:
+ * defter ve belgeler temel birimde kalır. Büyük katsayıdan küçüğe doğru açgözlü bölünür; sıfır olan parçalar yazılmaz.
+ * `units` temel birimi (katsayı 1) MUTLAKA içermelidir; yoksa ya da katsayı geçersizse `VALIDATION_FAILED`. Katsayısı 1'den küçük ya da 1'e eşit (temel) birim bölmeye girmez; kalan temel birimde yazılır.
+ * Miktar 0 ise temel birimle "0 adet". Negatif/biçimsiz miktar `VALIDATION_FAILED`. Yuvarlama yok.
+ */
+export function formatCompound(baseQty: string, units: readonly CompoundUnit[]): string {
+  let qty: ScaledDecimal;
+  try {
+    qty = parseDecimal(baseQty);
+  } catch (e) {
+    if (e instanceof DecimalFormatError) throw new AppError("VALIDATION_FAILED");
+    throw e;
+  }
+  if (qty.units < 0n) throw new AppError("VALIDATION_FAILED");
+  const parsed = units.map((u) => ({ name: u.name, factor: parseDecimal(assertConversionFactor(u.factor)) }));
+  const base = parsed.find((u) => u.factor.units === 10n ** BigInt(u.factor.scale));
+  if (base === undefined) throw new AppError("VALIDATION_FAILED");
+  const scale = Math.max(qty.scale, ...parsed.map((u) => u.factor.scale));
+  const toScaled = (d: ScaledDecimal): bigint => d.units * 10n ** BigInt(scale - d.scale);
+  const unit = 10n ** BigInt(scale);
+  const usable = parsed
+    .map((u) => ({ name: u.name, f: toScaled(u.factor) }))
+    .filter((u) => u.f > unit)
+    .sort((a, b) => (a.f < b.f ? 1 : a.f > b.f ? -1 : 0));
+  let rest = toScaled(qty);
+  const parts: string[] = [];
+  for (const u of usable) {
+    const n = rest / u.f;
+    if (n > 0n) {
+      parts.push(`${n.toString()} ${u.name}`);
+      rest -= n * u.f;
+    }
+  }
+  // Kalan (tam ya da kesirli) temel birimde yazılır; temel birim bölme döngüsüne girmez (aksi "2 adet + 0.5 adet" çıkardı).
+  if (rest > 0n) parts.push(`${formatDecimal({ units: rest, scale })} ${base.name}`);
+  return parts.length === 0 ? `0 ${base.name}` : parts.join(" + ");
+}
