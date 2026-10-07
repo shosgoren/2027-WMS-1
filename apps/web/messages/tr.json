@@ -515,14 +515,11 @@
     "now": {
       "title": "Şimdi yapılacaklar",
       "empty": "Bekleyen iş yok",
-      "receive": "{count} teslim kabul bekliyor",
-      "putaway": "{count} ürün yerleştirme bekliyor",
-      "receiveShort": "Teslim kabul",
-      "putawayShort": "Yerleştirme",
-      "next": "Sıradaki: {title} · {detail}",
-      "lines": "{n} kalem",
-      "qty": "{n} adet",
-      "taskFallback": "Yerleştirme görevi"
+      "receive": "{count} teslim bekliyor",
+      "putaway": "{count} yerleştirme görevi bekliyor",
+      "next": "Sıradaki: {label}",
+      "then": "Ardından: {label}",
+      "qty": "{n} adet"
     }
   },
   "audit": {
@@ -1380,9 +1377,9 @@
       "emptyTitle": "Bekleyen teslim yok",
       "emptyAction": "Yeni teslim gelince burada görünür. Yöneticine söyle.",
       "emptyCanCreate": "Önce bir teslim ekle.",
-      "lockedTitle": "Bu iş sana kapalı",
+      "lockedTitle": "Mal kabul sana kapalı",
       "lockedReason": "Mal kabul için yetkin yok. Yöneticine haber ver ya da yardım çağır.",
-      "toField": "Saha işleri",
+      "toField": "Saha işlerine dön",
       "notOpenTitle": "Teslim açık değil",
       "notOpen": "Bu teslim bulunamadı ya da artık açık değil. Başka teslim seç.",
       "otherReceipt": "Başka teslim seç",
@@ -1417,7 +1414,8 @@
       "scanNow": "Barkodu okut",
       "scanPrompt": "Okuyucunun tetiğine bas, kolinin barkodunu okut.",
       "readerReady": "Okuyucu hazır. Tetiğe bas ve barkodu okut.",
-      "lastScan": "Son okutulan: {code}",
+      "lastScan": "Son okutulan: {name}",
+      "lastCode": "Kod: {code}",
       "helpCall": "Yardım çağır"
     },
     "putaway": {

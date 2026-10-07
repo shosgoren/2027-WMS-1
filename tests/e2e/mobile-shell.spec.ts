@@ -228,7 +228,7 @@ async function homeLayout(page: Page, itemSelector: string): Promise<HomeLayout>
     const parts = [box(document.querySelector('main header')), ...tiles];
     const top = document.querySelector('.top-rows');
     if (top && visible(top)) parts.push(box(top));
-    for (const sel of ['.locked-note', '.soon-note', '.my-tasks-row', '.now-card[data-state="rows"]']) { const n = document.querySelector(sel); if (n && visible(n)) parts.push(box(n)); }
+    for (const sel of ['.locked-note', '.soon-note', '.my-tasks-row', '.now-card:not([data-state="empty"])']) { const n = document.querySelector(sel); if (n && visible(n)) parts.push(box(n)); }
     const topY = bar.b, bottom = nav.y;
     const spans = parts.map((p) => [Math.max(p.y, topY), Math.min(p.b, bottom)]).sort((a, b) => a[0] - b[0]);
     let covered = 0, cur = null;
@@ -255,6 +255,7 @@ async function expectBand(page: Page, where: string, panel: string | null, asser
     const isVisible = (el) => el.checkVisibility && el.checkVisibility();
     for (const el of root.querySelectorAll('*')) {
       if (!isVisible(el)) continue;
+      if (el.closest('.now-card[data-state="empty"]')) continue; // "Bekleyen iş yok" kartı içerik sayılmaz (DESIGN_REVIEW §7.4.1); hata ve gerçek veri satırı sayılır
       if (el.matches('a[href], button, summary, input, select, textarea, [tabindex="0"]')) { add(r(el)); continue; }
       if (el.tagName.toLowerCase() === 'svg') { add(r(el)); continue; }
       for (const n of el.childNodes) {
@@ -340,7 +341,6 @@ test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş al
   mkdirSync(OUT_T270, { recursive: true });
   const tag = test.info().project.name;
   const clockSizes: number[] = [];
-  const zeroState: Array<Record<string, unknown>> = [];
   for (const role of T270_ROLES) {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto("/");
@@ -411,11 +411,10 @@ test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş al
       const gridBottom = Math.max(...L.tiles.map((t) => t.y + t.h));
       expect(L.navTop - gridBottom, `${where}: ızgara alt kenarı ile alt sekme arası`).toBeLessThanOrEqual(16);
       const nowState = twoCol ? await page.getByTestId("now-card").getAttribute("data-state") : null;
-      const honestEmpty = twoCol && nowState !== "rows";
+      const honestEmpty = twoCol && nowState === "empty"; // hata durumu bekleyen iş YOK değildir: assert edilir
       if (twoCol) expect(nowState, `${where}: Şimdi kartı çizilir (stock.post)`).not.toBeNull();
       if (nowState === "empty") await expect(page.getByTestId("now-empty"), `${where}: bekleyen iş yok satırı`).toHaveText("Bekleyen iş yok");
-      if (honestEmpty) zeroState.push({ where, emptyRatio: Math.round(L.emptyRatio * 1000) / 1000, nowState });
-      else expect(L.emptyRatio, `${where}: boş dikey alan oranı`).toBeLessThanOrEqual(0.15);
+      if (!honestEmpty) expect(L.emptyRatio, `${where}: boş dikey alan oranı`).toBeLessThanOrEqual(0.15);
       expect(L.tiles[0]?.y, `${where}: ilk (en öncelikli) döşeme en alt satırda`).toBe(Math.max(...L.tiles.map((t) => t.y)));
 
       // Sıra: saha işleri (depo, ürün) yönetim işlerinden önce; ilk döşeme saha işi.
@@ -464,8 +463,7 @@ test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş al
       }
       await expect(page.getByRole("dialog")).toBeHidden();
       // B-02 (kapalı ana ekran): en büyük boş dikey bant ≤ 120 px; B-04: şevron sağda, ≥ 48 px, kapalıyken dönmemiş.
-      const band = await expectBand(page, `${where}: kapalı ana ekran`, null, !honestEmpty);
-      if (honestEmpty) zeroState.push({ where, band });
+      await expectBand(page, `${where}: kapalı ana ekran`, null, !honestEmpty);
       const sc = await chevronInfo(page, ".soon-toggle");
       expect(sc.h, `${where}: Yakında düğmesi yüksekliği (B-04)`).toBeGreaterThanOrEqual(48);
       expect(sc.rightGap, `${where}: şevron sağda (B-04)`).toBeLessThanOrEqual(16);
@@ -525,18 +523,46 @@ test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş al
       }
     }
 
-    if (isAdmin) await itemsScreenChecks(page);
+    if (isAdmin) {
+      await zeroStateChecks(page);
+      await itemsScreenChecks(page);
+    }
 
     await page.getByTestId("app-bar-menu").click();
     await page.getByRole("button", { name: "Çıkış yap" }).click();
     await expect(page).toHaveURL(/\/login$/);
   }
-  // T-280: "bekleyen iş yok" durumunda ölçülen (assert edilmeyen) boşluk değerleri raporlanır.
-  writeFileSync(path.join(OUT_T270, `metrics-home-zero-state-${tag}.json`), JSON.stringify(zeroState, null, 2));
   // H-03: saat ikonu 360/390/430'da tutarlı (rol başına 3 ölçüm; hepsi birbirine ≤ 1 px).
   expect(clockSizes.length, "saat ikonu ölçümleri").toBe(T270_ROLES.length * T270_SIZES.length);
   expect(Math.max(...clockSizes) - Math.min(...clockSizes), `saat ikonu boyutu tutarlı (${clockSizes.join("/")})`).toBeLessThanOrEqual(1);
 });
+
+// T-280 K-1: "bekleyen iş yok" ana ekranı DÜRÜST ölçülür (assert edilmez, Supervisor kararı; DESIGN_REVIEW §7.4.1): "Şimdi" kartı ızgaraya yaslıdır (tek üst boşluk),
+// kartın içeriği (başlık + "Bekleyen iş yok") B-02 bantında içerik sayılmaz. Dört boyutta ölçüm + görüntü; değerler raporlanır.
+/** Yönetici oturumu AÇIKKEN çağrılır (ek demo girişi yok: demo girişi hız sınırlıdır). */
+async function zeroStateChecks(page: Page): Promise<void> {
+  const outHome = path.resolve(import.meta.dirname, "../../.artifacts/t-313");
+  mkdirSync(outHome, { recursive: true });
+  mkdirSync(OUT_T270, { recursive: true });
+  const tag = test.info().project.name;
+  const rows: Array<Record<string, unknown>> = [];
+  for (const [w, h] of [[360, 740], [390, 664], [390, 844], [430, 932]] as const) {
+    await page.setViewportSize({ width: w, height: h });
+    await page.goto("/t/demo");
+    const where = `${w}x${h}`;
+    await expect(page.getByTestId("now-card"), `${where}: Şimdi kartı bekleyen iş yok durumunda`).toHaveAttribute("data-state", "empty");
+    await expect(page.getByTestId("now-empty")).toHaveText("Bekleyen iş yok");
+    const L = await homeLayout(page, ".task-grid > .task-item > [data-state]");
+    const band = await expectBand(page, `${where}: bekleyen iş yok`, null, false);
+    // Kart ızgaranın hemen üstüne yaslı: kart ile ızgara arası ≤ 16 px; kalan alan tek üst boşluktur (iki yana bölünmez).
+    const geo = await page.evaluate<{ gap: number; head: number; above: number }>(`(() => { const r = (e) => e.getBoundingClientRect(); const c = r(document.querySelector('.now-card')); const g = r(document.querySelector('.task-grid')); const hd = r(document.querySelector('main header')); return { gap: g.top - c.bottom, head: hd.bottom, above: c.top - hd.bottom }; })()`);
+    expect(geo.gap, `${where}: kart ızgaraya yaslı`).toBeLessThanOrEqual(16);
+    expect(geo.gap, `${where}: kart ızgarayla çakışmaz`).toBeGreaterThanOrEqual(0);
+    rows.push({ where, band: Math.round(band), emptyRatio: Math.round(L.emptyRatio * 1000) / 1000, cardToGridGap: Math.round(geo.gap), topGapAboveCard: Math.round(geo.above) });
+    await page.screenshot({ path: path.join(outHome, `final-home-zero-${tag}-${w}x${h}.png`) });
+  }
+  writeFileSync(path.join(OUT_T270, `metrics-home-zero-state-${tag}.json`), JSON.stringify(rows, null, 2));
+}
 
 // T-274: Ürünler ekranı telefonda sade (DESIGN_REVIEW §7, §7.3): TEK arama alanı (büyüteç, örnek metin, tek satır ipucu), "Durum" Gelişmiş altında
 // (şevronlu), açıklama tek satır, "Yeni ürün" altta sabit tek dolu eylem, ürün yokken ÖĞRETEN boş durum + eylem gibi okunan kurulum satırı.

@@ -45,6 +45,7 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
   const [qty, setQty] = useState(intOf(task?.quantity) ?? 1);
   const [avail, setAvail] = useState<number | null>(null);
   const [last, setLast] = useState("");
+  const [lastName, setLastName] = useState<string | undefined>(undefined);
   const [busy, setBusy] = useState(false);
   const [alert, setAlert] = useState<(AlertState & { back?: Stage }) | null>(null);
   const [error, setError] = useState<ErrorInfo | null>(null);
@@ -60,6 +61,7 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
     async (code: string) => {
       if (busy || alert !== null) return;
       setLast(code);
+      setLastName(undefined);
       setBusy(true);
       setError(null);
       try {
@@ -71,6 +73,7 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
           }
           const loc = { id: res.data.id, code: res.data.code, name: res.data.name };
           holder.contentChanged();
+          setLastName(loc.name);
           if (stage === "source") {
             setSource(loc);
             setStage("item");
@@ -104,6 +107,7 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
             setQty(Math.max(1, Math.min(have ?? Infinity, intOf(res.data.quantity) ?? 1)));
           }
           holder.contentChanged();
+          setLastName(res.data.itemName);
           setItem({ id: res.data.itemId, name: res.data.itemName, code: res.data.itemCode });
           setStage("target");
         }
@@ -295,7 +299,7 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
             {source === null ? null : <p className="break-words text-base text-ink">{t("putaway.takenFrom", { from: source.name || source.code })}</p>}
           </section>
         ) : null}
-        <ScanPanel service={scanner} prompt={busy ? t("flow.checking") : t(stage === "item" ? "putaway.itemPrompt" : stage === "source" ? "putaway.sourcePrompt" : "putaway.targetPrompt")} last={last} ready={scanPrimary.ready && last === ""} />
+        <ScanPanel service={scanner} prompt={busy ? t("flow.checking") : t(stage === "item" ? "putaway.itemPrompt" : stage === "source" ? "putaway.sourcePrompt" : "putaway.targetPrompt")} last={last} {...(lastName === undefined ? {} : { lastName })} ready={scanPrimary.ready && last === ""} hue="teal" />
       </FlowShell>
       {scanPrimary.overlay}
       {alertView}

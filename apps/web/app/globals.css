@@ -225,7 +225,8 @@ html {
     justify-content: flex-end;
   }
 
-  /* Kalan dikey alan "Şimdi" kartı ile ızgara arasında EŞİT paylaşılır (otomatik üst boşluklar): tek büyük boş bant yerine iki küçük aralık; ızgara alta yaslı kalır. */
+  /* "Şimdi" kartı ızgaranın hemen üstüne yaslıdır (kart + ızgara alta yaslı kabın içinde); kalan dikey alan selam başlığının altında TEK boşluk olarak kalır
+     (DESIGN_REVIEW §7.4.1: kartı iki yana otomatik boşlukla ortalayıp boşluğu bölmek yasak). */
   /* İkinci sıradaki iş satırı yalnız yüksek ekranda (≥ 880 px) görünür: yer varsa GERÇEK ek bilgi gösterilir (dolgu değil; veri yoksa satır hiç yoktur). */
   .now-extra {
     display: none;
@@ -237,16 +238,16 @@ html {
     }
   }
 
-  /* "Şimdi" kartı görünür yüksekliğe göre sığar (gerçek veri, yalnız sunum): < 800 px yükseklikte kompakt (başlık ve "Sıradaki" satırı yok; iki bağlantı alt alta, 48 px);
-     ≥ 800 px tam kart; ≥ 880 px ikinci sıradaki iş satırı da. */
+  /* "Şimdi" kartı görünür yüksekliğe göre sığar; yalnız YERLEŞİM değişir, anlam kaybolmaz (fiil, şevron, doğrudan bağlantı hep var; DESIGN_REVIEW §7.4.2):
+     ≥ 800 px tam kart (başlık + "Sıradaki"); 700-799 px başlıksız, satırlar alt alta, "Sıradaki" satırı var; < 700 px iki satır yan yana, etiket sarılır, "Sıradaki" yok
+     (satırın kendisi sıradaki işi açar). */
   @media (max-height: 799px) {
     .now-card {
       gap: 0;
-      padding: 0.5rem;
+      padding: 0.25rem;
     }
 
-    .now-card .now-title,
-    .now-card .now-next {
+    .now-card .now-title {
       display: none;
     }
 
@@ -267,12 +268,7 @@ html {
     }
   }
 
-  /* < 700 px yükseklik: iki bağlantı yan yana, tek satır kısa etiket + sayı rozeti (sayı gerçek veri). */
   @media (max-height: 699px) {
-    .now-card {
-      padding: 0.25rem;
-    }
-
     .now-card .now-list {
       flex-direction: row;
     }
@@ -282,23 +278,26 @@ html {
       min-width: 0;
     }
 
-    .now-card .now-long {
+    .now-card .now-next {
       display: none;
     }
 
-    .now-card .now-short {
-      display: block;
+    /* Sayı rozeti etiketin içinde zaten yazılı ("2 yerleştirme görevi bekliyor"); dar yarım satırda yer açmak için yalnız burada gizlenir. */
+    .now-card .now-list > li > a:first-child > span:first-child {
+      display: none;
+    }
+
+    .now-card .now-label {
+      font-size: 0.875rem;
+      line-height: 1.15;
     }
 
     .now-card .now-list > li > a:first-child > svg {
-      display: none;
+      width: 1.25rem;
+      height: 1.25rem;
     }
   }
 
-  .task-menu.task-menu-2col > .now-card,
-  .task-menu.task-menu-2col > .task-grid {
-    margin-top: auto;
-  }
 
   /* 6+ izinli iş (DESIGN_REVIEW §7.4, §7.4.1 SIKI): eşit 2 sütun; döşeme yüksekliği İÇERİKTEN gelir (ızgara alanı doldurmak için uzatmaz, ikon büyümez):
      satırlar eşit (en yüksek içeriğe göre), alta yaslı; tek sayıda iş varsa en üstteki son döşeme tam genişlik (`--col: 1 / -1`).
@@ -401,6 +400,11 @@ html {
   .task-grid-card {
     grid-template-rows: minmax(13.5rem, 1fr) repeat(var(--rows), minmax(4.5rem, 8.75rem));
     min-height: calc(var(--rows) * 5rem + 14rem);
+  }
+
+  /* Saha rolünde "Şimdi" satırları özetin yerine girdiğinde ilk satır içeriğe göre büyür (kırpma/çakışma yok); döşemeler kalan alanı 72-140 px arasında paylaşır. */
+  .task-grid-card.task-grid-now {
+    grid-template-rows: auto repeat(var(--rows), minmax(4.5rem, 8.75rem));
   }
 
   .task-grid-card > .my-tasks-row {

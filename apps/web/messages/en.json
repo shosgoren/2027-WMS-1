@@ -515,14 +515,11 @@
     "now": {
       "title": "To do now",
       "empty": "Nothing is waiting",
-      "receive": "{count} deliveries waiting to be received",
-      "putaway": "{count} items waiting to be put away",
-      "receiveShort": "Receiving",
-      "putawayShort": "Put away",
-      "next": "Next: {title} · {detail}",
-      "lines": "{n} lines",
-      "qty": "{n} units",
-      "taskFallback": "Putaway task"
+      "receive": "{count} deliveries waiting",
+      "putaway": "{count} putaway tasks waiting",
+      "next": "Next: {label}",
+      "then": "After that: {label}",
+      "qty": "{n} units"
     }
   },
   "audit": {
@@ -1380,9 +1377,9 @@
       "emptyTitle": "No waiting deliveries",
       "emptyAction": "New deliveries appear here. Tell your manager.",
       "emptyCanCreate": "Add a delivery first.",
-      "lockedTitle": "This job is closed to you",
+      "lockedTitle": "Receiving is closed to you",
       "lockedReason": "You cannot receive goods. Tell your manager or call for help.",
-      "toField": "Field jobs",
+      "toField": "Back to field jobs",
       "notOpenTitle": "Delivery is not open",
       "notOpen": "This delivery was not found or is no longer open. Pick another.",
       "otherReceipt": "Pick another delivery",
@@ -1417,7 +1414,8 @@
       "scanNow": "Scan barcode",
       "scanPrompt": "Press the reader trigger and scan the box barcode.",
       "readerReady": "Reader ready. Press the trigger and scan the barcode.",
-      "lastScan": "Last scanned: {code}",
+      "lastScan": "Last scanned: {name}",
+      "lastCode": "Code: {code}",
       "helpCall": "Call for help"
     },
     "putaway": {

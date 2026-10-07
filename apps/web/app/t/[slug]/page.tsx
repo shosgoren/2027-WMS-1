@@ -7,7 +7,6 @@ import { AppError } from "@wms/shared/errors";
 import { listMyActionsToday } from "@wms/domain/audit/today";
 import { getAppDb } from "@wms/db";
 import { getMembershipSummary } from "@wms/domain/identity/member-queries";
-import { getItem } from "@wms/domain/catalog";
 import { hasPermission } from "@wms/domain/identity/permissions";
 import { TASK_LIST_LIMIT_MAX, listInboundReceipts, listMyTasks } from "@wms/domain/operations";
 import { TaskMenu, type MyTasksSummary, type NowSummary } from "./task-menu.tsx";
@@ -83,33 +82,25 @@ export default async function TenantHomePage({ params }: { params: Promise<{ slu
       const stripZeros = (q: string): string => q.replace(/\.0+$/, "").replace(/(\.\d*?)0+$/, "$1");
       const base = `/t/${encodeURIComponent(slug)}`;
       const rows: Array<NonNullable<Extract<NowSummary, { kind: "rows" }>["rows"]>[number]> = [];
+      // Satır tek davranıştır: sayar, kısa "Sıradaki" etiketi verir ve DOĞRUDAN sıradaki işe götürür (teslim → kabul akışı, görev → yerleştirme akışı).
       if (receipts.items.length > 0) {
         rows.push({
           key: "receive",
           count: receipts.items.length,
           more: receipts.next !== null,
-          next: receipts.items.slice(0, 2).map((r) => ({
-            href: `${base}/field/receive?receipt=${encodeURIComponent(r.id)}` as `/${string}`,
-            title: r.number,
-            detail: r.supplierRef === null ? tn("lines", { n: r.lines.length }) : r.supplierRef,
-          })),
+          next: receipts.items.slice(0, 2).map((r) => ({ href: `${base}/field/receive?receipt=${encodeURIComponent(r.id)}` as `/${string}`, label: r.number })),
         });
       }
       if (put.length > 0) {
-        const nextTasks = await Promise.all(
-          put.slice(0, 2).map(async (task) => {
-            let title = tn("taskFallback");
-            if (task.itemId !== null) {
-              try {
-                title = (await getItem(call, { itemId: task.itemId })).name;
-              } catch (e) {
-                if (!(e instanceof AppError && e.code === "NOT_FOUND")) throw e;
-              }
-            }
-            return { href: `${base}/field/putaway?task=${encodeURIComponent(task.id)}` as `/${string}`, title, detail: tn("qty", { n: task.quantity === null ? "-" : stripZeros(task.quantity) }) };
-          }),
-        );
-        rows.push({ key: "putaway", count: put.length, more: tasks.next !== null, next: nextTasks });
+        rows.push({
+          key: "putaway",
+          count: put.length,
+          more: tasks.next !== null,
+          next: put.slice(0, 2).map((task) => ({
+            href: `${base}/field/putaway?task=${encodeURIComponent(task.id)}` as `/${string}`,
+            label: tn("qty", { n: task.quantity === null ? "-" : stripZeros(task.quantity) }),
+          })),
+        });
       }
       now = rows.length === 0 ? { kind: "empty" } : { kind: "rows", rows };
     } catch (e) {

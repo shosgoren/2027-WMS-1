@@ -307,9 +307,14 @@ async function screens(page: Page, projectName: string): Promise<void> {
     await shot("putaway-source");
     await scan(page, CODES.kabul);
     await expect(page.getByTestId("step-label")).toHaveText("Adım 2 / 5");
+    // Son okutulan: ad öne çıkar, ham kod ikincil (küçük) satırdır.
+    await expect(page.getByTestId("last-scan")).toContainText("Son okutulan:");
+    await expect(page.getByTestId("last-scan-code")).toHaveText(`Kod: ${CODES.kabul}`);
     await shot("putaway-item");
     await scan(page, BARCODE.koli);
     await expect(page.getByTestId("step-label")).toHaveText("Adım 3 / 5");
+    await expect(page.getByTestId("last-scan")).toContainText("Son okutulan:");
+    await expect(page.getByTestId("last-scan-code")).toHaveText(`Kod: ${BARCODE.koli}`);
     await shot("putaway-target");
     await scan(page, CODES.raf1);
     await expect(page.getByTestId("step-label")).toHaveText("Adım 4 / 5");
@@ -576,6 +581,7 @@ async function homeMetrics(page: Page): Promise<{ band: number; emptyRatio: numb
     const add = (b) => { if (b.width > 0 && b.height > 0) spans.push([Math.max(b.top, area.top), Math.min(b.bottom, area.bottom)]); };
     for (const el of document.body.querySelectorAll('*')) {
       if (!el.checkVisibility || !el.checkVisibility()) continue;
+      if (el.closest('.now-card[data-state="empty"]')) continue;
       if (el.matches('a[href], button, summary, input, select, textarea, [tabindex="0"]')) { add(r(el)); continue; }
       if (el.tagName.toLowerCase() === 'svg') { add(r(el)); continue; }
       for (const n of el.childNodes) if (n.nodeType === 3 && n.textContent.trim() !== '') { const g = document.createRange(); g.selectNodeContents(n); for (const q of g.getClientRects()) add(q); }
@@ -587,7 +593,7 @@ async function homeMetrics(page: Page): Promise<{ band: number; emptyRatio: numb
     const tiles = [...document.querySelectorAll('.task-grid > .task-item > [data-state]')].filter(vis);
     const parts = [r(document.querySelector('main header')), ...tiles.map(r)];
     const top = document.querySelector('.top-rows'); if (top && vis(top)) parts.push(r(top));
-    const now = document.querySelector('.now-card[data-state="rows"]'); if (now && vis(now)) parts.push(r(now));
+    const now = document.querySelector('.now-card:not([data-state="empty"])'); if (now && vis(now)) parts.push(r(now));
     const sp = parts.map((p) => [Math.max(p.top, area.top), Math.min(p.bottom, area.bottom)]).sort((a, b) => a[0] - b[0]);
     let covered = 0, cur = null;
     for (const [s, e] of sp) { if (cur && s <= cur[1]) cur[1] = Math.max(cur[1], e); else { if (cur) covered += cur[1] - cur[0]; cur = [s, e]; } }
@@ -623,15 +629,14 @@ test("ana ekran 'Şimdi' kartı: bekleyen iş GERÇEK veriden (DB ile eşleşir)
   );
   expect(receiptCount).toBeGreaterThan(1);
   expect(putCount).toBeGreaterThan(1);
-  const nextReceipts = await db<{ number: string; supplier_ref: string | null; n: string }>(
-    "SELECT r.number, r.supplier_ref, (SELECT count(*)::text FROM public.inbound_receipt_lines l WHERE l.tenant_id = r.tenant_id AND l.receipt_id = r.id) AS n FROM public.inbound_receipts r WHERE r.tenant_id = $1 AND r.status = 'OPEN' ORDER BY r.created_at, r.id LIMIT 2",
+  const nextReceipts = await db<{ id: string; number: string }>(
+    "SELECT r.id, r.number FROM public.inbound_receipts r WHERE r.tenant_id = $1 AND r.status = 'OPEN' ORDER BY r.created_at, r.id LIMIT 2",
     [fx.tenantId],
   );
-  const nextTasks = await db<{ name: string; quantity: string }>(
-    "SELECT i.name, t.quantity::text AS quantity FROM public.warehouse_tasks t JOIN public.items i ON i.tenant_id = t.tenant_id AND i.id = t.item_id WHERE t.tenant_id = $1 AND t.kind = 'PUTAWAY' AND (t.status = 'OPEN' OR (t.status = 'ASSIGNED' AND t.assigned_membership_id = $2)) ORDER BY t.created_at, t.id LIMIT 2",
+  const nextTasks = await db<{ id: string; quantity: string }>(
+    "SELECT t.id, t.quantity::text AS quantity FROM public.warehouse_tasks t WHERE t.tenant_id = $1 AND t.kind = 'PUTAWAY' AND (t.status = 'OPEN' OR (t.status = 'ASSIGNED' AND t.assigned_membership_id = $2)) ORDER BY t.created_at, t.id LIMIT 2",
     [fx.tenantId, adminM ?? randomUUID()],
   );
-  const recDetail = (r: { supplier_ref: string | null; n: string }): string => (r.supplier_ref === null ? `${r.n} kalem` : r.supplier_ref);
   const qtyText = (q: string): string => `${Number(q)} adet`;
   const mobile = isMobile(testInfo.project.name);
   const metrics: Record<string, unknown> = {};
@@ -643,21 +648,35 @@ test("ana ekran 'Şimdi' kartı: bekleyen iş GERÇEK veriden (DB ile eşleşir)
     await expect(card).toHaveAttribute("data-state", "rows");
     // Satırlar DB'deki gerçek bekleyen işle eşleşir (uydurma sayı yok).
     await expect(page.getByTestId("now-receive")).toHaveAttribute("data-count", String(receiptCount));
-    await expect(page.getByTestId("now-receive")).toContainText(`${receiptCount} teslim kabul bekliyor`);
+    // Satır neyi sayıyorsa onu söyler (teslim sayısı, yerleştirme GÖREVİ sayısı) ve DOĞRUDAN sıradaki işe gider (tek davranış).
+    await expect(page.getByTestId("now-receive")).toContainText(`${receiptCount} teslim bekliyor`);
     await expect(page.getByTestId("now-putaway")).toHaveAttribute("data-count", String(putCount));
-    await expect(page.getByTestId("now-putaway")).toContainText(`${putCount} ürün yerleştirme bekliyor`);
-    await expect(page.getByTestId("now-receive")).toHaveAttribute("href", "/t/demo/field/receive");
-    // "Sıradaki" ayrıntıları DB'deki en eski açık işlerdir (uydurma yok); ikinci satır yalnız yüksek ekranda (≥ 880 px) görünür.
-    await expect(page.getByTestId("now-receive-next")).toHaveText(`Sıradaki: ${nextReceipts[0]?.number} · ${recDetail(nextReceipts[0] as never)}`);
-    await expect(page.getByTestId("now-putaway-next")).toHaveText(`Sıradaki: ${nextTasks[0]?.name} · ${qtyText(nextTasks[0]?.quantity ?? "0")}`);
+    await expect(page.getByTestId("now-putaway")).toContainText(`${putCount} yerleştirme görevi bekliyor`);
+    await expect(page.getByTestId("now-receive")).toHaveAttribute("href", `/t/demo/field/receive?receipt=${nextReceipts[0]?.id}`);
+    await expect(page.getByTestId("now-putaway")).toHaveAttribute("href", `/t/demo/field/putaway?task=${nextTasks[0]?.id}`);
+    // Fiil ve şevron HER yükseklikte görünür (anlam kısa ekranda kaybolmaz).
+    for (const k of ["now-receive", "now-putaway"]) {
+      await expect(page.getByTestId(k).locator("svg"), `${w}x${h}: ${k} şevron görünür`).toBeVisible();
+      await expect(page.getByTestId(k).locator(".now-label"), `${w}x${h}: ${k} fiil görünür`).toContainText("bekliyor");
+    }
+    // "Sıradaki" KISA biçim (teslim numarası / adet): DB'deki en eski açık işler; < 700 px'te satırın kendisi sıradaki işi açtığından ayrıntı satırı yoktur.
+    if (h >= 700) {
+      await expect(page.getByTestId("now-receive-next")).toHaveText(`Sıradaki: ${nextReceipts[0]?.number}`);
+      await expect(page.getByTestId("now-putaway-next")).toHaveText(`Sıradaki: ${qtyText(nextTasks[0]?.quantity ?? "0")}`);
+    } else {
+      await expect(page.getByTestId("now-receive-next")).toBeHidden();
+    }
     if (h >= 880) {
-      await expect(page.getByTestId("now-receive-extra")).toContainText(`${nextReceipts[1]?.number}`);
-      await expect(page.getByTestId("now-receive-extra")).toContainText(recDetail(nextReceipts[1] as never));
-      await expect(page.getByTestId("now-putaway-extra")).toContainText(`${nextTasks[1]?.name}`);
-      await expect(page.getByTestId("now-putaway-extra")).toContainText(qtyText(nextTasks[1]?.quantity ?? "0"));
+      await expect(page.getByTestId("now-receive-extra")).toHaveText(`Ardından: ${nextReceipts[1]?.number}`);
+      await expect(page.getByTestId("now-receive-extra")).toHaveAttribute("href", `/t/demo/field/receive?receipt=${nextReceipts[1]?.id}`);
+      await expect(page.getByTestId("now-putaway-extra")).toHaveText(`Ardından: ${qtyText(nextTasks[1]?.quantity ?? "0")}`);
+      await expect(page.getByTestId("now-putaway-extra")).toHaveAttribute("href", `/t/demo/field/putaway?task=${nextTasks[1]?.id}`);
     } else {
       await expect(page.getByTestId("now-receive-extra")).toBeHidden();
     }
+    // Kesilme yok: kartın hiçbir görünür öğesi taşmaz (scrollWidth ≤ clientWidth); "…" ile kısaltma yok.
+    const cut = await page.evaluate<string[]>(`[...document.querySelectorAll('.now-card *')].filter((e) => e.getBoundingClientRect().width > 0 && e.scrollWidth > e.clientWidth + 0.5).map((e) => e.className + ':' + e.textContent)`);
+    expect(cut, `${w}x${h}: Şimdi kartında kesilen/taşan metin`).toEqual([]);
     const m = await homeMetrics(page);
     metrics[`admin-${w}x${h}`] = m;
     // Çakışma yok: selam başlığı kartın üstünde, kart ızgaranın üstünde (içerik alana sığar; üst üste binen/kesilen içerik yok).
@@ -683,16 +702,48 @@ test("ana ekran 'Şimdi' kartı: bekleyen iş GERÇEK veriden (DB ile eşleşir)
   // Toplayıcı (tek sütun kipi): görüntüler + taşma/hedef ölçümü; "Görevlerim" özeti bu kipin gerçek içeriğidir.
   await context.clearCookies();
   await login(page, "Toplayıcı");
+  const pickerM = (await db<{ id: string }>("SELECT m.id FROM public.tenant_memberships m JOIN public.membership_roles r ON r.tenant_id = m.tenant_id AND r.membership_id = m.id WHERE m.tenant_id = $1 AND r.role_key = 'PICKER' LIMIT 1", [fx.tenantId]))[0]?.id;
+  expect(pickerM, "toplayıcı üyeliği").toBeDefined();
+  const pickerPut = Number(
+    (await db<{ n: string }>("SELECT count(*)::text AS n FROM public.warehouse_tasks WHERE tenant_id = $1 AND kind = 'PUTAWAY' AND (status = 'OPEN' OR (status = 'ASSIGNED' AND assigned_membership_id = $2))", [fx.tenantId, pickerM ?? randomUUID()]))[0]?.n,
+  );
   for (const [w, h] of [[360, 740], [390, 664], [390, 844], [430, 932]] as const) {
     await page.setViewportSize({ width: w, height: h });
     await page.goto("/t/demo");
-    await expect(page.getByTestId("now-card")).toHaveCount(0);
+    // Saha rolü (K-2): atanmış iş yok, ama yetkili olduğu açık işler VAR → "Şu an sana atanmış iş yok" denmez; gerçek bekleyen iş satırları görünür.
+    await expect(page.getByTestId("my-tasks-empty"), `${w}x${h}: açık iş varken "atanmış iş yok" denmez`).toHaveCount(0);
+    await expect(page.getByTestId("now-card")).toHaveAttribute("data-state", "rows");
+    await expect(page.getByTestId("now-receive")).toHaveAttribute("data-count", String(receiptCount));
+    await expect(page.getByTestId("now-putaway")).toHaveAttribute("data-count", String(pickerPut));
+    await expect(page.getByTestId("now-receive")).toHaveAttribute("href", `/t/demo/field/receive?receipt=${nextReceipts[0]?.id}`);
+    // Çakışma/kırpma yok (saha rolü): kart selam başlığının altında, ilk döşemenin üstünde; döşemeler 72/88-140 px.
+    const pgeo = await page.evaluate<{ headB: number; cardT: number; cardB: number; tileT: number }>(`(() => { const r = (e) => e.getBoundingClientRect(); const tiles = [...document.querySelectorAll('.task-grid > .task-item')].filter((e) => r(e).height > 0); return { headB: r(document.querySelector('main header')).bottom, cardT: r(document.querySelector('.now-card')).top, cardB: r(document.querySelector('.now-card')).bottom, tileT: Math.min(...tiles.map((e) => r(e).top)) }; })()`);
+    expect(pgeo.cardT, `${w}x${h} toplayıcı: kart selam başlığıyla çakışmaz`).toBeGreaterThanOrEqual(pgeo.headB - 0.5);
+    expect(pgeo.tileT, `${w}x${h} toplayıcı: döşemeler kartla çakışmaz`).toBeGreaterThanOrEqual(pgeo.cardB - 0.5);
+    const ptiles = (await homeMetrics(page)).tileHeights;
+    expect(Math.max(...ptiles), `${w}x${h} toplayıcı: döşeme ≤ 140`).toBeLessThanOrEqual(140);
+    expect(Math.min(...ptiles), `${w}x${h} toplayıcı: döşeme ≥ ${h < 700 ? 72 : 88}`).toBeGreaterThanOrEqual(h < 700 ? 72 : 88);
+    const pcut = await page.evaluate<string[]>(`[...document.querySelectorAll('.now-card *')].filter((e) => e.getBoundingClientRect().width > 0 && e.scrollWidth > e.clientWidth + 0.5).map((e) => e.className + ':' + e.textContent)`);
+    expect(pcut, `${w}x${h} toplayıcı: Şimdi kartında kesilen metin`).toEqual([]);
     const pw = await measure(page);
     metrics[`picker-${w}x${h}`] = pw;
     expect(pw.scrollWidth).toBeLessThanOrEqual(pw.clientWidth);
     expect(pw.small, `${w}x${h} toplayıcı: 48 px altı hedef`).toEqual([]);
     if (mobile) await page.screenshot({ path: path.join(OUT, `final-home-picker-${w}x${h}.png`) });
   }
+  // Atanmış görev varsa önce o (Görevlerim özeti); Şimdi satırları onun yerine girmez.
+  const assignedId = nextTasks[0]?.id;
+  await db("UPDATE public.warehouse_tasks SET status = 'ASSIGNED', assigned_membership_id = $2 WHERE tenant_id = $1 AND id = $3", [fx.tenantId, pickerM ?? randomUUID(), assignedId ?? randomUUID()]);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/t/demo");
+  await expect(page.getByTestId("my-tasks-card")).toContainText("Sana atanmış 1 iş");
+  await expect(page.getByTestId("now-card")).toHaveCount(0);
+  await db("UPDATE public.warehouse_tasks SET status = 'OPEN', assigned_membership_id = NULL WHERE tenant_id = $1 AND id = $2", [fx.tenantId, assignedId ?? randomUUID()]);
+  // Tek davranış: satıra dokunmak DOĞRUDAN sıradaki işi açar.
+  await page.goto("/t/demo");
+  await page.getByTestId("now-receive").click();
+  await expect(page).toHaveURL(new RegExp(`/t/demo/field/receive\\?receipt=${nextReceipts[0]?.id}`));
+  await expect(page.getByTestId("flow-step")).toBeVisible();
   writeFileSync(path.join(OUT, `metrics-home-pending-${testInfo.project.name}.json`), JSON.stringify(metrics, null, 2));
 });
 
@@ -762,7 +813,7 @@ test("yetkisiz kullanıcı: kilit ekranı gerekçe + Yardım çağır yolu; tek 
   for (const size of [{ n: "390", w: 390, h: 844 }, { n: "390s", w: 390, h: 664 }]) {
     await page.setViewportSize({ width: size.w, height: size.h });
     for (const [flow, title, reason, other] of [
-      ["receive", "Bu iş sana kapalı", "Mal kabul için yetkin yok", "Yerleştirme için"],
+      ["receive", "Mal kabul sana kapalı", "Mal kabul için yetkin yok", "Yerleştirme için"],
       ["putaway", "Yerleştirme sana kapalı", "Yerleştirme için yetkin yok", "Mal kabul için"],
     ] as const) {
       await page.goto(`/t/demo/field/${flow}`);
@@ -772,6 +823,8 @@ test("yetkisiz kullanıcı: kilit ekranı gerekçe + Yardım çağır yolu; tek 
       await expect(page.locator("main")).not.toContainText(other);
       await expect(page.getByTestId("step-label")).toHaveCount(0);
       await expect(page.getByTestId("help-link")).toHaveAttribute("href", "/help");
+      // R-08: birincil düğme fiillidir ("Saha işlerine dön") ve aynı adlı ikinci bir bağlantı yoktur.
+      await expect(page.getByRole("link", { name: "Saha işlerine dön" })).toHaveCount(1);
       await expect(page.locator('[data-variant="primary"]:visible')).toHaveCount(1);
       const m = await measure(page);
       expect(m.scrollWidth).toBeLessThanOrEqual(m.clientWidth);

@@ -6,7 +6,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useId, useRef, useState, useTransition } from "react";
 import { useTranslations } from "next-intl";
-import { Banner, CircleAlert, CircleCheck, PackagePlus, ScanField, ScanLine } from "@wms/ui";
+import { Banner, ChevronDown, CircleAlert, CircleCheck, PackagePlus, ScanField, ScanLine } from "@wms/ui";
 import { ScannerService, type ScanSource, type ScannerSource } from "../../../../../lib/scanner/scanner-core.ts";
 import { createKeystrokeSource } from "../../../../../lib/scanner/keystroke-source.ts";
 import { ErrorNotice, LineStatus, errorKeyOf, intOf, scanMismatch, submitWithKey, useKeyHolder, type ErrorInfo, type ReceiptDetail, type ReceiptLineView } from "../../receipts/receipt-form.tsx";
@@ -17,6 +17,9 @@ const FOCUS = "focus-visible:outline-3 focus-visible:outline-offset-2 focus-visi
 const NAV_H = "bottom-[74px]";
 
 export type FlowHue = "green" | "teal";
+const SCAN_ICON: Record<FlowHue, string> = { green: "text-cat-green-ink", teal: "text-cat-teal-ink" };
+const SCAN_READY_BORDER: Record<FlowHue, string> = { green: "border-cat-green-ink", teal: "border-cat-teal-ink" };
+const SCAN_LINK: Record<FlowHue, string> = { green: "text-cat-green-ink", teal: "text-cat-teal-ink" };
 const HUE: Record<FlowHue, string> = { green: "bg-cat-green-bg text-cat-green-ink", teal: "bg-cat-teal-bg text-cat-teal-ink" };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -150,8 +153,11 @@ export function ScanAlert({ title, reason, action, code, onClose }: { title: str
           {reason} {action}
         </p>
         {code === undefined ? null : (
-          <details className="text-base">
-            <summary className="flex min-h-12 cursor-pointer items-center justify-center">{t("detail")}</summary>
+          <details className="group/d text-base">
+            <summary className="flex min-h-12 cursor-pointer list-none items-center justify-center gap-2 font-bold">
+              {t("detail")}
+              <ChevronDown aria-hidden="true" className="size-5 shrink-0 transition-transform group-open/d:rotate-180" />
+            </summary>
             <p data-testid="error-code">{t("errorCode", { code })}</p>
           </details>
         )}
@@ -313,7 +319,7 @@ export function CameraOverlay({ onCode, onClose }: { onCode: (code: string) => v
  * Tarama paneli (tek yol): büyük okut ikonu + tek cümle; alt birincil düğme "Barkodu okut". ScanField (T-303) yalnızca "Elle gir" bağlantısıyla açılır
  * (ikincil); okuma hazır olduğunda `ready` vurgusu görünür.
  */
-export function ScanPanel({ service, prompt, last, ready }: { service: ScannerService | null; prompt: string; last: string; ready: boolean }) {
+export function ScanPanel({ service, prompt, last, lastName, ready, hue }: { service: ScannerService | null; prompt: string; last: string; lastName?: string; ready: boolean; hue: FlowHue }) {
   const t = useTranslations("receiving");
   const wrap = useRef<HTMLDivElement>(null);
   return (
@@ -321,11 +327,16 @@ export function ScanPanel({ service, prompt, last, ready }: { service: ScannerSe
       data-testid="scan-panel"
       data-ready={ready ? "true" : "false"}
       aria-live="polite"
-      className={`flex min-w-0 flex-none flex-col items-center gap-2 rounded-card border-2 bg-surface p-4 text-center ${ready ? "border-accent" : "border-border"}`}
+      className={`flex min-w-0 flex-none flex-col items-center gap-2 rounded-card border-2 bg-surface p-4 text-center ${ready ? SCAN_READY_BORDER[hue] : "border-border"}`}
     >
-      <ScanLine aria-hidden="true" className="size-16 text-accent-ink" strokeWidth={1.75} />
+      <ScanLine aria-hidden="true" className={`size-16 ${SCAN_ICON[hue]}`} strokeWidth={1.75} />
       <p className="break-words text-lg font-bold text-ink">{ready ? t("flow.readerReady") : prompt}</p>
-      {last === "" ? null : <p className="break-all text-sm text-ink-muted">{t("flow.lastScan", { code: last })}</p>}
+      {last === "" ? null : (
+        <p className="break-words text-sm text-ink-muted" data-testid="last-scan">
+          {lastName === undefined ? null : <span className="font-bold text-ink">{t("flow.lastScan", { name: lastName })} </span>}
+          <span className="break-all text-xs" data-testid="last-scan-code">{t("flow.lastCode", { code: last })}</span>
+        </p>
+      )}
       <div ref={wrap} className="w-full min-w-0">
         <ScanField
           label={t("flow.scanLabel")}
@@ -340,7 +351,7 @@ export function ScanPanel({ service, prompt, last, ready }: { service: ScannerSe
       <button
         type="button"
         onClick={() => wrap.current?.querySelector<HTMLButtonElement>('[data-mode="scan"] > button')?.click()}
-        className={`flex min-h-12 min-w-12 items-center justify-center rounded-control px-4 text-base font-bold text-accent-ink underline group-has-[[data-mode=manual]]:hidden ${FOCUS}`}
+        className={`flex min-h-12 min-w-12 items-center justify-center rounded-control px-4 text-base font-bold ${SCAN_LINK[hue]} underline group-has-[[data-mode=manual]]:hidden ${FOCUS}`}
       >
         {t("flow.manual")}
       </button>
@@ -410,12 +421,13 @@ interface Done {
 export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptDetail }) {
   const t = useTranslations("receiving");
   const router = useRouter();
-  const [, startTransition] = useTransition();
+  const [refreshing, startTransition] = useTransition();
   const holder = useKeyHolder();
   const [stage, setStage] = useState<Stage>("scan");
   const [picked, setPicked] = useState<Picked | null>(null);
   const [showDamaged, setShowDamaged] = useState(false);
   const [last, setLast] = useState("");
+  const [lastName, setLastName] = useState<string | undefined>(undefined);
   const [busy, setBusy] = useState(false);
   const [alert, setAlert] = useState<AlertState | null>(null);
   const [error, setError] = useState<ErrorInfo | null>(null);
@@ -429,6 +441,7 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
     async (code: string) => {
       if (busy || alert !== null) return;
       setLast(code);
+      setLastName(undefined);
       setBusy(true);
       setError(null);
       let res: Awaited<ReturnType<typeof resolveItemScanAction>>;
@@ -455,6 +468,7 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
         setAlert({ titleKey: "alert.mismatchTitle", reasonKey: "line_done", code: "LINE_COMPLETE" });
         return;
       }
+      setLastName(line.itemName);
       const max = intOf(line.open);
       // Koli barkodu adedi (A-20): yalnızca barkod birimi satır birimiyle aynıysa varsayılan olur; değilse 1 (kullanıcı değiştirir).
       const perScan = unitId === line.unitId ? (intOf(quantity) ?? 1) : 1;
@@ -550,7 +564,7 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
           step={4}
           total={4}
           title={t("flow.savedTitle")}
-          footer={finished ? <PrimaryLink href={base}>{t("flow.otherReceipt")}</PrimaryLink> : <PrimaryButton onClick={() => setStage("scan")}>{t("flow.nextItem")}</PrimaryButton>}
+          footer={finished ? <PrimaryLink href={base}>{t("flow.otherReceipt")}</PrimaryLink> : <PrimaryButton loading={refreshing} onClick={() => setStage("scan")}>{t("flow.nextItem")}</PrimaryButton>}
         >
           <Banner kind="success">
             <p className="font-semibold" data-testid="saved-summary">
@@ -688,7 +702,7 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
         scanProxy
         footer={<PrimaryButton onClick={scanPrimary.press}>{t("flow.scanNow")}</PrimaryButton>}
       >
-        <ScanPanel service={scanner} prompt={busy ? t("flow.checking") : t("flow.scanPrompt")} last={last} ready={scanPrimary.ready && last === ""} />
+        <ScanPanel service={scanner} prompt={busy ? t("flow.checking") : t("flow.scanPrompt")} last={last} {...(lastName === undefined ? {} : { lastName })} ready={scanPrimary.ready && last === ""} hue="green" />
         <section aria-label={t("flow.expectedItems")} className="flex min-w-0 flex-col gap-2">
           <p className="text-sm font-bold text-ink-muted">
             {receipt.number}

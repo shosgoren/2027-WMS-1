@@ -45,8 +45,8 @@ export type NowSummary =
         readonly key: "receive" | "putaway";
         readonly count: number;
         readonly more: boolean;
-        /** Sıradaki en çok 2 GERÇEK iş (başlık + ayrıntı + bağlantı); ilki toplam satırının ikinci satırında, ikincisi yüksek ekranda ayrı satırdır. */
-        readonly next: ReadonlyArray<{ readonly href: `/${string}`; readonly title: string; readonly detail: string }>;
+        /** Sıradaki en çok 2 GERÇEK iş (doğrudan bağlantı + KISA etiket: teslim numarası / adet); ilki satırın kendisidir (tıklayınca ona gider), ikincisi yüksek ekranda ayrı satırdır. */
+        readonly next: ReadonlyArray<{ readonly href: `/${string}`; readonly label: string }>;
       }>;
     }
   | { readonly kind: "empty" }
@@ -57,7 +57,7 @@ export interface TaskMenuProps {
   readonly allowed: { readonly usersManage: boolean; readonly settingsManage: boolean; readonly auditView: boolean; readonly stockView: boolean; readonly stockPost?: boolean };
   /** Verilirse (yalnız saha rolleri) ızgaranın üstünde telefon özet kartı çizilir. */
   readonly myTasks?: MyTasksSummary;
-  /** `stock.post` sahibi için gerçek bekleyen işler; yalnız 2 sütun kipinde (≥ 6 izinli iş) çizilir. */
+  /** `stock.post` sahibi için gerçek bekleyen işler; 2 sütun kipinde (≥ 6 izinli iş) ızgara üstünde, saha rolünde (tek sütun) atanmış iş yoksa Görevlerim özetinin yerinde çizilir. */
   readonly now?: NowSummary;
 }
 
@@ -273,6 +273,68 @@ export async function TaskMenu({ slug, allowed, myTasks, now }: TaskMenuProps) {
       );
     }
   }
+  const nowSection =
+    now !== undefined ? (
+      <section aria-labelledby="now-title" data-testid="now-card" data-state={now.kind} className="now-card flex min-w-0 flex-col gap-2 rounded-card border-2 border-border bg-surface p-3">
+        <h2 id="now-title" className="now-title text-base font-extrabold text-ink">
+          {t("now.title")}
+        </h2>
+        {now.kind === "error" ? (
+          <Banner kind="warning">
+            <p>{now.message}</p>
+            <p className="mt-1 text-sm">{now.code}</p>
+          </Banner>
+        ) : now.kind === "empty" ? (
+          <p data-testid="now-empty" className="m-0 text-base text-ink-muted">
+            {t("now.empty")}
+          </p>
+        ) : (
+          <ul className="now-list m-0 flex list-none flex-col gap-2 p-0">
+            {now.rows.map((r) => {
+              const shown = r.more ? `${r.count}+` : String(r.count);
+              const first = r.next[0];
+              return (
+                <li key={r.key} className="flex min-w-0 flex-col gap-2">
+                  <a
+                    href={first?.href ?? (r.key === "receive" ? `${base}/field/receive` : `${base}/field/tasks`)}
+                    data-testid={`now-${r.key}`}
+                    data-count={r.count}
+                    className={`${FOCUS} flex min-h-16 w-full min-w-0 items-center gap-3 rounded-control border-2 border-border bg-surface px-3 py-1 text-ink`}
+                  >
+                    <span aria-hidden="true" className={`flex size-10 shrink-0 items-center justify-center rounded-full text-lg font-extrabold ${r.key === "receive" ? HUE.green.circle : HUE.teal.circle}`}>
+                      {shown}
+                    </span>
+                    <span className="flex min-w-0 flex-1 flex-col">
+                      <span className="now-label break-words text-base font-bold">{t(`now.${r.key}`, { count: shown })}</span>
+                      {first === undefined ? null : (
+                        <span data-testid={`now-${r.key}-next`} className="now-next whitespace-nowrap text-sm text-ink-muted">
+                          {t("now.next", { label: first.label })}
+                        </span>
+                      )}
+                    </span>
+                    <ChevronRight aria-hidden="true" className="size-6 shrink-0" />
+                  </a>
+                  {r.next[1] === undefined ? null : (
+                    <a
+                      href={r.next[1].href}
+                      data-testid={`now-${r.key}-extra`}
+                      className={`${FOCUS} now-extra min-h-14 w-full min-w-0 items-center gap-3 rounded-control border-2 border-border bg-surface px-3 py-1 text-ink`}
+                    >
+                      <span className="min-w-0 flex-1 whitespace-nowrap text-base font-bold">{t("now.then", { label: r.next[1].label })}</span>
+                      <ChevronRight aria-hidden="true" className="size-6 shrink-0" />
+                    </a>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </section>
+    ) : null;
+  const nowCard = twoCol ? nowSection : null;
+  // Saha rolü (tek sütun): atanmış iş yoksa ve yetkili olunan açık iş (ya da okuma hatası) varsa "Şimdi" satırları boş durum kartının yerini alır (§7.4.2, K-2).
+  const nowInPlace = !twoCol && hasCard && myTasks?.kind === "count" && myTasks.count === 0 && now !== undefined && now.kind !== "empty";
+
   if (hasCard && myTasks !== undefined) {
     const mt = myTasks;
     items.push(
@@ -295,6 +357,8 @@ export async function TaskMenu({ slug, allowed, myTasks, now }: TaskMenuProps) {
             </span>
             <ChevronRight aria-hidden="true" className="size-6 shrink-0" />
           </a>
+        ) : nowInPlace ? (
+          nowSection
         ) : (
           <div data-testid="my-tasks-empty" className="my-tasks my-tasks-empty m-0 flex max-h-30! w-full flex-none! flex-col items-center justify-center gap-1 rounded-2xl border border-border bg-surface px-4 py-2 text-center">
             <p className="m-0 flex items-center gap-2 text-base font-semibold text-ink-muted">
@@ -338,70 +402,11 @@ export async function TaskMenu({ slug, allowed, myTasks, now }: TaskMenuProps) {
     );
   }
 
-  const nowCard =
-    twoCol && now !== undefined ? (
-      <section aria-labelledby="now-title" data-testid="now-card" data-state={now.kind} className="now-card flex min-w-0 flex-col gap-2 rounded-card border-2 border-border bg-surface p-3">
-        <h2 id="now-title" className="now-title text-base font-extrabold text-ink">
-          {t("now.title")}
-        </h2>
-        {now.kind === "error" ? (
-          <Banner kind="warning">
-            <p>{now.message}</p>
-            <p className="mt-1 text-sm">{now.code}</p>
-          </Banner>
-        ) : now.kind === "empty" ? (
-          <p data-testid="now-empty" className="m-0 text-base text-ink-muted">
-            {t("now.empty")}
-          </p>
-        ) : (
-          <ul className="now-list m-0 flex list-none flex-col gap-2 p-0">
-            {now.rows.map((r) => (
-              <li key={r.key} className="flex min-w-0 flex-col gap-2">
-                <a
-                  href={r.key === "receive" ? `${base}/field/receive` : `${base}/field/tasks`}
-                  data-testid={`now-${r.key}`}
-                  data-count={r.count}
-                  className={`${FOCUS} flex min-h-16 w-full min-w-0 items-center gap-3 rounded-control border-2 border-border bg-surface px-3 py-1 text-ink`}
-                >
-                  <span aria-hidden="true" className={`flex size-10 shrink-0 items-center justify-center rounded-full text-lg font-extrabold ${r.key === "receive" ? HUE.green.circle : HUE.teal.circle}`}>
-                    {r.more ? `${r.count}+` : r.count}
-                  </span>
-                  <span className="flex min-w-0 flex-1 flex-col">
-                    <span className="now-long break-words text-base font-bold">{t(`now.${r.key}`, { count: r.more ? `${r.count}+` : String(r.count) })}</span>
-                    <span className="now-short hidden truncate text-sm font-bold">{t(`now.${r.key}Short`)}</span>
-                    {r.next[0] === undefined ? null : (
-                      <span data-testid={`now-${r.key}-next`} className="now-next truncate text-sm text-ink-muted">
-                        {t("now.next", { title: r.next[0].title, detail: r.next[0].detail })}
-                      </span>
-                    )}
-                  </span>
-                  <ChevronRight aria-hidden="true" className="size-6 shrink-0" />
-                </a>
-                {r.next[1] === undefined ? null : (
-                  <a
-                    href={r.next[1].href}
-                    data-testid={`now-${r.key}-extra`}
-                    className={`${FOCUS} now-extra min-h-14 w-full min-w-0 items-center gap-3 rounded-control border-2 border-border bg-surface px-3 py-1 text-ink`}
-                  >
-                    <span className="flex min-w-0 flex-1 flex-col">
-                      <span className="truncate text-base font-bold">{r.next[1].title}</span>
-                      <span className="truncate text-sm text-ink-muted">{r.next[1].detail}</span>
-                    </span>
-                    <ChevronRight aria-hidden="true" className="size-6 shrink-0" />
-                  </a>
-                )}
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-    ) : null;
-
   const grid = (
     <ul
       aria-label={t("tasksLabel")}
       style={gridStyle}
-      className={`task-grid m-0 grid min-w-0 list-none grid-cols-1 gap-4 p-0 md:grid-cols-2 lg:grid-cols-3 ${twoCol ? "phone:grid-cols-2" : "phone:grid-cols-1"} phone:gap-2 ${reverse ? "task-grid-fill" : ""} ${reverse && twoCol ? "task-grid-2col" : ""} ${hasCard ? "task-grid-card" : ""}`}
+      className={`task-grid m-0 grid min-w-0 list-none grid-cols-1 gap-4 p-0 md:grid-cols-2 lg:grid-cols-3 ${twoCol ? "phone:grid-cols-2" : "phone:grid-cols-1"} phone:gap-2 ${reverse ? "task-grid-fill" : ""} ${reverse && twoCol ? "task-grid-2col" : ""} ${hasCard ? "task-grid-card" : ""} ${nowInPlace ? "task-grid-now" : ""}`}
     >
       {items}
     </ul>
