@@ -79,14 +79,27 @@ export interface FieldLine {
   readonly sourceLineId: string | null;
 }
 
-export type FieldSourceKind = "INBOUND_RECEIPT" | "TASK";
+export type FieldSourceKind = "INBOUND_RECEIPT" | "TASK" | "SALES_ORDER";
+
+/** T-308 sevk: `lines[lineIndex]` çıkış satırının tüketeceği sipariş satırı rezervasyonları (stok çekirdeği `consumes`; yalnız `STOCK_OUT`). */
+export interface FieldConsume {
+  readonly lineIndex: number;
+  readonly orderLineId: string;
+  readonly reservationIds: readonly string[];
+}
 
 export interface FieldPostSpec {
-  readonly kind: Extract<PostingKind, "STOCK_IN" | "STOCK_MOVE">;
+  readonly kind: Extract<PostingKind, "STOCK_IN" | "STOCK_OUT" | "STOCK_MOVE">;
   readonly warehouseId: string;
   readonly sourceKind: FieldSourceKind | null;
   readonly sourceId: string | null;
   readonly lines: readonly FieldLine[];
+  /** Belge nedeni (`documents.reason`, ≤ 500; T-308 iade nedeni). */
+  readonly reason?: string | null;
+  /** Yalnız `STOCK_OUT` (T-308 sevk). */
+  readonly consumes?: readonly FieldConsume[];
+  /** Yalnız `STOCK_IN` (T-308 müşteri iadesi): defter nedeni `RETURN`. */
+  readonly ledgerReason?: "RETURN";
 }
 
 function postingLines(spec: FieldPostSpec, ids: readonly string[]): PostingLine[] {
@@ -119,7 +132,7 @@ function assertSize(spec: FieldPostSpec): void {
  */
 export async function planFieldPosting(tx: AccessTx, tenantId: string, spec: FieldPostSpec): Promise<StockCommandPlan> {
   assertSize(spec);
-  const built = buildPostingPlan(spec.kind, postingLines(spec, spec.lines.map(() => randomUUID())));
+  const built = buildPostingPlan(spec.kind, postingLines(spec, spec.lines.map(() => randomUUID())), spec.ledgerReason);
   const rows =
     built.locationIds.length === 0
       ? []
@@ -202,15 +215,16 @@ export async function postFieldDocument(
   const date = await tenantToday(tx, ctx.tenantId);
   const typeVersionId = await systemTypeVersionId(tx, spec.kind);
   const documentId = randomUUID();
+  const lineIds = spec.lines.map(() => randomUUID());
   registerTxCreatedDocument(tx, documentId); // çekirdek: bu belge bu transaction'da doğdu (kilit planında belge yok)
   await tx.execute(
-    sql`INSERT INTO public.documents (tenant_id, id, kind, type_version_id, warehouse_id, business_date, created_by, source_kind, source_id)
+    sql`INSERT INTO public.documents (tenant_id, id, kind, type_version_id, warehouse_id, business_date, created_by, source_kind, source_id, reason)
         VALUES (${ctx.tenantId}::uuid, ${documentId}::uuid, ${spec.kind}, ${typeVersionId}::uuid, ${spec.warehouseId}::uuid, ${date}::date,
-                ${ctx.userId}::uuid, ${spec.sourceKind}, ${spec.sourceId}::uuid)`,
+                ${ctx.userId}::uuid, ${spec.sourceKind}, ${spec.sourceId}::uuid, ${spec.reason ?? null})`,
   );
   const json = JSON.stringify(
     spec.lines.map((l, i) => ({
-      id: randomUUID(),
+      id: lineIds[i] as string,
       line_no: i + 1,
       item_id: l.itemId,
       unit_id: l.unitId,
@@ -239,5 +253,10 @@ export async function postFieldDocument(
          WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${documentId}::uuid AND status = 'DRAFT' RETURNING id`,
   );
   if (approved[0] === undefined) throw new AppError("INTERNAL");
-  return postApprovedDocumentInTx(tx, locked, ctx, documentId, { requestId });
+  const consumes = spec.consumes?.map((c) => {
+    const lineId = lineIds[c.lineIndex];
+    if (lineId === undefined) throw new AppError("INTERNAL");
+    return { lineId, orderLineId: c.orderLineId, reservationIds: c.reservationIds };
+  });
+  return postApprovedDocumentInTx(tx, locked, ctx, documentId, { requestId, consumes, ledgerReason: spec.ledgerReason });
 }

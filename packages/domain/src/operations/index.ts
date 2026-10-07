@@ -92,3 +92,6 @@ export {
   type PickNotFound,
   type PickReallocation,
 } from "./picking.ts";
+// Kısmi sevk ve müşteri iadesi (T-308). `planShipment`/`isShippableReservation` (shipping.ts) ve iade saf yardımcıları iç/test amaçlıdır: burada YOKTUR.
+export { shipOrder, type ShipLineInput, type ShipOrderInput } from "./shipping.ts";
+export { createCustomerReturn, type CreateCustomerReturnInput } from "./returns.ts";
