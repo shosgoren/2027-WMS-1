@@ -88,6 +88,53 @@ describe("palet kontrastı (palette.md §7)", () => {
   }
 });
 
+// --- T-270 (ADR-020 ek, kural 8): iş kategorisi renk ailesi ---
+// Döşeme zemini = açık `*-bg` (ya da `accent-soft`), ikon/başlık = aynı ailenin `*-ink`'i; ikon beyaz rozet (`surface`) üstünde de durur.
+// Metin (başlık, açıklama) ≥4,5:1 ve ikon ≥3:1: ikon çiftleri de 4,5:1 ile denetlenir (daha sıkı). Yeni `count-*` çifti `globals.css`
+// içindeki AYRI ikinci `@theme` bloğundan okunur (palette.md §2 tablosu 28 belirteçle sabit; tablo güncellemesi ADR-020 ekinde takip).
+const CATEGORY_PAIRS: ReadonlyArray<readonly [string, string, number]> = [
+  ["success-ink", "success-bg", T], ["success-ink", "surface", T], ["ink", "success-bg", T],
+  ["warning-ink", "warning-bg", T], ["warning-ink", "surface", T], ["ink", "warning-bg", T],
+  ["info-ink", "info-bg", T], ["info-ink", "surface", T], ["ink", "info-bg", T],
+  ["count-ink", "count-bg", T], ["count-ink", "surface", T], ["ink", "count-bg", T],
+  ["accent-ink", "accent-soft", T], ["accent-ink", "surface", T], ["ink", "accent-soft", T],
+  ["undo-ink", "undo-bg", T], ["undo-ink", "surface", T], ["ink", "undo-bg", T],
+  ["ink-muted", "locked-bg", T], ["ink", "surface", T],
+  ["success-ink", "success-bg", U], ["warning-ink", "warning-bg", U], ["info-ink", "info-bg", U],
+  ["count-ink", "count-bg", U], ["accent-ink", "accent-soft", U], ["undo-ink", "undo-bg", U], ["ink-muted", "locked-bg", U],
+];
+
+function secondThemeBlock(): string {
+  const first = css.indexOf("@theme");
+  const second = css.indexOf("@theme", css.indexOf("\n}", first));
+  if (first < 0 || second < 0) throw new Error("globals.css: ikinci @theme bloğu (T-270 kategori belirteçleri) yok");
+  const open = css.indexOf("{", second);
+  return css.slice(open + 1, css.indexOf("\n}", open));
+}
+
+const categoryExtra = tokens(secondThemeBlock());
+const categoryFlow = new Map([...flow, ...categoryExtra]);
+const categoryCockpit = new Map([...cockpit, ...categoryExtra]);
+
+describe("iş kategorisi renk ailesi (T-270)", () => {
+  it("yeni belirteçler yalnız ikinci @theme bloğundadır ve count-ink/count-bg'dir", () => {
+    expect([...categoryExtra.keys()].sort()).toEqual(["count-bg", "count-ink"]);
+    expect(flow.has("count-ink")).toBe(false);
+  });
+
+  for (const [view, map] of [["Akış", categoryFlow], ["Kokpit", categoryCockpit]] as const) {
+    describe(view, () => {
+      it.each(CATEGORY_PAIRS)("%s / %s >= eşik", (fg, bg, min) => {
+        const f = map.get(fg);
+        const b = map.get(bg);
+        if (!f || !b) throw new Error(`belirteç eksik: ${f ? bg : fg}`);
+        const ratio = contrast(f, b);
+        expect(ratio, `${fg} ${f} / ${bg} ${b} = ${ratio.toFixed(2)}`).toBeGreaterThanOrEqual(min);
+      });
+    });
+  }
+});
+
 // --- palette.md §2/§3 ile globals.css eşitliği (fail-closed: tablo biçimi bozulursa test kırılır) ---
 
 function section(md: string, from: RegExp, to: RegExp): string {

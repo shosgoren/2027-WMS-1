@@ -433,6 +433,10 @@
     "soonLabel": "Coming soon",
     "soonWarehouse": "This task will open after warehouse setup.",
     "soonScreen": "This screen will open soon.",
+    "soonList": {
+      "toggle": "Coming soon ({count})",
+      "back": "Back to tasks"
+    },
     "tasks": {
       "members": {
         "title": "Manage my team",

@@ -64,6 +64,14 @@
   --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
 }
 
+/* T-270 (ADR-020 ek, kural 8): iş kategorisi renk ailesi. Yalnız yeni "sayım" mor çifti burada tanımlıdır; diğer kategoriler mevcut
+   success/warning/info/undo/accent-soft çiftlerini kullanır. İkinci @theme bloğu bilerek ayrıdır: palette.md §2 tablosu (28 belirteç)
+   bu çifti henüz içermez; tablo güncellemesi ADR-020 ekinde takip maddesidir. Kontrast: theme-contrast.test.ts (KATEGORİ çiftleri). */
+@theme {
+  --color-count-ink: #5b2aa8;
+  --color-count-bg: #f1ebfa;
+}
+
 /* Aralık ölçeği ve dokunma hedefi */
 :root {
   --space-1: 0.25rem;
@@ -119,6 +127,12 @@ html {
   }
 }
 
+/* Masaüstü/tablet: döşemede sağ ok yok; "Yakında" düğmesi telefona özgü (telefon bloğu aşağıda geçersiz kılar). */
+.tile-chevron,
+.soon-row {
+  display: none;
+}
+
 /* Telefon yalnız öğeleri masaüstünde gizlidir; masaüstüne özgü öğeler telefonda gizlenir. */
 .phone-only {
   display: none;
@@ -163,64 +177,159 @@ html {
     overscroll-behavior: contain;
   }
 
-  /* Ana ekran döşemeleri: TaskCard'ın (packages/ui) kare ikon döşemesine daraltılmış görünümü. Açıklama gizlenir (başlık yeter);
-     kilit gerekçesi ve "Yakında" etiketi görünür kalır (neden + durum). */
-  .task-grid [data-state] {
-    align-items: center;
-    justify-content: center;
-    gap: 0.25rem;
-    min-height: 4.5rem;
-    padding: 0.5rem;
-    border-radius: 1rem;
-    text-align: center;
+  /* Ana ekran (T-270): ızgara kalan dikey alanı doldurur; alt sekmeye yaslanır ve döşemeler yüksekliği eşit paylaşır
+     (satır sayısı/konum task-menu.tsx sınıflarında; ilk satır "Yakında" düğmesi). "Yakında" öğeleri varsayılan gizli, düğme (details) açılınca liste olur. */
+  .soon-row {
+    display: block;
+    flex: none;
   }
 
-  .task-grid [data-state] > span:first-child {
-    flex-direction: column;
-    align-items: center;
-    gap: 0.125rem;
-  }
-
-  .task-grid [data-state] > span:first-child > span:first-child {
-    width: 2.25rem;
-    height: 2.25rem;
-  }
-
-  .task-grid [data-state] > span:nth-child(2) {
-    font-size: 0.9375rem;
-    line-height: 1.2;
-  }
-
-  .task-grid [data-state="active"] > span:nth-child(3),
-  .task-grid [data-state="soon"] > span:nth-child(3) {
+  .soon-toggle > summary::-webkit-details-marker {
     display: none;
   }
 
-  .task-grid [data-state="locked"] > span:nth-child(3) {
+  .soon-toggle .soon-when-open {
+    display: none;
+  }
+
+  .soon-toggle[open] .soon-when-open {
+    display: block;
+  }
+
+  .soon-toggle[open] .soon-when-closed {
+    display: none;
+  }
+
+  .soon-toggle > summary {
+    flex-wrap: wrap;
+    row-gap: 0.25rem;
+    padding-top: 0.5rem;
+  }
+
+  .soon-toggle[open] > summary {
+    padding-bottom: 0.5rem;
+  }
+
+  .soon-toggle .soon-chevron {
+    order: 2;
+  }
+
+  .soon-toggle .soon-chips {
+    order: 3;
+    flex-basis: 100%;
+    padding-bottom: 0.5rem;
+  }
+
+  .soon-toggle[open] .soon-chips {
+    display: none;
+  }
+
+  /* Kısa görünür alan (Safari araç çubukları açık, <700 px): kaydırmasız sığma için kategori önizleme şeridi gizlenir. */
+  @media (max-height: 699px) {
+    .soon-toggle .soon-chips {
+      display: none;
+    }
+  }
+
+  .soon-toggle[open] .soon-chevron {
+    transform: rotate(180deg);
+  }
+
+  .task-grid {
+    flex: 1 1 0%;
+  }
+
+  .task-grid > .soon-item {
+    display: none;
+  }
+
+  .task-grid:has(.soon-toggle[open]) {
+    display: flex;
+    flex: 0 1 auto;
+    flex-direction: column;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .task-grid:has(.soon-toggle[open]) > .task-item {
+    display: none;
+  }
+
+  .task-grid:has(.soon-toggle[open]) > .soon-item {
+    display: flex;
+  }
+
+  /* Döşeme: tek sütun yatay satır (ikon solda, başlık + açıklama, sağ ok). Satır yüksekliğini ızgara paylaştırır (>=740 px yükseklikte 88-140 px; kısa ekranda alt sınır 72 px). */
+  .task-grid .task-tile {
+    flex-direction: row;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 0.875rem;
+    padding: 0.5rem 1rem;
+    overflow: hidden;
+    border-radius: 1rem;
+  }
+
+  .task-grid .tile-head {
+    display: contents;
+  }
+
+  .task-grid .tile-head > :not(.tile-badge) {
+    order: 3;
+  }
+
+  .task-grid .tile-badge {
+    width: 3.25rem;
+    height: 3.25rem;
+  }
+
+  .task-grid .tile-body {
+    flex: 1 1 0%;
+  }
+
+  .task-grid .tile-title {
+    font-size: 1.0625rem;
+    line-height: 1.2;
+  }
+
+  .task-grid .tile-desc {
     display: -webkit-box;
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 2;
     overflow: hidden;
-    font-size: 0.75rem;
-    line-height: 1.2;
-  }
-
-  .task-grid [data-state="soon"] {
-    min-height: 4rem;
-    padding: 0.375rem;
-  }
-
-  .task-grid [data-state="soon"] > span:first-child > span:first-child {
-    display: none;
-  }
-
-  .task-grid [data-state="soon"] > span:nth-child(2) {
     font-size: 0.8125rem;
+    line-height: 1.25;
   }
 
-  .task-grid [data-state="soon"] > span:first-child > span:last-child {
-    min-height: 0;
-    padding: 0 0.5rem;
-    font-size: 0.6875rem;
+  .task-grid .tile-chevron {
+    display: block;
+  }
+
+  .task-grid:not([class*="grid-rows"]) .task-tile {
+    min-height: 4.5rem;
+  }
+
+  /* "Yakında" listesi: sıkı satır; ikon + başlık + etiket (ızgarada yer kaplamaz, düğmeyle açılır). */
+  .task-grid .task-tile[data-state="soon"] {
+    flex-direction: row;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 0.75rem;
+    min-height: 4rem;
+    padding: 0.5rem 0.75rem;
+  }
+
+  .task-grid .task-tile[data-state="soon"] .tile-badge {
+    width: 2.5rem;
+    height: 2.5rem;
+  }
+
+  .task-grid .task-tile[data-state="soon"] .tile-body {
+    flex: 1 1 0%;
+  }
+
+  .task-grid .task-tile[data-state="soon"] .tile-desc,
+  .task-grid .task-tile[data-state="soon"] .tile-chevron {
+    display: none;
   }
 }

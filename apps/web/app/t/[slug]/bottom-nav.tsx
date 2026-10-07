@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useTranslations } from "next-intl";
 import type { ReactNode } from "react";
-import { ClipboardCheck, Search, Warehouse } from "@wms/ui";
+import { House, ListChecks, Menu, ScanLine } from "@wms/ui";
 import { openAppMenu } from "./app-bar.tsx";
 
 // Telefon alt sekme çubuğu (T-254): başparmak erişimi, her sekme >= 48 px, güvenli alan boşluğu. Yalnız telefonda görünür
@@ -38,17 +38,15 @@ export function BottomNav({ slug }: { slug: string }) {
       data-testid="bottom-nav"
       className="phone-only z-30 shrink-0 items-stretch border-t-2 border-border bg-surface pb-[env(safe-area-inset-bottom)]"
     >
-      {link(base, t("home"), <Warehouse {...ICON} />, pathname === base)}
-      {link(`${base}/field`, t("scan"), <Search {...ICON} />, false)}
+      {link(base, t("home"), <House {...ICON} />, pathname === base)}
+      {link(`${base}/field`, t("scan"), <ScanLine {...ICON} />, false)}
       <span role="group" aria-disabled="true" aria-label={t("tasks")} tabIndex={0} className={`${TAB} ${FOCUS} text-ink-muted`}>
-        <ClipboardCheck {...ICON} />
+        <ListChecks {...ICON} />
         <span className="max-w-full truncate">{t("tasks")}</span>
         <span className="text-[0.625rem] font-semibold leading-none">{t("soon")}</span>
       </span>
       <button type="button" aria-haspopup="dialog" onClick={openAppMenu} className={`${TAB} ${FOCUS} cursor-pointer text-ink`}>
-        <span aria-hidden="true" className="text-2xl leading-6">
-          ≡
-        </span>
+        <Menu {...ICON} />
         <span className="max-w-full truncate">{t("menu")}</span>
       </button>
     </nav>

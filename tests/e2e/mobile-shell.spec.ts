@@ -170,3 +170,117 @@ test("telefon kabuğu: ana ekran tek ekran, menü, alt sekme; masaüstü korunur
 
   console.log(`T254-METRICS ${tag}\n${rows.join("\n")}`);
 });
+
+// T-270: telefon ana ekranı düzeni. Ölçülen yerleşim değerleri (piksel karşılaştırma yok): eşit döşeme, başparmak bölgesi,
+// boş alan oranı, role göre sıra ve "Yakında" listesi. Rol başına ayrı demo girişi (yönetici + toplayıcı). Ekran görüntüleri
+// `.artifacts/t-270/final-*.png` (git'e girmez).
+const OUT_T270 = process.env.T270_OUT ?? path.resolve(import.meta.dirname, "../../.artifacts/t-270");
+const T270_SIZES = [
+  { width: 360, height: 740 },
+  { width: 390, height: 844 },
+  { width: 430, height: 932 },
+] as const;
+const T270_ROLES = [
+  { label: "Yönetici", shot: "admin" },
+  { label: "Toplayıcı", shot: "picker" },
+] as const;
+
+interface HomeLayout {
+  readonly tiles: ReadonlyArray<{ readonly href: string; readonly x: number; readonly y: number; readonly w: number; readonly h: number }>;
+  readonly navTop: number;
+  readonly areaTop: number;
+  readonly emptyRatio: number;
+}
+
+async function homeLayout(page: Page): Promise<HomeLayout> {
+  return page.evaluate<HomeLayout>(`(() => {
+    const box = (el) => { const b = el.getBoundingClientRect(); return { x: b.x, y: b.y, w: b.width, h: b.height, b: b.y + b.height }; };
+    const bar = box(document.querySelector('[data-testid="app-bar"]'));
+    const nav = box(document.querySelector('[data-testid="bottom-nav"]'));
+    const tiles = [...document.querySelectorAll('.task-grid > .task-item > [data-state]')].map((el) => ({ href: el.getAttribute('href') || '', ...box(el) }));
+    const parts = [box(document.querySelector('main header')), ...tiles];
+    const toggle = document.querySelector('.soon-toggle');
+    if (toggle) parts.push(box(toggle));
+    const top = bar.b, bottom = nav.y;
+    const spans = parts.map((p) => [Math.max(p.y, top), Math.min(p.b, bottom)]).sort((a, b) => a[0] - b[0]);
+    let covered = 0, cur = null;
+    for (const [s, e] of spans) { if (cur && s <= cur[1]) cur[1] = Math.max(cur[1], e); else { if (cur) covered += cur[1] - cur[0]; cur = [s, e]; } }
+    if (cur) covered += cur[1] - cur[0];
+    return { tiles: tiles.map((t) => ({ href: t.href, x: t.x, y: t.y, w: t.w, h: t.h })), navTop: nav.y, areaTop: top, emptyRatio: (bottom - top - covered) / (bottom - top) };
+  })()`);
+}
+
+test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş alan, saha işi önce, Yakında listesi", async ({ page }) => {
+  mkdirSync(OUT_T270, { recursive: true });
+  const tag = test.info().project.name;
+  for (const role of T270_ROLES) {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto("/");
+    await page.getByRole("button", { name: `${role.label} olarak gir` }).click();
+    await expect(page).toHaveURL(/\/t\/demo$/);
+    const tasks = page.getByRole("list", { name: "İşler" });
+
+    for (const size of T270_SIZES) {
+      await page.setViewportSize({ width: size.width, height: size.height });
+      await page.goto("/t/demo");
+      await expect(tasks).toBeVisible();
+      const L = await homeLayout(page);
+      const where = `${role.shot} ${size.width}x${size.height}`;
+      expect(L.tiles.length, `${where}: görünür döşeme sayısı (etkin + kilitli)`).toBe(5);
+
+      // Eşit ızgara: tüm genişlik ve yükseklikler ±2 px; yükseklik 88-140 px.
+      const ws = L.tiles.map((t) => t.w);
+      const hs = L.tiles.map((t) => t.h);
+      expect(Math.max(...ws) - Math.min(...ws), `${where}: genişlik farkı`).toBeLessThanOrEqual(2);
+      expect(Math.max(...hs) - Math.min(...hs), `${where}: yükseklik farkı`).toBeLessThanOrEqual(2);
+      expect(Math.min(...hs), `${where}: en küçük döşeme yüksekliği`).toBeGreaterThanOrEqual(88);
+      expect(Math.max(...hs), `${where}: en büyük döşeme yüksekliği`).toBeLessThanOrEqual(140);
+
+      // Başparmak bölgesi: ızgara alt sekmeye yaslı (<= 16 px), boş dikey alan <= %15, ilk iş en alt satırda.
+      const gridBottom = Math.max(...L.tiles.map((t) => t.y + t.h));
+      expect(L.navTop - gridBottom, `${where}: ızgara alt kenarı ile alt sekme arası`).toBeLessThanOrEqual(16);
+      expect(L.emptyRatio, `${where}: boş dikey alan oranı`).toBeLessThanOrEqual(0.15);
+      const lowest = Math.max(...L.tiles.map((t) => t.y));
+      expect(L.tiles[0]?.y, `${where}: ilk (en öncelikli) döşeme en alt satırda`).toBe(lowest);
+
+      // Sıra: saha işleri (depo, ürün) yönetim işlerinden (denetim, ekip, ayarlar) önce — rol fark etmez.
+      const hrefs = L.tiles.map((t) => t.href);
+      const idx = (suffix: string) => hrefs.findIndex((h) => h.endsWith(suffix));
+      const field = [idx("/warehouses"), idx("/items")].filter((i) => i >= 0);
+      const admin = [idx("/audit"), idx("/members"), idx("/settings")].filter((i) => i >= 0);
+      expect(Math.max(...field), `${where}: saha işleri yönetimden önce`).toBeLessThan(admin.length > 0 ? Math.min(...admin) : 99);
+      expect(hrefs[0], `${where}: ilk döşeme saha işi`).toMatch(/\/(warehouses|items)$/);
+
+      // Dokunma hedefleri ve taşma.
+      expect(await smallTargets(page, "body"), `${where}: 48 px altı dokunma hedefi`).toEqual([]);
+      const m = await metrics(page);
+      expect(m.scrollWidth, `${where}: yatay taşma`).toBeLessThanOrEqual(m.clientWidth);
+      expect(m.scrollHeight, `${where}: sayfa gövdesi kaymaz`).toBeLessThanOrEqual(m.innerHeight);
+      await page.screenshot({ path: path.join(OUT_T270, `final-${tag}-${role.shot}-${size.width}.png`) });
+    }
+
+    // "Yakında" döşeme değildir: varsayılan kapalı tek satır; açılınca 6 iş listelenir, "İşlere dön" ile kapanır.
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto("/t/demo");
+    const toggle = page.locator(".soon-toggle > summary");
+    await expect(toggle).toContainText("Yakında gelecekler (6)");
+    expect(await height(toggle), `${role.shot}: Yakında satırı dokunma yüksekliği`).toBeGreaterThanOrEqual(48);
+    await expect(tasks.locator('[data-state="soon"]').first()).toBeHidden();
+    await toggle.click();
+    await expect(toggle).toContainText("İşlere dön");
+    await expect(tasks.locator('[data-state="soon"]')).toHaveCount(6);
+    for (const card of await tasks.locator('[data-state="soon"]').all()) {
+      await expect(card).toBeVisible();
+      await expect(card).toContainText("Yakında");
+    }
+    await expect(tasks.locator('a[data-state="active"]').first()).toBeHidden();
+    expect(await smallTargets(page, "body"), `${role.shot}: Yakında listesi 48 px altı hedef`).toEqual([]);
+    await page.screenshot({ path: path.join(OUT_T270, `final-${tag}-${role.shot}-yakinda-390.png`) });
+    await toggle.click();
+    await expect(tasks.locator('a[data-state="active"]').first()).toBeVisible();
+
+    await page.getByTestId("app-bar-menu").click();
+    await page.getByRole("button", { name: "Çıkış yap" }).click();
+    await expect(page).toHaveURL(/\/login$/);
+  }
+});

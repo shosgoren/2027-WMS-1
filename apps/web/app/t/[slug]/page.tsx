@@ -51,11 +51,11 @@ export default async function TenantHomePage({ params }: { params: Promise<{ slu
   const firstName = summary.userName.trim().split(/\s+/)[0] ?? summary.userName;
 
   return (
-    <main className="mx-auto flex w-full max-w-6xl min-w-0 flex-col gap-6 px-4 py-6 phone:gap-2 phone:px-3 phone:py-2">
-      {/* Telefonda tek satır: "Merhaba Ad, Ne yapmak istiyorsun?"; açıklama paragrafı yalnız geniş ekranda (T-254). */}
-      <header className="flex min-w-0 flex-col gap-2 phone:flex-row phone:flex-wrap phone:items-baseline phone:gap-x-1 phone:gap-y-0">
-        <p className="break-words text-xl font-semibold text-ink-muted phone:text-base">{t("home.greeting", { name: firstName })}</p>
-        <h1 className="break-words text-4xl font-extrabold text-ink phone:text-base">{t("home.title")}</h1>
+    <main className="mx-auto flex w-full max-w-6xl min-w-0 flex-col gap-6 px-4 py-6 phone:min-h-0 phone:flex-1 phone:gap-2 phone:px-3 phone:pb-2 phone:pt-1">
+      {/* Telefonda iki kısa satır (selam + soru); açıklama paragrafı yalnız geniş ekranda (T-254, T-270). */}
+      <header className="flex min-w-0 flex-col gap-2 phone:gap-0">
+        <p className="break-words text-xl font-semibold text-ink-muted phone:text-sm">{t("home.greeting", { name: firstName })}</p>
+        <h1 className="break-words text-4xl font-extrabold text-ink phone:text-xl">{t("home.title")}</h1>
         <p className="desk-only max-w-2xl basis-full break-words text-lg text-ink">{t("home.intro")}</p>
       </header>
       <TaskMenu
