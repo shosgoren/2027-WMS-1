@@ -41,26 +41,54 @@ interface Fx {
 }
 
 /**
- * Fikstür/gözlem SQL'i migration rolüyle `psql` üzerinden çalışır (e2e'de `pg` sürücüsü yasaktır, I-02); parametreler ($n) güvenli biçimde
- * değişmez metne çevrilir (yalnızca bu dosyanın sentetik değerleri). SELECT sonuçları JSON satırlarıdır.
+ * Fikstür/gözlem SQL'i migration rolüyle `psql` üzerinden çalışır (e2e'de `pg` sürücüsü yasaktır, I-02). Bağlantı bilgisi ASLA argümanla verilmez
+ * (süreç listesine/hata iletisine sızar, G-09): URL ayrıştırılıp yalnızca `PG*` ortam değişkenleriyle çocuk sürece geçer, SQL stdin'den gider.
+ * Hata iletisi sterilizedir (argv/ortam/URL/parola yok). Yazmadan önce sunucunun loopback olduğu doğrulanır (yerel yığın dışına yazılmaz).
+ * Parametreler ($n) değişmez metne çevrilir (yalnızca bu dosyanın sentetik değerleri). SELECT sonuçları JSON satırlarıdır.
  */
 type Row = Record<string, string>;
+const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
 function lit(v: unknown): string {
   if (v === null || v === undefined) return "NULL";
   if (typeof v === "number" || typeof v === "boolean") return String(v);
   return `'${String(v).replaceAll("'", "''")}'`;
 }
-async function db<T = Row>(text: string, params: unknown[] = []): Promise<T[]> {
-  const url = process.env.DATABASE_URL_DIRECT;
+function pgEnv(url: string): NodeJS.ProcessEnv {
+  const u = new URL(url);
+  if (!LOOPBACK.has(u.hostname)) throw new Error("e2e: fikstür veritabanı loopback değil; yerel olmayan sunucuya yazılmaz");
+  return {
+    PATH: process.env.PATH,
+    PGHOST: u.hostname.replace(/^\[|\]$/g, ""),
+    PGPORT: u.port === "" ? "5432" : u.port,
+    PGUSER: decodeURIComponent(u.username),
+    PGPASSWORD: decodeURIComponent(u.password),
+    PGDATABASE: decodeURIComponent(u.pathname.replace(/^\//, "")),
+  };
+}
+/** Sterilize hata: yalnızca çıkış durumu; argv, ortam, URL ve psql çıktısı iletiye girmez. */
+function sanitized(e: unknown): Error {
+  const err = e as { code?: string; status?: number | null };
+  if (err.code === "ENOENT") return new Error("e2e: psql bulunamadı (PostgreSQL istemcisi kurulu olmalı: postgresql-client)");
+  return new Error(`e2e: fikstür SQL başarısız (psql çıkış durumu ${err.status ?? "?"})`);
+}
+async function db<T = Row>(text: string, params: unknown[] = [], url: string | undefined = process.env.DATABASE_URL_DIRECT): Promise<T[]> {
   if (url === undefined || url === "") throw new Error("e2e: DATABASE_URL_DIRECT yok (globalSetup .env yükler)");
+  const env = pgEnv(url);
   const sql = text.replace(/\$(\d+)/g, (_m, i: string) => lit(params[Number(i) - 1]));
   const isSelect = /^\s*SELECT/i.test(sql);
   const wrapped = isSelect ? `SELECT COALESCE(json_agg(t), '[]'::json) FROM (${sql}) t` : sql;
-  const out = execFileSync("psql", [url, "-v", "ON_ERROR_STOP=1", "-X", "-q", "-A", "-t", "-c", wrapped], { encoding: "utf8" });
-  return isSelect ? (JSON.parse(out.trim() || "[]") as T[]) : [];
+  try {
+    const out = execFileSync("psql", ["-v", "ON_ERROR_STOP=1", "-X", "-q", "-A", "-t"], { input: wrapped, encoding: "utf8", env, stdio: ["pipe", "pipe", "pipe"] });
+    return isSelect ? (JSON.parse(out.trim() || "[]") as T[]) : [];
+  } catch (e) {
+    throw sanitized(e);
+  }
 }
 
 async function seed(): Promise<Fx> {
+  // Bu spec yerel yığına (compose DB + migration rolü) SQL fikstürü yazar; E2E_BASE_URL (staging) koşusunda uygulanamaz. `test.skip` guard tarafından
+  // yasak (G-11) olduğundan sessizce atlanmaz, açık hatayla durur: staging koşusu bu dosyayı hariç tutmalıdır (örn. `--grep-invert`).
+  if (process.env.E2E_BASE_URL?.trim()) throw new Error("e2e: zzz-receiving yerel yığın ister (E2E_BASE_URL ile staging'de fikstür yazılamaz); bu dosyayı staging koşusundan hariç tut");
   const n = names(randomUUID().replaceAll("-", "").slice(0, 6).toUpperCase());
   run = n.run;
   CODES = n.codes;
@@ -165,6 +193,52 @@ async function login(page: Page, label: string): Promise<void> {
 }
 
 const isMobile = (name: string): boolean => name === "mobile";
+
+/** Ekran ölçümleri ve görüntüleri (aynı oturum: demo girişi hız sınırlı olduğundan ikinci giriş yapılmaz). */
+async function screens(page: Page, projectName: string): Promise<void> {
+  const mobile = isMobile(projectName);
+  mkdirSync(OUT, { recursive: true });
+  const fx = await seed();
+  const metrics: Record<string, unknown> = {};
+  for (const size of SIZES) {
+    await page.setViewportSize({ width: size.width, height: size.height });
+    const shot = async (name: string): Promise<void> => {
+      const m = await measure(page);
+      metrics[`${size.name}-${name}`] = m;
+      expect(m.scrollWidth, `${size.name} ${name}: yatay taşma`).toBeLessThanOrEqual(m.clientWidth);
+      expect(m.small, `${size.name} ${name}: 48 px altı hedef`).toEqual([]);
+      if (mobile) await page.screenshot({ path: path.join(OUT, `final-${size.name}-${name}.png`) });
+    };
+    await page.goto("/t/demo/field/receive");
+    await shot("receive-pick");
+    await page.goto(`/t/demo/field/receive?receipt=${fx.receiptId}`);
+    await page.waitForLoadState("networkidle");
+    await shot("receive-scan");
+    await scan(page, "0000000000000");
+    await expect(page.getByTestId("scan-alert")).toBeVisible();
+    const a = await page.getByTestId("scan-alert").boundingBox();
+    metrics[`${size.name}-alert`] = a;
+    if (mobile) await page.screenshot({ path: path.join(OUT, `final-${size.name}-wrong-scan-alert.png`) });
+    await page.getByRole("button", { name: "Anladım, tekrar okut" }).click();
+    await scan(page, BARCODE.koli);
+    await expect(page.getByRole("textbox", { name: /^Gelen \(/ })).toBeVisible();
+    await page.getByRole("button", { name: "Hasarlı var" }).click();
+    await shot("receive-qty");
+    await page.goto(`/t/demo/field/putaway?wh=${fx.warehouseId}`);
+    await page.waitForLoadState("networkidle");
+    await shot("putaway-source");
+    await page.goto("/t/demo/receipts");
+    const m = await measure(page);
+    metrics[`${size.name}-receipts`] = m;
+    expect(m.scrollWidth, `${size.name} receipts: yatay taşma`).toBeLessThanOrEqual(m.clientWidth);
+    if (mobile) await page.screenshot({ path: path.join(OUT, `final-${size.name}-receipts.png`), fullPage: true });
+  }
+  // Masaüstü (1280) görüntüsü: teslim listesi + form.
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/t/demo/receipts");
+  if (mobile) await page.screenshot({ path: path.join(OUT, "final-1280-receipts.png"), fullPage: true });
+  writeFileSync(path.join(OUT, `metrics-screens-${projectName}.json`), JSON.stringify(metrics, null, 2));
+}
 
 test("kabul → kalite onayı → yerleştirme (görevli ve serbest) + yanlış tarama ve sayım kilidi engelleri", async ({ page }, testInfo) => {
   mkdirSync(OUT, { recursive: true });
@@ -389,50 +463,27 @@ test("kabul → kalite onayı → yerleştirme (görevli ve serbest) + yanlış 
   expect(Number(onRaf2[0]?.q)).toBe(left);
 
   writeFileSync(path.join(OUT, `metrics-flow-${testInfo.project.name}.json`), JSON.stringify(log, null, 2));
+  await screens(page, testInfo.project.name);
 });
 
-test("ekran ölçümleri (360/390/430): kabul, yerleştirme, teslim listesi, yanlış tarama uyarısı; görüntüler mobil projede", async ({ page }, testInfo) => {
-  const mobile = isMobile(testInfo.project.name);
-  mkdirSync(OUT, { recursive: true });
-  const fx = await seed();
-  await login(page, "Yönetici");
-  const metrics: Record<string, unknown> = {};
-  for (const size of SIZES) {
-    await page.setViewportSize({ width: size.width, height: size.height });
-    const shot = async (name: string): Promise<void> => {
-      const m = await measure(page);
-      metrics[`${size.name}-${name}`] = m;
-      expect(m.scrollWidth, `${size.name} ${name}: yatay taşma`).toBeLessThanOrEqual(m.clientWidth);
-      expect(m.small, `${size.name} ${name}: 48 px altı hedef`).toEqual([]);
-      if (mobile) await page.screenshot({ path: path.join(OUT, `final-${size.name}-${name}.png`) });
-    };
-    await page.goto("/t/demo/field/receive");
-    await shot("receive-pick");
-    await page.goto(`/t/demo/field/receive?receipt=${fx.receiptId}`);
-    await page.waitForLoadState("networkidle");
-    await shot("receive-scan");
-    await scan(page, "0000000000000");
-    await expect(page.getByTestId("scan-alert")).toBeVisible();
-    const a = await page.getByTestId("scan-alert").boundingBox();
-    metrics[`${size.name}-alert`] = a;
-    if (mobile) await page.screenshot({ path: path.join(OUT, `final-${size.name}-wrong-scan-alert.png`) });
-    await page.getByRole("button", { name: "Anladım, tekrar okut" }).click();
-    await scan(page, BARCODE.koli);
-    await expect(page.getByRole("textbox", { name: /^Gelen \(/ })).toBeVisible();
-    await page.getByRole("button", { name: "Hasarlı var" }).click();
-    await shot("receive-qty");
-    await page.goto(`/t/demo/field/putaway?wh=${fx.warehouseId}`);
-    await page.waitForLoadState("networkidle");
-    await shot("putaway-source");
-    await page.goto("/t/demo/receipts");
-    const m = await measure(page);
-    metrics[`${size.name}-receipts`] = m;
-    expect(m.scrollWidth, `${size.name} receipts: yatay taşma`).toBeLessThanOrEqual(m.clientWidth);
-    if (mobile) await page.screenshot({ path: path.join(OUT, `final-${size.name}-receipts.png`), fullPage: true });
+test("fikstür SQL hata iletisi parola/URL/argv içermez ve loopback dışına yazılmaz", async () => {
+  const secret = `pw-${randomUUID()}`;
+  // Kapalı loopback portu: psql bağlanamaz; ileti sterilize olmalı.
+  let message = "";
+  try {
+    await db("SELECT 1", [], `postgresql://fx_user:${secret}@127.0.0.1:1/fxdb`);
+  } catch (e) {
+    message = String((e as Error).message);
   }
-  // Masaüstü (1280) görüntüsü: teslim listesi + form.
-  await page.setViewportSize({ width: 1280, height: 800 });
-  await page.goto("/t/demo/receipts");
-  if (mobile) await page.screenshot({ path: path.join(OUT, "final-1280-receipts.png"), fullPage: true });
-  writeFileSync(path.join(OUT, `metrics-screens-${testInfo.project.name}.json`), JSON.stringify(metrics, null, 2));
+  expect(message, "hata üretilmeli").toContain("e2e:");
+  for (const leak of [secret, "fx_user", "fxdb", "127.0.0.1", "postgresql://", "-c", "psql -", "PGPASSWORD"]) expect(message, `iletide '${leak}' yok`).not.toContain(leak);
+  // Loopback olmayan sunucu: bağlanmadan reddedilir.
+  let remote = "";
+  try {
+    await db("SELECT 1", [], `postgresql://u:${secret}@db.example.test:5432/x`);
+  } catch (e) {
+    remote = String((e as Error).message);
+  }
+  expect(remote).toContain("loopback değil");
+  expect(remote).not.toContain(secret);
 });

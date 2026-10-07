@@ -180,6 +180,10 @@ export function TaskTile({ name, hue, title, description, what, href, locked, so
   );
 }
 
+/** Telefonda tek sütundan 2 sütuna geçiş eşiği (izinli iş sayısı) ve 2 sütunda alttan doldurmanın üst sınırı (DESIGN_REVIEW §7.4). */
+const TWO_COL_FROM = 6;
+const TWO_COL_MAX = 10;
+
 export async function TaskMenu({ slug, allowed, myTasks }: TaskMenuProps) {
   const t = await getTranslations("home");
   const base = `/t/${encodeURIComponent(slug)}` as const;
@@ -199,11 +203,14 @@ export async function TaskMenu({ slug, allowed, myTasks }: TaskMenuProps) {
   const active = real.filter((d) => hrefs[d.key]?.allowed === true);
   const locked = real.filter((d) => hrefs[d.key]?.allowed !== true);
   const soon = ordered.filter((d) => hrefs[d.key] === undefined);
-  // Telefonda tek sütun, eşit yükseklikli yatay satırlar; en çok 6 izinli iş için alttan yukarı doldurma (CSS değişkenleri `--rows`,
-  // `--row`). Daha çok iş olursa doldurma kapanır ve içerik alanı kayar (takip: 2 sütun).
-  const reverse = active.length >= 1 && active.length <= 6;
+  // Telefon yerleşimi izinli iş sayısına göre (DESIGN_REVIEW §7.4): ≤5 iş tek sütun eşit yükseklikli yatay satırlar; ≥6 iş eşit 2 sütunlu ızgara
+  // (aynı döşeme biçemi, açıklama gizli; tek sayıda iş varsa en üstteki son döşeme tam genişlik). Her iki kipte ızgara alttan yukarı dolar
+  // (CSS değişkenleri `--rows`, `--row`, `--col`); sınırı aşan iş sayısında doldurma kapanır ve içerik alanı kayar.
+  const twoCol = active.length >= TWO_COL_FROM;
+  const reverse = active.length >= 1 && active.length <= (twoCol ? TWO_COL_MAX : TWO_COL_FROM - 1);
+  const rowCount = twoCol ? Math.ceil(active.length / 2) : active.length;
   const hasCard = reverse && myTasks !== undefined;
-  const gridStyle = reverse ? ({ "--rows": active.length } as CSSProperties) : undefined;
+  const gridStyle = reverse ? ({ "--rows": rowCount } as CSSProperties) : undefined;
   const items: ReactNode[] = [];
   let moreNode: ReactNode = null;
 
@@ -286,7 +293,10 @@ export async function TaskMenu({ slug, allowed, myTasks }: TaskMenuProps) {
   active.forEach((d, i) => {
     const h = hrefs[d.key];
     if (h === undefined) return;
-    const row = reverse ? ({ "--row": active.length + 1 - i } as CSSProperties) : undefined;
+    const lastOdd = twoCol && active.length % 2 === 1 && i === active.length - 1;
+    const row = reverse
+      ? ({ "--row": rowCount + 1 - (twoCol ? Math.floor(i / 2) : i), ...(twoCol ? { "--col": lastOdd ? "1 / -1" : (i % 2) + 1 } : {}) } as CSSProperties)
+      : undefined;
     items.push(
       <li key={d.key} className="task-item flex min-w-0" style={row}>
         <TaskTile name={d.key} hue={d.hue} title={t(`tasks.${d.key}.title`)} description={t(`tasks.${d.key}.description`)} href={h.href} />
@@ -312,7 +322,7 @@ export async function TaskMenu({ slug, allowed, myTasks }: TaskMenuProps) {
     <ul
       aria-label={t("tasksLabel")}
       style={gridStyle}
-      className={`task-grid m-0 grid min-w-0 list-none grid-cols-1 gap-4 p-0 md:grid-cols-2 lg:grid-cols-3 phone:grid-cols-1 phone:gap-2 ${reverse ? "task-grid-fill" : ""} ${hasCard ? "task-grid-card" : ""}`}
+      className={`task-grid m-0 grid min-w-0 list-none grid-cols-1 gap-4 p-0 md:grid-cols-2 lg:grid-cols-3 ${twoCol ? "phone:grid-cols-2" : "phone:grid-cols-1"} phone:gap-2 ${reverse ? "task-grid-fill" : ""} ${reverse && twoCol ? "task-grid-2col" : ""} ${hasCard ? "task-grid-card" : ""}`}
     >
       {items}
     </ul>

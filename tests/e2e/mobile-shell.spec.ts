@@ -12,6 +12,7 @@ const PHONES = [
   { name: "iphone13", width: 390, height: 664 }, // Playwright "iPhone 13" cihaz profili (Safari araç çubukları dahil görünür alan)
   { name: "iphone13-tam", width: 390, height: 844 }, // standalone / tam ekran
   { name: "android-360", width: 360, height: 740 },
+  { name: "android-430", width: 430, height: 932 }, // T-313: 6 etkin iş (2 sütun) için büyük telefon da kaydırmasız sınanır
 ] as const;
 
 interface Metrics {
@@ -358,7 +359,24 @@ test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş al
       expect(L.tiles.length, `${where}: görünür döşeme sayısı (izinli işler)`).toBe(activeCount);
 
       // Eşit ızgara: tüm genişlik ve yükseklikler ±2 px; yükseklik 88-140 px (her rol).
-      const ws = L.tiles.map((t) => t.w);
+      // T-313 (DESIGN_REVIEW §7.4): ≤5 izinli iş tek sütun, ≥6 eşit 2 sütun; tek sayıda iş varsa en üstteki son döşeme tam genişlik (yetim değil).
+      // İki kipte de aynı güçte: eşit boyut (±2 px), 88-140 px, alt yaslı ≤ 16 px, boş alan ≤ %15, ilk iş en alt satırda.
+      const twoCol = activeCount >= 6;
+      const perRow = new Map<number, number>();
+      for (const t of L.tiles) perRow.set(Math.round(t.y), (perRow.get(Math.round(t.y)) ?? 0) + 1);
+      const orphanRows = twoCol ? [...perRow.entries()].filter(([, n]) => n === 1).map(([y]) => y) : [];
+      expect(new Set(L.tiles.filter((t) => !orphanRows.includes(Math.round(t.y))).map((t) => Math.round(t.x))).size, `${where}: sütun sayısı`).toBe(twoCol ? 2 : 1);
+      if (twoCol) {
+        expect(orphanRows.length, `${where}: tek döşemeli satır sayısı (tek sayıda iş → 1, çift → 0)`).toBe(L.tiles.length % 2);
+        for (const y of orphanRows) {
+          const o = L.tiles.find((t) => Math.round(t.y) === y);
+          const regularW = Math.max(...L.tiles.filter((t) => Math.round(t.y) !== y).map((t) => t.w));
+          expect(o?.w ?? 0, `${where}: tek döşeme tam genişlik`).toBeGreaterThan(regularW * 1.9);
+          expect(y, `${where}: tek döşeme en üst satırda`).toBe(Math.min(...L.tiles.map((t) => Math.round(t.y))));
+        }
+      }
+      const regular = L.tiles.filter((t) => !orphanRows.includes(Math.round(t.y)));
+      const ws = regular.map((t) => t.w);
       const hs = L.tiles.map((t) => t.h);
       expect(Math.max(...ws) - Math.min(...ws), `${where}: genişlik farkı`).toBeLessThanOrEqual(2);
       expect(Math.max(...hs) - Math.min(...hs), `${where}: yükseklik farkı`).toBeLessThanOrEqual(2);

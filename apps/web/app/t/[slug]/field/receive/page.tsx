@@ -75,7 +75,8 @@ export default async function FieldReceivePage({ params, searchParams }: { param
     } catch (e) {
       if (!(e instanceof AppError && (e.code === "NOT_FOUND" || e.code === "VALIDATION_FAILED"))) guardErrors(e);
     }
-    if (receipt === null || receipt.status !== "OPEN") {
+    // KAPALI teslim (son kalem alındı) de akışa gider: akış "Teslim tamam" ekranını gösterir; yenilemeden sonra "kaydedildi" ekranı kaybolmaz.
+    if (receipt === null || (receipt.status !== "OPEN" && receipt.status !== "CLOSED")) {
       return (
         <FlowShell hue="green" icon={icon} step={1} total={4} title={t("flow.notOpenTitle")} backHref={base} footer={<PrimaryLink href={base}>{t("flow.otherReceipt")}</PrimaryLink>}>
           <p className="break-words text-lg text-ink">{t("flow.notOpen")}</p>

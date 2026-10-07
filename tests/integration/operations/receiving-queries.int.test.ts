@@ -143,8 +143,9 @@ describe("listInboundReceipts / getInboundReceipt", () => {
     }
   });
 
-  it("izin: stock.view olmayan üyelik reddedilir (üye olmayan kullanıcı)", async () => {
-    // B tenant'ının üyesi A'nın verisine erişemez: üyelik yok → NOT_FOUND/FORBIDDEN (tenant varlığı sızmaz).
+  it("üyelik: başka tenant'ın üyesi (A'da üyeliği yok) reddedilir", async () => {
+    // NOT: `stock.view` TÜM rollerde vardır (permissions.ts ROLE_PERMISSIONS), bu yüzden "stock.view'sız üye" durumu kurulamaz; izin reddi yalnızca
+    // üyeliksiz kullanıcı için sınanır. B tenant'ının üyesi A'nın verisine erişemez: üyelik yok → NOT_FOUND/FORBIDDEN (tenant varlığı sızmaz).
     const e = await failure(listInboundReceipts({ db: app, principal: { userId: B.ownerUserId, mfaVerified: true }, tenantSlug: A.slug }));
     expect(["NOT_FOUND", "FORBIDDEN"]).toContain(e.code);
   });
