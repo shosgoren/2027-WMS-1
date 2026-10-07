@@ -778,3 +778,131 @@ describe("scope argümanları", () => {
     expect(() => parseScopeArgs(["--base=a", "--base=b"])).toThrow(/birden fazla/);
   });
 });
+
+describe("T-299 main push kipi: PR birleştirme commit'inden dal çözümü", () => {
+  /**
+   * main'e `from` dalını PR birleştirme commit'iyle alır; PR başı ref'i (`refs/remotes/pull/N/head`)
+   * `prHead` ile (varsayılan: dalın ucu) kurulur — iş akışındaki fetch'in karşılığı.
+   * @param {ReturnType<typeof fixture>} r
+   * @param {string} from
+   * @param {string} subject
+   * @param {{ prHead?: string | null, number?: number }} [o]
+   */
+  function mergeToMain(r, from, subject, o = {}) {
+    const tip = r.git("rev-parse", from).trim();
+    r.checkout("main");
+    r.merge(from, subject);
+    const prHead = o.prHead === undefined ? tip : o.prHead;
+    if (prHead !== null) r.git("update-ref", `refs/remotes/pull/${o.number ?? 9}/head`, prHead);
+    r.git("checkout", "--quiet", "main");
+    return tip;
+  }
+
+  it("PR birleştirme commit'i (int dalı, başlık eki, Supervisor yolu) → OK", async () => {
+    const r = fixture();
+    r.branch("int/dilim");
+    r.branch("feat/T-100-x").write("src/a.mjs", "a2\n").commit("100").checkout("int/dilim");
+    r.merge("feat/T-100-x", "Merge pull request #7 from owner/feat/T-100-x");
+    r.write("docs/STATE.md", "durum\n").commit("supervisor");
+    r.publish("int/dilim");
+    mergeToMain(r, "int/dilim", "Merge pull request #9 from owner/int/dilim — Paket 2");
+    const res = await check(r.dir, ["--branch", "main"]);
+    expect(res.lines).toEqual(["check:scope OK"]);
+    expect(res.code).toBe(0);
+  });
+
+  it("PR birleştirme commit'i (feat dalı, kart içi) → OK; kapsam dışı dosya → FAIL OUT_OF_SCOPE", async () => {
+    const ok = fixture();
+    ok.branch("feat/T-100-x").write("src/a.mjs", "a2\n").commit("iş");
+    mergeToMain(ok, "feat/T-100-x", "Merge pull request #9 from owner/feat/T-100-x");
+    expect((await check(ok.dir, ["--branch", "main"])).code).toBe(0);
+
+    const bad = fixture();
+    bad.branch("feat/T-100-x").write("src/a.mjs", "a2\n").write("README.md", "değişti\n").commit("iş");
+    mergeToMain(bad, "feat/T-100-x", "Merge pull request #9 from owner/feat/T-100-x");
+    const res = await check(bad.dir, ["--branch", "main"]);
+    expect(res.code).toBe(1);
+    expect(res.lines).toContainEqual(expect.stringMatching(/^\[check:scope\] FAIL OUT_OF_SCOPE README\.md — kart dosya listesinde yok \(T-100; durum M\)$/));
+  });
+
+  it("int PR'ında birleştirilmemiş kartın dosyası → FAIL OUT_OF_SCOPE", async () => {
+    const r = fixture();
+    r.branch("int/dilim").write("src/c.mjs", "c2\n").commit("T-102 dosyası doğrudan int'te");
+    mergeToMain(r, "int/dilim", "Merge pull request #9 from owner/int/dilim");
+    const res = await check(r.dir, ["--branch", "main"]);
+    expect(res.code).toBe(1);
+    expect(res.text).toContain("FAIL OUT_OF_SCOPE src/c.mjs");
+  });
+
+  it("PR'sız doğrudan commit → FAIL MAIN_DIRECT_PUSH", async () => {
+    const r = fixture();
+    r.write("src/a.mjs", "a2\n").commit("doğrudan");
+    const res = await check(r.dir, ["--branch", "main"]);
+    expect(res.code).toBe(1);
+    expect(res.text).toContain("FAIL MAIN_DIRECT_PUSH");
+  });
+
+  it("ikinci ebeveyni olmayan, konusu sahte PR yazan commit → FAIL MAIN_DIRECT_PUSH", async () => {
+    const r = fixture();
+    r.write("src/a.mjs", "a2\n").commit("Merge pull request #9 from owner/feat/T-100-x");
+    const res = await check(r.dir, ["--branch", "main"]);
+    expect(res.code).toBe(1);
+    expect(res.text).toContain("FAIL MAIN_DIRECT_PUSH");
+  });
+
+  it("biçimi bozuk konu → FAIL MAIN_PR_SUBJECT", async () => {
+    for (const subject of ["Merge branch 'feat/T-100-x'", "Merge pull request 9 from owner/feat/T-100-x", "Merge pull request #9 from feat/T-100-x"]) {
+      const r = fixture();
+      r.branch("feat/T-100-x").write("src/a.mjs", "a2\n").commit("iş");
+      mergeToMain(r, "feat/T-100-x", subject);
+      const res = await check(r.dir, ["--branch", "main"]);
+      expect(res.code, subject).toBe(1);
+      expect(res.text, subject).toContain("FAIL MAIN_PR_SUBJECT");
+    }
+  });
+
+  it("kart kalıbına uymayan PR dalı → FAIL MAIN_PR_SUBJECT", async () => {
+    const r = fixture();
+    r.branch("deneme").write("src/a.mjs", "a2\n").commit("iş");
+    mergeToMain(r, "deneme", "Merge pull request #9 from owner/deneme");
+    const res = await check(r.dir, ["--branch", "main"]);
+    expect(res.code).toBe(1);
+    expect(res.text).toContain("FAIL MAIN_PR_SUBJECT");
+  });
+
+  it("sahte konu: PR başı ref'i yok → FAIL MAIN_PR_UNVERIFIED", async () => {
+    const r = fixture();
+    r.branch("feat/T-100-x").write("src/a.mjs", "a2\n").commit("iş");
+    mergeToMain(r, "feat/T-100-x", "Merge pull request #9 from owner/feat/T-100-x", { prHead: null });
+    const res = await check(r.dir, ["--branch", "main"]);
+    expect(res.code).toBe(1);
+    expect(res.text).toContain("FAIL MAIN_PR_UNVERIFIED");
+  });
+
+  it("sahte konu: ikinci ebeveyn PR #N başı değil (başka PR'ın kartını ödünç alma) → FAIL MAIN_PR_UNVERIFIED", async () => {
+    const r = fixture();
+    r.branch("feat/T-100-x").write("src/a.mjs", "a2\n").commit("gerçek PR");
+    const real = r.git("rev-parse", "HEAD").trim();
+    r.checkout("main").branch("int/sahte").write("README.md", "evil\n").commit("evil");
+    mergeToMain(r, "int/sahte", "Merge pull request #9 from owner/feat/T-100-x", { prHead: real });
+    const res = await check(r.dir, ["--branch", "main"]);
+    expect(res.code).toBe(1);
+    expect(res.text).toContain("FAIL MAIN_PR_UNVERIFIED");
+  });
+
+  it("sahte konu: dal origin'de var ama ikinci ebeveyn onun commit'i değil → FAIL MAIN_PR_UNVERIFIED", async () => {
+    const r = fixture();
+    r.branch("feat/T-100-x").write("src/a.mjs", "a2\n").commit("iş").publish("feat/T-100-x");
+    r.checkout("main").branch("yan").write("src/a.mjs", "a3\n").commit("yan");
+    mergeToMain(r, "yan", "Merge pull request #9 from owner/feat/T-100-x");
+    const res = await check(r.dir, ["--branch", "main"]);
+    expect(res.code).toBe(1);
+    expect(res.text).toContain("FAIL MAIN_PR_UNVERIFIED");
+  });
+
+  it("main kipinde --base verilemez → kullanım hatası (çıkış 2)", async () => {
+    const r = fixture();
+    const res = await check(r.dir, ["--branch", "main", "--base", "origin/main"]);
+    expect(res.code).toBe(2);
+  });
+});

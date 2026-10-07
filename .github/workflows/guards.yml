@@ -115,6 +115,25 @@ jobs:
           path: pr
           fetch-depth: 0
           persist-credentials: false
+      # main push'unda (T-299) check:scope PR dalını birleştirme commit'inin konusundan ve ikinci
+      # ebeveyninden çözer; konuya tek başına güvenmez: GitHub'ın `refs/pull/N/head` ref'i
+      # `refs/remotes/pull/N/head` olarak getirilir ve ikinci ebeveynle birebir karşılaştırılır.
+      # Konu yalnızca rakam çıkarmak için (katı regex) okunur; kabuğa gömülmez. Konu biçimi uymuyorsa
+      # getirme atlanır ve bekçi MAIN_PR_SUBJECT/MAIN_PR_UNVERIFIED ile FAIL eder (atla/geç yok).
+      # Getirme başarısızsa iş FAIL. Yalnızca push olayı (PR olaylarında bu ref'ler getirilmez).
+      - name: Fetch merged PR head (main push)
+        if: github.event_name == 'push'
+        working-directory: pr
+        run: |
+          set -euo pipefail
+          subject="$(git log -1 --format=%s HEAD)"
+          if [[ "$subject" =~ ^Merge\ pull\ request\ \#([1-9][0-9]{0,8})\ from\ [A-Za-z0-9][A-Za-z0-9-]*/[^[:space:]]+ ]]; then
+            n="${BASH_REMATCH[1]}"
+            git fetch --no-tags --quiet origin "+refs/pull/${n}/head:refs/remotes/pull/${n}/head"
+            echo "PR #${n} başı getirildi: $(git rev-parse --short "refs/remotes/pull/${n}/head")"
+          else
+            echo "::notice::HEAD konusu PR birleştirme biçiminde değil; PR başı getirilmedi (check:scope FAIL verecek)"
+          fi
       # check:scope kartı dal adından bulur; ayrık HEAD'e doğrulanmış dal adı verilir.
       - name: Name PR branch
         env:

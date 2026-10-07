@@ -3,15 +3,20 @@
 //   --base <ref>     hedef dal (varsayılan: kartın Dal satırındaki `→ int/…` hedefi
 //                    `origin/int/…`, yoksa `origin/main`; `int/*` dalında `origin/main`)
 //   --branch <ad>    dal adı (varsayılan: geçerli dal; CI'da ayrık HEAD için)
+// `main` kipi (T-299; dal adı `main`, yani main'e push): HEAD bir PR birleştirme commit'i olmalı
+// (tam 2 ebeveyn + "Merge pull request #N from <sahip>/<dal>" konusu); PR dalı bundan çözülür ve
+// o dalın kuralıyla (int/* → birleştirilmiş kartlar + SUPERVISOR_PATHS; feat|fix/T-xxx → tek kart)
+// `HEAD^1..HEAD` farkı denetlenir. Çözülemezse FAIL (atla/geç yok); PR'sız commit FAIL (G-08).
 // Kart listesi dalda değiştiyse `WARN SCOPE_CARD_CHANGED` (Supervisor §2 adım 4'te okur).
 import path from "node:path";
-import { CardError, mergedWorkBranches, parseCardFiles, resolveCards } from "./lib/cards.mjs";
+import { CardError, cardIdFromBranch, isIntBranch, mergedWorkBranches, parseCardFiles, resolveCards } from "./lib/cards.mjs";
 import {
   branchPointsAt,
   changedFiles,
   currentBranch,
   DEFAULT_TARGET,
   fileAtRef,
+  git,
   GitError,
   indexEntries,
   isAncestor,
@@ -19,6 +24,7 @@ import {
   mergeHeads,
   mergeMsgSubject,
   mergeSubjects,
+  refExists,
   repoRoot,
   touchedPaths,
   treeEntries,
@@ -177,6 +183,70 @@ function checkCardChanged(out, root, base, card) {
   out.warn("SCOPE_CARD_CHANGED", card.path, `kartın dosya listesi dalda değişti (${parts.join("; ")})`);
 }
 
+/** `main` dalı adı: bu adla çalışan bekçi main-push kipindedir. */
+export const MAIN_BRANCH = "main";
+
+/**
+ * GitHub PR birleştirme konusu. Dal adı boşluksuz tek simge; ardındaki isteğe bağlı serbest metin
+ * (Supervisor'ın verdiği başlık eki) dal çözümüne katılmaz.
+ */
+const PR_MERGE_SUBJECT = /^Merge pull request #([1-9]\d{0,8}) from ([A-Za-z0-9][A-Za-z0-9-]*)\/(\S+)(?:\s.*)?$/;
+
+/** main-push kipinde PR dalının çözülememesi (kod + ileti; her biri FAIL). */
+class MainPushError extends Error {
+  /**
+   * @param {string} code
+   * @param {string} message
+   */
+  constructor(code, message) {
+    super(message);
+    this.name = "MainPushError";
+    this.code = code;
+  }
+}
+
+/**
+ * main'e push edilen HEAD'in PR birleştirme commit'i olduğunu doğrular ve PR dalını çözer.
+ * Yalnız konuya güvenilmez: ikinci ebeveyn, iş akışının `refs/pull/N/head`'den getirdiği
+ * `refs/remotes/pull/N/head` ile birebir aynı olmalı (GitHub'ın PR başı; konu sahte yazılsa da
+ * PR #N'nin başı değilse FAIL). Ayrıca `origin/<dal>` hâlâ varsa ikinci ebeveyn onun atası olmalı.
+ * @param {string} root
+ * @returns {{ prBranch: string, number: string, base: string, tip: string }}
+ */
+function resolveMainPush(root) {
+  const parents = git(root, ["rev-list", "--parents", "-n", "1", "HEAD"]).trim().split(" ").slice(1);
+  if (parents.length !== 2) {
+    throw new MainPushError(
+      "MAIN_DIRECT_PUSH",
+      `HEAD bir PR birleştirme commit'i değil (${parents.length} ebeveyn; 2 beklenir) — main'e doğrudan push yasak (G-08)`,
+    );
+  }
+  const [base, tip] = /** @type {[string, string]} */ (parents);
+  const subject = git(root, ["log", "-1", "--format=%s", "HEAD"]).trim();
+  const m = PR_MERGE_SUBJECT.exec(subject);
+  if (m === null) {
+    throw new MainPushError("MAIN_PR_SUBJECT", `birleştirme konusu "Merge pull request #N from <sahip>/<dal>" biçiminde değil: "${subject}"`);
+  }
+  const number = /** @type {string} */ (m[1]);
+  const prBranch = /** @type {string} */ (m[3]);
+  const prRef = `refs/remotes/pull/${number}/head`;
+  if (!refExists(root, prRef)) {
+    throw new MainPushError("MAIN_PR_UNVERIFIED", `PR #${number} başı (${prRef}) yerelde yok; ikinci ebeveyn doğrulanamadı`);
+  }
+  const prHead = git(root, ["rev-parse", `${prRef}^{commit}`]).trim();
+  if (prHead !== tip) {
+    throw new MainPushError("MAIN_PR_UNVERIFIED", `ikinci ebeveyn ${tip.slice(0, 7)}, PR #${number} başı ${prHead.slice(0, 7)} ile aynı değil`);
+  }
+  const branchRef = `refs/remotes/origin/${prBranch}`;
+  if (refExists(root, branchRef) && !isAncestor(root, tip, branchRef)) {
+    throw new MainPushError("MAIN_PR_UNVERIFIED", `ikinci ebeveyn ${tip.slice(0, 7)}, origin/${prBranch} dalının commit'i değil`);
+  }
+  if (cardIdFromBranch(prBranch) === null && !isIntBranch(prBranch)) {
+    throw new MainPushError("MAIN_PR_SUBJECT", `PR dalı "${prBranch}" kart kalıbına uymuyor (feat|fix/T-xxx[a-z]?-… veya int/…)`);
+  }
+  return { prBranch, number, base, tip };
+}
+
 /**
  * @param {{ root: string, argv: string[], out: Reporter }} ctx
  */
@@ -190,17 +260,36 @@ export function run(ctx) {
 
     /** @type {{ kind: "work" | "int", cards: Card[] }} */
     let scope;
+    /** @type {string} */
+    let target;
+    /** @type {string} */
+    let base;
     try {
-      scope = resolveCards(root, branch, () => [...mergeSubjects(root, mergeBase(root, args.base ?? DEFAULT_TARGET)), ...pendingMergeSubjects(root)]);
+      if (branch === MAIN_BRANCH) {
+        if (args.base !== null) throw new UsageError("--base main kipinde (dal adı main) verilemez; taban HEAD^1'dir");
+        const pr = resolveMainPush(root);
+        out.detail("prMerge", { number: pr.number, branch: pr.prBranch, base: pr.base, tip: pr.tip });
+        const { base: b, tip } = pr;
+        scope = resolveCards(root, pr.prBranch, () =>
+          git(root, ["log", "--first-parent", "--merges", "--format=%s", `${b}..${tip}`]).split("\n").filter((l) => l !== ""),
+        );
+        target = b;
+        base = b;
+      } else {
+        scope = resolveCards(root, branch, () => [...mergeSubjects(root, mergeBase(root, args.base ?? DEFAULT_TARGET)), ...pendingMergeSubjects(root)]);
+        const first = scope.cards[0];
+        target = args.base ?? (scope.kind === "work" && first?.intTarget ? `origin/${first.intTarget}` : DEFAULT_TARGET);
+        base = mergeBase(root, target);
+      }
     } catch (e) {
+      if (e instanceof MainPushError) {
+        out.fail(e.code, NO_FILE, e.message);
+        return;
+      }
       if (!(e instanceof CardError)) throw e;
       out.fail(e.code, e.file, e.message);
       return;
     }
-    const first = scope.cards[0];
-    const target =
-      args.base ?? (scope.kind === "work" && first?.intTarget ? `origin/${first.intTarget}` : DEFAULT_TARGET);
-    const base = mergeBase(root, target);
     out.detail("target", target);
     out.detail("mergeBase", base);
     out.detail("cards", scope.cards.map((c) => ({ id: c.id, path: c.path, globs: c.globs })));
