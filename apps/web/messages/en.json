@@ -647,6 +647,14 @@
     },
     "pick": {
       "not_found": "You reported a product as not found while picking; the location was flagged for counting."
+    },
+    "count": {
+      "started": "You started a count; the locations are locked while counting.",
+      "recorded": "You entered count values.",
+      "submitted": "You submitted a count for approval.",
+      "approved": "You approved a count difference.",
+      "posted": "You posted the count difference; the locations were unlocked.",
+      "cancelled": "You cancelled a count; no difference was applied and the locations were unlocked."
     }
   },
   "auditLog": {

@@ -647,6 +647,14 @@
     },
     "pick": {
       "not_found": "Toplamada ürünü bulamadığını bildirdin; lokasyon sayıma alındı."
+    },
+    "count": {
+      "started": "Bir sayım başlattın; lokasyonlar sayım süresince kilitlendi.",
+      "recorded": "Sayım değerlerini girdin.",
+      "submitted": "Bir sayımı onaya gönderdin.",
+      "approved": "Bir sayım farkını onayladın.",
+      "posted": "Sayım farkını işledin; lokasyonların kilidi açıldı.",
+      "cancelled": "Bir sayımı iptal ettin; fark uygulanmadı, lokasyonların kilidi açıldı."
     }
   },
   "auditLog": {

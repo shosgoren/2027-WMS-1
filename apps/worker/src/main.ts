@@ -1,11 +1,13 @@
 // Worker giriş noktası: `node dist/main.js`. Web'den bağımsız, uzun ömürlü süreç (ADR-001).
 import { DEMO_TENANT_ID, createDbClient, withSystemTenant, withUser } from "@wms/db";
 import { consumeOnce, createJobQueue } from "@wms/queue-adapter";
+import { findAbandonedCounts } from "@wms/domain/operations";
 import type { ConsumeOnceFn } from "@wms/domain/stock/jobs";
 import { assertMailModeAllowed, loadMailConfig } from "@wms/shared/mailer";
 import { createSealer } from "@wms/shared/seal";
 import { JOB_TYPES, PLATFORM_NO_USER_ID, type JobHandler, type JobType } from "@wms/shared/queue";
 import { createDeliverInvitationHandler } from "./jobs/deliver-invitation.js";
+import { startCountAbandonSchedule } from "./jobs/count-abandon.js";
 import { DEMO_RESEED_SINGLETON_KEY, registerDemoReseed } from "./jobs/demo-reseed.js";
 import { createPostStockDocumentHandler } from "./jobs/post-stock-document.js";
 import { startQueueMaintenance } from "./jobs/queue-maintenance.js";
@@ -162,10 +164,18 @@ const consistencySchedule = startConsistencySchedule({
   logger,
 });
 
+// Terk edilmiş sayım alarmı (T-309, A-136): açılışta bir kez + saatte bir; salt okuma, kilidi açmaz (yalnızca yetkili iptal/onay kapatır).
+const countAbandonSchedule = startCountAbandonSchedule({
+  listActiveTenantIds: (after, limit) => queue.listActiveTenantIds(after, limit),
+  checkFor: (tenantId) => withSystemTenant(db, tenantId, "stock.count.abandon.check", (tx) => findAbandonedCounts(tx, tenantId)),
+  logger,
+});
+
 // Kapanış sırası: önce zamanlayıcı, sonra kuyruk (çalışan işler biter), sonra DB havuzu.
 lifecycle.register({ name: "demo-schedule", run: () => demoSchedule?.stop() });
 lifecycle.register({ name: "queue-maintenance", run: () => queueMaintenance.stop() });
 lifecycle.register({ name: "consistency-schedule", run: () => consistencySchedule.stop() });
+lifecycle.register({ name: "count-abandon-schedule", run: () => countAbandonSchedule.stop() });
 lifecycle.register({ name: "job-queue", run: () => queue.stop() });
 lifecycle.register({ name: "db", run: () => db.close() });
 lifecycle.register({ name: "worker-db", run: () => workerDb.close() });

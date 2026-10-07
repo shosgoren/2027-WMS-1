@@ -92,3 +92,29 @@ export {
   type PickNotFound,
   type PickReallocation,
 } from "./picking.ts";
+// Kilitli sayım (T-309): başlatma, giriş, onay, fark fişi, iptal ve terk alarmı sorgusu. `postCountAdjustment` stok kilit planını `countSessionId` ile bildirir;
+// `location_count_locks` yazımı yalnızca posting çekirdeğindeki iç yardımcılardadır ve burada YOKTUR.
+export {
+  COUNT_BLIND_DEFAULT,
+  COUNT_MAX_INPUT_LINES,
+  COUNT_MAX_LOCATIONS,
+  COUNT_REASON_MAX,
+  approveCount,
+  cancelCount,
+  findAbandonedCounts,
+  postCountAdjustment,
+  recordCount,
+  startCount,
+  submitCount,
+  type AbandonedCount,
+  type CancelCountInput,
+  type CountCallParams,
+  type CountCommandResult,
+  type CountDifference,
+  type CountStockStatus,
+  type CountTransitionInput,
+  type PostCountAdjustmentInput,
+  type RecordCountInput,
+  type RecordCountLineInput,
+  type StartCountInput,
+} from "./counting.ts";
