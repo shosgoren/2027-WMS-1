@@ -114,7 +114,7 @@ describe("plan normalizasyonu", () => {
     expect(res?.params.filter((p) => p !== TENANT)).toEqual([id(1), id(2), id(3)]);
     expect(res?.text).toContain("ORDER BY id FOR UPDATE");
     expect(ser?.params.filter((p) => p !== TENANT)).toEqual([id(7), id(9)]);
-    expect(ser?.text).toContain("ORDER BY id FOR UPDATE");
+    expect(ser?.text).toContain("ORDER BY id FOR NO KEY UPDATE");
   });
 
   it("yinelenen boyut anahtarı tekilleşir; aynı anahtarın büyük harfli yazımı da aynıdır", async () => {

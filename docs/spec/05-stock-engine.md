@@ -51,7 +51,10 @@ type StockLockPlan = {
 | 3 | `ensureDimensions` + `ensureBalanceRows` | Eksik boyut ve bakiye satırları sıralı `INSERT … ON CONFLICT DO NOTHING` | boyut anahtarı / `stock_dimension_id` artan |
 | 4 | `lockBalances` | `SELECT … FROM stock_balances WHERE stock_dimension_id = ANY($1) ORDER BY stock_dimension_id FOR UPDATE` | `stock_dimension_id` artan |
 | 5 | `lockReservations` | `SELECT … FROM reservations WHERE id = ANY($1) ORDER BY id FOR UPDATE` | `id` artan |
-| 6 | `lockSerials` | `SELECT … FROM serials WHERE id = ANY($1) ORDER BY id FOR UPDATE` | `id` artan |
+| 6 | `lockSerials` | `SELECT … FROM serials WHERE id = ANY($1) ORDER BY id FOR NO KEY UPDATE` (T-256: **`FOR UPDATE`'e geri ÇEVRİLMEZ**; kök neden aşağıdaki not) | `id` artan |
+
+> **Not (T-256, seri kilit modu):** Adım 3'te yeni boyut satırı eklenirken `stock_dimensions_serial_fkey` `serials` satırında `FOR KEY SHARE` alır. Adım 6 `FOR UPDATE` olsaydı aynı seriyi isteyen iki işlem birbirinin KEY SHARE'ini bekleyip 40P01 (deadlock) üretirdi; `id` sırası tek anahtarda çözmez. `FOR NO KEY UPDATE` KEY SHARE ile çakışmaz, kendisiyle çakışır (seri komutları yine sıralanır). Bu mod `FOR UPDATE`'e ya da daha zayıf bir kipe (`FOR SHARE`) çevrilmemelidir; `locking.int.test.ts` bunu doğrular.
+
 
 Dönüş değeri: kilitlenmiş satırların anlık görüntüsü (`LockedState`). Komut iş kurallarını (yeterlilik, lot/SKT, durum geçişi) **bu görüntü üzerinde** kontrol eder ve yazma işlemlerini yalnızca bu satırlara yapar.
 
