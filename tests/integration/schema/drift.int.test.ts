@@ -533,7 +533,7 @@ describe(`documents işleme bağlamı bekçisi (0024, T-275; target=${env.target
       const r = await client.query<{ tgenabled: string; tgtype: number; tgattrs: number; prosecdef: boolean; proconfig: string[] | null; src: string; acl: string[] | null }>(
         `SELECT t.tgenabled, t.tgtype, cardinality(t.tgattr::int2[]) AS tgattrs, p.prosecdef, p.proconfig, p.prosrc AS src, p.proacl::text[] AS acl
            FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
-          WHERE t.tgrelid = 'public.documents'::regclass AND t.tgname = 'documents_posting_stamp_guard'`,
+          WHERE t.tgrelid = 'public.documents'::regclass AND t.tgname = 'posting_context_stamp_guard'`,
       );
       expect(r.rows).toHaveLength(1);
       const t = r.rows[0] as (typeof r.rows)[number];

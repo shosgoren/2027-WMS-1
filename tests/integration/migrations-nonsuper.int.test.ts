@@ -1651,8 +1651,8 @@ describe("0013–0014 — süper kullanıcı olmayan migrator", () => {
       const ALL24 = [...ALL16, "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024"];
       const hasGuard = async (u: string): Promise<boolean> =>
         withClient(u, async (c) => {
-          const t = await c.query("SELECT 1 FROM pg_trigger WHERE tgrelid = 'public.documents'::regclass AND tgname = 'documents_posting_stamp_guard'");
-          const f = await c.query("SELECT 1 FROM pg_proc WHERE proname = 'documents_posting_stamp_guard'");
+          const t = await c.query("SELECT 1 FROM pg_trigger WHERE tgrelid = 'public.documents'::regclass AND tgname = 'posting_context_stamp_guard'");
+          const f = await c.query("SELECT 1 FROM pg_proc WHERE proname = 'posting_context_stamp_guard'");
           expect(t.rows.length).toBe(f.rows.length); // tetikleyici ve işlev birlikte var/yok
           return t.rows.length === 1;
         });

@@ -41,7 +41,7 @@ BEGIN
 END
 $reseed$;
 
-CREATE FUNCTION public.documents_posting_stamp_guard() RETURNS trigger
+CREATE FUNCTION public.posting_context_stamp_guard() RETURNS trigger
   LANGUAGE plpgsql
   SET search_path = pg_catalog, pg_temp
 AS $fn$
@@ -55,6 +55,6 @@ BEGIN
   RETURN NEW;
 END
 $fn$;
-REVOKE ALL ON FUNCTION public.documents_posting_stamp_guard() FROM PUBLIC;
-CREATE TRIGGER documents_posting_stamp_guard BEFORE UPDATE OF posting_mfa_verified_at, posting_idempotency_record_id, posting_job_id ON public.documents
-  FOR EACH ROW EXECUTE FUNCTION public.documents_posting_stamp_guard();
+REVOKE ALL ON FUNCTION public.posting_context_stamp_guard() FROM PUBLIC;
+CREATE TRIGGER posting_context_stamp_guard BEFORE UPDATE OF posting_mfa_verified_at, posting_idempotency_record_id, posting_job_id ON public.documents
+  FOR EACH ROW EXECUTE FUNCTION public.posting_context_stamp_guard();
