@@ -356,6 +356,13 @@ export async function seedWorld(
      VALUES ($1, 'item', $2, 'ESKI-KOD', 'YENI-KOD', $3)`,
     [tenantId, itemNoneId, ownerUserId],
   );
+  // T-252: dış referans eşlemesi + senkron imleci (AC-04 db-isolation her tenant tablosunda fikstür satırı arar).
+  await c.query(
+    `INSERT INTO public.external_refs (tenant_id, system, entity_type, entity_id, external_id, external_code)
+     VALUES ($1, 'LOGO', 'ITEM', $2, $3, 'LOGO-KOD')`,
+    [tenantId, itemNoneId, `fx-${hex(6)}`],
+  );
+  await c.query("INSERT INTO public.sync_cursors (tenant_id, system, stream) VALUES ($1, 'LOGO', 'LEDGER')", [tenantId]);
   const world: TenantWorld = {
     label,
     tenantId,
@@ -407,7 +414,7 @@ export async function cleanupRegistry(c: pg.Client, reg: WorldRegistry): Promise
     await cleanupStock(c, tenantIds);
     await cleanupDocuments(c, tenantIds);
     // T-204 tabloları (FK sırası: taşıma birimi [lokasyona bağlı, T-202'den önce] → seri → lot → barkod/dönüşüm → sahip → ürün → birim).
-    for (const t of ["code_history", "handling_units", "serials", "lots", "item_barcodes", "unit_conversions", "inventory_owners", "items", "units"]) {
+    for (const t of ["external_refs", "sync_cursors", "code_history", "handling_units", "serials", "lots", "item_barcodes", "unit_conversions", "inventory_owners", "items", "units"]) {
       await c.query(`DELETE FROM public.${t} WHERE tenant_id = ANY($1::uuid[])`, [tenantIds]);
     }
     // T-202 tabloları (FK sırası: kapsam → kilit → lokasyon [tek ifade; NO ACTION FK ifade sonunda denetlenir] → depo).

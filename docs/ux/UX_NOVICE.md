@@ -39,7 +39,7 @@ Cihaz profilleri: iPhone 13 (390×844), 360×740, tablet 768×1024, masaüstü 1
 |---|---|---|---|
 | K-01 | Dokunma hedefi ≥48×48 px | OTO | Tüm `button, a, input, [role=button|tab|checkbox|radio]` için `getBoundingClientRect` (T-254 testi genelleştirilir). |
 | K-02 | Hedefler arası boşluk ≥8 px | OTO | Komşu etkileşimli kutuların kesişim/mesafe taraması. |
-| K-03 | axe-core: 0 ihlal (wcag2a, wcag2aa, wcag22aa) | OTO | `@axe-core/playwright` her rotada. (Kurulu olup olmadığı doğrulanmadı — G-04.) |
+| K-03 | axe-core: 0 ihlal (wcag2a, wcag2aa, wcag22aa) | OTO | `@axe-core/playwright` her rotada. (2026-10-06: repoda kurulu değil; T-261 STACK.md'ye Context7 ile doğrulanan sürümle ekler — G-04.) |
 | K-04 | Ekranda tek birincil eylem | OTO | `[data-variant=primary]` görünür sayısı = 1 (diyaloglar ayrı sayılır). |
 | K-05 | Her form alanının etiketi + varsayılanı veya "Bilmiyorum"u var | YARI | Boş zorunlu alan sayısı ilk açılışta 0 olmalı; istisna listesi gerekçeli (`data-no-default="neden"`). |
 | K-06 | Her hata mesajı eylem fiiliyle başlar ve alanla `aria-describedby` ile bağlı | YARI | i18n anahtarları `errors.*` için sözlük denetimi (emir kipi fiil listesi) + DOM bağlantı testi; dil kalitesi insan onayı. |
@@ -62,7 +62,7 @@ Cihaz profilleri: iPhone 13 (390×844), 360×740, tablet 768×1024, masaüstü 1
 
 ## 3. Ekran ekran açıklar (kartlardan/şartnameden çıkarım — kod okunmadı)
 
-1. **Şartname çelişkisi — onay vs. geri al:** `08-ux-i18n.md` "Yıkıcı işlemler onay ister" der; geri alma deseni hiç yok. ADR-020'de `undo` renk belirteci var ama karşılığı bir bileşen/kural tanımlı görünmüyor. → N-03 ile şartname güncellemesi gerekir (Q-xx adayı: hangi işlemler 10 sn içinde ters kayıtla geri alınabilir?).
+1. **Şartname çelişkisi — onay vs. geri al:** `08-ux-i18n.md` "Yıkıcı işlemler onay ister" der; geri alma deseni hiç yok. ADR-020'de `undo` renk belirteci var ama karşılığı bir bileşen/kural tanımlı görünmüyor. → N-03 ile şartname güncellemesi gerekir: Q-82 / A-157; karar taslağı ADR-024 (öneri, T-262 kapsamında yazılır).
 2. **Ana ekran (task-menu):** T-254 sığdırmayı çözüyor, fakat kartların piktogram/metin dili, "Yakında" kartlarının acemiyi yanıltma riski (dokunulabilir görünüp çalışmaması) tanımsız. "Yakında" kartları dokunulduğunda ne olacağı belirtilmemiş.
 3. **Yardım:** Şartname "Yardım çağır" öğesinden söz ediyor; T-254'te Yardım menüye taşınıyor (bir dokunuş daha uzak). Ekran başına bağlamsal yardım ("?" / ne yapmalıyım) tanımlı değil.
 4. **Kurulum (T-250):** Boş ekran rehberi ve akıllı varsayılan iyi; ancak kapsam depo/raf/ürünle sınırlı. Açılış fişi (ilk stok), kullanıcı davet, rol atama gibi sonraki ilk adımlar rehbere bağlı değil. Toplu raf oluşturucu önizleme var, geri alma yok.
@@ -78,6 +78,8 @@ Cihaz profilleri: iPhone 13 (390×844), 360×740, tablet 768×1024, masaüstü 1
 ---
 
 ## 4. Önerilen kartlar (öncelik sırasıyla, en çok 8)
+
+Kart eşlemesi (T-260): T-NOV-1 → `docs/tasks/T-261.md` · T-NOV-2 → T-262 (+ ADR-024 öneri) · T-NOV-3 → T-263 · T-NOV-4 → T-264 · T-NOV-5 → T-265 · T-NOV-6 → T-266 (ilk dilim: saha mal kabul) · T-NOV-7 → T-267 · T-NOV-8 → T-268. Açık sorular Q-82…Q-86, varsayımlar A-157…A-162.
 
 **P1 — T-NOV-1: Acemi kullanılabilirlik kapısı (heuristic gate e2e)**
 - Kapsam: `tests/e2e/novice-gate.spec.ts` (yeni), rota listesi, K-01…K-04, K-07, K-10, K-11, K-12 kontrolleri; axe-core (kurulu değilse STACK.md + ADR ile eklenir); `check:all`'a rapor bağlantısı.
@@ -116,14 +118,38 @@ Cihaz profilleri: iPhone 13 (390×844), 360×740, tablet 768×1024, masaüstü 1
 ## 5. Sürekli gelişim döngüsü
 
 **Ritim**
-- **Her kart:** UI dokunan kart, Bölüm 2'den ilgili K-xx maddelerini kabul ölçütüne yazar; T-NOV-1 kapısı CI'da çalışır.
+- **Her kart:** UI dokunan kart, Bölüm 2'den ilgili K-xx maddelerini kabul ölçütüne yazar; T-261 kapısı (`pnpm test:e2e -- novice-gate`) yeşil kalır, taban artmaz.
 - **Her sürüm (release):** "İlk kez kullanan" yazılı yürüyüşü (aşağıda) en az 1 kişiyle — tercihen gerçek depo çalışanı veya dijital deneyimi az biri — telefonda yapılır; sonuç `.artifacts/novice-walkthrough/<sürüm>.md`.
+- **Her faz kapısı:** aşağıdaki "Faz kapısı kontrol listesi" eksiksiz işaretlenmeden faz kapanmaz; kapı raporuna (JOURNAL) liste ve yürüyüş dosyasının yolu yazılır.
 - **Her faz sonu:** sezgisel denetim (Nielsen 10 sezgisi + COGA 8 hedefi + bu belgenin N-01…N-15'i); 2 değerlendirici, bulgu önem 0–4; ≥3 önemdeki bulgular sonraki faza kart olur. Bu belge aynı toplantıda gözden geçirilir: geçersiz ilke çıkarılır, yeni bulgu ilkeye dönüşür, sürüm notu `DECISIONS`'a ADR olarak.
 - **Çeyreklik:** 5 kullanıcıyla moderasyonlu test (yaşlı ve düşük okuryazar katılımcı dahil; NN/g yaşlılarla test önerileri).
 
-**İlk kez kullanan yürüyüşü (betik — her sürümde aynı)**
+**Faz kapısı kontrol listesi (her faz kapısında, tümü zorunlu)**
+- [ ] T-261 acemi kapısı iki projede yeşil; `novice-baseline.json` ölçülen değerlere sıkılaştırıldı (`tighten.json` boş) ve önceki kapıya göre toplam ihlal sayısı artmadı.
+- [ ] Bu fazda eklenen her yeni rota `tests/e2e/novice-routes.ts`'de ve tabanda 0 ihlalle.
+- [ ] "İlk kez kullanan" yürüyüşü: ortak çekirdek (aşağıda) + o fazın ek adımları, telefonda (390×844 veya 360×740), en az 1 katılımcı, gözlemci müdahalesiz; sonuç `.artifacts/novice-walkthrough/faz-<n>.md`.
+- [ ] Yürüyüşte her adım için yardımsız/yardımlı/başarısız, süre, yardım dokunuşu, hata sayısı ve "kaybolma" notu kayıtlı; yardımsız başarı K-19 eşiğinin (≥%80, A-160 varsayımı) altındaysa nedeni ve kart numarası yazılı.
+- [ ] Başarısız veya yardımlı her adım için ≥3 önemde bulgu → kart (Kuyruk'a eklendi) ya da gerekçeli kabul.
+- [ ] Faz kapsamındaki geri alınabilir işlemler K-08, geri alınamazlar K-09'u sağlıyor (ADR-024 kabul edildiyse).
+- [ ] Bu belge gözden geçirildi; açık Q-xx'ler (Q-82…Q-86) güncel durumda.
+
+**İlk kez kullanan yürüyüşü — ortak çekirdek (betik; her sürümde ve her faz kapısında aynı)**
 1. Davet bağlantısıyla gir, şifre oluştur. 2. Ana ekranda "Mal kabul"ü bul. 3. Bir ürünü okut/seç, miktarı 12 gir, kaydet. 4. Yanlış rafı okut, uyarıyı anla, düzelt. 5. Yanlışlıkla bir satırı sil, geri al. 6. "Bugün yaptıkların"da işlemi gör. 7. Yardım iste.
-Ölçülen: adım başına başarı (yardımsız/yardımlı/başarısız), süre, yardım dokunuşu, hata sayısı, "kaybolma" anları (sesli düşünme notu). Gözlemci müdahale etmez.
+Ekranı henüz olmayan adım "uygulanamaz" diye işaretlenir (atlanmaz, gizlenmez); faz ilerledikçe adımlar uygulanabilir hale gelir.
+
+**Faz bazında ek yürüyüş adımları (ortak çekirdekten sonra)**
+| Faz kapısı | Ek adımlar (katılımcı yardımsız dener) |
+|---|---|
+| 3A — Pilot akışı | Rehberle depo + raf + ürün kur (T-250); beklenen teslimi sihirbazla kabul et (T-266), yerleştir; sipariş için topla; sevk et; bir iadeyi al; bir rafı kör say; (?) ipucundan bir ekranın ne işe yaradığını bul (T-265). |
+| 4P — Pilot hazırlığı | Açılış stokunu içe aktar ve önizlemede hatayı düzelt; verini dışa aktar; yedekten dönüş adımlarını yardım metninden bul (yönetici rolüyle). |
+| ▶ Pilot | Gerçek pilot depoda, gerçek çalışanla, ortak çekirdek + 3A adımları; vardiya başında ilk kez gören kişi; süre ve yardım dokunuşu taban ölçümü olarak kaydedilir (Q-85). |
+| 3B — Kalan depo akışları | Depolar arası transfer başlat ve karşı depoda teslim al; üretim girişi/sarf kaydı; iki depo arasında ürün ara. |
+| 4S — Ticari SaaS | Kendi kendine kayıt ol, paket seç, ödeme ekranını tamamla; fatura/e-Arşiv belgesini bul. |
+| 5 — Mobil/offline | Ağ kapalıyken kabul yap, "bekliyor" durumunu anla; ağ gelince senkronu ve çatışma uyarısını çöz; ortak cihazda kullanıcı değiştir. |
+| 6 — Genişletme | Yeni bir özel alan ekle ve formda kullan; entegrasyon hatasını ekrandan anla ve yeniden dene. |
+| 7 — AI & ölçek | AI önerisini gör, gerekçesini oku, onayla veya reddet; önerinin neyi değiştireceğini önceden anla. |
+
+Ölçülen: adım başına başarı (yardımsız/yardımlı/başarısız), süre, yardım dokunuşu, hata sayısı, "kaybolma" anları (sesli düşünme notu). Gözlemci müdahale etmez. Katılımcı adı/kişisel verisi dosyaya yazılmaz (G-09); yalnız "K1, K2…" ve profil (ör. "dijital deneyimi az, 55+").
 
 **Metrikler (ürün içi, anonim, kişisel veri yok — G-09)**
 | Metrik | Tanım | Hedef (A-xx varsayım; ölçüm sonrası güncellenir) |
@@ -136,9 +162,37 @@ Cihaz profilleri: iPhone 13 (390×844), 360×740, tablet 768×1024, masaüstü 1
 | Yardım dokunuşu | (?) ve "Yardım çağır" / ekran oturumu | En yüksek 3 ekran her faz incelenir |
 | Terk oranı | Sihirbazda yarıda bırakılan adım | Adım bazında; en yüksek adım sadeleştirilir |
 
-Not: Hedef sayılar uydurma değil, varsayımdır (G-03): ilk sürümde taban çizgisi ölçülür, hedefler `OPEN_QUESTIONS`'ta Q-xx olarak onaya sunulur. Telemetri için olay şeması ve saklama süresi ayrı karar gerektirir (KVKK).
+Not: Hedef sayılar uydurma değil, varsayımdır (G-03, A-160): ilk sürümde taban çizgisi ölçülür, hedefler Q-85 ile onaya sunulur. Telemetri için olay şeması ve saklama süresi ayrı karar gerektirir (KVKK, Q-85); karar gelene kadar ürün içi ölçüm yok, metrikler yalnız yürüyüşte elle toplanır.
 
 **Doğrulanamayan / açık noktalar**
 - Honeywell'in resmi uygulama-UX rehberi bulunamadı; yalnız tarayıcı "good read / bad read" göstergesi belgeleri var. Zebra kaynağı DataWedge belgesi + üçüncü taraf rehber.
 - `@axe-core/playwright`, `navigator.vibrate` (iOS Safari), TR `speechSynthesis` sesi kurulu/destekli mi doğrulanmadı.
 - Kaynak sayfaları doğrudan açılamadı; alıntı içerikler arama özetlerine dayanır.
+
+---
+
+## 6. Az dokunuş ilkesi ve dokunuş bütçesi (T-321, ADR-023)
+
+> Hedef (kullanıcı, birebir): "Minimum bilgi girişi yada dokunma ve maksimum faydayı sağlayabilir miyiz … program hem az zaman ayırmalı ve ayırdığı zamanda fayda verim sağladığını hissetmelidir."
+
+**N-16 — Az dokunuş, çok fayda.** Her ana iş bir **niyettir** (ADR-023) ve bir dokunuş bütçesi taşır. Sistem soruyu değil öneriyi getirir: önce hazır plan/önizleme gösterilir, kullanıcı yalnız onaylar veya tek öğeyi değiştirir. Bilinen veri yeniden sorulmaz (N-14); seçim serbest metinden önce gelir (N-02).
+- **Dokunuş** = işi başlatan ekran açıkken, iş tamamlanana kadar gereken dokunuş/tıklama sayısı (ekran açılışı ve kaydırma sayılmaz; tarama dokunuş değildir).
+- **Yazma niyeti** her zaman önizleme + **tek** onay ister (ADR-023 §3); onay önizlemenin birincil düğmesidir, ayrı diyalog açılmaz. Geri alınabilen yazımlar onaydan sonra "Geri al" sunar (N-03, ADR-024).
+- **Ses** (üst paket) dokunuşun yerine geçer ama onayı atlamaz: yazma niyetinde önizleme yine açılır, "onayla" sesi veya bir dokunuş gerekir.
+- **Uyarı yönlendirir:** "Dikkat" kartı bir cümle + tek eylem düğmesi taşır (T-328); kritik saha hatası ekran engeline ek olarak kısa ve vurgulu sesle söylenir (T-327), iş onaylanana kadar durur (N-13).
+- Bütçe aşan akış tasarım hatasıdır: kart kabul ölçütüne e2e dokunuş sayacı yazılır; aşım ancak gerekçeli istisna ile (kartta "Bütçe istisnası: neden").
+
+**Niyet başına dokunuş bütçesi (≤; ses sütunu üst paket)**
+
+| Niyet | İş | Başlangıç | Dokunuş bütçesi | Ses ile | Kart |
+|---|---|---|---|---|---|
+| `orders.today` | Bugünkü siparişleri tüm bilgiyle göster | Ana ekran | 1 | 1 cümle, 0 dokunuş | T-326 |
+| `pick.plan_and_assign` | Siparişleri yürüme sırasıyla planla, personele ata | "Bugün" ekranı (ana ekrandan +1) | 2 (ana ekrandan 3) | 1 cümle + "onayla" veya 1 dokunuş | T-325, T-326 |
+| `pick.undo_plan` | Az önce yapılan planı geri al | Plan sonrası bildirim | 1 | — | T-326 |
+| `staff.assign_area` | Bir personelin kat/bölge/koridorunu ayarla | Personel alanları ekranı | 3 (kişi → alan → onay) | 1 cümle + "onayla" | T-324, T-326 |
+| `location.recompute_walk_order` | Deponun yürüme sırasını güncelle | Personel alanları ekranı | 2 | — | T-323, T-326 |
+| `attention.*` eylemi | Dikkat kartındaki işi başlat | "Bugün" ekranı | 1 (yazma niyetinde 2) | — | T-328 |
+| `actions.today` | Bugün yaptıklarımı göster | Ana ekran | 1 | 1 cümle | T-322 |
+| Tarama hatası onayı | Yanlış okutmayı anla, tekrar okut | Saha akışı | 1 | — (ses yalnız uyarır) | T-263, T-327 |
+
+**Ölçüm:** e2e testleri dokunuşu `pointerdown` sayacıyla ölçer (T-326, T-328); sonuç `.artifacts/<kart>/touch-budget.json`. Bütçeler varsayımdır (G-03) — ilk "ilk kez kullanan" yürüyüşünden (§5) sonra gözden geçirilir.

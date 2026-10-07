@@ -1401,6 +1401,87 @@ describe("0013–0014 — süper kullanıcı olmayan migrator", () => {
       });
     });
 
+    // ---- 0019 (T-252): external_refs + sync_cursors; süper kullanıcı olmayan migrator ----
+    describe("0019 external_refs", () => {
+      let thru19Dir: string | undefined;
+      const thru19 = (): string => (thru19Dir ??= copyMigrations("0019"));
+      const ALL19 = [...ALL16, "0017", "0018", "0019"];
+
+      it("ileri (0001–0019) → 0019 geri (to 0018) → ileri: parmak izi birebir; RLS FORCE; wms_app en az yetki; tablolar/işlevler down'da yok", async () => {
+        await setProbeMemberships(STANDARD_GRANT);
+        const u = await freshDatabase();
+        expect((await migrateUp({ url: u, dir: thru19() })).applied).toEqual(ALL19);
+        const before = await digest16(u);
+        await withClient(u, async (c) => {
+          const f = await c.query<{ relname: string; relrowsecurity: boolean; relforcerowsecurity: boolean }>(
+            "SELECT relname, relrowsecurity, relforcerowsecurity FROM pg_class WHERE oid IN ('public.external_refs'::regclass, 'public.sync_cursors'::regclass) ORDER BY relname",
+          );
+          expect(f.rows).toEqual([
+            { relname: "external_refs", relrowsecurity: true, relforcerowsecurity: true },
+            { relname: "sync_cursors", relrowsecurity: true, relforcerowsecurity: true },
+          ]);
+          const g = await c.query<Record<string, boolean | number>>(
+            `SELECT has_table_privilege('wms_app', 'public.external_refs', 'SELECT') AS er_sel,
+                    has_table_privilege('wms_app', 'public.external_refs', 'DELETE') AS er_del,
+                    has_column_privilege('wms_app', 'public.external_refs', 'external_code', 'UPDATE') AS er_upd_code,
+                    has_column_privilege('wms_app', 'public.external_refs', 'external_id', 'UPDATE') AS er_upd_ext,
+                    has_column_privilege('wms_app', 'public.external_refs', 'version', 'INSERT') AS er_ins_version,
+                    has_table_privilege('wms_app', 'public.sync_cursors', 'DELETE') AS sc_del,
+                    has_column_privilege('wms_app', 'public.sync_cursors', 'cursor_xid', 'UPDATE') AS sc_upd_cur,
+                    has_column_privilege('wms_app', 'public.sync_cursors', 'updated_at', 'UPDATE') AS sc_upd_at,
+                    has_any_column_privilege('wms_ops', 'public.external_refs', 'SELECT') AS ops_er,
+                    has_any_column_privilege('wms_ops', 'public.sync_cursors', 'SELECT') AS ops_sc,
+                    (SELECT count(*)::int FROM pg_constraint WHERE conrelid IN ('public.external_refs'::regclass, 'public.sync_cursors'::regclass) AND contype = 'f') AS fks`,
+          );
+          expect(g.rows).toEqual([
+            { er_sel: true, er_del: false, er_upd_code: true, er_upd_ext: false, er_ins_version: false, sc_del: false, sc_upd_cur: true, sc_upd_at: false, ops_er: false, ops_sc: false, fks: 2 },
+          ]);
+        });
+
+        expect((await migrateDown({ url: u, dir: thru19(), to: "0018", wmsEnv: "ci" })).reverted).toEqual(["0019"]);
+        expect(await digest16(u)).not.toEqual(before);
+        await withClient(u, async (c) => {
+          const gone = await c.query("SELECT relname FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relname IN ('external_refs', 'sync_cursors')");
+          expect(gone.rows).toEqual([]);
+          const fn = await c.query("SELECT proname FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND proname IN ('external_refs_on_update', 'sync_cursors_guard')");
+          expect(fn.rows).toEqual([]);
+        });
+        expect((await migrateUp({ url: u, dir: thru19() })).applied).toEqual(["0019"]);
+        expect(await digest16(u)).toEqual(before);
+      });
+
+      it("dolu tablolarla staging geri alma RAISE eder, veri yerinde ve FORCE açık; ci bayrağıyla geçer; yeniden ileri parmak izi birebir", async () => {
+        await setProbeMemberships(STANDARD_GRANT);
+        const u = await freshDatabase();
+        expect((await migrateUp({ url: u, dir: thru19() })).applied).toEqual(ALL19);
+        const tenantId = await freshTenant(u, async (c, t) => {
+          await seedBase(c, t);
+          await c.query(
+            `INSERT INTO public.external_refs (tenant_id, system, entity_type, entity_id, external_id)
+             SELECT $1, 'LOGO', 'ITEM', id, 'X-1' FROM public.items WHERE code = 'NS-I'`,
+            [t],
+          );
+          await c.query("INSERT INTO public.sync_cursors (tenant_id, system, stream) VALUES ($1, 'LOGO', 'LEDGER')", [t]);
+        });
+        const before = await digest16(u);
+        await expect(migrateDown({ url: u, dir: thru19(), to: "0018", wmsEnv: "staging" })).rejects.toThrow(/0019_external_refs down:.*(external_refs|sync_cursors).*satır var/);
+        await withClient(u, async (c) => {
+          const ledger = await c.query<{ version: string }>("SELECT version FROM wms_meta.schema_migrations ORDER BY version");
+          expect(ledger.rows.map((r) => r.version)).toEqual(ALL19);
+          await c.query("BEGIN");
+          await c.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+          const kept = await c.query<{ a: string; b: string }>("SELECT (SELECT count(*) FROM public.external_refs)::text AS a, (SELECT count(*) FROM public.sync_cursors)::text AS b");
+          await c.query("ROLLBACK");
+          expect(kept.rows[0]).toEqual({ a: "1", b: "1" });
+          const force = await c.query<{ n: number }>("SELECT count(*)::int AS n FROM pg_class WHERE oid IN ('public.external_refs'::regclass, 'public.sync_cursors'::regclass) AND relforcerowsecurity");
+          expect(force.rows).toEqual([{ n: 2 }]);
+        });
+        expect((await migrateDown({ url: u, dir: thru19(), to: "0018", wmsEnv: "ci" })).reverted).toEqual(["0019"]);
+        expect((await migrateUp({ url: u, dir: thru19() })).applied).toEqual(["0019"]);
+        expect(await digest16(u)).toEqual(before);
+      });
+    });
+
     // ---- 0020 (T-258): hedef durum bekçisi (tetikleyici); süper kullanıcı olmayan migrator ----
     describe("0020 target_status_guard", () => {
       let thru20Dir: string | undefined;

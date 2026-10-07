@@ -57,6 +57,7 @@ export const AUDIT_ACTIONS = [
   "stock_document.reversed",
   "reservation.created",
   "reservation.released",
+  "external_ref.linked",
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];

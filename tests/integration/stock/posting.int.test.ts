@@ -18,6 +18,7 @@ import {
   type DocumentLineInput,
   type StockDocCallParams,
 } from "../../../packages/domain/src/stock/index.ts";
+import { assertTargetStatusAllowed } from "../../../packages/domain/src/stock/documents.ts";
 import { ALLOWED_STATUS_TRANSITION_PAIRS, isStatusTransitionAllowed } from "../../../packages/domain/src/stock/plan.ts";
 import { archiveLocation } from "../../../packages/domain/src/warehouse/index.ts";
 import { runTenantQuery } from "../../../packages/domain/src/identity/access.ts";
@@ -343,6 +344,17 @@ describe("T-248: hedef stok durumu ve STOCK_MOVE ile durum değişimi", () => {
       expect(codeOf(await failure(createStockDocument(ownerP(), { kind: "STOCK_MOVE", warehouseId: A.warehouseId, lines })))).toBe("VALIDATION_FAILED");
     }
     expect((await q<{ n: string }>("SELECT count(*)::text AS n FROM public.documents WHERE tenant_id=$1", [A.tenantId]))[0]?.n).toBe(before);
+  });
+
+  it("alan denetimi DB'den bağımsız kanıtlanır (T-258, M1): assertTargetStatusAllowed izinsiz çifti ve STOCK_IN+hedefi VALIDATION_FAILED ile reddeder; izinli/NULL geçer", () => {
+    const l = (stock_status: string, target_stock_status: string | null) => ({ stock_status, target_stock_status });
+    for (const [from, to] of DENIED_CASES) {
+      expect(() => assertTargetStatusAllowed("STOCK_MOVE", [l(from as string, to as string)])).toThrowError(expect.objectContaining({ code: "VALIDATION_FAILED" }));
+    }
+    expect(() => assertTargetStatusAllowed("STOCK_IN", [l("AVAILABLE", "QUARANTINE")])).toThrowError(expect.objectContaining({ code: "VALIDATION_FAILED" }));
+    expect(() => assertTargetStatusAllowed("STOCK_OUT", [l("AVAILABLE", "AVAILABLE")])).toThrowError(expect.objectContaining({ code: "VALIDATION_FAILED" }));
+    expect(() => assertTargetStatusAllowed("STOCK_MOVE", [l("QUARANTINE", "AVAILABLE"), l("AVAILABLE", "QUARANTINE"), l("AVAILABLE", "AVAILABLE"), l("DAMAGED", null)])).not.toThrow();
+    expect(() => assertTargetStatusAllowed("STOCK_IN", [l("AVAILABLE", null)])).not.toThrow();
   });
 
   it("izinsiz geçiş updateDraft'ta reddedilir (T-258): izinli taslak DAMAGED→AVAILABLE'a güncellenemez; satır ve sürüm değişmez", async () => {

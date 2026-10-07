@@ -153,7 +153,7 @@ function recordset(lines: readonly NormalizedLine[]) {
  * T-248/T-258: hedef durum yalnız `STOCK_MOVE` satırında ve izinli (kaynak, hedef) çiftinde kabul edilir (16 kural 3: durum değişimi bir −/+
  * çiftidir; IN/OUT tek uçludur; A-154 beyaz liste). Taslak/onay aşamasında erken ret; posting denetimi savunma derinliği olarak kalır.
  */
-function assertTargetStatusAllowed(kind: string, lines: readonly { readonly stock_status: string; readonly target_stock_status: string | null }[]): void {
+export function assertTargetStatusAllowed(kind: string, lines: readonly { readonly stock_status: string; readonly target_stock_status: string | null }[]): void {
   for (const l of lines) {
     if (l.target_stock_status === null) continue;
     if (kind !== "STOCK_MOVE") throw new AppError("VALIDATION_FAILED");
