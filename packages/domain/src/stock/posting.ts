@@ -31,7 +31,6 @@ import { runTenantQuery, type AccessTx } from "../identity/access.ts";
 import { pgUuidArray } from "../warehouse/scope.ts";
 import {
   EMPTY_LOCK_PLAN,
-  FeatureDisabledError,
   executeStockCommand,
   type StockCommandApplied,
   type StockCommandParams,
@@ -333,7 +332,8 @@ async function deferToWorker(
   o: PostCommandOptions,
 ): Promise<StockCommandApplied> {
   if (o.moves !== undefined && o.moves.length > 0) throw new AppError("VALIDATION_FAILED"); // A-222-1
-  if (o.queue === undefined) throw new FeatureDisabledError("ASYNC_POSTING");
+  // Kuyruk bağlanmamışsa eşik üstü belge işlenemez: açık hata (sahte başarı yok); T-217'den beri değişmeyen davranış.
+  if (o.queue === undefined) throw documentState();
   const enq = await o.queue.enqueue(tx, {
     type: "stock.document.post",
     actorUserId: ctx.userId,
