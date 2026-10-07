@@ -570,7 +570,14 @@
     "external_ref": {
       "linked": "You linked or updated an external system reference."
     },
-    "other": "You did something."
+    "other": "You did something.",
+    "warehouse_task": {
+      "created": "You created a warehouse task.",
+      "assigned": "You assigned a warehouse task.",
+      "claimed": "You took a warehouse task.",
+      "cancelled": "You cancelled a warehouse task.",
+      "completed": "You completed a warehouse task."
+    }
   },
   "auditLog": {
     "title": "Who did what?",
@@ -1094,5 +1101,97 @@
     "submit": "Change code",
     "done": "Code changed: {from} → {to}.",
     "undo": "Undo (go back to {code})"
+  },
+  "tasks": {
+    "title": "Tasks",
+    "intro": "Assign warehouse tasks to people or cancel them.",
+    "kind": {
+      "PUTAWAY": "Put-away",
+      "PICK": "Picking",
+      "REPUTAWAY": "Re-put-away",
+      "COUNT": "Counting"
+    },
+    "status": {
+      "OPEN": "Open",
+      "ASSIGNED": "Assigned",
+      "DONE": "Done",
+      "CANCELLED": "Cancelled"
+    },
+    "filters": {
+      "label": "Filter tasks",
+      "kind": "Type",
+      "status": "Status",
+      "all": "All",
+      "apply": "Apply"
+    },
+    "listLabel": "Task list",
+    "unassigned": "Not assigned yet",
+    "assignee": "Assigned to: {name}",
+    "assigneeUnknown": "Assigned to: unknown",
+    "quantity": "Quantity: {quantity}",
+    "assign": "Assign",
+    "reassign": "Reassign",
+    "cancel": "Cancel",
+    "lockedReason": "Assigning and cancelling need the task approval permission. Ask your manager.",
+    "empty": {
+      "title": "No tasks",
+      "action": "Tasks come from goods receipt, orders and counts; change the filter and look again."
+    },
+    "nextPage": "Next page",
+    "firstPage": "First page",
+    "assignTitle": "Assign task",
+    "member": "Person",
+    "memberPlaceholder": "Choose a person",
+    "noEligible": "Nobody can do this kind of task yet. Give a suitable role on the team screen first.",
+    "cancelTitle": "Cancel task",
+    "reasonLabel": "Reason for cancelling",
+    "reasonHint": "Required; written to the audit log. At most 500 characters.",
+    "back": "Go back",
+    "submit": "Save",
+    "confirmCancel": "Cancel task",
+    "done": {
+      "assigned": "Task assigned.",
+      "cancelled": "Task cancelled."
+    },
+    "field": {
+      "title": "My tasks",
+      "intro": "Work assigned to you and work you can pick up.",
+      "listLabel": "My task list",
+      "claim": "Take it",
+      "start": "Start",
+      "startLocked": "This work screen is not open yet. The task stays with you; you will start it here once the screen opens.",
+      "claimed": "You took the task.",
+      "empty": {
+        "title": "No tasks right now",
+        "action": "New work shows up here; you can refresh the page."
+      },
+      "mine": "Assigned to you",
+      "available": "You can take it",
+      "more": "Show more",
+      "backToField": "Field work"
+    },
+    "errors": {
+      "code": "Error code: {code}",
+      "forbidden": "You are not allowed to do this.",
+      "forbiddenAction": "Ask your manager.",
+      "unauthenticated": "Your session has ended.",
+      "unauthenticatedAction": "Sign in again and repeat the action.",
+      "not_found": "Task not found.",
+      "not_foundAction": "Refresh the page and try again.",
+      "validation_failed": "The information entered is not valid.",
+      "validation_failedAction": "Check the selection and the reason, then try again. The chosen person may not be able to do this kind of task.",
+      "validation_failed_document_state": "The task no longer allows this action (done, cancelled or taken by someone else).",
+      "validation_failed_document_stateAction": "Refresh the page to see the current state.",
+      "version_conflict": "Someone else changed the task at the same time.",
+      "version_conflictAction": "Refresh the page and try again.",
+      "rate_limited": "Too many actions.",
+      "rate_limitedAction": "Wait a moment and try again.",
+      "tenant_suspended": "The workspace is suspended.",
+      "tenant_suspendedAction": "Contact your manager or support.",
+      "tenant_closing": "The workspace is being closed.",
+      "tenant_closingAction": "Contact your manager.",
+      "internal": "Something went wrong.",
+      "internalAction": "Try again shortly; if it continues, send the error code to support."
+    }
   }
 }

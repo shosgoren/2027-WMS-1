@@ -151,6 +151,9 @@ let members: Actions;
 let settings: { saveSettingsAction: (f: FormData) => Promise<void> };
 let inviteAccept: Actions;
 let itemActions: Actions;
+let taskActions: Actions;
+/** T-304: B tenant'ının sentetik görevi (eylem tablosu bu kimlikle çağırır). */
+let bTask: string;
 /** T-216: her tenant için sentetik birim/ürün/barkod kimlikleri (eylem tablosu B'nin kimlikleriyle çağırır). */
 let fx: { A: ItemFx; B: ItemFx };
 interface ItemFx {
@@ -196,6 +199,8 @@ beforeAll(async () => {
   settings = (await load("app/t/[slug]/settings/actions.ts")) as typeof settings;
   inviteAccept = (await load("app/invite/[token]/actions.ts")) as Actions;
   itemActions = (await load("app/t/[slug]/items/actions.ts")) as Actions;
+  taskActions = (await load("app/t/[slug]/tasks/actions.ts")) as Actions;
+  bTask = (await adm.query<{ id: string }>("INSERT INTO public.warehouse_tasks (tenant_id, warehouse_id, kind) VALUES ($1, $2, 'PICK') RETURNING id", [B.tenant, B.warehouse])).rows[0]!.id;
   const mkFx = async (t: Fx): Promise<ItemFx> => {
     const unit = (await adm.query<{ id: string }>("INSERT INTO public.units (tenant_id, id, code, name) VALUES ($1, gen_random_uuid(), $2, 'Birim') RETURNING id", [t.tenant, `U${rnd()}`])).rows[0]!.id;
     const item = (await adm.query<{ id: string }>("INSERT INTO public.items (tenant_id, id, code, name, base_unit_id) VALUES ($1, gen_random_uuid(), $2, 'Fx urun', $3) RETURNING id", [t.tenant, `FX-${rnd()}`, unit])).rows[0]!.id;
@@ -245,7 +250,17 @@ const LOADERS = [
   "items/page.tsx",
   "warehouses/page.tsx",
   "warehouses/[warehouseId]/page.tsx",
+  // T-304: görev ekranları; üyelik/izin `listTasks`/`listMyTasks`/üyelik özeti ile sayfanın kendisinde çözülür.
+  "tasks/page.tsx",
+  "field/tasks/page.tsx",
 ] as const;
+/**
+ * T-304: tenant verisi çizmeyen saha kabuğu sayfaları. Üyelik kararı üst `layout.tsx`'tedir (yukarıdaki LOADERS satırı çapraz tenant
+ * için 404 verir); burada kendi başlarına B'ye ait hiçbir şey çizmedikleri ve var olmayan slug ile aynı yapıyı verdikleri sınanır.
+ */
+const SHELL_LOADERS = ["field/layout.tsx", "field/page.tsx"] as const;
+/** T-312: etiket sayfası kaynak (depo) ister; kaynaksız çağrı tenant'a hiç dokunmaz, bu yüzden özel blokta `?warehouse=` ile sınanır. */
+const LABELS = "labels/page.tsx" as const;
 /** T-216: ürün ayrıntısı ek bir dinamik segment (`itemId`) ister; ortak döngüde değil, aşağıdaki özel bloktadır. */
 const ITEM_DETAIL = "items/[itemId]/page.tsx" as const;
 type Loader = (props: {
@@ -256,16 +271,17 @@ type Loader = (props: {
 
 /** `[warehouseId]` yükleyicisi için kimlik: verilmezse slug A'nınsa A'nın, değilse B'nin deposu (çapraz tenant denemesi). */
 async function runLoader(
-  rel: (typeof LOADERS)[number] | typeof ITEM_DETAIL,
+  rel: (typeof LOADERS)[number] | typeof ITEM_DETAIL | (typeof SHELL_LOADERS)[number] | typeof LABELS,
   slug: string,
   warehouseId?: string,
   itemId?: string,
+  search: Record<string, string> = {},
 ): Promise<{ outcome: "render" | "notFound" | "redirect"; to?: string; value?: unknown }> {
   const mod = (await import(/* @vite-ignore */ path.join(SLUG_DIR, rel))) as { default: Loader };
   const wid = warehouseId ?? (slug === A.slug ? A.warehouse : B.warehouse);
   try {
     const params = itemId === undefined ? { slug, warehouseId: wid } : { slug, warehouseId: wid, itemId };
-    const value = await mod.default({ params: Promise.resolve(params), searchParams: Promise.resolve({}), children: null });
+    const value = await mod.default({ params: Promise.resolve(params), searchParams: Promise.resolve(search), children: null });
     return { outcome: "render", value };
   } catch (e) {
     const k = (e as { kind?: string }).kind;
@@ -275,9 +291,56 @@ async function runLoader(
   }
 }
 
+describe("saha kabuğu ve etiket sayfaları (/t/<slug>)", () => {
+  for (const rel of SHELL_LOADERS) {
+    it(`@AC-04 sayfa ${rel}: B'nin slug'ıyla da var olmayan slug'la da aynı yapı (yalnızca istenen slug yankılanır); B'ye ait ad/kimlik çizilmez (404 kararı üst layout.tsx'te)`, async () => {
+      as(A.admin);
+      const cross = await runLoader(rel, B.slug);
+      as(A.admin);
+      const missingSlug = `yok-${rnd()}`;
+      const missing = await runLoader(rel, missingSlug);
+      expect(cross.outcome).toBe("render");
+      // React öğesinin `type` alanı (bileşen/modül nesnesi) döngüsel olabilir; yalnızca çizilen veri (props/anahtarlar) karşılaştırılır.
+      const norm = (v: unknown, slug: string): string =>
+        JSON.stringify(v, (k, x: unknown) => (k === "type" || k === "_owner" || k === "_store" ? undefined : x)).split(encodeURIComponent(slug)).join("<slug>");
+      expect(norm(cross, B.slug)).toEqual(norm(missing, missingSlug));
+      expect(norm(cross, B.slug)).not.toContain(B.name);
+      expect(norm(cross, B.slug)).not.toContain(B.tenant);
+      expect(norm(cross, B.slug)).not.toContain(B.warehouse);
+    });
+  }
+
+  it("@AC-04 sayfa labels/page.tsx: A kullanıcısı B'nin slug'ı + B deposuyla -> 404 (var olmayan slug ile aynı sonuç); üye olmayan 404; oturumsuz -> /login", async () => {
+    as(A.admin);
+    const cross = await runLoader(LABELS, B.slug, undefined, undefined, { warehouse: B.warehouse });
+    as(A.admin);
+    const missing = await runLoader(LABELS, `yok-${rnd()}`, undefined, undefined, { warehouse: B.warehouse });
+    expect(cross).toEqual({ outcome: "notFound" });
+    expect(cross).toEqual(missing);
+    as(outsider.id);
+    expect(await runLoader(LABELS, B.slug, undefined, undefined, { warehouse: B.warehouse })).toEqual({ outcome: "notFound" });
+    as(null);
+    const anon = await runLoader(LABELS, B.slug, undefined, undefined, { warehouse: B.warehouse });
+    expect(anon.outcome).toBe("redirect");
+    expect(anon.to).toMatch(/^\/login\?next=/);
+  });
+
+  it("@AC-04 sayfa labels/page.tsx: A kendi slug'ında B'nin depo kimliğini basamaz -> 404; kendi deposunu çizer (olumlu kontrol)", async () => {
+    as(A.admin);
+    const cross = await runLoader(LABELS, A.slug, undefined, undefined, { warehouse: B.warehouse });
+    expect(cross).toEqual({ outcome: "notFound" });
+    // Olumlu kontrol için A'nın deposunda en az bir lokasyon gerekir (etiket kaynağı boşsa 404).
+    await adm.query("INSERT INTO public.locations (tenant_id, id, warehouse_id, parent_id, code, name, depth, kind) VALUES ($1, gen_random_uuid(), $2, NULL, $3, 'Etiket Bolge', 0, 'STORAGE')", [A.tenant, A.warehouse, `ZL-${rnd()}`]);
+    as(A.admin);
+    const own = await runLoader(LABELS, A.slug, undefined, undefined, { warehouse: A.warehouse });
+    expect(own.outcome).toBe("render");
+    expect(JSON.stringify(own.value)).not.toContain(B.warehouseName);
+  });
+});
+
 describe("sayfa yükleyicileri (/t/<slug>)", () => {
   it("@AC-04 kapsam: apps/web/app/t/[slug] altındaki her page/layout bu tabloda (yeni yükleyici testsiz kalamaz)", () => {
-    expect(files(SLUG_DIR, /^(page|layout)\.[cm]?[jt]sx?$/)).toEqual([...LOADERS, ITEM_DETAIL].sort());
+    expect(files(SLUG_DIR, /^(page|layout)\.[cm]?[jt]sx?$/)).toEqual([...LOADERS, ...SHELL_LOADERS, LABELS, ITEM_DETAIL].sort());
   });
 
   for (const rel of LOADERS) {
@@ -454,17 +517,27 @@ const ITEM_ACTIONS: Record<string, Call> = {
   setConversionAction: (slug) => itemActions.setConversionAction!({ slug, itemId: fx.B.item, unitId: fx.B.unit, factor: "12" }),
   addBarcodeAction: (slug) => itemActions.addBarcodeAction!({ slug, itemId: fx.B.item, unitId: null, barcode: `9${rnd()}`, quantity: null }),
   removeBarcodeAction: (slug) => itemActions.removeBarcodeAction!({ slug, barcodeId: fx.B.barcode }),
+  suggestItemCodeAction: (slug) => itemActions.suggestItemCodeAction!({ slug }),
+  searchItemsAction: (slug) => itemActions.searchItemsAction!({ slug, q: "a" }),
+};
+
+/** T-304: görev eylemleri; hepsi B'nin görev/üyelik kimliğiyle çağrılır (A veya B slug'ında). */
+const TASK_ACTIONS: Record<string, Call> = {
+  claimTaskAction: (slug) => taskActions.claimTaskAction!({ slug, taskId: bTask, expectedVersion: 1 }),
+  assignTaskAction: (slug, v) => taskActions.assignTaskAction!({ slug, taskId: bTask, membershipId: v.membership, expectedVersion: 1 }),
+  cancelTaskAction: (slug) => taskActions.cancelTaskAction!({ slug, taskId: bTask, expectedVersion: 1, reason: "Ele geçirme" }),
 };
 
 describe("Server Action'lar", () => {
   it("@AC-04 kapsam: members/actions.ts dışa aktarımlarının tamamı tabloda; ayarlar eylemi ayrıca sınanır", () => {
     expect(Object.keys(members).sort()).toEqual(Object.keys(ACTIONS).sort());
     expect(Object.keys(itemActions).sort()).toEqual(Object.keys(ITEM_ACTIONS).sort());
+    expect(Object.keys(taskActions).sort()).toEqual(Object.keys(TASK_ACTIONS).sort());
     expect(Object.keys(settings)).toEqual(["saveSettingsAction"]);
     expect(Object.keys(inviteAccept)).toEqual(["acceptInvitationAction"]);
   });
 
-  for (const [name, call] of Object.entries({ ...ACTIONS, ...ITEM_ACTIONS })) {
+  for (const [name, call] of Object.entries({ ...ACTIONS, ...ITEM_ACTIONS, ...TASK_ACTIONS })) {
     it(`@AC-04 ${name}: A yöneticisi B'nin slug'ıyla -> NOT_FOUND (var olmayan slug ile aynı yanıt); B'de hiçbir değişiklik yok`, async () => {
       const victim = { membership: B.managerMembership, invitation: bInvite.invitationId };
       const beforeB = await snapshot(B);

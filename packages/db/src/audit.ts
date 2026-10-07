@@ -58,6 +58,11 @@ export const AUDIT_ACTIONS = [
   "reservation.created",
   "reservation.released",
   "external_ref.linked",
+  "warehouse_task.created",
+  "warehouse_task.assigned",
+  "warehouse_task.claimed",
+  "warehouse_task.cancelled",
+  "warehouse_task.completed",
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];

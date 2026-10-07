@@ -1,0 +1,31 @@
+// Operasyon alanı genel yüzeyi (T-304). YALNIZCA genel komutlar/sorgular/tipler açılır; `createTasks` ve `completeTask` saha
+// komutlarının transaction'ı içinden çağrılan iç yardımcılardır (görev `DONE` yalnızca stok etkisiyle aynı transaction'da — ADR-021 §6)
+// ve bilerek burada YOKTUR (export testi: tests/integration/operations/tasks.int.test.ts).
+export {
+  REASON_MAX,
+  TASK_KINDS,
+  TASK_KIND_PERMISSION,
+  TASK_LIST_LIMIT_DEFAULT,
+  TASK_LIST_LIMIT_MAX,
+  TASK_SOURCE_KINDS,
+  TASK_STATUSES,
+  assignTask,
+  cancelTask,
+  claimTask,
+  listMyTasks,
+  listTasks,
+  nextTaskStatus,
+  type AssignTaskInput,
+  type CancelTaskInput,
+  type ClaimTaskInput,
+  type ListMyTasksInput,
+  type ListTasksInput,
+  type TaskCallParams,
+  type TaskCursor,
+  type TaskEvent,
+  type TaskKind,
+  type TaskPage,
+  type TaskRow,
+  type TaskSourceKind,
+  type TaskStatus,
+} from "./tasks.ts";
