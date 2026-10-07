@@ -10,7 +10,7 @@
 // - Sipariş/iade miktarları ürünün temel birimindedir (A-151); kabul satırı birim + katsayı taşır.
 // - Tablo nesneleri yalnızca `@wms/db/internal/schema` alt yolundan açılır, genel yüzeye yalnızca tipler çıkar.
 import { sql } from "drizzle-orm";
-import { boolean, check, index, integer, numeric, pgTable, text, timestamp, unique, uuid } from "drizzle-orm/pg-core";
+import { boolean, check, index, integer, numeric, pgTable, primaryKey, text, timestamp, unique, uuid } from "drizzle-orm/pg-core";
 
 const timestamptz = (name: string) => timestamp(name, { withTimezone: true, mode: "date" });
 
@@ -34,6 +34,9 @@ export const STOCK_ALERT_KINDS = ["MIN_MAX"] as const;
 export type StockAlertKind = (typeof STOCK_ALERT_KINDS)[number];
 export const STOCK_ALERT_STATUSES = ["OPEN", "RESOLVED"] as const;
 export type StockAlertStatus = (typeof STOCK_ALERT_STATUSES)[number];
+// T-293 (ADR-025) — `0026_task_progress`: sıradaki BEKLENEN adım (satır ilk doğrulanan adımla doğar; ilk adım ürün okutma = satır yok).
+export const WAREHOUSE_TASK_PROGRESS_STEPS = ["SCAN_TARGET", "ENTER_QUANTITY", "CONFIRM", "SAVING"] as const;
+export type WarehouseTaskProgressStep = (typeof WAREHOUSE_TASK_PROGRESS_STEPS)[number];
 
 export const inboundReceipts = pgTable(
   "inbound_receipts",
@@ -282,6 +285,34 @@ export const stockAlerts = pgTable(
   ],
 );
 
+/**
+ * Görev adım ilerlemesi (T-293, ADR-025): görev başına tek satır, yalnızca ATANAN üyelik için (domain denetimi). STOK DEĞİLDİR (G-01): stok/defter/görev
+ * tablolarına yazmaz, audit üretmez. `quantity` migration'da numeric(20,6)'dır; Drizzle duyarlılıksız `numeric` (string, I-09). Kimlik sütunları
+ * (tenant_id, task_id) wms_app UPDATE listesinde yoktur. CHECK/FK/RLS/yetki migration'dadır (şema yalnızca tip kaynağıdır).
+ */
+export const warehouseTaskProgress = pgTable(
+  "warehouse_task_progress",
+  {
+    tenantId: uuid("tenant_id").notNull(),
+    taskId: uuid("task_id").notNull(),
+    membershipId: uuid("membership_id").notNull(),
+    taskVersion: integer("task_version").notNull(),
+    step: text("step").$type<WarehouseTaskProgressStep>().notNull(),
+    locationId: uuid("location_id"),
+    itemId: uuid("item_id").notNull(),
+    quantity: numeric("quantity"),
+    saveClientKey: uuid("save_client_key"),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+    updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ name: "warehouse_task_progress_pkey", columns: [t.tenantId, t.taskId] }),
+    index("warehouse_task_progress_tenant_membership_idx").on(t.tenantId, t.membershipId),
+    check("warehouse_task_progress_step_chk", sql`${t.step} IN ('SCAN_TARGET', 'ENTER_QUANTITY', 'CONFIRM', 'SAVING')`),
+    check("warehouse_task_progress_save_key_chk", sql`(${t.step} = 'SAVING') = (${t.saveClientKey} IS NOT NULL)`),
+  ],
+);
+
 export type InboundReceipt = typeof inboundReceipts.$inferSelect;
 export type NewInboundReceipt = typeof inboundReceipts.$inferInsert;
 export type InboundReceiptLine = typeof inboundReceiptLines.$inferSelect;
@@ -304,3 +335,5 @@ export type ItemStockPolicy = typeof itemStockPolicies.$inferSelect;
 export type NewItemStockPolicy = typeof itemStockPolicies.$inferInsert;
 export type StockAlert = typeof stockAlerts.$inferSelect;
 export type NewStockAlert = typeof stockAlerts.$inferInsert;
+export type WarehouseTaskProgress = typeof warehouseTaskProgress.$inferSelect;
+export type NewWarehouseTaskProgress = typeof warehouseTaskProgress.$inferInsert;
