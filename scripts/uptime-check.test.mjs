@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULTS, evaluateHealth, evaluateLogin, parseArgs, runCheck, summaryLine } from "./uptime-check.mjs";
 
-const HEALTH_OK = JSON.stringify({ status: "ok", db: "ok", queue: "ok", version: "git-abc1234" });
+const HEALTH_OK = JSON.stringify({ status: "ok", db: "ok", queue: "ok", worker: "ok", version: "git-abc1234" });
 
 /**
  * Sıralı yanıt/hata veren sahte fetch + sahte saat (gövde okunurken/hata anında `ticks` kadar ilerler).
@@ -39,7 +39,21 @@ function harness(script, ticks = [100, 100]) {
 }
 
 describe("evaluateHealth", () => {
-  it("200 + status/db/queue ok → OK", () => expect(evaluateHealth({ status: 200, body: HEALTH_OK }).ok).toBe(true));
+  it("worker heartbeat bayat (worker fail) → FAIL; çıktıda yalnız alan adı", () => {
+    const body = JSON.stringify({ status: "degraded", db: "ok", queue: "ok", worker: "fail", metrics: { workerAgeSeconds: 99999 } });
+    const v = evaluateHealth({ status: 200, body });
+    expect(v).toEqual({ ok: false, reason: "status ok değil" });
+    const onlyWorker = evaluateHealth({ status: 200, body: JSON.stringify({ status: "ok", db: "ok", queue: "ok", worker: "fail", metrics: { workerAgeSeconds: 99999 } }) });
+    expect(onlyWorker).toEqual({ ok: false, reason: "worker ok değil" });
+    expect(onlyWorker.reason).not.toContain("99999");
+  });
+  it("worker alanı hiç yoksa (eski sürüm/eksik yanıt) FAIL: sessiz yeşil yok", () => {
+    expect(evaluateHealth({ status: 200, body: JSON.stringify({ status: "ok", db: "ok", queue: "ok" }) })).toEqual({ ok: false, reason: "worker ok değil" });
+  });
+  it("kuyruk ilerleme kırmızısı (queue fail, worker ok) → FAIL", () => {
+    expect(evaluateHealth({ status: 200, body: JSON.stringify({ status: "degraded", db: "ok", queue: "fail", worker: "ok" }) }).ok).toBe(false);
+  });
+  it("200 + status/db/queue/worker ok → OK", () => expect(evaluateHealth({ status: 200, body: HEALTH_OK }).ok).toBe(true));
   it.each([
     [{ status: 503, body: HEALTH_OK }, "HTTP 503"],
     [{ status: 200, body: "<html>" }, "gövde JSON değil"],
