@@ -95,9 +95,9 @@ Giderilen maddeler: (P1.1) döşeme biçemi tek ve beyaz, renk yalnız ikon dair
 | H-01 | ~~Gerekçe kartı yüksekliği ≤ 160 px~~ **KALDIRILDI (Supervisor kararı, a67bd63 sonrası):** D-03 `emptyRatio ≤ %15` önceliklidir, kart boşluğu doldurur. Boşluk ayrıca açık listelerdeki satırların gerçek tek satırlık açıklamasıyla (`tasks.*.description`) ve ≤ 72 px satırla azaltıldı. | — | — | — |
 | H-02 | Boş durum kartı (`my-tasks-empty`) yüksekliği ve "Tara ile başla" gerçek bağlantı (`/t/<slug>/field`) | ≤ 120 px + bağlantı | 121–140 px | > 140 px ya da bağlantı yok |
 | H-03 | Saat ikonu boyutu 360/390/430'da tutarlı | Fark ≤ 1 px | 2–4 px | > 4 px |
-| H-04 | Gerekçe kartı alttan bitişik: kart alt kenarı ile ilk liste satırı üstü arası; D-03 boş alan eşiği (≤ %15) bozulmaz | ≤ 16 px ve D-03 geçer | 17–32 px | > 32 px ya da D-03 kırılır |
+| H-04 | ~~Gerekçe kartı alttan bitişik~~ **DEĞİŞTİ (bkz. §7.1, §7.2):** açık listelerde D-03 (`emptyRatio`) uygulanmaz, yerine H-05; D-03 yalnız KAPALI ana ekranda geçerlidir. Gerekçe kartı kalktı; açıklama tek başlık satırıdır. §7.3 ile B-01 (alt sayfa) bu ölçütü de yerine alır. | — | — | — |
 
-### 7.1 Supervisor kararı (2026-10-07, görsel inceleme sonrası): AÇIK ikincil listelerde `emptyRatio` uygulanmaz
+### 7.1 Supervisor kararı (2026-10-07, görsel inceleme sonrası): AÇIK ikincil listelerde `emptyRatio` uygulanmaz (açık liste ölçütleri §7.3 B-01/B-02 ile yeniden tanımlandı)
 
 Gerekçe: "metrik doldurma kutusu üretiyordu; kullanıcı görsel kalitesi öncelikli". Önceki "emptyRatio önceliklidir" kararı (a67bd63) bu kararla DEĞİŞTİRİLDİ; ekran görüntüsünde yetkisiz liste açıkken ekranın yaklaşık yarısı yalnız kilit ikonu ve tek cümle taşıyan kutuydu.
 
@@ -106,3 +106,34 @@ Gerekçe: "metrik doldurma kutusu üretiyordu; kullanıcı görsel kalitesi önc
 - **I-09 (N-01, kurulum rehberi):** kurulum tamamlanmadıysa rehber TEK kompakt satır ("Kurulum 0/3 · Sıradaki: Depo ekle", ok ile açılır); kapalıyken dolu düğme yok, "Yeni ürün" tek birincil eylem (2); aksi 0.
 - **I-10:** sabit çubuğun altında içerik kalmaz (liste sonu ≤ çubuk üstü) (2).
 - **I-11 (arama alanı örnek metni "Örn. URN-0001, koli ya da barkod"):** alanda görünür örnek metin var (2); yok (0). `Typeahead` opsiyonel `placeholder` prop'u (604663e kapsam eki); diğer kullanıcılar değişmedi. e2e: mobile-shell.
+
+### 7.2 Eşik değişiklik geçmişi (ekran görüntüsünden SONRA yapılan her değişiklik; dürüstlük kaydı)
+
+İlk §7 tablosu ekran görüntüsünden önce yazıldı (8997f48 ile birlikte commit edildi; rubrik ve kod aynı commit'teydi, bu bir süreç eksiğiydi). Sonraki değişiklikler:
+
+| Değişiklik | Karar / commit | Gerekçe |
+|---|---|---|
+| H-01 (gerekçe kartı ≤ 160 px) KALDIRILDI | Karar a67bd63 (T-274 kartı kapsam eki); uygulama 8997f48 | T-270 `emptyRatio ≤ %15` önceliklidir diye; kart boşluğu dolduran büyük kutuya dönüştü (görsel olarak kötü, bkz. d9ce4d6) |
+| §7.1 eklendi: açık listelerde `emptyRatio` uygulanmaz; H-05, I-09, I-10, I-11 | d9ce4d6 (I-11 uygulaması 5c51152) | "Metrik doldurma kutusu üretiyordu; kullanıcı görsel kalitesi öncelikli". Önceki karar (a67bd63) geri alındı |
+| Açık liste satır üst sınırı 64 → 72 px (mobile-shell 359-360, 386-387) | Karar a67bd63; uygulama 8997f48 | Her satıra tek satırlık gerçek açıklama sığsın |
+| "Döşeme" tanımı daraltıldı (§2): yalnız ETKİN döşeme; kilitli/Yakında satırları dışarıda | 8997f48 | Kart madde 3; D-01/D-04 eşikleri DEĞİŞMEDİ |
+| H-04'teki "D-03 bozulmaz" ibaresi netleştirildi (D-03 yalnız kapalı ana ekran) | bu belge güncellemesi (§7.3 öncesi rubrik-yalnız commit) | §7.1 ile çelişkiydi |
+| T-274 kartı madde 3 ("emptyRatio önceliklidir, değişmez", `docs/tasks/T-274.md`) ve `mobile-shell.spec.ts` içindeki "H-01 ... emptyRatio önceliklidir; gerekçe kartı boşluğu doldurur" yorumu bayat | Kart dosyası dokunulacak dosyalar dışında: güncelleme Supervisor'da. Test yorumu rubrik-yalnız commit'ten SONRAKİ kod commit'inde düzeltilir | Güncel kural: §7.1 + §7.3 (açık listede `emptyRatio` yok; B-01/B-02) |
+
+### 7.3 Yeni ölçütler (bağımsız inceleme "geçmez" sonrası) — ekran görüntüsü ve kod değişikliğinden ÖNCE sabitlendi
+
+Bu bölüm ayrı, yalnız rubrik içeren bir commit'tir; kod ve ekran görüntüsü sonradan gelir; eşikler sonradan değişmez. Ölçüm: telefon (Playwright `mobile`), 360×740, 390×844, 430×932; ölçümler `mobile-shell.spec.ts` içindedir. Puan 2/1/0. Birleştirme eşiği: hiçbir ölçütte 0 yok ve toplam ≥ %90.
+
+**Yürürlükte kalan ölçütler:** I-01…I-08, I-10, H-02, H-03, D-01…D-11 (kapalı ana ekran). **Yerine geçilenler:** H-04, H-05, I-09, I-11 (aşağıdaki B/S/T ölçütleri); I-04 hint ve açıklama satır sayısı korunur. **Toplam:** I-01…I-08, I-10, H-02, H-03, B-01…B-05, T-01, S-01 = 18 ölçüt × 2 = 36; eşik ≥ 33.
+
+| No | Ölçüt | Geçer (2) | Kısmen (1) | Geçmez (0) |
+|---|---|---|---|---|
+| B-01 | "Yakında" ve "Yetkin olmayan işler" AÇILINCA kararmış ana ekran üzerinde ALT SAYFA (bottom sheet) olarak açılır. Alt sayfa `role="dialog"` + `aria-modal`; yüksekliği içeriğine uyar ve görünür yüksekliğin ≤ %85'i; kapatma denetimi sayfanın EN ALTINDA (altı ≤ 16 px içeride, 48 px); arka plana dokunma, Esc ve aşağı kaydırma (≥ 80 px) kapatır; odak sayfada tutulur (Tab döngüsü dışarı çıkmaz) ve kapanınca açan düğmeye döner; sayfa içinde düz zemin bandı yok | Hepsi | Yalnız biri eksik: aşağı kaydırma, odağın geri dönmesi ya da arka plana dokunma | Diğer (yükseklik > %85, kapatma altta değil, odak tuzağı yok, Esc yok ya da doğrudan düz bant) |
+| B-02 | Ana içerik alanında (üst çubuk altı – alt sekme üstü; alt sayfa açıkken yalnız alt sayfanın kutusu, kararmış zemin sayılmaz) içerik ya da etkileşimli öğe içermeyen EN BÜYÜK dikey bant. İçerik öğesi: etkileşimli öğe (kutusu), metin düğümü taşıyan öğe, simge (svg); kenarlıklı/boyalı kutular tek başına içerik sayılmaz. Durumlar: ana ekran kapalı (yönetici, toplayıcı boş durum), alt sayfa içi (Yakında, yetkisiz), ürünler (ürün yok). Ürün listesi ekrandan kısaysa liste sonu ile sabit "Yeni ürün" çubuğu arası bu ölçütün DIŞINDADIR (liste gerçek içeriktir; boşluk kabul edilmiş risk, inceleyici görsel olarak değerlendirir) | ≤ 120 px (3 boyutta, tüm durumlarda) | 121–160 px | > 160 px |
+| B-03 | Ürün yokken ürünler ekranı ÖĞRETEN gerçek boş durum: sıralı (`ol`) kurulum adımları (adım metni + ikincil metin bağlantıları, DOLU düğme yok); sayfadaki tek dolu birincil eylem sabit "Yeni ürün" (dolu `bg-accent` denetim sayısı = 1). B-02 geçerli | Sıralı liste var, dolu denetim = 1 | Liste var ama 2. dolu denetim ya da bağlantı yok | Liste yok ya da ≥ 2 ek dolu denetim |
+| B-04 | Genişleyen her denetimde (Gelişmiş, alt sayfa açan "Yakında"/"Yetkin olmayan işler" düğmeleri, kurulum satırı açılırsa) görünür şevron (chevron); hepsi aynı biçimde, sağda, ≥ 48 px yükseklikte ve açılınca aynı dönüşü yapar | Hepsi tutarlı | 1 tutarsız | ≥ 2 tutarsız ya da şevronsuz |
+| B-05 | Arama alanı: solda büyüteç simgesi; ipucu (hint) 360'ta TEK satır; örnek metin yalnız gerçek örnekler: "Örn. URN-0001 ya da Koli 40x30"; barkod yalnız ipucunda bir kez ("barkodu okutabilirsin"), örnek metinde yok | Dördü de | 1 eksik | ≥ 2 eksik |
+| T-01 | Metin ve hizalama: yalnız filtre ile arayıp sonuç yoksa "Bu filtreye uyan ürün yok"; boş-filtre ipucu tek kutu diline uygun; "Aramayı temizle" sol kenarı arama alanıyla hizalı (± 2 px); "Yakında" açıklaması çoğul ("Bu işler … açılacak") | Dördü de | 1 eksik | ≥ 2 eksik |
+| S-01 | Kurulum satırı eylem gibi okunur: depo yoksa "Önce depo ekle · 1. adım / 3"; depo var, raf yoksa "Sıradaki: rafları oluştur · 2. adım / 3"; raf da varsa ve sıra üründe ise "Sıradaki: ilk ürünü ekle". Sağda şevron; dokununca doğrudan o adıma gider; ürün adımında satır "Yeni ürün" ile AYNI eylemi açar (ikinci dolu düğme yok) | Hepsi | 1 eksik | ≥ 2 eksik |
+
+Yazma kuralı: bu tablo ve eşikler ekran görüntüsünden sonra değiştirilirse değişiklik §7.2'ye commit ve gerekçesiyle eklenir.
