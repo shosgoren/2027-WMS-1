@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { AppError } from "@wms/shared/errors";
-import { addDecimal, assertConversionFactor, assertPositive, assertQuantityScale, compareDecimal, mulDecimal, subDecimal, toBase } from "./quantity.ts";
+import { addDecimal, assertConversionFactor, assertPositive, assertQuantityScale, compareDecimal, formatCompound, mulDecimal, subDecimal, toBase } from "./quantity.ts";
 
 const detailOf = (fn: () => unknown): string | undefined => {
   try {
@@ -101,5 +101,38 @@ describe("işaret ve taşma denetimi", () => {
     expect(toBase("-3", "12", 0, { allowNegative: true })).toBe("-36");
     expect(detailOf(() => toBase("-0.5", "5", 0, { allowNegative: true }))).toBe("VALIDATION_FAILED/QUANTITY_SCALE");
     expect(toBase("0", "12", 0)).toBe("0");
+  });
+});
+
+describe("formatCompound (T-287e; yalnız gösterim, K-3)", () => {
+  const adet = { name: "adet", factor: "1" };
+  const koli = { name: "koli", factor: "12" };
+  const paket = { name: "paket", factor: "4" };
+  it("koli + adet bileşik gösterim", () => {
+    expect(formatCompound("27", [adet, koli])).toBe("2 koli + 3 adet");
+    expect(formatCompound("24", [adet, koli])).toBe("2 koli");
+    expect(formatCompound("5", [adet, koli])).toBe("5 adet");
+    expect(formatCompound("12", [koli, adet])).toBe("1 koli");
+  });
+  it("birim sırası önemsiz; büyük katsayıdan küçüğe bölünür (koli > paket > adet)", () => {
+    expect(formatCompound("30", [adet, paket, koli])).toBe("2 koli + 1 paket + 2 adet");
+    expect(formatCompound("30", [paket, adet, koli])).toBe("2 koli + 1 paket + 2 adet");
+  });
+  it("sıfır temel birimle yazılır; kanonik olmayan girdi kabul edilir", () => {
+    expect(formatCompound("0", [adet, koli])).toBe("0 adet");
+    expect(formatCompound("27.000000", [adet, koli])).toBe("2 koli + 3 adet");
+  });
+  it("kesirli temel miktar kalan olarak temel birimde, yuvarlamasız", () => {
+    expect(formatCompound("25.5", [adet, koli])).toBe("2 koli + 1.5 adet");
+    expect(formatCompound("0.5", [adet, koli])).toBe("0.5 adet");
+  });
+  it("kesirli katsayılı (1'den küçük) birim bölmeye girmez", () => {
+    expect(formatCompound("3", [adet, { name: "yarım", factor: "0.5" }])).toBe("3 adet");
+  });
+  it("temel birim (katsayı 1) yoksa, negatif ya da biçimsiz miktar ve geçersiz katsayı VALIDATION_FAILED", () => {
+    expect(detailOf(() => formatCompound("5", [koli]))).toBe("VALIDATION_FAILED/");
+    expect(detailOf(() => formatCompound("-1", [adet, koli]))).toBe("VALIDATION_FAILED/");
+    expect(detailOf(() => formatCompound("abc", [adet, koli]))).toBe("VALIDATION_FAILED/");
+    expect(detailOf(() => formatCompound("5", [adet, { name: "x", factor: "0" }]))).toBe("VALIDATION_FAILED/UNIT_CONVERSION_INVALID");
   });
 });

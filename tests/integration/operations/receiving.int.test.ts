@@ -651,36 +651,42 @@ describe("T-275: birim yuvarlama, numara kilit sırası, özet normalizasyonu, d
     return { id, lineId: ((await q<{ id: string }>("SELECT id FROM public.inbound_receipt_lines WHERE receipt_id = $1", [id]))[0] as { id: string }).id, item };
   }
 
-  it("MINOR-2: kabul 0,000004 (hasarlı 0,000001) × 0,5 → iyi + hasarlı temel miktarı toplamın temel miktarına eşit (0,000002); onay kalanın tamamını alır", async () => {
+  // T-287 + T-290 (I-09): temel miktar KESİN çarpım, tek `toBase` kuralı; 6 ondalığa inmeyen sonuç yuvarlanmaz, reddedilir.
+  // T-275'in yarım-yukarı yuvarlama beklentileri bu kurala göre yeniden yazıldı (Supervisor kararı 2026-10-07).
+  it("MINOR-2 (I-09): kabul 0,000008 (hasarlı 0,000002) × 0,5 → toplam 0,000004 = iyi 0,000003 + hasarlı 0,000001; ölçeğe inmeyen onay reddedilir, kesin onay kalanın tamamını alır", async () => {
     await setQc(true);
     const KABUL = await mkLoc("RECEIVING");
     const g = await mkHalfReceipt("0.000010");
-    await receiveGoods(pickerP(), { receiptId: g.id, lines: [{ lineId: g.lineId, received: "0.000004", damaged: "0.000001", locationId: KABUL }] });
-    // Toplam = round(0,000004 × 0,5) = 0,000002; hasarlı = round(0,0000005) = 0,000001; iyi = 0,000001 (eski: iyi round(0,0000015) = 0,000002 → toplam 0,000003).
+    await receiveGoods(pickerP(), { receiptId: g.id, lines: [{ lineId: g.lineId, received: "0.000008", damaged: "0.000002", locationId: KABUL }] });
     expect(await bal(g.item, KABUL, "DAMAGED")).toBe(n("0.000001"));
-    expect(await bal(g.item, KABUL, "QUARANTINE")).toBe(n("0.000001"));
-    expect(n(await ledgerSum(g.item))).toBe(n("0.000002"));
-    // Onay: iyi miktar kabul biriminde 0,000003 → round(0,0000015) = 0,000002 > bekleyen 0,000001 yalnız yuvarlama kadar → kalan (0,000001) onaylanır (eski: VALIDATION_FAILED).
-    await approveQuality(ownerP(), { receiptId: g.id, lines: [{ lineId: g.lineId, locationId: KABUL, quantity: "0.000003" }] });
-    expect(await bal(g.item, KABUL, "AVAILABLE")).toBe(n("0.000001"));
+    expect(await bal(g.item, KABUL, "QUARANTINE")).toBe(n("0.000003"));
+    expect(n(await ledgerSum(g.item))).toBe(n("0.000004"));
+    const ledgerBefore = await ledgerCount(g.item);
+    // 0,000003 × 0,5 = 0,0000015 → 6 ondalığa inmez: yuvarlanmaz, reddedilir; hiçbir şey yazılmaz.
+    expect(codeOf(await failure(approveQuality(ownerP(), { receiptId: g.id, lines: [{ lineId: g.lineId, locationId: KABUL, quantity: "0.000003" }] })))).toBe("VALIDATION_FAILED/QUANTITY_SCALE");
+    expect(await ledgerCount(g.item)).toBe(ledgerBefore);
+    expect(await bal(g.item, KABUL, "QUARANTINE")).toBe(n("0.000003"));
+    await approveQuality(ownerP(), { receiptId: g.id, lines: [{ lineId: g.lineId, locationId: KABUL, quantity: "0.000006" }] });
+    expect(await bal(g.item, KABUL, "AVAILABLE")).toBe(n("0.000003"));
     expect(await bal(g.item, KABUL, "QUARANTINE")).toBe(n(0));
     expect(await bal(g.item, KABUL, "DAMAGED")).toBe(n("0.000001"));
-    expect(n(await ledgerSum(g.item))).toBe(n("0.000002"));
+    expect(n(await ledgerSum(g.item))).toBe(n("0.000004"));
     // Bekleyenin ikinci katı aşılmaz: kalan yokken yeni onay reddedilir.
-    expect(codeOf(await failure(approveQuality(ownerP(), { receiptId: g.id, lines: [{ lineId: g.lineId, locationId: KABUL, quantity: "0.000003" }] })))).toBe("VALIDATION_FAILED");
+    expect(codeOf(await failure(approveQuality(ownerP(), { receiptId: g.id, lines: [{ lineId: g.lineId, locationId: KABUL, quantity: "0.000002" }] })))).toBe("VALIDATION_FAILED");
   });
 
-  it("MINOR-2: 0,000001 × 0,5 üçlü: toplam, hasarlı ve onay AYNI tek dönüşümden; tamamı hasarlı kabulde iyi satır oluşmaz, kalite onayı karantina bulmaz", async () => {
+  it("MINOR-2 (I-09): toplamı ya da hasarlısı × 0,5 ile 6 ondalığa inmeyen kabul QUANTITY_SCALE ile reddedilir; hiçbir şey yazılmaz, birim sayaçları değişmez", async () => {
     await setQc(true);
     const KABUL = await mkLoc("RECEIVING");
     const g = await mkHalfReceipt("0.000010");
-    // 0,000002 kabul, 0,000001 hasarlı: toplam round(0,000001) = 0,000001; hasarlı round(0,0000005) = 0,000001 → iyi 0 (eski: 0,000001 + 0,000001 = 0,000002).
-    await receiveGoods(pickerP(), { receiptId: g.id, lines: [{ lineId: g.lineId, received: "0.000002", damaged: "0.000001", locationId: KABUL }] });
-    expect(await bal(g.item, KABUL, "DAMAGED")).toBe(n("0.000001"));
+    // hasarlı 0,000001 × 0,5 = 0,0000005 (eski davranış: 0,000001'e yuvarlanırdı)
+    expect(codeOf(await failure(receiveGoods(pickerP(), { receiptId: g.id, lines: [{ lineId: g.lineId, received: "0.000002", damaged: "0.000001", locationId: KABUL }] })))).toBe("VALIDATION_FAILED/QUANTITY_SCALE");
+    // toplam 0,000003 × 0,5 = 0,0000015
+    expect(codeOf(await failure(receiveGoods(pickerP(), { receiptId: g.id, lines: [{ lineId: g.lineId, received: "0.000003", damaged: "0", locationId: KABUL }] })))).toBe("VALIDATION_FAILED/QUANTITY_SCALE");
+    expect(await ledgerCount(g.item)).toBe(0);
+    expect(await bal(g.item, KABUL, "DAMAGED")).toBe(n(0));
     expect(await bal(g.item, KABUL, "QUARANTINE")).toBe(n(0));
-    expect(n(await ledgerSum(g.item))).toBe(n("0.000001"));
-    expect(codeOf(await failure(approveQuality(ownerP(), { receiptId: g.id })))).toBe("VALIDATION_FAILED"); // onaylanacak karantina yok
-    expect(await lineRow(g.lineId)).toMatchObject({ received: n("0.000002"), damaged: n("0.000001") }); // birim sayaçları kabul biriminde tam
+    expect(await lineRow(g.lineId)).toMatchObject({ received: n(0), damaged: n(0) });
   });
 
   it("MINOR-2 (hasarlı yuvarlama): hasarlı > 0 ama temel birimde 0'a yuvarlanıyorsa kabul VALIDATION_FAILED; hasarlı mal iyi stok olmaz, hiçbir şey yazılmaz", async () => {

@@ -160,9 +160,24 @@ describe("barkod ve çözümleme", () => {
     const plain = `S${rnd()}`;
     const box = `K${rnd()}`;
     await addBarcode(admin(A), { itemId, barcode: plain });
-    const { barcodeId } = await addBarcode(admin(A), { itemId, unitId: A.boxUnitId, barcode: box, quantity: "12.0" });
-    expect(await resolveBarcodeQuery(picker(A), plain)).toEqual({ itemId, unitId: A.unitId, quantity: "1" });
-    expect(await resolveBarcodeQuery(picker(A), `  ${box} `)).toEqual({ itemId, unitId: A.boxUnitId, quantity: "12" });
+    // K-1 (T-287): koli barkodunun adedi unit_conversions'tan gelir; önce katsayı, sonra barkod.
+    await expectFail(addBarcode(admin(A), { itemId, unitId: A.boxUnitId, barcode: box }), "VALIDATION_FAILED", "UNIT_CONVERSION_INVALID"); // dönüşümsüz birim
+    await setUnitConversion(admin(A), { itemId, unitId: A.boxUnitId, factor: "12" });
+    await expectFail(addBarcode(admin(A), { itemId, unitId: A.boxUnitId, barcode: box, quantity: "12.0" }), "VALIDATION_FAILED", "UNIT_CONVERSION_INVALID"); // çifte sayım
+    await expectFail(addBarcode(admin(A), { itemId, unitId: A.boxUnitId, barcode: box, quantity: "2" }), "VALIDATION_FAILED", "UNIT_CONVERSION_INVALID");
+    const { barcodeId } = await addBarcode(admin(A), { itemId, unitId: A.boxUnitId, barcode: box, quantity: "1.0" });
+    expect(await resolveBarcodeQuery(picker(A), plain)).toEqual({ itemId, unitId: A.unitId, quantity: "1", unitFactor: "1", baseQuantity: "1" });
+    expect(await resolveBarcodeQuery(picker(A), `  ${box} `)).toEqual({ itemId, unitId: A.boxUnitId, quantity: "1", unitFactor: "12", baseQuantity: "12" });
+    // Temel birim barkodunda "okutma başına miktar" anlamlıdır (12'li poşet) ve ürün ölçeğine uyar.
+    const pack = `P${rnd()}`;
+    await addBarcode(admin(A), { itemId, barcode: pack, quantity: "12" });
+    expect(await resolveBarcodeQuery(picker(A), pack)).toEqual({ itemId, unitId: A.unitId, quantity: "12", unitFactor: "1", baseQuantity: "12" });
+    // Katsayısı ürün ölçeğine uymayan koli yuvarlanmaz: çözümleme QUANTITY_SCALE (0.25 katsayı, ölçek 1).
+    const { itemId: fracItem } = await createItem(admin(A), { code: `I${rnd()}`, name: "Kesirli", baseUnitId: A.unitId, quantityScale: 1 });
+    await setUnitConversion(admin(A), { itemId: fracItem, unitId: A.boxUnitId, factor: "0.25" });
+    const fracBox = `F${rnd()}`;
+    await addBarcode(admin(A), { itemId: fracItem, unitId: A.boxUnitId, barcode: fracBox });
+    await expectFail(resolveBarcodeQuery(picker(A), fracBox), "VALIDATION_FAILED", "QUANTITY_SCALE");
     await expectFail(resolveBarcodeQuery(picker(A), `Z${rnd()}`), "NOT_FOUND");
     await expectFail(resolveBarcodeQuery(picker(A), "   "), "VALIDATION_FAILED");
     await expectFail(addBarcode(admin(A), { itemId, unitId: A.boxUnitId, barcode: box }), "VALIDATION_FAILED", "CODE_TAKEN");
@@ -199,11 +214,12 @@ describe("barkod ve çözümleme", () => {
     const { itemId: i3 } = await createItem(admin(A), { code: `I${rnd()}`, name: "Üçüncü", baseUnitId: A.unitId });
     const sh2 = `AMB${rnd()}`;
     await addBarcode(admin(A), { itemId: i3, barcode: sh2 });
-    await addBarcode(admin(A), { itemId: i3, unitId: A.boxUnitId, barcode: sh2, quantity: "6" });
+    await setUnitConversion(admin(A), { itemId: i3, unitId: A.boxUnitId, factor: "6" });
+    await addBarcode(admin(A), { itemId: i3, unitId: A.boxUnitId, barcode: sh2 });
     expect(await fail(resolveBarcodeQuery(picker(A), sh2))).toBeInstanceOf(BarcodeAmbiguousError);
     // Arşivlenen ürün adaylardan çıkar → tek eşleşme kalır.
     await archiveItem(admin(A), { itemId: i2 });
-    expect(await resolveBarcodeQuery(picker(A), shared)).toEqual({ itemId: i1, unitId: A.unitId, quantity: "1" });
+    expect(await resolveBarcodeQuery(picker(A), shared)).toEqual({ itemId: i1, unitId: A.unitId, quantity: "1", unitFactor: "1", baseQuantity: "1" });
     // Arşivli ürüne barkod eklenemez.
     await expectFail(addBarcode(admin(A), { itemId: i2, barcode: `Q${rnd()}` }), "VALIDATION_FAILED");
   });
@@ -321,7 +337,7 @@ describe("belirsizlik anahtarı: miktar", () => {
     const same = `QK${rnd()}`;
     await addBarcode(admin(A), { itemId, barcode: same }); // birim NULL → temel birim, miktar yok (=1)
     await addBarcode(admin(A), { itemId, unitId: A.unitId, barcode: same, quantity: "1" }); // aynı birim, miktar 1
-    expect(await resolveBarcodeQuery(picker(A), same)).toEqual({ itemId, unitId: A.unitId, quantity: "1" });
+    expect(await resolveBarcodeQuery(picker(A), same)).toEqual({ itemId, unitId: A.unitId, quantity: "1", unitFactor: "1", baseQuantity: "1" });
     const diff = `QD${rnd()}`;
     await addBarcode(admin(A), { itemId, barcode: diff });
     await addBarcode(admin(A), { itemId, unitId: A.unitId, barcode: diff, quantity: "6" });
