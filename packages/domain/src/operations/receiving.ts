@@ -167,6 +167,11 @@ export async function createInboundReceipt(
         await assertWarehouseActive(tx, ctx.tenantId, warehouseId);
         const itemIds = [...new Set(lines.map((l) => l.itemId))].sort();
         await assertItemsActive(tx, ctx.tenantId, itemIds);
+        // A-305-4: takipli (LOT/SERIAL) ürünün kabulü bu kartta yok → belge hiç açılmaz (kabulde TRACKING_VIOLATION'a düşmesin).
+        const tracked = await tx.execute<{ id: string }>(
+          sql`SELECT id FROM public.items WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ANY(${pgUuidArray(itemIds)}::uuid[]) AND tracking_mode <> 'NONE'`,
+        );
+        if (tracked.length > 0) throw new AppError("VALIDATION_FAILED");
         const factors = await tx.execute<{ item_id: string; unit_id: string; factor: string }>(
           sql`SELECT i.id AS item_id, i.base_unit_id AS unit_id, '1.000000' AS factor FROM public.items i
                WHERE i.tenant_id = ${ctx.tenantId}::uuid AND i.id = ANY(${pgUuidArray(itemIds)}::uuid[])
@@ -527,26 +532,47 @@ function parseApproval(input: ApproveQualityInput): ParsedApproval {
 
 type PendingRow = {
   line_id: string;
+  receipt_id: string;
+  item_id: string;
   location_id: string;
+  /** TEMEL birimde (I-09): kabul girişleri − onay çıkışları. */
   pending: string;
+};
+interface PendingFilter {
+  readonly receiptId?: string;
+  readonly itemId?: string;
+  readonly locationId?: string;
 }
 /**
- * Kabul belgesinin bekleyen karantina miktarı (satır, lokasyon) kırılımında: işlenmiş kabul belgelerinin `QUARANTINE` girişleri − işlenmiş onayların
- * (`QUARANTINE → AVAILABLE`) çıkışları. Başlık kilidi altında kararlıdır (kabul ve onay aynı başlığı kilitler).
+ * Bekleyen karantina (kabul satırı, lokasyon) kırılımında, TEMEL birimde, FIFO sıralı (kabul belgesi `created_at`, kimlik, satır no):
+ * işlenmiş kabul girişleri (`QUARANTINE`) − işlenmiş onay çıkışları (`QUARANTINE → AVAILABLE`). Onay satırları kabul satırına `source_line_id` ile bağlıdır
+ * (belge kaynağından bağımsız: `dimensions` onayı da bir kabul satırına atfedilir), böylece iki varyant AYNI sayaca yazar ve bekleyen miktar sapmaz.
+ * Başlık kilidi altında kararlıdır (kabul ve her iki onay yolu ilgili başlıkları kilitler).
  */
-async function pendingQuarantine(tx: AccessTx, tenantId: string, receiptId: string): Promise<PendingRow[]> {
+async function pendingQuarantine(tx: AccessTx, tenantId: string, f: PendingFilter): Promise<PendingRow[]> {
+  const receiptId = f.receiptId ?? null;
+  const itemId = f.itemId ?? null;
+  const locationId = f.locationId ?? null;
   return tx.execute<PendingRow>(
-    sql`SELECT x.line_id, x.location_id, sum(x.q)::text AS pending FROM (
-          SELECT dl.source_line_id AS line_id, dl.target_location_id AS location_id, dl.quantity AS q
+    sql`SELECT x.line_id, rl.receipt_id, rl.item_id, x.location_id, sum(x.q)::text AS pending FROM (
+          SELECT dl.source_line_id AS line_id, dl.target_location_id AS location_id, dl.base_quantity AS q
             FROM public.document_lines dl JOIN public.documents d ON d.tenant_id = dl.tenant_id AND d.id = dl.document_id
-           WHERE d.tenant_id = ${tenantId}::uuid AND d.source_kind = 'INBOUND_RECEIPT' AND d.source_id = ${receiptId}::uuid
-             AND d.status = 'POSTED' AND d.kind = 'STOCK_IN' AND dl.stock_status = 'QUARANTINE'
+           WHERE d.tenant_id = ${tenantId}::uuid AND d.source_kind = 'INBOUND_RECEIPT' AND d.status = 'POSTED' AND d.kind = 'STOCK_IN'
+             AND dl.stock_status = 'QUARANTINE' AND dl.source_line_id IS NOT NULL
           UNION ALL
-          SELECT dl.source_line_id, dl.source_location_id, -dl.quantity
+          SELECT dl.source_line_id, dl.source_location_id, -dl.base_quantity
             FROM public.document_lines dl JOIN public.documents d ON d.tenant_id = dl.tenant_id AND d.id = dl.document_id
-           WHERE d.tenant_id = ${tenantId}::uuid AND d.source_kind = 'INBOUND_RECEIPT' AND d.source_id = ${receiptId}::uuid
-             AND d.status = 'POSTED' AND d.kind = 'STOCK_MOVE' AND dl.stock_status = 'QUARANTINE' AND dl.target_stock_status = 'AVAILABLE'
-        ) x GROUP BY x.line_id, x.location_id HAVING sum(x.q) > 0 ORDER BY x.line_id, x.location_id`,
+           WHERE d.tenant_id = ${tenantId}::uuid AND d.status = 'POSTED' AND d.kind = 'STOCK_MOVE'
+             AND dl.stock_status = 'QUARANTINE' AND dl.target_stock_status = 'AVAILABLE' AND dl.source_line_id IS NOT NULL
+        ) x
+        JOIN public.inbound_receipt_lines rl ON rl.tenant_id = ${tenantId}::uuid AND rl.id = x.line_id
+        JOIN public.inbound_receipts r ON r.tenant_id = rl.tenant_id AND r.id = rl.receipt_id
+       WHERE (${receiptId}::uuid IS NULL OR rl.receipt_id = ${receiptId}::uuid)
+         AND (${itemId}::uuid IS NULL OR rl.item_id = ${itemId}::uuid)
+         AND (${locationId}::uuid IS NULL OR x.location_id = ${locationId}::uuid)
+       GROUP BY x.line_id, rl.receipt_id, rl.item_id, x.location_id, r.created_at, rl.line_no
+      HAVING sum(x.q) > 0
+       ORDER BY r.created_at, rl.receipt_id, rl.line_no, x.location_id`,
   );
 }
 
@@ -555,38 +581,70 @@ interface ApprovalPlan {
   readonly spec: FieldPostSpec;
   /** Onaylanan her satır için görev girdisi (yerleştirme). */
   readonly tasks: readonly NewTaskInput[];
+  /** Kilitlenecek kabul başlıkları (kimliğe göre sıralı; yalnızca `dimensions` yolunda apply'da kilitlenir). */
+  readonly receiptIds: readonly string[];
 }
 
+type ApprovalItem = {
+  readonly base_unit_id: string;
+  readonly id: string;
+};
+async function readApprovalItems(tx: AccessTx, tenantId: string, itemIds: readonly string[]): Promise<Map<string, string>> {
+  const uniq = [...new Set(itemIds)];
+  const items = await tx.execute<ApprovalItem>(
+    sql`SELECT id, base_unit_id FROM public.items WHERE tenant_id = ${tenantId}::uuid AND id = ANY(${pgUuidArray(uniq)}::uuid[])`,
+  );
+  if (items.length !== uniq.length) throw new AppError("NOT_FOUND");
+  return new Map(items.map((i) => [i.id.toLowerCase(), i.base_unit_id]));
+}
+
+/** Onay satırı: HER ZAMAN ürünün temel biriminde (katsayı 1) — bekleyen sayaç temel birimdedir; `sourceLineId` atıf içindir. */
+function approvalLine(itemId: string, unitId: string, locationId: string, qtyMicro: bigint, sourceLineId: string | null): FieldLine {
+  const quantity = microToDecimal(qtyMicro);
+  return {
+    itemId,
+    unitId,
+    quantity,
+    conversionFactor: "1.000000",
+    baseQuantity: quantity,
+    sourceLocationId: locationId,
+    targetLocationId: locationId,
+    stockStatus: "QUARANTINE",
+    targetStockStatus: "AVAILABLE",
+    sourceLineId,
+  };
+}
+
+/**
+ * Onay spesifikasyonu. RECEIPT: belgenin kendi bekleyen karantinası (açık `lines` verilmişse o miktarlar; kabul birimi → temel birim, bekleyeni aşamaz).
+ * DIMENSIONS: (ürün, lokasyon) miktarı, o boyutu bekleyen kabul satırlarına FIFO dağıtılır (en eski kabul önce); artan miktar (iade vb. kabul dışı karantina)
+ * kaynaksız satır olur. Her atıf `source_line_id` ile işlenir → bekleyen sayaç iki yolda da tutarlı. `receiptWh`: RECEIPT yolunda kilitli/okunan depo.
+ */
 async function buildApproval(tx: AccessTx, tenantId: string, p: ParsedApproval, receiptWh: string | null): Promise<ApprovalPlan> {
   if (p.mode === "RECEIPT") {
     const warehouseId = receiptWh as string;
     const rows = await readReceiptLines(tx, tenantId, p.receiptId);
     const byId = new Map(rows.map((r) => [r.id.toLowerCase(), r]));
-    const pending = await pendingQuarantine(tx, tenantId, p.receiptId);
-    const pendingOf = new Map(pending.map((r) => [`${r.line_id.toLowerCase()}|${r.location_id.toLowerCase()}`, r.pending]));
+    const pending = await pendingQuarantine(tx, tenantId, { receiptId: p.receiptId });
+    const pendingOf = new Map(pending.map((r) => [`${r.line_id.toLowerCase()}|${r.location_id.toLowerCase()}`, decimalToMicro(r.pending)]));
     const wanted =
-      p.lines ?? pending.map((r) => ({ lineId: r.line_id.toLowerCase(), locationId: r.location_id.toLowerCase(), quantity: r.pending }));
+      p.lines === null
+        ? pending.map((r) => ({ lineId: r.line_id.toLowerCase(), locationId: r.location_id.toLowerCase(), base: decimalToMicro(r.pending) }))
+        : p.lines.map((l) => {
+            const row = byId.get(l.lineId);
+            if (row === undefined) throw new AppError("NOT_FOUND"); // A-152: satır bu belgeye ait değil
+            return { lineId: l.lineId, locationId: l.locationId, base: decimalToMicro(baseQuantityOf(l.quantity, row.conversion_factor)) };
+          });
     if (wanted.length === 0) throw new AppError("VALIDATION_FAILED"); // onaylanacak karantina yok
+    const units = await readApprovalItems(tx, tenantId, wanted.map((w) => (byId.get(w.lineId) as ReceiptLineRow).item_id.toLowerCase()));
     const lines: FieldLine[] = [];
     const tasks: NewTaskInput[] = [];
     for (const w of wanted) {
       const row = byId.get(w.lineId);
-      if (row === undefined) throw new AppError("NOT_FOUND"); // A-152: satır bu belgeye ait değil
+      if (row === undefined) throw new AppError("NOT_FOUND");
       const avail = pendingOf.get(`${w.lineId}|${w.locationId}`);
-      if (avail === undefined || decimalToMicro(w.quantity) > decimalToMicro(avail)) throw new AppError("VALIDATION_FAILED");
-      const baseQuantity = baseQuantityOf(w.quantity, row.conversion_factor);
-      lines.push({
-        itemId: row.item_id,
-        unitId: row.unit_id,
-        quantity: w.quantity,
-        conversionFactor: row.conversion_factor,
-        baseQuantity,
-        sourceLocationId: w.locationId,
-        targetLocationId: w.locationId,
-        stockStatus: "QUARANTINE",
-        targetStockStatus: "AVAILABLE",
-        sourceLineId: row.id,
-      });
+      if (avail === undefined || w.base <= 0n || w.base > avail) throw new AppError("VALIDATION_FAILED");
+      lines.push(approvalLine(row.item_id, units.get(row.item_id.toLowerCase()) as string, w.locationId, w.base, row.id));
       tasks.push({
         warehouseId,
         kind: "PUTAWAY",
@@ -595,44 +653,50 @@ async function buildApproval(tx: AccessTx, tenantId: string, p: ParsedApproval, 
         sourceLineId: row.id,
         locationId: w.locationId,
         itemId: row.item_id,
-        quantity: baseQuantity,
+        quantity: microToDecimal(w.base),
       });
     }
-    return { warehouseId, spec: { kind: "STOCK_MOVE", warehouseId, sourceKind: "INBOUND_RECEIPT", sourceId: p.receiptId, lines }, tasks };
+    return { warehouseId, spec: { kind: "STOCK_MOVE", warehouseId, sourceKind: "INBOUND_RECEIPT", sourceId: p.receiptId, lines }, tasks, receiptIds: [] };
   }
-  // DIMENSIONS: temel birimde; depo ilk lokasyonun deposundan (hepsi aynı depoda olmalı — çekirdek A-145 denetler).
+  // DIMENSIONS: depo lokasyonlardan; hepsi aynı depoda olmalı (çekirdek A-145 denetler).
   const locIds = [...new Set(p.dimensions.map((d) => d.locationId))];
   const locs = await tx.execute<{ id: string; warehouse_id: string }>(
     sql`SELECT id, warehouse_id FROM public.locations WHERE tenant_id = ${tenantId}::uuid AND id = ANY(${pgUuidArray(locIds)}::uuid[])`,
   );
   if (locs.length !== locIds.length) throw new AppError("NOT_FOUND");
   const warehouseId = (locs[0] as { warehouse_id: string }).warehouse_id;
-  const itemIds = [...new Set(p.dimensions.map((d) => d.itemId))];
-  const items = await tx.execute<{ id: string; base_unit_id: string }>(
-    sql`SELECT id, base_unit_id FROM public.items WHERE tenant_id = ${tenantId}::uuid AND id = ANY(${pgUuidArray(itemIds)}::uuid[])`,
-  );
-  if (items.length !== itemIds.length) throw new AppError("NOT_FOUND");
-  const unitOf = new Map(items.map((i) => [i.id.toLowerCase(), i.base_unit_id]));
-  const lines: FieldLine[] = p.dimensions.map((d) => ({
-    itemId: d.itemId,
-    unitId: unitOf.get(d.itemId) as string,
-    quantity: d.quantity,
-    conversionFactor: "1.000000",
-    baseQuantity: baseQuantityOf(d.quantity, "1.000000"),
-    sourceLocationId: d.locationId,
-    targetLocationId: d.locationId,
-    stockStatus: "QUARANTINE",
-    targetStockStatus: "AVAILABLE",
-    sourceLineId: null,
-  }));
-  const tasks: NewTaskInput[] = p.dimensions.map((d) => ({
-    warehouseId,
-    kind: "PUTAWAY",
-    locationId: d.locationId,
-    itemId: d.itemId,
-    quantity: baseQuantityOf(d.quantity, "1.000000"),
-  }));
-  return { warehouseId, spec: { kind: "STOCK_MOVE", warehouseId, sourceKind: null, sourceId: null, lines }, tasks };
+  const units = await readApprovalItems(tx, tenantId, p.dimensions.map((d) => d.itemId));
+  const lines: FieldLine[] = [];
+  const tasks: NewTaskInput[] = [];
+  const receipts = new Set<string>();
+  for (const d of p.dimensions) {
+    const unitId = units.get(d.itemId) as string;
+    let left = decimalToMicro(d.quantity);
+    for (const r of await pendingQuarantine(tx, tenantId, { itemId: d.itemId, locationId: d.locationId })) {
+      if (left === 0n) break;
+      const have = decimalToMicro(r.pending);
+      const take = have < left ? have : left;
+      lines.push(approvalLine(d.itemId, unitId, d.locationId, take, r.line_id));
+      tasks.push({
+        warehouseId,
+        kind: "PUTAWAY",
+        sourceKind: "INBOUND_RECEIPT",
+        sourceId: r.receipt_id,
+        sourceLineId: r.line_id,
+        locationId: d.locationId,
+        itemId: d.itemId,
+        quantity: microToDecimal(take),
+      });
+      receipts.add(r.receipt_id.toLowerCase());
+      left -= take;
+    }
+    if (left > 0n) {
+      // Kabul dışı karantina (kaynaksız): bekleyen sayaçlara yazılmaz; yeterlilik (QUARANTINE bakiyesi) motorda denetlenir.
+      lines.push(approvalLine(d.itemId, unitId, d.locationId, left, null));
+      tasks.push({ warehouseId, kind: "PUTAWAY", locationId: d.locationId, itemId: d.itemId, quantity: microToDecimal(left) });
+    }
+  }
+  return { warehouseId, spec: { kind: "STOCK_MOVE", warehouseId, sourceKind: null, sourceId: null, lines }, tasks, receiptIds: [...receipts].sort() };
 }
 
 /**
@@ -663,7 +727,13 @@ export async function approveQuality(
       },
       apply: async (tx, locked, ctx) => {
         let receiptWh: string | null = null;
-        if (parsed.mode === "RECEIPT") receiptWh = (await lockFieldHeader(tx, ctx.tenantId, "inbound_receipts", parsed.receiptId)).warehouseId;
+        if (parsed.mode === "RECEIPT") {
+          receiptWh = (await lockFieldHeader(tx, ctx.tenantId, "inbound_receipts", parsed.receiptId)).warehouseId;
+        } else {
+          // `dimensions`: atıf yapılabilecek kabul başlıklarını (kimliğe göre sıralı, stok kilitlerinden SONRA) kilitle, SONRA yeniden hesapla.
+          const first = await buildApproval(tx, ctx.tenantId, parsed, null);
+          for (const id of first.receiptIds) await lockFieldHeader(tx, ctx.tenantId, "inbound_receipts", id);
+        }
         const b = await buildApproval(tx, ctx.tenantId, parsed, receiptWh);
         const applied = await postFieldDocument(tx, locked, ctx, b.spec, input.requestId ?? null);
         await createTasks(tx, { tenantId: ctx.tenantId, userId: ctx.userId }, b.tasks, input.requestId ?? null);

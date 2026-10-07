@@ -233,6 +233,18 @@ export async function postDocument(
   return { ...outcome.result, replayed: outcome.replayed };
 }
 
+/**
+ * Aynı transaction'da OLUŞTURULAN belgeler (saha komutları; T-305 güvenlik incelemesi MAJOR): belgeyi başka transaction göremez, bu yüzden plan'da
+ * belge kilidi yoktur. Kayıt `tx` nesnesine bağlıdır (WeakMap): başka transaction'a ya da çağıranın uydurduğu kimliğe taşınamaz.
+ */
+const createdInTx = new WeakMap<object, Set<string>>();
+/** İÇ (yalnızca saha komutları; apps/** import edemez — eslint `no-restricted-imports`): belge bu `tx`'te yaratıldı. */
+export function registerTxCreatedDocument(tx: AccessTx, documentId: string): void {
+  const set = createdInTx.get(tx) ?? new Set<string>();
+  set.add(documentId.toLowerCase());
+  createdInTx.set(tx, set);
+}
+
 export interface PostInTxOptions {
   /** Yalnızca `STOCK_MOVE`: satır → taşınacak rezervasyonlar (normalize edilmiş). */
   readonly moves?: readonly ReservationMoveInput[] | undefined;
@@ -253,6 +265,11 @@ export async function postApprovedDocumentInTx(
   opts: PostInTxOptions,
 ): Promise<StockCommandApplied> {
   const moves = opts.moves;
+  // Kilit/sahiplik koruması: belge ya bu komutun planıyla KİLİTLENMİŞ (`locked.document`) ya da bu transaction'da oluşturulmuş olmalı; aksi
+  // kilitsiz/yabancı belge işlenirdi (yarış ve I-15 ihlali). Sözleşme ihlali = üretim kodu hatası → INTERNAL.
+  const docKey = documentId.toLowerCase();
+  const lockedHere = locked.document !== undefined && locked.document.id.toLowerCase() === docKey;
+  if (!lockedHere && createdInTx.get(tx)?.has(docKey) !== true) throw new AppError("INTERNAL");
   const header = await readDocumentHeader(tx, ctx.tenantId, documentId); // belge kilitli
   assertNotProcessing(header); // M-6
   if (header.status !== "APPROVED") throw documentState();

@@ -1,6 +1,9 @@
 // T-305 birim testleri (DB'siz): girdi doğrulama (satır, fazla/hasarlı miktar, boyut sınırı), ondalık yardımcıları, numara öneki.
 // Stok etkisi ve kilit davranışı tests/integration/operations/receiving.int.test.ts'tedir.
 import { randomUUID } from "node:crypto";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { ESLint } from "eslint";
 import { describe, expect, it } from "vitest";
 import { AppError } from "@wms/shared/errors";
 import { NUMBER_PREFIX, formatDocumentNumber, type StockDocCallParams } from "../stock/index.ts";
@@ -99,4 +102,24 @@ describe("numara öneki (A-305-1)", () => {
     expect(formatDocumentNumber("INBOUND_RECEIPT", "2026", 7)).toBe("KBL-2026-000007");
     expect(NUMBER_PREFIX).toMatchObject({ STOCK_IN: "GRS", STOCK_OUT: "CKS", STOCK_MOVE: "TSM", REVERSAL: "TRS", INBOUND_RECEIPT: "KBL" });
   });
+});
+
+describe("apps/web posting çekirdeğini import edemez (eslint no-restricted-imports; T-305 MAJOR)", () => {
+  const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
+  const lint = async (code: string, rel: string): Promise<string[]> => {
+    const eslint = new ESLint({ cwd: ROOT });
+    const [r] = await eslint.lintText(code, { filePath: path.join(ROOT, rel), warnIgnored: true });
+    return (r?.messages ?? []).filter((m) => m.ruleId === "no-restricted-imports").map((m) => m.message);
+  };
+  it.each([
+    'import { postApprovedDocumentInTx } from "@wms/domain/stock";\nexport const x = postApprovedDocumentInTx;\n',
+    'import { registerTxCreatedDocument } from "@wms/domain/stock";\nexport const x = registerTxCreatedDocument;\n',
+    'import * as stock from "@wms/domain/stock";\nexport const x = stock;\n',
+  ])("apps/web içinde ihlal: %s", async (code) => {
+    const msgs = await lint(code, "apps/web/lib/__core_probe__.ts");
+    expect(msgs.some((m) => m.includes("posting çekirdeğini"))).toBe(true);
+  }, 60_000);
+  it("komut yüzeyi ve diğer stok adları serbest (kapsam dar)", async () => {
+    expect(await lint('import { postDocument, receiveGoods } from "@wms/domain/stock";\nexport const x = [postDocument, receiveGoods];\n', "apps/web/lib/__ok_probe__.ts")).toEqual([]);
+  }, 60_000);
 });

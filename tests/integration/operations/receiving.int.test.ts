@@ -16,7 +16,14 @@ import {
   putaway,
   receiveGoods,
 } from "../../../packages/domain/src/operations/index.ts";
-import { createStockDocument, type StockDocCallParams } from "../../../packages/domain/src/stock/index.ts";
+import {
+  EMPTY_LOCK_PLAN,
+  approveDocument,
+  createStockDocument,
+  executeStockCommand,
+  postApprovedDocumentInTx,
+  type StockDocCallParams,
+} from "../../../packages/domain/src/stock/index.ts";
 import { newRegistry, seedWorld, type TenantWorld } from "../fixtures/tenants.ts";
 import { readIntEnv } from "../harness/env.ts";
 
@@ -62,10 +69,10 @@ async function failure(p: Promise<unknown>): Promise<AppError> {
 const codeOf = (e: AppError): string => (e.detail === undefined ? e.code : `${e.code}/${e.detail}`);
 
 // --- fikstürler ---------------------------------------------------------------------------------------------------------
-async function mkItem(): Promise<string> {
+async function mkItem(mode: "NONE" | "LOT" | "SERIAL" = "NONE"): Promise<string> {
   const id = uuid();
-  await q("INSERT INTO public.items (tenant_id, id, code, name, base_unit_id, tracking_mode, quantity_scale) VALUES ($1,$2,$3,'T305 urun',$4,'NONE',0)", [
-    A.tenantId, id, `I-${hex(10)}`, A.unitId,
+  await q("INSERT INTO public.items (tenant_id, id, code, name, base_unit_id, tracking_mode, quantity_scale) VALUES ($1,$2,$3,'T305 urun',$4,$5,0)", [
+    A.tenantId, id, `I-${hex(10)}`, A.unitId, mode,
   ]);
   return id;
 }
@@ -464,7 +471,7 @@ describe("kurallar", () => {
     expect((await tasksOf(g.id))[0]?.status).toBe("DONE");
   });
 
-  it("kalite onayı kısmi (satır + lokasyon + miktar): kalan karantinada kalır; fazlası reddedilir; dimensions yolu görev açar", async () => {
+  it("kalite onayı kısmi (satır + lokasyon + miktar): kalan karantinada kalır; fazlası reddedilir; dimensions yolu da kabul satırına atfedilir", async () => {
     const X = await mkItem();
     const KABUL = await mkLoc("RECEIVING");
     const g = await mkReceipt([{ itemId: X, expected: "10" }]);
@@ -478,7 +485,11 @@ describe("kurallar", () => {
     expect(await bal(X, KABUL, "QUARANTINE")).toBe(n(4));
     expect(await bal(X, KABUL, "AVAILABLE")).toBe(n(6));
     expect(n(await physical(X))).toBe(n(10));
-    expect((await tasksOf(g.id)).map((t) => t.quantity)).toEqual([n(4)]); // dimensions yolu kaynaksız görev
+    // dimensions yolu da kabul satırına atfedilir (FIFO): görev kaynaklı ve bekleyen sayaç tutarlı (2 + 4 görev; 4 bekleyen kaldı).
+    expect((await tasksOf(g.id)).map((t) => t.quantity)).toEqual([n(4), n(2)]);
+    await approveQuality(ownerP(), { receiptId: g.id }); // kalan bekleyen = 10 − 4 − 2 = 4
+    expect(await bal(X, KABUL, "QUARANTINE")).toBe(n(0));
+    expect(await bal(X, KABUL, "AVAILABLE")).toBe(n(10));
   });
 
   it("eşzamanlı iki kabul (aynı belge, farklı satır/lokasyon): başlık kilidi serileştirir; 40P01 yok, son tamamlayan belgeyi kapatır", async () => {
@@ -515,5 +526,114 @@ describe("kurallar", () => {
     expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
     expect(await lineRow(lineId)).toMatchObject({ received: n(6) });
     expect(n(await physical(X))).toBe(n(6));
+  });
+  it("MINOR-2 R1/R2: dimensions onayı kabul satırlarına FIFO atfedilir; bekleyen karantina belgeler arasında sapmaz", async () => {
+    const X = await mkItem();
+    const KABUL = await mkLoc("RECEIVING");
+    const r1 = await mkReceipt([{ itemId: X, expected: "5" }]);
+    const r2 = await mkReceipt([{ itemId: X, expected: "5" }]);
+    await receiveGoods(pickerP(), { receiptId: r1.id, lines: [{ lineId: r1.lineIds[0] as string, received: "5", locationId: KABUL }] });
+    await receiveGoods(pickerP(), { receiptId: r2.id, lines: [{ lineId: r2.lineIds[0] as string, received: "5", locationId: KABUL }] });
+    // 7 birim: en eski kabul (R1) 5'in tamamı, R2'den 2.
+    await approveQuality(ownerP(), { dimensions: [{ itemId: X, locationId: KABUL, quantity: "7" }] });
+    expect(await bal(X, KABUL, "QUARANTINE")).toBe(n(3));
+    expect(await bal(X, KABUL, "AVAILABLE")).toBe(n(7));
+    expect((await tasksOf(r1.id)).map((t) => t.quantity)).toEqual([n(5)]);
+    expect((await tasksOf(r2.id)).map((t) => t.quantity)).toEqual([n(2)]);
+    // R1'in bekleyeni 0 (onay yok → VALIDATION_FAILED); R2'nin bekleyeni 3 (5 değil): tamamı onaylanınca karantina 0.
+    expect(codeOf(await failure(approveQuality(ownerP(), { receiptId: r1.id })))).toBe("VALIDATION_FAILED");
+    expect(codeOf(await failure(approveQuality(ownerP(), { receiptId: r2.id, lines: [{ lineId: r2.lineIds[0] as string, locationId: KABUL, quantity: "4" }] })))).toBe("VALIDATION_FAILED");
+    await approveQuality(ownerP(), { receiptId: r2.id });
+    expect(await bal(X, KABUL, "QUARANTINE")).toBe(n(0));
+    expect(await bal(X, KABUL, "AVAILABLE")).toBe(n(10));
+    expect((await tasksOf(r2.id)).map((t) => t.quantity)).toEqual([n(2), n(3)]);
+    // Mevcut karantinadan fazlası motorda reddedilir (INSUFFICIENT_STOCK); hiçbir şey yazılmaz.
+    expect(codeOf(await failure(approveQuality(ownerP(), { dimensions: [{ itemId: X, locationId: KABUL, quantity: "1" }] })))).toBe("INSUFFICIENT_STOCK");
+    expect(n(await physical(X))).toBe(n(10));
+  });
+
+  it("MINOR-6: LOT/SERIAL takipli ürünle beklenen teslim açılamaz (VALIDATION_FAILED); hiçbir satır yazılmaz", async () => {
+    for (const mode of ["LOT", "SERIAL"] as const) {
+      const T = await mkItem(mode);
+      const before = Number((await q<{ c: string }>("SELECT count(*)::text AS c FROM public.inbound_receipts WHERE tenant_id=$1", [A.tenantId]))[0]?.c);
+      const e = await failure(createInboundReceipt(ownerP(), { warehouseId: A.warehouseId, lines: [{ itemId: T, unitId: A.unitId, expectedQuantity: "1" }] }));
+      expect(codeOf(e), mode).toBe("VALIDATION_FAILED");
+      expect(Number((await q<{ c: string }>("SELECT count(*)::text AS c FROM public.inbound_receipts WHERE tenant_id=$1", [A.tenantId]))[0]?.c)).toBe(before);
+    }
+  });
+
+  it("MINOR-7: görevsiz yerleştirme eşleşen açık PUTAWAY görevlerini FIFO kapatır; karşılamayan ilk görevde durur", async () => {
+    const X = await mkItem();
+    const KABUL = await mkLoc("RECEIVING");
+    const R01 = await mkLoc("STORAGE");
+    const g = await mkReceipt([{ itemId: X, expected: "10" }]);
+    const lineId = g.lineIds[0] as string;
+    await receiveGoods(pickerP(), { receiptId: g.id, lines: [{ lineId, received: "10", locationId: KABUL }] });
+    await approveQuality(ownerP(), { receiptId: g.id, lines: [{ lineId, locationId: KABUL, quantity: "4" }] }); // görev 1: 4
+    await approveQuality(ownerP(), { receiptId: g.id, lines: [{ lineId, locationId: KABUL, quantity: "6" }] }); // görev 2: 6
+    const [t1, t2] = (await tasksOf(g.id)) as unknown as [{ id: string }, { id: string }];
+    // 3 birim: ilk görev (4) karşılanmaz → hiçbiri kapanmaz (görev miktarı sütunu değişmez; A-305-10).
+    await putaway(pickerP(), { sourceLocationId: KABUL, targetLocationId: R01, itemId: X, quantity: "3" });
+    expect((await tasksOf(g.id)).map((t) => t.status)).toEqual(["OPEN", "OPEN"]);
+    // 4 birim: FIFO ilk görev (4) karşılanır → DONE; ikinci görev (6) kalan 0 ile karşılanmaz.
+    await putaway(pickerP(), { sourceLocationId: KABUL, targetLocationId: R01, itemId: X, quantity: "4" });
+    expect((await tasksOf(g.id)).map((t) => [t.id, t.status])).toEqual([[t1.id, "DONE"], [t2.id, "OPEN"]]);
+    // 3 birim: ikinci görev (6) karşılanmaz → açık kalır.
+    await putaway(pickerP(), { sourceLocationId: KABUL, targetLocationId: R01, itemId: X, quantity: "3" });
+    expect((await tasksOf(g.id)).map((t) => t.status)).toEqual(["DONE", "OPEN"]);
+    expect(n(await physical(X))).toBe(n(10));
+    expect(await audits("warehouse_task.completed", t1.id)).toBe(1);
+  });
+
+  it("posting çekirdeği: belge kilitli değil / yabancı / bu tx'te yaratılmamış → INTERNAL; belge APPROVED kalır, defter yazılmaz (MAJOR)", async () => {
+    const X = await mkItem();
+    const KABUL = await mkLoc("RECEIVING");
+    const mk = async () => {
+      const c = await createStockDocument(ownerP(), {
+        kind: "STOCK_IN",
+        warehouseId: A.warehouseId,
+        lines: [{ itemId: X, unitId: A.unitId, quantity: "1", conversionFactor: "1", baseQuantity: "1", targetLocationId: KABUL, stockStatus: "AVAILABLE" }],
+      });
+      const id = c.documentId as string;
+      await approveDocument(ownerP(), { documentId: id, expectedVersion: 1 });
+      return id;
+    };
+    const docA = await mk();
+    const docB = await mk();
+    const versionOf = async (id: string) => Number((await q<{ version: number }>("SELECT version FROM public.documents WHERE id=$1", [id]))[0]?.version);
+    const vB = await versionOf(docB);
+    const callCore = (lockedDoc: string | null, target: string) =>
+      executeStockCommand({
+        db: app,
+        principal: { userId: A.ownerUserId, mfaVerified: true },
+        tenantSlug: A.slug,
+        clientKey: uuid(),
+        retry: NO_WAIT,
+        commandType: "stock.test.core",
+        permission: "stock.post",
+        input: { lockedDoc, target },
+        plan: async () => ({
+          warehouseIds: [A.warehouseId],
+          locks: {
+            ...EMPTY_LOCK_PLAN,
+            locationIds: [KABUL],
+            dimensions: [{ itemId: X, locationId: KABUL, lotId: null, serialId: null, stockStatus: "AVAILABLE", inventoryOwnerId: null, handlingUnitId: null }],
+            ...(lockedDoc === null ? {} : { document: { id: lockedDoc, expectedVersion: vB } }),
+          },
+        }),
+        apply: (tx, locked, ctx) => postApprovedDocumentInTx(tx, locked, ctx, target, { requestId: null }),
+      });
+    const docStatus = async (id: string) => (await q<{ status: string }>("SELECT status FROM public.documents WHERE id=$1", [id]))[0]?.status;
+    // 1) kilit planında belge yok, bu tx'te yaratılmadı
+    expect((await failure(callCore(null, docA))).code).toBe("INTERNAL");
+    // 2) başka belge kilitli, çekirdek yabancı belgeyi işlemek istiyor
+    expect((await failure(callCore(docB, docA))).code).toBe("INTERNAL");
+    expect(await docStatus(docA)).toBe("APPROVED");
+    expect(await ledgerCount(X)).toBe(0);
+    expect(n(await physical(X))).toBe(n(0));
+    // Kontrol: kilitli belge (postDocument'la aynı koşul) işlenir.
+    await callCore(docB, docB);
+    expect(await docStatus(docB)).toBe("POSTED");
+    expect(await ledgerCount(X)).toBe(1);
   });
 });
