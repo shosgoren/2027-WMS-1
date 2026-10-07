@@ -122,6 +122,7 @@ Gerekçe: "metrik doldurma kutusu üretiyordu; kullanıcı görsel kalitesi önc
 | Ana ekran ölçeklenmesi (§7.4): ≤5 izinli iş tek sütun satır (mevcut), ≥6 eşit 2 sütunlu ızgara; 2 sütunda D-04 88–140 px | Supervisor kararı 2026-10-07 (T-313); rubrik-yalnız commit, T-313 ana ekran görüntüsünden ÖNCE | "6 etkin işte tek sütun D-04'ü ihlal ediyor": 6 döşemeyle 360×740'ta 77 px (<88), 390×664'te son döşeme alt sekmenin 38 px altına taşıyor. Eşikler gevşetilmedi; yerleşim biçimi değişti |
 | 2 sütun D-04 tavanı 140 px → "en çok kare (yükseklik ≤ genişlik), en az 88 px" (§7.4.1) | Supervisor kararı 2026-10-07 (T-313); rubrik-yalnız commit, yeni görüntüden ÖNCE | "2 sütunda 140 px tavan büyük telefonda 178–266 px boş bant bırakıyor"; dolgu içeriği reddedildi. B-02 ve `emptyRatio` değişmedi |
 | e57c69a GERİ ÇEKİLDİ: "2 sütun döşeme en çok kare" kuralı kaldırıldı; yerine §7.4.1 (140 px'i yalnız gerçek içerik/açıklama aşar, ≤ kare; D-04b içi boşluk ≤ 24 px) | Supervisor kararı 2026-10-07 (bağımsız inceleme T-313, 28/32); rubrik-yalnız commit, görüntülerden ÖNCE | e57c69a geri çekildi: ölçüm sonrası tavan kaldırma = eşik bükme (bağımsız inceleme T-313). Büyüyen döşemenin içi boş kalıyordu (60–75 px) |
+| 654e127 İSTİSNASI KALDIRILDI: "140 px'i açıklama taşıyan döşeme aşabilir" → D-04 88–140 px İSTİSNASIZ; ikon sabit, `cqh` yok, açıklama tek satır kesilmeden; "Şimdi" kartı (§7.4.2) ve B-02 sayım kuralı eklendi | Supervisor kararı 2026-10-07 (T-280; bağımsız denetim T-313 27/32, D-04 = 0, D-04b = 0); rubrik-yalnız commit, görüntülerden ÖNCE | Aynı hata ikinci kez: döşeme büyütülüp içi ikonla dolduruldu (metrik oyunu). Boş alan gerçek iş bilgisiyle (Şimdi kartı) kullanılır; B-02/emptyRatio eşikleri değişmedi, yalnız "bekleyen iş yok" durumunda dürüst ölçüm (assert yok) |
 
 ### 7.3 Yeni ölçütler (bağımsız inceleme "geçmez" sonrası) — ekran görüntüsü ve kod değişikliğinden ÖNCE sabitlendi
 
@@ -148,19 +149,30 @@ Gerekçe: "6 etkin işte tek sütun D-04'ü ihlal ediyor" (ölçüm: 6 döşeme,
 Kural (telefon ana ekranı, `.task-grid`):
 - **≤5 izinli (etkin) iş:** tek sütun yatay satırlar (mevcut §5 B biçimi, D-04 88–140 px; kısa ekranda 72 px).
 - **≥6 izinli iş:** eşit 2 sütunlu ızgara, aynı döşeme biçimi (ikon dairesi + başlık; açıklama 2 sütunda gizlenebilir), eşit satırlar. Tek sayıda iş varsa son döşeme tam genişlik kaplar (yetim döşeme yok; eşitlik yükseklik ve satır genişliğiyle ölçülür, bkz. D-01 notu).
-- **D-04 (2 sütun):** döşeme yüksekliği 88–140 px (görünür yüksekliği < 700 px olan ekranda 72 px alt sınırı, mevcut D-04 notu); 140 px'i yalnızca döşeme GERÇEK içerik taşıyorsa aşabilir (§7.4.1) ve her durumda ≤ kare (yükseklik ≤ genişlik). **D-04b (§7.4.1):** döşeme içi dikey boşluk ≤ 24 px. **B-02 ve `emptyRatio` aynen geçerlidir.**
+- **D-04 (2 sütun):** döşeme yüksekliği 88–140 px, İSTİSNA YOK (§7.4.1 SIKI sürüm; 654e127 istisnası kaldırıldı). **D-04b (§7.4.1):** döşeme içi dikey boşluk ≤ 24 px. **B-02 ve `emptyRatio` eşikleri değişmedi; "Şimdi" kartı (§7.4.2) yalnız gerçek veri satırı içerdiğinde içerik sayılır.**
 - Her iki modda aynı güçte ölçülür: eşit boyut (±2 px), yetim yok, ızgara alt kenarı alt sekmenin ≤ 16 px üstünde (alttan yukarı), dokunma hedefi ≥ 48×48 px ve aralık ≥ 8 px, sayfa kayması yok; 360×740, 390×664, 390×844, 430×932. Başlık ≤ 2 satır (D-09).
 - Eşikler değişmedi; yalnızca 6+ iş için yerleşim biçimi eklendi. (DÜZELTME 2026-10-07: e57c69a'daki "en çok kare" tavan kaldırma kuralı geri çekildi; geçerli kural §7.4.1'dedir.)
 
-#### 7.4.1 2 sütun D-04 (2026-10-07, Supervisor kararı; görüntülerden ÖNCE) — e57c69a GERİ ÇEKİLDİ
+#### 7.4.1 2 sütun D-04 / D-04b — SIKI sürüm (2026-10-07, T-280 Supervisor kararı; görüntülerden ÖNCE)
 
-Geri çekme: e57c69a ("2 sütunda döşeme en çok kare, ≥ 88 px") 140 px tavanını ölçüm BAŞARISIZ OLDUKTAN sonra kaldırdığı için eşik bükme sayıldı (bağımsız inceleme T-313, 28/32). Boş alan, döşemeyi büyütüp içini boş bırakarak kapatılamaz.
+Geri çekme: 654e127'deki "140 px'i açıklama taşıyan döşeme aşabilir" istisnası KALDIRILDI. Aynı hata ikinci kez yapıldı: döşeme büyütülüp içi ikonla dolduruldu (ikon `flex: 1`, yazı `cqh` ile ölçekli) ve D-04 "tek satır" şartı kodda ve testte uygulanmadı (bağımsız denetim T-313 27/32: D-04 = 0, D-04b = 0, "metrik oyunu"). Boş alan, döşemeyi ya da ikonu büyüterek kapatılamaz.
 
-Geçerli kural (2 sütun, ≥ 6 izinli iş):
-- **D-04:** döşeme yüksekliği 88–140 px (görünür yüksekliği < 700 px olan ekranda 72 px alt sınırı). 140 px'i **yalnızca döşeme GERÇEK içerik taşıyorsa** aşabilir: ikonun altında başlık + tek satırlık sade dilde açıklama (örn. "Depoya mal geldi — gelen ürünü say, kaydet"; acemi kullanıcıya ne işe yaradığını söyler, N-08/N-09). Üst sınır kare (yükseklik ≤ genişlik). Açıklaması olmayan döşeme 140 px'i aşamaz.
-- **D-04b (yeni):** döşeme İÇİNDE ikon, başlık ve açıklama blokları arasındaki toplam dikey boşluk ≤ 24 px (içi boş döşeme yok; incelemede 60–75 px bulundu). Ölçü: döşeme iç yüksekliği − (ikon + başlık + açıklama kutu yükseklikleri toplamı); iç yükseklik = kenarlık ve iç dolgu çıkarılmış yükseklik, dolgu 2 × 12 px'e kadar sayılmaz.
-- **B-02** (en büyük boş dikey bant ≤ 120 px) ve kapalı ana ekranda **`emptyRatio ≤ %15`** DEĞİŞMEZ. Dolgu/süs içeriği eklenmez.
-- Tek sütun kipi (≤ 5 iş) değişmedi: 88–140 px.
+Geçerli kural (telefon ana ekranı, ≥ 6 izinli iş = 2 sütun):
+- **D-04:** döşeme yüksekliği 88–140 px (görünür yüksekliği < 700 px olan ekranda 72 px alt sınırı). İSTİSNA YOK. Tek sütun kipi (≤ 5 iş) aynı 88–140 px.
+- **Döşeme yüksekliği İÇERİKTEN gelir:** döşeme, bulunduğu alana sığdırmak için uzatılmaz/uzayan alanı doldurmaz. İkon boyutu SABİTTİR ve tüm döşemelerde eşittir (flex/yüzde/`cqh` ile büyümez); yazı boyu döşeme yüksekliğine göre ölçeklenmez (`cqh` yok; yalnızca görünüm genişliğine bağlı sabit aralık).
+- **Açıklama:** döşemede TEK SATIR, KESİLMEDEN (`scrollWidth ≤ clientWidth`, `line-clamp`/`…` yok); sığmıyorsa metin kısaltılır (kısa anahtar), döşeme yüksekliğini artırmaz. Açıklaması olmayan döşeme olmaz.
+- **D-04b:** döşeme İÇİNDE ikon, başlık, açıklama blokları arasındaki toplam dikey boşluk ≤ 24 px. Ölçü: döşeme iç yüksekliği (yükseklik − kenarlık 2×2 − iç dolgu 2×12) − (ikon + başlık + açıklama kutu yüksekliklerinin toplamı); blok kutuları sahte yükseklikle (min-height/rezerv) şişirilemez, ölçü blokların GERÇEK içerik kutusudur. Satırlar eşit yüksekliktedir (en yüksek içeriğe göre); tek satırlık başlıklı döşemedeki fark da bu ölçüye girer.
+- **D-06/D-09:** döşeme zemini beyaz, renk yalnız ikon dairesinde; başlık ≤ 2 satır ve kesilmez.
+- **B-02 ve `emptyRatio`:** eşikler DEĞİŞMEDİ (B-02 ≤ 120 px; kapalı ana ekranda `emptyRatio ≤ %15`). Büyük telefonda kalan dikey alan **dolgu ile değil gerçek iş bilgisiyle** kullanılır: §7.4.2 "Şimdi" kartı. Ölçü kuralı: **"Şimdi" kartı B-02/`emptyRatio` hesabında YALNIZCA gerçek veri satırı içerdiğinde içerik sayılır** (bekleyen iş satırı); "Bekleyen iş yok" satırı içerik sayılmaz.
+  - *Bekleyen iş VAR durumu (fikstür > 0):* B-02 ve `emptyRatio` tüm boyutlarda ASSERT edilir (360×740, 390×664, 390×844, 430×932).
+  - *Bekleyen iş YOK durumu:* boşluk kalabilir; B-02 ve `emptyRatio` DÜRÜSTÇE ÖLÇÜLÜR ve `metrics-*.json`'a yazılır, raporda belirtilir; bu durumda assert edilmez (yalnızca sahte dolgu ile sağlanabilir). Bu istisna yalnızca 2 sütun kipi içindir.
+
+#### 7.4.2 Ana ekran "Şimdi" kartı (2026-10-07, T-280; görüntülerden ÖNCE)
+
+- Yalnızca 2 sütun kipinde (≥ 6 izinli iş) ve `stock.post` yetkisi olan kullanıcıda çizilir; tek sütun kipinde "Görevlerim" özeti (T-270) aynı rolü üstlenir. Yetkisiz iş satırı gösterilmez.
+- Satırlar GERÇEK veriden: bekleyen kabul = açık (`OPEN`) beklenen teslim sayısı (`listInboundReceipts`, `stock.view`, tenant ve depo kapsamı domain'de), bekleyen yerleştirme = kullanıcının görebileceği açık/atanmış PUTAWAY görevi sayısı (`listMyTasks`). Sayı 0 ise o satır yazılmaz. Her satır ilgili işe götürür ("Depoya mal geldi", "Yerleştirme"), dokunma hedefi ≥ 48 px.
+- Hiç bekleyen iş yoksa tek satır "Bekleyen iş yok"; kart küçülür. Sabit/uydurma sayı, örnek metin, dekoratif kutu YASAK.
+- Okuma hatasında sunucu hatası + kod gösterilir (ana ekran düşmez).
 
 ## 8. T-313 mal kabul ve yerleştirme ekranları — tasarım ölçütleri (görüntüden ÖNCE yazıldı)
 
@@ -205,3 +217,13 @@ Ayrı denetçi puanı ve Supervisor'ın kullanıcıya görüntü gösterimi birl
 Bu bölüm önce ölçütleri yazar; uygulama sonrası ölçüm özeti ve denetçi puanı buraya eklenir (ölçüt metinleri değişmez).
 
 **R-11 revizyonu (ekran görüntüsünden önce, ayrı commit).** İlk metin "TanStack Virtual, liste içi kaydırma" istiyordu. Gerekçe: `@tanstack/react-virtual` kurulu değil ve yeni bağımlılık eklenmeyecek (Supervisor kararı 2026-10-07); teslim listesi keyset ile ≤50 satır/sayfa getirilir, bu boyutta sanallaştırma gerekmez (T-274 aynı sonuca vardı). Sanallaştırma 200+ satırlık tek sayfa gerektiğinde takip kartıdır. Diğer ölçütler değişmedi; görüntü henüz üretilmedi.
+
+### 8.4 T-280 netleştirmeleri (2026-10-07; R ölçüt metinleri ve 32 puan DEĞİŞMEDİ; görüntülerden ÖNCE)
+
+- **Yerleştirme akışı (B5/R-06):** serbest 5 adım = kaynak raf → ürün → hedef raf → miktar ve onay → bitti (kart T-313 madde 3 sırası, A-313-2); görevli 4 adım = ürün → hedef raf → onay → bitti (kaynak görevden gelir). "Adım n / m" bu sayılara eşittir; hata/kilit/boş durum ekranlarında adım etiketi YOKTUR (yanlış sayı gösterilmez).
+- **R-14:** kilit ekranı O akışın kendi gerekçesini söyler (kabul için kabul, yerleştirme için "Yerleştirme için yetkin yok…") ve Yardım çağır yolunu taşır.
+- **R-03/R-06:** 360×740 ve 390×664'te hasarlı satırı sabit çubuğun altına girmez ve "Kabul rafı" etiketi HER boyutta görünür (başka bir şey kısaltılır, etiket değil).
+- **R-07:** seçili raf düğmesi akış rengindedir (kabul `cat-green`, yerleştirme `cat-teal`), ana mavi değildir.
+- **R-08:** düğmeler fiille başlar ("Hasarlı ekle", "Sıradaki ürüne geç"); teknik ifade yok ("Denetim kaydı" yerine "Kim ne yaptı").
+- **B6:** tarama adımında boş kesik çizgili kutu ve yinelenen cümle yoktur; tarama paneli yalnız ikon + tek cümle + "Elle gir" taşır, ekranı doldurmak için uzamaz.
+- **B7:** yerleştirme adım görüntüleri (kaynak, ürün, hedef, miktar/onay, bitti) ve kaydedildi, kilit, SCAN_MISMATCH ve 390×664 akış ekranları kanıttır.
