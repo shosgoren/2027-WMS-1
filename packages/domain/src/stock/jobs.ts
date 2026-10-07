@@ -168,7 +168,9 @@ async function mayVouchMfa(ctx: AsyncPostingContext, tenantId: string, documentI
     retryDelay: Number(d.retry_delay),
     retryBackoff: d.retry_backoff,
   });
-  return Number(d.age_seconds) <= window;
+  const age = Number(d.age_seconds);
+  // Negatif yaş = GELECEKTEKİ damga (saat kayması ya da sahte yazım): tanınmaz (fail-closed).
+  return Number.isFinite(age) && age >= 0 && age <= window;
 }
 
 /** Son deneme mi (pg-boss `fail` yolunda `retry_count >= retry_limit` ise iş kalıcı `failed` olur). Okunamazsa `false` (asıl hata yayılır). */

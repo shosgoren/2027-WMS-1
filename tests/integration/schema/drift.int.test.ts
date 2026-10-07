@@ -539,11 +539,13 @@ describe(`documents işleme bağlamı bekçisi (0024, T-275; target=${env.target
       const t = r.rows[0] as (typeof r.rows)[number];
       expect(t.tgenabled).toBe("O");
       expect(t.tgtype).toBe(1 | 2 | 16); // ROW=1, BEFORE=2, UPDATE=16 (INSERT/DELETE yok)
-      expect(t.tgattrs).toBe(3); // UPDATE OF posting_mfa_verified_at, posting_idempotency_record_id, posting_job_id
+      expect(t.tgattrs).toBe(4); // UPDATE OF posting_mfa_verified_at, posting_idempotency_record_id, posting_job_id, posting_requested_by
       expect(t.prosecdef).toBe(false);
       expect(t.proconfig).toEqual(["search_path=pg_catalog, pg_temp"]);
       expect(t.src).toContain("OLD.posting_job_id IS NOT NULL OR NEW.posting_job_id IS NULL");
       expect(t.src).toContain("NEW.posting_mfa_verified_at IS NOT NULL");
+      expect(t.src).toContain("NEW.posting_mfa_verified_at <> pg_catalog.now()"); // damga yalnızca işlemin now() değeri
+      expect(t.src).toContain("NEW.posting_requested_by IS DISTINCT FROM OLD.posting_requested_by");
       expect(t.src).toContain("NEW.posting_idempotency_record_id IS NOT NULL");
       expect((t.acl ?? []).some((a) => a.startsWith("="))).toBe(false); // PUBLIC girdisi yok
     } catch (e) {

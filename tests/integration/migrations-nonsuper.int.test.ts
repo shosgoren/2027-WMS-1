@@ -1708,6 +1708,22 @@ describe("0013–0014 — süper kullanıcı olmayan migrator", () => {
           expect(await stmt(c, "UPDATE public.documents SET posting_job_id = $2, posting_mfa_verified_at = now() + interval '2 seconds' WHERE id = $1", [id, randomUUID()])).toBe("guard");
           // (6) temizleme (failPostingInTx biçimi: APPROVED kalır): izinli.
           expect(await stmt(c, "UPDATE public.documents SET posting_job_id = NULL, posting_requested_by = NULL, posting_mfa_verified_at = NULL, posting_idempotency_record_id = NULL WHERE id = $1", [id])).toBe("ok");
+          // (6b) GELECEK (ya da geçmiş) damga iki adımlı yoldan (temizle → kilitle) bile yazılamaz: yalnızca işlemin now() değeri kabul edilir (MAJOR).
+          expect(
+            await stmt(c, "UPDATE public.documents SET posting_job_id = $2, posting_requested_by = $3, posting_mfa_verified_at = now() + interval '1 hour', posting_idempotency_record_id = $4 WHERE id = $1", [id, job, randomUUID(), rec]),
+          ).toBe("guard");
+          expect(
+            await stmt(c, "UPDATE public.documents SET posting_job_id = $2, posting_requested_by = $3, posting_mfa_verified_at = now() - interval '4 hours', posting_idempotency_record_id = $4 WHERE id = $1", [id, job, randomUUID(), rec]),
+          ).toBe("guard");
+          // (6c) damga işine bağlıdır (MINOR-1): kilit doluyken istek sahibi/iş, damga temizlenmeden değiştirilemez; temizlenerek devredilebilir.
+          const by = randomUUID();
+          expect(
+            await stmt(c, "UPDATE public.documents SET posting_job_id = $2, posting_requested_by = $3, posting_mfa_verified_at = now(), posting_idempotency_record_id = $4 WHERE id = $1", [id, job, by, rec]),
+          ).toBe("ok");
+          expect(await stmt(c, "UPDATE public.documents SET posting_requested_by = $2 WHERE id = $1", [id, randomUUID()])).toBe("guard"); // yalnız istek sahibi
+          expect(await stmt(c, "UPDATE public.documents SET posting_job_id = $2 WHERE id = $1", [id, randomUUID()])).toBe("guard"); // yalnız iş
+          expect(await stmt(c, "UPDATE public.documents SET posting_job_id = $2, posting_requested_by = $3, posting_mfa_verified_at = NULL, posting_idempotency_record_id = NULL WHERE id = $1", [id, randomUUID(), randomUUID()])).toBe("ok"); // temizleyerek devir
+          expect(await stmt(c, "UPDATE public.documents SET posting_job_id = NULL, posting_requested_by = NULL WHERE id = $1", [id])).toBe("ok");
           // (7) damgasız kilit (MFA'sız istek) sonradan damgalanamaz.
           expect(await stmt(c, "UPDATE public.documents SET posting_job_id = $2, posting_requested_by = $3, posting_mfa_verified_at = NULL, posting_idempotency_record_id = $4 WHERE id = $1", [id, job, randomUUID(), rec])).toBe("ok");
           expect(await stmt(c, "UPDATE public.documents SET posting_mfa_verified_at = now() WHERE id = $1", [id])).toBe("guard");

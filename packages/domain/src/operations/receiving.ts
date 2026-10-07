@@ -176,11 +176,11 @@ export async function createInboundReceipt(
           sql`SELECT id FROM public.items WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ANY(${pgUuidArray(itemIds)}::uuid[]) AND tracking_mode <> 'NONE'`,
         );
         if (tracked.length > 0) throw new AppError("VALIDATION_FAILED");
-        // Birim satırları da burada (numaradan ÖNCE) paylaşımlı kilitlenir: satır INSERT'indeki FK denetimi onlara `FOR KEY SHARE` alır; bu kilit numaradan
-        // sonra alınırsa `number_sequences` son kilit olmaktan çıkar (T-305 MINOR-3). Kilit sırası: depo → ürünler → birimler → number_sequences.
+        // Birim satırları da burada (numaradan ÖNCE) `FOR KEY SHARE` ile kilitlenir (FK denetiminin alacağı kilidin aynısı; birim adı/ayarı güncellemesini engellemez,
+        // silme/anahtar değişimini engeller): bu kilit numaradan sonra alınırsa `number_sequences` son kilit olmaktan çıkar (T-305 MINOR-3). Kilit sırası: depo → ürünler → birimler → number_sequences.
         const unitIds = [...new Set(lines.map((l) => l.unitId))].sort();
         const lockedUnits = await tx.execute<{ id: string }>(
-          sql`SELECT id FROM public.units WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ANY(${pgUuidArray(unitIds)}::uuid[]) ORDER BY id FOR SHARE`,
+          sql`SELECT id FROM public.units WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ANY(${pgUuidArray(unitIds)}::uuid[]) ORDER BY id FOR KEY SHARE`,
         );
         if (lockedUnits.length !== unitIds.length) throw new AppError("VALIDATION_FAILED");
         const factors = await tx.execute<{ item_id: string; unit_id: string; factor: string }>(
@@ -202,7 +202,8 @@ export async function createInboundReceipt(
           resolved.map((l, i) => ({ id: randomUUID(), line_no: i + 1, item_id: l.itemId, unit_id: l.unitId, factor: l.factor, expected: l.expectedQuantity })),
         );
         // ADR-018 §7: `number_sequences` satırı komutun SON kilididir (T-305 MINOR-3). `number` NOT NULL ve wms_app başlıkta `number` UPDATE yetkisi yok →
-        // numara başlık INSERT'inden hemen önce alınır; bundan sonra yalnızca bu komutun kendi yeni satırları yazılır (başka kilit/okuma yok).
+        // numara başlık INSERT'inden hemen önce alınır; bundan sonra yalnızca bu komutun kendi yeni satırları yazılır. Bu INSERT'lerin FK denetimleri yalnızca ZATEN kilitli
+        // satırlara (depo, ürünler, birimler) ve tenants satırına `FOR KEY SHARE` alır; yeni bir kaynak kilidi (başka kilit) alınmaz.
         const number = await nextDocumentNumber(tx, ctx.tenantId, "INBOUND_RECEIPT", date);
         await tx.execute(
           sql`INSERT INTO public.inbound_receipts (tenant_id, id, warehouse_id, number, supplier_ref, created_by)
@@ -396,13 +397,15 @@ export function splitReceivedBase(received: string, damaged: string, factor: str
 }
 
 /**
- * Kısmi onay miktarının (kabul birimi) temel birime tek dönüşümü (T-305 MINOR-2): `round(q × factor)`; ama istenen miktar kabul satırının kalan
- * bekleyenini yalnızca yuvarlama kadar (≤ 1 mikro) aşıyorsa istek "kalanın tamamı"dır → `kalan = toplam − dağıtılan` (bekleyen) onaylanır.
- * Daha fazlası bekleyeni aşar (çağıran reddeder).
+ * Kısmi onay miktarının (kabul birimi) temel birime tek dönüşümü (T-305 MINOR-2/3): `round(q × factor)`; ama istenen miktarın TAM çarpımı (`q × factor`,
+ * yuvarlamasız) kabul satırının kalan bekleyenini en çok 1 temel mikro (0,000001; toplam + hasarlı yuvarlamalarının en çok kayması) aşıyorsa istek
+ * "kalanın tamamı"dır → `kalan = toplam − dağıtılan` (bekleyen) onaylanır. Daha fazlası bekleyeni aşar (çağıran reddeder). Sınır (A-305-11): katsayı < 2 iken
+ * bir mikro-birimlik fazla istek de bu paya sığabilir ve bekleyene kırpılır (bekleyen asla aşılmaz).
  */
 export function approvalBaseOf(quantity: string, factor: string, pending: bigint): bigint {
   const raw = decimalToMicro(baseQuantityOf(quantity, factor));
-  return raw > pending && raw - pending <= 1n ? pending : raw;
+  const excessExact = decimalToMicro(quantity) * decimalToMicro(factor) - pending * 1_000_000n; // 1e-12 ölçeği
+  return raw > pending && excessExact <= 1_000_000n ? pending : raw;
 }
 
 /** Kabul satırlarından primitif `STOCK_IN` spesifikasyonu. Kural denetimleri (fazla kabul, lokasyon türü) çağıranındır. */
@@ -420,6 +423,9 @@ function receiveSpec(warehouseId: string, receiptId: string, qc: boolean, lines:
     const damagedUnits = decimalToMicro(l.damaged);
     const goodUnits = decimalToMicro(l.received) - damagedUnits;
     const split = splitReceivedBase(l.received, l.damaged, row.conversion_factor);
+    // Hasarlı miktar > 0 ama temel birimde 0'a yuvarlanıyorsa kabul REDDEDİLİR: aksi halde hasarlı mal sessizce iyi stok sayılırdı (hasarlı hiçbir zaman
+    // kullanılabilir olmaz). Kullanıcı hasarlıyı daha büyük (temel birimde en az 0,000001 eden) bir miktar olarak girmelidir ya da hasarlı ayrı satır/birimle kabul edilmelidir.
+    if (damagedUnits > 0n && split.damaged === 0n) throw new AppError("VALIDATION_FAILED");
     const base = (units: bigint, baseQuantity: bigint, status: "AVAILABLE" | "QUARANTINE" | "DAMAGED"): FieldLine => {
       const exact = decimalToMicro(baseQuantityOf(microToDecimal(units), row.conversion_factor)) === baseQuantity;
       return {

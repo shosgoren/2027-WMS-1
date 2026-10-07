@@ -101,4 +101,7 @@ istemci `IN_PROGRESS` görür. Worker önce çıkarsa durum zararsızdır: eski 
 Geri alma tersidir: önce web, sonra worker. Not: 0024 tetikleyicisi damgayı yalnızca `posting_job_id` NULL → dolu geçişinde yazdırır; eski sürüm web bunu zaten aynı ifadede yazar,
 farklı bir yazım yolu 23514 `POSTING_STAMP_GUARD` ile reddedilir (bu hata dağıtım sırası yanlışlığının değil, kodun belirtisidir).
 Takılı işleme kilidi gözlenirse (belge APPROVED + `posting_job_id` dolu, işlenmiyor): önce worker'ın ayakta ve yeni sürümde olduğunu doğrulayın; sonlandırma süpürücüsü kiracı
-açıksa kilidi temizler (kiracı askıda/kapanıştaysa ertelenir, A-222-3).
+açıksa kilidi temizler (kiracı askıda/kapanıştaysa ertelenir, A-222-4).
+Geçiş notu (T-275, özet normalizasyonu): kabul komutlarının (`createInboundReceipt`, `receiveGoods`, `approveQuality`) idempotency özeti artık ondalık dizgileri normalleştirir
+("10" = "10.000000"). Dağıtımdan ÖNCE oluşmuş `IN_PROGRESS`/`COMPLETED` kayıtlar ham dizgiyle hesaplanmış özet taşır; aynı istemci anahtarı dağıtımdan sonra aynı HAM dizgiyle
+yeniden denenirse özet değişeceği için `IDEMPOTENCY_MISMATCH` döner (yinelenen etki oluşmaz, güvenli taraf). Beklenen ve zararsızdır; istemci yeni anahtarla yeniden dener.

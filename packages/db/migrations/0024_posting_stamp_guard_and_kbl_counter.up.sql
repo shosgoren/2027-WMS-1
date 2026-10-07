@@ -46,15 +46,27 @@ CREATE FUNCTION public.posting_context_stamp_guard() RETURNS trigger
   SET search_path = pg_catalog, pg_temp
 AS $fn$
 BEGIN
+  -- (1) Damga/kayıt kimliği DOLU değere yalnızca posting_job_id NULL → dolu geçişinde yazılır; MFA damgası ayrıca bu transaction'ın `now()` değerine
+  --     EŞİT olmalıdır (deferToWorker `now()` yazar): gelecek ya da geçmiş damga (sahte/bayat) yazılamaz.
   IF (NEW.posting_mfa_verified_at IS NOT NULL AND NEW.posting_mfa_verified_at IS DISTINCT FROM OLD.posting_mfa_verified_at)
      OR (NEW.posting_idempotency_record_id IS NOT NULL AND NEW.posting_idempotency_record_id IS DISTINCT FROM OLD.posting_idempotency_record_id) THEN
     IF OLD.posting_job_id IS NOT NULL OR NEW.posting_job_id IS NULL THEN
       RAISE EXCEPTION 'POSTING_STAMP_GUARD: işleme bağlamı (MFA damgası / idempotency kaydı) yalnızca posting_job_id NULL → dolu geçişinde yazılabilir' USING ERRCODE = '23514';
     END IF;
+    IF NEW.posting_mfa_verified_at IS NOT NULL AND NEW.posting_mfa_verified_at <> pg_catalog.now() THEN
+      RAISE EXCEPTION 'POSTING_STAMP_GUARD: MFA damgası yalnızca işlemin now() değeri olabilir (gelecek/geçmiş damga reddedilir)' USING ERRCODE = '23514';
+    END IF;
+  END IF;
+  -- (2) Damga işine bağlıdır: kilit doluyken işi (posting_job_id) ya da istek sahibini (posting_requested_by) değiştirmek, damga ve kayıt kimliği AYNI ifadede
+  --     temizlenmedikçe reddedilir (damga başka bir iş/kullanıcıya devredilemez).
+  IF OLD.posting_job_id IS NOT NULL
+     AND (NEW.posting_job_id IS DISTINCT FROM OLD.posting_job_id OR NEW.posting_requested_by IS DISTINCT FROM OLD.posting_requested_by)
+     AND (NEW.posting_mfa_verified_at IS NOT NULL OR NEW.posting_idempotency_record_id IS NOT NULL) THEN
+    RAISE EXCEPTION 'POSTING_STAMP_GUARD: kilit doluyken posting_job_id / posting_requested_by değişimi damga ve kayıt kimliği temizlenmeden yapılamaz' USING ERRCODE = '23514';
   END IF;
   RETURN NEW;
 END
 $fn$;
 REVOKE ALL ON FUNCTION public.posting_context_stamp_guard() FROM PUBLIC;
-CREATE TRIGGER posting_context_stamp_guard BEFORE UPDATE OF posting_mfa_verified_at, posting_idempotency_record_id, posting_job_id ON public.documents
+CREATE TRIGGER posting_context_stamp_guard BEFORE UPDATE OF posting_mfa_verified_at, posting_idempotency_record_id, posting_job_id, posting_requested_by ON public.documents
   FOR EACH ROW EXECUTE FUNCTION public.posting_context_stamp_guard();
