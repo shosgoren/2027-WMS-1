@@ -41,7 +41,7 @@
     "tests/integration/audit-immutability.int.test.ts": 43,
     "tests/integration/operations/orders.int.test.ts": 148,
     "tests/integration/operations/picking.int.test.ts": 157,
-    "tests/integration/operations/receiving.int.test.ts": 171,
+    "tests/integration/operations/receiving.int.test.ts": 175,
     "tests/integration/schema/documents-qa.int.test.ts": 27,
     "tests/integration/schema/phase2-catalog-qa.int.test.ts": 49,
     "tests/integration/schema/stock-guard-qa.int.test.ts": 51,
