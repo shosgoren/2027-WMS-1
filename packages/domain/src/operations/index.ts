@@ -47,6 +47,25 @@ export {
   type ReceiveLineInput,
 } from "./receiving.ts";
 export { putaway, type PutawayInput } from "./putaway.ts";
+// Mal kabul okuma sorguları (T-313; stock.view, keyset, depo kapsamı).
+export {
+  RECEIPT_LIST_LIMIT_DEFAULT,
+  RECEIPT_LIST_LIMIT_MAX,
+  RECEIPT_STATUSES,
+  getAvailableAtLocation,
+  getInboundReceipt,
+  getLocationBrief,
+  listInboundReceipts,
+  type ListInboundReceiptsInput,
+  type LocationBrief,
+  type ReceiptCursor,
+  type ReceiptDetail,
+  type ReceiptLineView,
+  type ReceiptPage,
+  type ReceiptStatus,
+  type ReceiptView,
+  type ReceivingLocationView,
+} from "./receiving-queries.ts";
 // Müşteri siparişi, sipariş tahsisi ve iptal (T-306). `allocation.ts` saf öneri işlevidir (birim testi); `allocateInTx`/`releaseSelected` iç çekirdeklerdir: burada YOKTUR.
 export {
   cancelOrderLine,

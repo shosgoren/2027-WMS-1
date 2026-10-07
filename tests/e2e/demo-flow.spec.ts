@@ -138,10 +138,10 @@ test.describe("demo akışı", () => {
     await expect(page).toHaveURL(/\/t\/demo$/);
     await expect(page.getByRole("heading", { level: 1, name: "Ne yapmak istiyorsun?" })).toBeVisible();
 
-    // Kartlar: 5 etkin bağlantı (yönetici; "Ürünlerim" T-216 ve "Depo ve raflar" T-207 ile EKLENDİ, mevcut kartlar değişmedi), 6 "Yakında" kartı (depo işleri) tıklanamaz; kilitli kart yok.
+    // Kartlar: 6 etkin bağlantı (yönetici; "Depoya mal geldi" T-313 ile etkinleşti; "Ürünlerim" T-216 ve "Depo ve raflar" T-207 ile EKLENDİ, mevcut kartlar değişmedi), 5 "Yakında" kartı (depo işleri) tıklanamaz; kilitli kart yok.
     const tasks = page.getByRole("list", { name: "İşler" });
-    await expect(tasks.locator('a[data-state="active"]')).toHaveCount(5);
-    await expect(tasks.locator('[data-state="soon"]')).toHaveCount(6);
+    await expect(tasks.locator('a[data-state="active"]')).toHaveCount(6);
+    await expect(tasks.locator('[data-state="soon"]')).toHaveCount(5);
     const warehousesCard = tasks.locator('a[data-state="active"]').filter({ hasText: "Depo ve raflar" });
     await expect(warehousesCard).toHaveCount(1);
     await expect(warehousesCard).toHaveAttribute("href", "/t/demo/warehouses");
@@ -217,12 +217,13 @@ test.describe("demo akışı", () => {
 
     // Yönetim, ayar ve denetim kartları kilitli (bağlantı değil) + gerekçe.
     const tasks = page.getByRole("list", { name: "İşler" });
-    await expect(tasks.locator('[data-state="locked"]')).toHaveCount(3);
+    // T-313: "Depoya mal geldi" `stock.post` ister; salt okunur kullanıcıda bağlantı değil kilitli kart (FORBIDDEN ekranına götürmez) → 3 yönetim işi + 1.
+    await expect(tasks.locator('[data-state="locked"]')).toHaveCount(4);
     // Yalnızca "Ürünlerim" (T-216) ve "Depo ve raflar" (T-207) etkin (okuma `stock.view`; yazma kilidi hedef sayfada), hedef rotaları doğrulanır.
     await expect(tasks.locator('a[data-state="active"]')).toHaveCount(2);
     await expect(tasks.locator('a[data-state="active"]').filter({ hasText: "Ürünlerim" })).toHaveAttribute("href", "/t/demo/items");
     await expect(tasks.locator('a[data-state="active"]').filter({ hasText: "Depo ve raflar" })).toHaveAttribute("href", "/t/demo/warehouses");
-    await expect(tasks.locator('[data-state="soon"]')).toHaveCount(6);
+    await expect(tasks.locator('[data-state="soon"]')).toHaveCount(5);
     await expect(tasks.locator('[data-state="locked"]').first()).toContainText("Bu iş için yetkin yok. Sorumluna sorabilirsin.");
     await expectNoHorizontalOverflow(page, "salt okunur ana ekran");
 
