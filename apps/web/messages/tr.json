@@ -1464,9 +1464,34 @@
     "camera": {
       "title": "Kamera",
       "hint": "Barkodu çerçeveye getir.",
-      "failed": "Kamera açılamadı. Okuyucunun tetiğini kullan ya da barkodu elle gir.",
+      "starting": "Kamera açılıyor…",
+      "accepted": "Okundu.",
       "dropped": "Bir kod okundu ama okuma şu an kapalıydı. Kodu yeniden okut.",
-      "ok": "Tamam"
+      "ok": "Tamam",
+      "retry": "Tekrar dene",
+      "torchOn": "Feneri aç",
+      "torchOff": "Feneri kapat",
+      "torchFailed": "Fener açılamadı. Işığı olan yere geç ya da barkodu elle gir.",
+      "installHint": "Ana ekrana ekle: Paylaş > Ana Ekrana Ekle.",
+      "rejected": {
+        "empty": "Okuma boş geldi. Barkodu yeniden çerçeveye getir.",
+        "edge_space": "Okuma bozuk geldi. Barkodu yeniden çerçeveye getir.",
+        "too_long": "Okunan kod çok uzun, barkod olmayabilir. Etiketteki barkodu çerçevele.",
+        "control_chars": "Okuma bozuk geldi. Telefonu sabit tut, yeniden çerçevele.",
+        "unexpected_format": "Bu tür kod kabul edilmiyor. Ürün ya da raf etiketini okut.",
+        "bad_digits": "Barkod eksik okundu. Tamamını çerçeveye al, sabit tut.",
+        "bad_checksum": "Barkod yanlış okundu. Işığı artır, biraz uzaklaş, yeniden dene."
+      },
+      "error": {
+        "denied_ios": "Kamera kapalı. Ayarlar > Safari (ya da tarayıcın) > Kamera'yı aç.",
+        "denied_android": "Kamera kapalı. Ayarlar > Uygulamalar > tarayıcı > İzinler > Kamera'yı aç.",
+        "denied_other": "Kamera kapalı. Adres çubuğundaki kilit simgesinden kamerayı aç.",
+        "none": "Kamera bulunamadı. Barkodu elle gir ya da okuyucunun tetiğini kullan.",
+        "busy": "Kamera başka uygulamada açık. Onu kapat, sonra Tekrar dene.",
+        "insecure": "Kamera yalnızca https bağlantıda açılır. Yöneticine haber ver, barkodu elle gir.",
+        "decoder": "Okuyucu yüklenemedi. Bağlantını kontrol et, sonra Tekrar dene.",
+        "failed": "Kamera açılamadı. Tekrar dene ya da barkodu elle gir."
+      }
     }
   }
 }

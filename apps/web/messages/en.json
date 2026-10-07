@@ -1464,9 +1464,34 @@
     "camera": {
       "title": "Camera",
       "hint": "Bring the barcode into the frame.",
-      "failed": "The camera could not be opened. Use the reader trigger or type the barcode.",
+      "starting": "Opening the camera…",
+      "accepted": "Scanned.",
       "dropped": "A code was read but reading was off. Scan the code again.",
-      "ok": "OK"
+      "ok": "OK",
+      "retry": "Try again",
+      "torchOn": "Torch on",
+      "torchOff": "Torch off",
+      "torchFailed": "The torch did not turn on. Move to a lit place or type the barcode.",
+      "installHint": "Add to home screen: Share > Add to Home Screen.",
+      "rejected": {
+        "empty": "The read came back empty. Frame the barcode again.",
+        "edge_space": "The read was damaged. Frame the barcode again.",
+        "too_long": "The code is too long and may not be a barcode. Frame the label barcode.",
+        "control_chars": "The read was damaged. Hold the phone steady and frame it again.",
+        "unexpected_format": "This type of code is not accepted. Scan the product or shelf label.",
+        "bad_digits": "The barcode was read partly. Frame all of it and hold steady.",
+        "bad_checksum": "The barcode was misread. Add light, move back, try again."
+      },
+      "error": {
+        "denied_ios": "Camera is off. Settings > Safari (or your browser) > Camera, turn it on.",
+        "denied_android": "Camera is off. Settings > Apps > your browser > Permissions > Camera.",
+        "denied_other": "Camera is off. Use the lock icon in the address bar to allow it.",
+        "none": "No camera found. Type the barcode or use the reader trigger.",
+        "busy": "The camera is open in another app. Close it, then Try again.",
+        "insecure": "The camera needs an https connection. Tell your manager, type the barcode.",
+        "decoder": "The reader failed to load. Check your connection, then Try again.",
+        "failed": "The camera did not open. Try again or type the barcode."
+      }
     }
   }
 }

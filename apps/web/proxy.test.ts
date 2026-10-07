@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { proxy } from "./proxy.ts";
+import { buildCsp, proxy } from "./proxy.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const GIVEN = "3f2b8c1e-9d4a-4e6b-8a57-1c2d3e4f5a6b";
@@ -90,5 +90,15 @@ describe("proxy: x-request-id, erişim günlüğü (T-129)", () => {
     expect(res.status).toBe(307);
     expect(res.headers.get("referrer-policy")).toBe("no-referrer");
     expect(lines[0]).not.toContain("SuperSecret");
+  });
+});
+
+describe("CSP: uygulama içi barkod çözücü (T-286)", () => {
+  it("script-src yalnızca WASM derlemesine izin verir; JS eval ve üçüncü taraf kaynak açılmaz", () => {
+    const csp = buildCsp("N0nce");
+    expect(csp).toMatch(/script-src 'self' 'nonce-N0nce' 'strict-dynamic' 'wasm-unsafe-eval'(;|$)/);
+    expect(csp).not.toContain("'unsafe-eval'");
+    expect(csp).toContain("connect-src 'self'");
+    expect(csp).not.toMatch(/https?:/);
   });
 });

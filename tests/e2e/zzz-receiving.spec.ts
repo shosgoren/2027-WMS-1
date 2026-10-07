@@ -254,12 +254,16 @@ async function screens(page: Page, projectName: string): Promise<void> {
     await page.goto(`/t/demo/field/receive?receipt=${fx.receiptId}`);
     await page.waitForLoadState("networkidle");
     await shot("receive-scan");
-    // Tarama adımı: tek birincil "Barkodu okut" (Elle gir ikincil); okuyucu/kamera yoksa hazır vurgusu.
+    // Tarama adımı: tek birincil "Barkodu okut" (Elle gir ikincil).
     const primary = page.locator('[data-variant="primary"]:visible');
     await expect(primary).toHaveCount(1);
     await expect(primary).toHaveText("Barkodu okut");
     await primary.click();
-    await expect(page.getByTestId("scan-panel")).toHaveAttribute("data-ready", "true");
+    // T-286: kamera yolu telefonların hepsinde kurulabilir (uygulama içi çözücü); bu koşuda sahte kamera aygıtı yok → katman açılır ve kamera rehberini gösterir.
+    // Vazgeç ile ekrana dönülür; klavye kaması (aşağıdaki tarama) kamera katmanından bağımsız çalışır.
+    await expect(page.getByTestId("camera-overlay")).toBeVisible();
+    await page.getByRole("button", { name: "Vazgeç" }).click();
+    await expect(page.getByTestId("camera-overlay")).toHaveCount(0);
     await scan(page, "0000000000000");
     await expect(page.getByTestId("scan-alert")).toBeVisible();
     const a = await page.getByTestId("scan-alert").boundingBox();

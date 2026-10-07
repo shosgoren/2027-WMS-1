@@ -253,7 +253,14 @@ export const COLOR_RULES: ReadonlyArray<readonly [string, RegExp]> = [
 ];
 
 // Açık ve dar muafiyet: yalnız globals.css içindeki belirteç tanım satırları (`--color-*`, `--shadow-*`).
-const EXEMPT_LINE: ReadonlyArray<readonly [string, RegExp]> = [["apps/web/app/globals.css", /^\s*--(?:color|shadow)-[a-z-]+:/]];
+// T-286: manifest `theme_color` ve PWA simgeleri (ImageResponse) CSS değişkeni kullanamaz; yalnızca bu üç dosyada onaltılık renk satırı muaftır (başka kural ve dosya değil).
+const HEX_ONLY = /#[0-9a-f]{6}\b/i;
+const EXEMPT_LINE: ReadonlyArray<readonly [string, RegExp]> = [
+  ["apps/web/app/globals.css", /^\s*--(?:color|shadow)-[a-z-]+:/],
+  ["apps/web/app/manifest.ts", HEX_ONLY],
+  ["apps/web/app/icon.tsx", HEX_ONLY],
+  ["apps/web/app/apple-icon.tsx", HEX_ONLY],
+];
 
 export function scanLine(rel: string, line: string): string[] {
   if (EXEMPT_LINE.some(([f, re]) => f === rel && re.test(line))) return [];

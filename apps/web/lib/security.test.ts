@@ -60,10 +60,11 @@ describe("buildCsp", () => {
   it("istenen yönergeleri nonce ile üretir, betikte unsafe-inline/eval yok (üretim)", () => {
     const csp = buildCsp("abc123");
     expect(csp).toBe(
-      "default-src 'self'; script-src 'self' 'nonce-abc123' 'strict-dynamic'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; " +
+      "default-src 'self'; script-src 'self' 'nonce-abc123' 'strict-dynamic' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; " +
         "connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'",
     );
-    expect(csp.match(/script-src[^;]*/)?.[0]).not.toMatch(/unsafe-/);
+    // `wasm-unsafe-eval` (T-286, uygulama içi barkod çözücü) yalnızca WASM derlemesine izin verir; `unsafe-inline` ve `unsafe-eval` (JS) yasak sürer.
+    expect(csp.match(/script-src[^;]*/)?.[0]).not.toMatch(/(?<!wasm-)unsafe-/);
   });
   it("unsafe-eval yalnızca geliştirmede", () => {
     expect(buildCsp("n", true)).toContain("'unsafe-eval'");
