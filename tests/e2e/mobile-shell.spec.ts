@@ -6,6 +6,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
 import type { Browser, Locator, Page } from "@playwright/test";
+import { enterDemoReal } from "./support/demo-session.ts";
 import { T270_SIZES, chevronInfo, expectBand, itemsScreenChecks, metrics, smallTargets } from "./support/items-screen.ts";
 
 const OUT = process.env.T254_OUT ?? path.resolve(import.meta.dirname, "../../.artifacts/t-254");
@@ -30,7 +31,7 @@ test("telefon kabuğu: ana ekran tek ekran, menü, alt sekme; masaüstü korunur
 
   await page.setViewportSize({ width: PHONES[0].width, height: PHONES[0].height });
   await page.goto("/");
-  await page.getByRole("button", { name: "Yönetici olarak gir" }).click();
+  await enterDemoReal(page, "Yönetici");
   await expect(page).toHaveURL(/\/t\/demo$/);
   await expect(page.getByRole("heading", { level: 1, name: "Ne yapmak istiyorsun?" })).toBeVisible();
 
@@ -271,7 +272,7 @@ test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş al
   for (const role of T270_ROLES) {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto("/");
-    await page.getByRole("button", { name: `${role.label} olarak gir` }).click();
+    await enterDemoReal(page, role.label);
     await expect(page).toHaveURL(/\/t\/demo$/);
     const tasks = page.getByRole("list", { name: "İşler" });
     const isAdmin = role.shot === "admin";

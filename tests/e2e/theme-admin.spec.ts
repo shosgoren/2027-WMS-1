@@ -3,6 +3,7 @@
 // Görüntüler `.artifacts/t-246c/<görünüm>-<genişlik>-<ekran>.png` altına yazılır (git'e girmez).
 import { expect, test } from "@playwright/test";
 import type { Locator, Page } from "@playwright/test";
+import { enterDemoShared } from "./support/demo-session.ts";
 
 const SIZES = [
   { width: 375, height: 812 },
@@ -54,7 +55,7 @@ async function expectFocusRing(page: Page, field: Locator, name: string): Promis
 // Tek test, tek demo girişi: demo girişi hız sınırlıdır (kombinasyon başına giriş "Çok fazla deneme" döndürür).
 test("yönetim ekranları: Akış/Kokpit x 375/1280 px", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: "Yönetici olarak gir" }).click();
+  await enterDemoShared(page, "Yönetici");
   await expect(page).toHaveURL(/\/t\/demo$/);
 
   for (const size of SIZES) {
