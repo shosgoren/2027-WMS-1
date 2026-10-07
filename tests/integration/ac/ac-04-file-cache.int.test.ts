@@ -25,7 +25,9 @@ import { readIntEnv } from "../harness/env.ts";
 function startCountingProxy(target: URL): Promise<{ url: string; close: () => Promise<void> }> {
   const server = http.createServer((req, res) => {
     requests += 1;
-    const up = http.request({ host: target.hostname, port: target.port, method: req.method, path: req.url, headers: req.headers }, (r) => {
+    // agent:false = istek başına yeni bağlantı. Paylaşılan keep-alive havuzu, MinIO'nun 403 yanıtından sonra kapattığı
+    // soketi hemen yeniden kullanıp ECONNRESET → 502 (boş gövde) üretiyordu (T-288); aktarıcı bir test yardımcısıdır.
+    const up = http.request({ host: target.hostname, port: target.port, method: req.method, path: req.url, headers: req.headers, agent: false }, (r) => {
       res.writeHead(r.statusCode ?? 502, r.headers);
       r.pipe(res);
     });
