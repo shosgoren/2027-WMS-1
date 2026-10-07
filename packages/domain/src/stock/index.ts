@@ -79,8 +79,6 @@ export {
   isReservationExpiryEnabled,
   moveReservations,
   planReservationEffects,
-  readCancellationLockSet,
-  readReservationPlanRows,
   readScopedAvailability,
   release,
   releaseForCancellation,
@@ -93,9 +91,9 @@ export {
   type ReservationMoveInput,
   type ReservationMoveOp,
   type ReservationOp,
-  type ReservationPlanRow,
   type ReserveInput,
 } from "./reservations.ts";
+export { readCancellationLockSet, readReservationPlanRows, stagedAmong, type ReservationPlanRow } from "./reservation-reads.ts";
 export {
   REASON_BY_KIND,
   allocateAcross,

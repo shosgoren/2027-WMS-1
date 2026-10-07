@@ -18,22 +18,31 @@
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { AppError } from "@wms/shared/errors";
-import type { AccessTx, TenantAccessParams } from "../identity/access.ts";
+import type { AccessTx } from "../identity/access.ts";
 import { hasPermission } from "../identity/permissions.ts";
 import { pgUuidArray } from "../warehouse/scope.ts";
 import { EMPTY_LOCK_PLAN, executeStockCommand, type StockCommandOutcome, type StockCommandParams } from "./command.ts";
 import type { StockCommandResult, StockResultLine } from "./idempotency.ts";
 import { yearOfBusinessDate } from "./numbering.ts";
 import { isStatusTransitionAllowed, type PostingStatus } from "./plan.ts";
-import { readCancellationLockSet, releaseForCancellation } from "./reservations.ts";
+import {
+  assertItemsActive,
+  assertNotProcessing,
+  readCancellationLockSet,
+  readDocumentHeader,
+  type StockDocCallParams,
+} from "./reservation-reads.ts";
+import { releaseForCancellation } from "./reservations.ts";
 
-/** Çağıran bağlamı: izin komuta bağlıdır; `clientKey` her komutta zorunludur (A-73). */
-export type StockDocCallParams = Omit<TenantAccessParams, "permission" | "recentAuth"> & {
-  readonly clientKey: string | null | undefined;
-  readonly retry?: StockCommandParams<unknown>["retry"];
-  readonly timeouts?: StockCommandParams<unknown>["timeouts"];
-  readonly logger?: StockCommandParams<unknown>["logger"];
-};
+// Döngüyü kıran ortak okuma modülünden taşınan adlar buradan da erişilir kalır (index.ts/posting.ts yolu değişmez).
+export {
+  assertItemsActive,
+  assertLocationsActiveInWarehouse,
+  assertNotProcessing,
+  readDocumentHeader,
+  type DocumentHeader,
+  type StockDocCallParams,
+} from "./reservation-reads.ts";
 
 /** A-07: belge başına en çok 2.000 satır. */
 export const MAX_DOCUMENT_LINES = 2000;
@@ -182,72 +191,8 @@ async function insertLines(tx: AccessTx, tenantId: string, documentId: string, l
 
 // --- ortak yardımcılar (T-217/T-221 de kullanır) ----------------------------------------------------------------------
 
-export interface DocumentHeader {
-  readonly id: string;
-  readonly kind: string;
-  readonly status: "DRAFT" | "APPROVED" | "POSTED" | "CANCELLED";
-  readonly version: number;
-  readonly warehouseId: string;
-  readonly businessDate: string;
-  readonly reason: string | null;
-  readonly postingJobId: string | null;
-}
-
-/**
- * Belge başlığını okur. ÇAĞIRAN başlığı daha önce `acquireStockLocks` ile `FOR UPDATE` kilitlemiş olmalıdır (kilitli görüntü: durum
- * ve `posting_job_id` kilit altında okunur). Yoksa `NOT_FOUND`.
- */
-export async function readDocumentHeader(tx: AccessTx, tenantId: string, documentId: string): Promise<DocumentHeader> {
-  const rows = await tx.execute<{
-    id: string; kind: string; status: DocumentHeader["status"]; version: number | string; warehouse_id: string; business_date: string; reason: string | null; posting_job_id: string | null;
-  }>(
-    sql`SELECT id, kind, status, version, warehouse_id, business_date::text AS business_date, reason, posting_job_id
-          FROM public.documents WHERE tenant_id = ${tenantId}::uuid AND id = ${documentId}::uuid`,
-  );
-  const r = rows[0];
-  if (r === undefined) throw new AppError("NOT_FOUND");
-  return {
-    id: r.id,
-    kind: r.kind,
-    status: r.status,
-    version: Number(r.version),
-    warehouseId: r.warehouse_id,
-    businessDate: r.business_date,
-    reason: r.reason,
-    postingJobId: r.posting_job_id,
-  };
-}
-
-/** İşleme kilidi (M-6, ADR-018 §6): `posting_job_id` doluyken düzenleme/onay/iptal/rezervasyon/yeni işleme → `DOCUMENT_STATE`. */
-export function assertNotProcessing(header: Pick<DocumentHeader, "postingJobId">): void {
-  if (header.postingJobId !== null) throw new AppError("VALIDATION_FAILED", { detail: "DOCUMENT_STATE" });
-}
-
 function documentState(): AppError {
   return new AppError("VALIDATION_FAILED", { detail: "DOCUMENT_STATE" });
-}
-
-/**
- * Ürünleri `FOR SHARE` okur ve hepsinin ACTIVE olduğunu denetler (ARCHIVED ürüne hareket reddedilir; arşivleme `FOR NO KEY UPDATE`
- * ile çakışır). Eksik ürün → `NOT_FOUND`; ACTIVE değil → `VALIDATION_FAILED`. Kimliğe göre sıralı (kilit sırası sabit).
- */
-export async function assertItemsActive(
-  tx: AccessTx,
-  tenantId: string,
-  itemIds: readonly string[],
-  opts: { readonly archivedDetail?: "IN_USE" } = {},
-): Promise<void> {
-  const ids = [...new Set(itemIds.map((i) => i.toLowerCase()))].sort();
-  if (ids.length === 0) return;
-  const rows = await tx.execute<{ id: string; status: string }>(
-    sql`SELECT id, status FROM public.items
-         WHERE tenant_id = ${tenantId}::uuid AND id = ANY(${pgUuidArray(ids)}::uuid[])
-         ORDER BY id FOR SHARE`,
-  );
-  if (rows.length !== ids.length) throw new AppError("NOT_FOUND");
-  if (rows.some((r) => r.status !== "ACTIVE")) {
-    throw new AppError("VALIDATION_FAILED", opts.archivedDetail === undefined ? {} : { detail: opts.archivedDetail });
-  }
 }
 
 async function assertWarehouseActive(tx: AccessTx, tenantId: string, warehouseId: string): Promise<void> {
@@ -315,31 +260,6 @@ export async function assertLocationsInWarehouse(tx: AccessTx, tenantId: string,
   if (rows.some((r) => r.warehouse_id.toLowerCase() !== warehouseId.toLowerCase())) {
     throw new AppError("VALIDATION_FAILED", { detail: "LOCATION_WAREHOUSE_MISMATCH" });
   }
-}
-
-/**
- * T-217 (T-243 MAJOR): stok yazıcısı için lokasyon denetimi. Kimliğe göre sıralı `FOR SHARE` (arşivin `FOR NO KEY UPDATE`'iyle çakışır),
- * sonra: yok/başka tenant → `NOT_FOUND`; başka depo → `VALIDATION_FAILED`/`LOCATION_WAREHOUSE_MISMATCH` (A-145);
- * `ACTIVE` değil → `VALIDATION_FAILED`/`IN_USE`. `acquireStockLocks` SONRASI çağrılır (kilit sırası: sayım kilidi → lokasyon).
- */
-export async function assertLocationsActiveInWarehouse(
-  tx: AccessTx,
-  tenantId: string,
-  locationIds: readonly string[],
-  warehouseId: string,
-): Promise<void> {
-  if (locationIds.length === 0) return;
-  const ids = [...new Set(locationIds.map((i) => i.toLowerCase()))].sort();
-  const rows = await tx.execute<{ id: string; warehouse_id: string; status: string }>(
-    sql`SELECT id, warehouse_id, status FROM public.locations
-         WHERE tenant_id = ${tenantId}::uuid AND id = ANY(${pgUuidArray(ids)}::uuid[])
-         ORDER BY id FOR SHARE`,
-  );
-  if (rows.length !== ids.length) throw new AppError("NOT_FOUND");
-  if (rows.some((r) => r.warehouse_id.toLowerCase() !== warehouseId.toLowerCase())) {
-    throw new AppError("VALIDATION_FAILED", { detail: "LOCATION_WAREHOUSE_MISMATCH" });
-  }
-  if (rows.some((r) => r.status !== "ACTIVE")) throw new AppError("VALIDATION_FAILED", { detail: "IN_USE" });
 }
 
 async function existingLineLocationIds(tx: AccessTx, tenantId: string, documentId: string): Promise<string[]> {

@@ -6,8 +6,8 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { createDbClient } from "../../../packages/db/src/index.ts";
-import { DB_CLIENT_SETTINGS, type DbClient } from "../../../packages/db/src/client.ts";
+import { createDbClient, withTenant } from "../../../packages/db/src/index.ts";
+import { DB_CLIENT_SETTINGS, createTenantContext, type DbClient } from "../../../packages/db/src/client.ts";
 import { AppError } from "../../../packages/shared/src/errors.ts";
 import {
   approveDocument,
@@ -16,8 +16,10 @@ import {
   isReservationExpiryEnabled,
   postDocument,
   readScopedAvailability,
+  readReservationPlanRows,
   release,
   reserve,
+  stagedAmong,
   type DocumentLineInput,
   type StockDocCallParams,
 } from "../../../packages/domain/src/stock/index.ts";
@@ -596,5 +598,184 @@ describe("depo kapsamı (MINOR-1) ve A-145", () => {
     expect((await read(mgrP(), { itemId: x, locationId: other })).length).toBe(1);
     // TENANT_ADMIN kısıtsızdır
     expect((await read(ownerP(), { itemId: x })).length).toBe(2);
+  });
+});
+
+// T-253: kilitten SONRA yeniden okuma (yarış, bariyerli), UUID doğrulama, açık tenant süzgeci.
+// Bariyer (zamanlamaya DAYANMAZ): `blocker` bağlantısı belge satırını FOR UPDATE tutar; komutlar planlarını (kilitsiz okuma) bitirip belge kilidinde
+// BEKLER; JS tarafı `pg_blocking_pids` (geçişli) ile beklemenin gerçekleştiğini gözleyerek (koşul yoklaması, uyku varsayımı değil) araya girecek işlemi çalıştırır
+// ve ancak sonra kilidi bırakır. PostgreSQL kilit kuyruğu FIFO'dur: önce kuyruğa giren önce kilidi alır (sıra deterministiktir).
+describe("T-253: kilitten sonra yeniden okuma (bariyerli yarış)", () => {
+  async function blockerHoldsDocument(documentId: string): Promise<number> {
+    await blocker.query("BEGIN");
+    await blocker.query("SELECT 1 FROM public.documents WHERE tenant_id = $1 AND id = $2 FOR UPDATE", [A.tenantId, documentId]);
+    return (await blocker.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]?.pid as number;
+  }
+  /** `n` arka uç `blockerPid`i bekleyene dek yoklar (en çok 30 sn; aksi hata). */
+  async function waitBlockedBehind(blockerPid: number, n: number): Promise<void> {
+    const deadline = Date.now() + 30_000;
+    for (;;) {
+      // Geçişli: ikinci bekleyen satır kilidinde doğrudan blocker'ı değil, kuyrukta önündeki bekleyeni (tuple kilidi) gösterir.
+      const r = await q<{ c: string }>(
+        `WITH RECURSIVE w(pid) AS (
+           SELECT pid FROM pg_stat_activity WHERE $1::int = ANY(pg_blocking_pids(pid))
+           UNION
+           SELECT a.pid FROM pg_stat_activity a JOIN w ON w.pid = ANY(pg_blocking_pids(a.pid)))
+         SELECT count(*)::text AS c FROM w`,
+        [blockerPid],
+      );
+      if (Number(r[0]?.c) >= n) return;
+      if (Date.now() > deadline) throw new Error(`bariyer zaman aşımı: ${n} bekleyen yok`);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }
+  const settle = async <T,>(p: Promise<T>): Promise<{ ok: true; value: T } | { ok: false; err: AppError }> =>
+    p.then(
+      (value) => ({ ok: true as const, value }),
+      (e: unknown) => ({ ok: false as const, err: e as AppError }),
+    );
+  const activeOf = async (lineId: string): Promise<number> => (await rsvOf(lineId)).filter((r) => r.status === "ACTIVE").length;
+
+  it("release(satır) ∥ başka belgenin kısmi toplaması: plan sonrası kümeye giren rezervasyon kilitten sonra görülür → VERSION_CONFLICT, hiçbir şey yazılmaz; yeniden deneme hepsini bırakır", async () => {
+    const x = await mkItem();
+    const r01 = await mkLoc("STORAGE");
+    const sevk = await mkLoc("STAGING");
+    await stock(x, r01, "9");
+    const s1 = await mkApproved("STOCK_OUT", [ln(x, { sourceLocationId: sevk, ...qty("4") })]);
+    const line = s1.lines[0] as string;
+    const rs = await doReserve(line, [alloc(r01, "4")]);
+    const pick = await mkApproved("STOCK_MOVE", [ln(x, { sourceLocationId: r01, targetLocationId: sevk, ...qty("3") })]);
+
+    const pid = await blockerHoldsDocument(s1.id);
+    const racing = settle(release(ownerP(), { documentLineId: line })); // plan: yalnızca R-01'deki 4'lük rezervasyon ACTIVE görülür
+    await waitBlockedBehind(pid, 1);
+    // Araya giren: toplama 3 → rezervasyon bölünür (R-01'de 1 kalır, SEVK'te yeni ACTIVE 3). Belge s1 kilidi bu işlemde YOK; commit olur.
+    await post(pick, ownerP(), [{ lineId: pick.lines[0] as string, reservationIds: rs.reservationIds as string[] }]);
+    await blocker.query("COMMIT");
+
+    const out = await racing;
+    expect(out.ok).toBe(false);
+    if (!out.ok) expect(codeOf(out.err)).toBe("VERSION_CONFLICT");
+    // Hiçbir şey yazılmadı: iki ACTIVE satır duruyor, bakiye yansımaları Σ ACTIVE ile tutarlı.
+    expect((await rsvOf(line)).map((r) => [r.status, r.quantity, r.location_id])).toEqual([["ACTIVE", "1.000000", r01], ["ACTIVE", "3.000000", sevk]]);
+    expect(await reservedMatchesActive(x)).toBe(true);
+    // İstemci yeniden denemesi güncel kümeyi görür ve TAMAMINI bırakır.
+    const again = await release(ownerP(), { documentLineId: line });
+    expect(again.lines?.[0]?.quantity).toBe("4.000000");
+    expect(await activeOf(line)).toBe(0);
+    expect(await triple(x)).toEqual(["9", "0", "9"]);
+    expect(await reservedMatchesActive(x)).toBe(true);
+    expect(await ledgerMatchesBalances(x)).toBe(true);
+  });
+
+  it("release ∥ sevk, sıra 1 (release önce kilidi alır): sevk bayat rezervasyon kümesine rağmen bırakılanı tüketmez; defter = bakiye, Σ ACTIVE = reserved", async () => {
+    const x = await mkItem();
+    const r01 = await mkLoc("STORAGE");
+    await stock(x, r01, "6");
+    const s1 = await mkApproved("STOCK_OUT", [ln(x, { sourceLocationId: r01, ...qty("4") })]);
+    const line = s1.lines[0] as string;
+    await doReserve(line, [alloc(r01, "4")]);
+    const version = (await docRow(s1.id)).version;
+
+    const pid = await blockerHoldsDocument(s1.id);
+    const rel = settle(release(ownerP(), { documentLineId: line }));
+    await waitBlockedBehind(pid, 1);
+    const ship = settle(postDocument(ownerP(), { documentId: s1.id, expectedVersion: version }));
+    await waitBlockedBehind(pid, 2);
+    await blocker.query("COMMIT");
+    const [r, sh] = await Promise.all([rel, ship]);
+
+    expect(r.ok).toBe(true); // FIFO: release önce
+    if (r.ok) expect(r.value.reservationIds?.length).toBe(1);
+    expect((await rsvOf(line)).map((v) => v.status)).toEqual(["RELEASED"]);
+    if (sh.ok) {
+      // sevk yürüdüyse: rezervasyon tüketmedi (zaten bırakılmıştı), fiziksel 6 → 2
+      expect(sh.value.reservationIds ?? []).toEqual([]);
+      expect(await triple(x)).toEqual(["2", "0", "2"]);
+      expect((await ledgerRows(s1.id)).map((v) => v.quantity)).toEqual(["-4.000000"]);
+    } else {
+      expect(codeOf(sh.err)).toBe("VERSION_CONFLICT"); // release belge sürümünü artırdıysa sevk yeniden yüklenmeli; stok yazılmadı
+      expect(await triple(x)).toEqual(["6", "0", "6"]);
+      expect((await ledgerRows(s1.id)).length).toBe(0);
+    }
+    expect(await reservedMatchesActive(x)).toBe(true);
+    expect(await ledgerMatchesBalances(x)).toBe(true);
+  });
+
+  it("release ∥ sevk, sıra 2 (sevk önce kilidi alır): bayat plandaki release tüketilmiş rezervasyonu bırakamaz (VERSION_CONFLICT: sevk belge sürümünü artırır); defter = bakiye, Σ ACTIVE = reserved", async () => {
+    const x = await mkItem();
+    const r01 = await mkLoc("STORAGE");
+    await stock(x, r01, "6");
+    const s1 = await mkApproved("STOCK_OUT", [ln(x, { sourceLocationId: r01, ...qty("4") })]);
+    const line = s1.lines[0] as string;
+    const rs = await doReserve(line, [alloc(r01, "4")]);
+    const version = (await docRow(s1.id)).version;
+
+    const pid = await blockerHoldsDocument(s1.id);
+    const ship = settle(postDocument(ownerP(), { documentId: s1.id, expectedVersion: version }));
+    await waitBlockedBehind(pid, 1);
+    const rel = settle(release(ownerP(), { reservationId: (rs.reservationIds as string[])[0] as string }));
+    await waitBlockedBehind(pid, 2);
+    await blocker.query("COMMIT");
+    const [sh, r] = await Promise.all([ship, rel]);
+
+    expect(sh.ok).toBe(true);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(codeOf(r.err)).toBe("VERSION_CONFLICT"); // sevk APPROVED→POSTED ile belge sürümünü artırdı; bayat release hiçbir şey yazmaz
+    expect((await rsvOf(line)).map((v) => [v.status, v.quantity])).toEqual([["CONSUMED", "4.000000"]]);
+    expect(await triple(x)).toEqual(["2", "0", "2"]);
+    expect((await ledgerRows(s1.id)).map((v) => [v.quantity, v.reason])).toEqual([["-4.000000", "SHIPMENT"]]);
+    expect(await reservedMatchesActive(x)).toBe(true);
+    expect(await ledgerMatchesBalances(x)).toBe(true);
+  });
+});
+
+describe("T-253: UUID doğrulama (DB hatası değil) ve açık tenant süzgeci", () => {
+  it("geçersiz kimlik → VALIDATION_FAILED (reserve/release/tahsis boyutu/okuma işlevleri); geçerli ama olmayan → NOT_FOUND", async () => {
+    const x = await mkItem();
+    const store = await mkLoc("STORAGE");
+    await stock(x, store, "2");
+    const s1 = await mkApproved("STOCK_OUT", [ln(x, { sourceLocationId: store, ...qty("1") })]);
+    const line = s1.lines[0] as string;
+    for (const bad of ["not-a-uuid", "", `${line}0`, "00000000-0000-4000-8000-00000000000z"]) {
+      expect(codeOf(await failure(doReserve(bad, [alloc(store, "1")])))).toBe("VALIDATION_FAILED");
+      expect(codeOf(await failure(doReserve(line, [alloc(bad, "1")])))).toBe("VALIDATION_FAILED");
+      expect(codeOf(await failure(doReserve(line, [alloc(store, "1", { lotId: bad })])))).toBe("VALIDATION_FAILED");
+      expect(codeOf(await failure(release(ownerP(), { reservationId: bad })))).toBe("VALIDATION_FAILED");
+      expect(codeOf(await failure(release(ownerP(), { documentLineId: bad })))).toBe("VALIDATION_FAILED");
+      expect(codeOf(await failure(cancelDocument(ownerP(), { documentId: bad, expectedVersion: 1 })))).toBe("VALIDATION_FAILED");
+      expect(codeOf(await failure(runTenantQuery({ ...ownerP(), permission: "document.approve" }, (tx, m) => readReservationPlanRows(tx, m.tenantId, { ids: [bad] }))))).toBe("VALIDATION_FAILED");
+      expect(codeOf(await failure(runTenantQuery({ ...ownerP(), permission: "document.approve" }, (tx, m) => stagedAmong(tx, m.tenantId, [bad]))))).toBe("VALIDATION_FAILED");
+    }
+    expect(codeOf(await failure(doReserve(uuid(), [alloc(store, "1")])))).toBe("NOT_FOUND");
+    expect(codeOf(await failure(release(ownerP(), { reservationId: uuid() })))).toBe("NOT_FOUND");
+    expect(await triple(x)).toEqual(["2", "0", "2"]);
+  });
+
+  it("RLS'siz rol (DATABASE_URL_DIRECT, süper kullanıcı): başka kiracının rezervasyonu açık tenant_id süzgeciyle görünmez (readReservationPlanRows, stagedAmong)", async () => {
+    const x = await mkItem();
+    const sevk = await mkLoc("STAGING");
+    await stock(x, sevk, "2");
+    const s1 = await mkApproved("STOCK_OUT", [ln(x, { sourceLocationId: sevk, ...qty("2") })]);
+    const rs = await doReserve(s1.lines[0] as string, [alloc(sevk, "2")]);
+    const ids = rs.reservationIds as string[];
+    const B = await seedWorld(adm, reg, "B253");
+    const direct = createDbClient({ url: env.databaseUrlDirect, poolMax: 1, prepare: env.prepare ?? DB_CLIENT_SETTINGS.prepare });
+    try {
+      await withTenant(createTenantContext(direct, B.tenantId), async (tx) => {
+        // Ön koşul: bu rolde RLS devre dışıdır (süzgeç olmadan A'nın satırı B bağlamında görünür); aksi test anlamsız olurdu.
+        const raw = await tx.execute<{ n: string }>(`SELECT count(*)::text AS n FROM public.reservations WHERE id = ANY('{${ids.join(",")}}'::uuid[])`);
+        expect(Number(raw[0]?.n)).toBe(ids.length);
+        expect(await readReservationPlanRows(tx, B.tenantId, { ids })).toEqual([]);
+        expect(await readReservationPlanRows(tx, B.tenantId, { lineId: s1.lines[0] as string })).toEqual([]);
+        expect(await readReservationPlanRows(tx, B.tenantId, { documentId: s1.id })).toEqual([]);
+        expect(await stagedAmong(tx, B.tenantId, ids)).toBe(false);
+        // Karşı kontrol: doğru kiracıyla aynı çağrılar satırı görür.
+        expect((await readReservationPlanRows(tx, A.tenantId, { ids })).length).toBe(ids.length);
+        expect(await stagedAmong(tx, A.tenantId, ids)).toBe(true);
+      });
+    } finally {
+      await direct.close();
+    }
   });
 });

@@ -22,11 +22,9 @@ import { AppError } from "@wms/shared/errors";
 import { runTenantQuery, type AccessTx, type Membership } from "../identity/access.ts";
 import { pgUuidArray, resolveWarehouseScope } from "../warehouse/scope.ts";
 import { EMPTY_LOCK_PLAN, executeStockCommand, type StockCommandOutcome, type StockCommandPlan } from "./command.ts";
-import { assertItemsActive, assertLocationsActiveInWarehouse, assertNotProcessing, readDocumentHeader, type StockDocCallParams } from "./documents.ts";
 import type { StockCommandResult } from "./idempotency.ts";
 import {
   allocateAcross,
-  compareDimensionKeys,
   dimensionIdentity,
   fromMicro,
   remainingToReserve,
@@ -37,6 +35,25 @@ import {
   type ReservationTake,
 } from "./plan.ts";
 import { readAvailability, type AvailabilityFilter, type AvailabilityRow } from "./availability.ts";
+import {
+  assertItemsActive,
+  assertLocationsActiveInWarehouse,
+  assertNotProcessing,
+  cmp,
+  lockedDimensionIdByIdentity,
+  readDocumentHeader,
+  readReservationPlanRows,
+  stagedAmong,
+  uniqueKeys,
+  uuid,
+  uuidOrNull,
+  versionConflict,
+  type ReservationPlanRow,
+  type StockDocCallParams,
+} from "./reservation-reads.ts";
+
+// Okuma modülünün (reservation-reads.ts) rezervasyon okumaları buradan da erişilir kalır (posting.ts yolu değişmez).
+export { readCancellationLockSet, readReservationPlanRows, type ReservationPlanRow } from "./reservation-reads.ts";
 
 export const RESERVATION_EXPIRY_FLAG = "RESERVATION_EXPIRY_ENABLED";
 /** A-76: otomatik süre aşımı işi yok; bayrak varsayılan KAPALI ve bu kartta yalnızca okunur. Yalnızca `true`/`1` açar. */
@@ -45,21 +62,12 @@ export function isReservationExpiryEnabled(env: Readonly<Record<string, string |
   return v === "true" || v === "1";
 }
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const STATUSES: ReadonlySet<string> = new Set(["AVAILABLE", "QUARANTINE", "DAMAGED", "BLOCKED"]);
 const RESERVABLE_KINDS: ReadonlySet<string> = new Set(["STOCK_OUT", "STOCK_MOVE"]);
 const MAX_ALLOCATIONS = 200;
 const invalid = (): AppError => new AppError("VALIDATION_FAILED");
 const documentState = (): AppError => new AppError("VALIDATION_FAILED", { detail: "DOCUMENT_STATE" });
-const versionConflict = (): AppError => new AppError("VERSION_CONFLICT", { retryable: true });
 
-function uuid(raw: unknown): string {
-  if (typeof raw !== "string" || !UUID_RE.test(raw)) throw invalid();
-  return raw.toLowerCase();
-}
-function uuidOrNull(raw: unknown): string | null {
-  return raw === undefined || raw === null ? null : uuid(raw);
-}
 function positiveMicro(raw: unknown): bigint {
   if (typeof raw !== "string") throw invalid();
   const n = toMicro(raw);
@@ -71,7 +79,6 @@ function versionOf(raw: unknown): number | undefined {
   if (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw < 1) throw invalid();
   return raw;
 }
-const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
 // --- girdiler --------------------------------------------------------------------------------------------------------------
 
@@ -165,63 +172,6 @@ async function locationWarehouses(tx: AccessTx, tenantId: string, ids: readonly 
   return rows.map((r) => r.warehouse_id);
 }
 
-/** Plan satırı: rezervasyon + boyut anahtarı + boyutun lokasyon deposu (kilitsiz okuma; apply kilitli görüntüyü doğrular). */
-export interface ReservationPlanRow {
-  readonly id: string;
-  readonly status: string;
-  readonly documentLineId: string;
-  readonly key: StockDimensionKey;
-  readonly warehouseId: string;
-}
-type PlanSelector = { readonly ids: readonly string[] } | { readonly lineId: string } | { readonly documentId: string };
-
-export async function readReservationPlanRows(tx: AccessTx, tenantId: string, sel: PlanSelector): Promise<ReservationPlanRow[]> {
-  type R = {
-    id: string; status: string; document_line_id: string; item_id: string; location_id: string; lot_id: string | null; serial_id: string | null;
-    stock_status: StockDimensionKey["stockStatus"]; inventory_owner_id: string | null; handling_unit_id: string | null; warehouse_id: string;
-  };
-  const cols = sql`r.id, r.status, r.document_line_id, d.item_id, d.location_id, d.lot_id, d.serial_id, d.stock_status, d.inventory_owner_id, d.handling_unit_id, loc.warehouse_id`;
-  const from = sql`public.reservations r
-          JOIN public.stock_dimensions d ON d.tenant_id = r.tenant_id AND d.id = r.stock_dimension_id
-          JOIN public.locations loc ON loc.tenant_id = d.tenant_id AND loc.id = d.location_id
-          JOIN public.document_lines l ON l.tenant_id = r.tenant_id AND l.id = r.document_line_id`;
-  let rows: R[];
-  if ("ids" in sel) {
-    rows = await tx.execute<R>(sql`SELECT ${cols} FROM ${from} WHERE r.tenant_id = ${tenantId}::uuid AND r.id = ANY(${pgUuidArray(sel.ids)}::uuid[]) ORDER BY r.id`);
-  } else if ("lineId" in sel) {
-    rows = await tx.execute<R>(
-      sql`SELECT ${cols} FROM ${from} WHERE r.tenant_id = ${tenantId}::uuid AND r.document_line_id = ${sel.lineId}::uuid AND r.status = 'ACTIVE' ORDER BY r.id`,
-    );
-  } else {
-    rows = await tx.execute<R>(
-      sql`SELECT ${cols} FROM ${from} WHERE r.tenant_id = ${tenantId}::uuid AND l.document_id = ${sel.documentId}::uuid AND r.status = 'ACTIVE' ORDER BY r.id`,
-    );
-  }
-  return rows.map((r) => ({
-    id: r.id,
-    status: r.status,
-    documentLineId: r.document_line_id,
-    warehouseId: r.warehouse_id,
-    key: {
-      itemId: r.item_id,
-      locationId: r.location_id,
-      lotId: r.lot_id,
-      serialId: r.serial_id,
-      stockStatus: r.stock_status,
-      inventoryOwnerId: r.inventory_owner_id,
-      handlingUnitId: r.handling_unit_id,
-    },
-  }));
-}
-
-const uniqueKeys = (keys: readonly StockDimensionKey[]): StockDimensionKey[] =>
-  [...new Map(keys.map((k) => [dimensionIdentity(k), k])).values()].sort(compareDimensionKeys);
-
-/** Planın boyutları kilitli görüntüde var mı (I-15: yalnızca kilitli satırlara yazılır); yoksa plan bayat: `VERSION_CONFLICT`. */
-function lockedDimensionIdByIdentity(locked: LockedState): Map<string, string> {
-  return new Map(locked.dimensions.map((d) => [dimensionIdentity(d.key), d.id]));
-}
-
 // --- ortak yazıcılar (posting.ts de kullanır) ---------------------------------------------------------------------------------
 
 /**
@@ -245,6 +195,8 @@ export async function assertReservableDimensions(
     if (d.key.stockStatus !== "AVAILABLE" || (l.kind !== "STORAGE" && l.kind !== "STAGING") || l.pick_blocked) throw new AppError("INSUFFICIENT_STOCK");
   }
 }
+
+// --- ortak yazıcılar (posting.ts ve cancelDocument kullanır) ---------------------------------------------------------------------
 
 /**
  * `reserved_quantity` değişimleri (işaretli, boyut kimliği → 1e-6 ölçekli). Yalnızca KİLİTLİ bakiye satırlarına yazılır (çağıran kilitli
@@ -307,6 +259,32 @@ export async function closeReservations(tx: AccessTx, tenantId: string, status: 
   );
   if (done.length !== closeIds.length) throw new AppError("INTERNAL");
   return closeIds;
+}
+
+/**
+ * `cancelDocument.apply` adımı: belgenin ACTIVE rezervasyonlarını aynı transaction'da, kilitli görüntü üzerinde kapatır (`RELEASED`) ve boyut
+ * `reserved_quantity`'sini düşürür; böylece ertelenmiş denetim (reserved = Σ ACTIVE) iptal sonrası tutar. Plan sonrası kümeye giren ya da
+ * boyutu değişen rezervasyon (taşıma işlemi araya girdi) → `VERSION_CONFLICT` (kilit planı genişletilip baştan çalıştırılır; I-15).
+ * Küme KİLİTTEN SONRA yeniden okunur (plan anındaki küme karara girmez). Döner: kapanan satır kimlikleri.
+ */
+export async function releaseForCancellation(tx: AccessTx, tenantId: string, locked: LockedState, documentId: string): Promise<string[]> {
+  const fresh = await readReservationPlanRows(tx, tenantId, { documentId });
+  if (fresh.length === 0) return [];
+  const lockedById = new Map(locked.reservations.map((r) => [r.id.toLowerCase(), r]));
+  const dimIds = lockedDimensionIdByIdentity(locked);
+  const ops: ReservationOp[] = [];
+  const deltas = new Map<string, bigint>();
+  for (const r of fresh) {
+    const lr = lockedById.get(r.id.toLowerCase());
+    const dimId = dimIds.get(dimensionIdentity(r.key));
+    if (lr === undefined || lr.status !== "ACTIVE" || dimId === undefined || lr.stockDimensionId !== dimId) throw versionConflict();
+    const q = toMicro(lr.quantity);
+    ops.push({ id: lr.id, take: q, rest: 0n, dimensionId: dimId, documentLineId: lr.documentLineId });
+    deltas.set(dimId, (deltas.get(dimId) ?? 0n) - q);
+  }
+  const closed = await closeReservations(tx, tenantId, "RELEASED", ops);
+  await applyReservedDeltas(tx, tenantId, deltas);
+  return closed;
 }
 
 export interface ReservationMoveOp extends ReservationTake {
@@ -724,62 +702,8 @@ export async function release(params: StockDocCallParams, input: ReleaseInput): 
     }),
   );
   const ids = outcome.reservationIds ?? [];
-  const needsPutaway = ids.length === 0 ? false : await runTenantQuery({ ...params, permission: "document.approve" }, (tx) => stagedAmong(tx, ids));
+  const needsPutaway = ids.length === 0 ? false : await runTenantQuery({ ...params, permission: "document.approve" }, (tx, m) => stagedAmong(tx, m.tenantId, ids));
   return { ...outcome, needsPutaway };
-}
-
-/** Kapanan rezervasyonlardan biri STAGING lokasyondaki boyuttaysa mal sevk alanında kalıyor demektir (kural 7). */
-async function stagedAmong(tx: AccessTx, ids: readonly string[]): Promise<boolean> {
-  const rows = await tx.execute<{ n: string }>(
-    sql`SELECT count(*)::text AS n
-          FROM public.reservations r
-          JOIN public.stock_dimensions d ON d.tenant_id = r.tenant_id AND d.id = r.stock_dimension_id
-          JOIN public.locations l ON l.tenant_id = d.tenant_id AND l.id = d.location_id
-         WHERE r.id = ANY(${pgUuidArray(ids)}::uuid[]) AND l.kind = 'STAGING'`,
-  );
-  return Number(rows[0]?.n ?? "0") > 0;
-}
-
-// --- belge iptali ---------------------------------------------------------------------------------------------------------------
-
-/** `cancelDocument` planı için: belgenin açık rezervasyonları, boyutları ve depoları (kilitsiz okuma; kilit planına girer). */
-export async function readCancellationLockSet(
-  tx: AccessTx,
-  tenantId: string,
-  documentId: string,
-): Promise<{ readonly reservationIds: string[]; readonly dimensions: StockDimensionKey[]; readonly warehouseIds: string[] }> {
-  const rows = await readReservationPlanRows(tx, tenantId, { documentId });
-  return {
-    reservationIds: rows.map((r) => r.id).sort(cmp),
-    dimensions: uniqueKeys(rows.map((r) => r.key)),
-    warehouseIds: [...new Set(rows.map((r) => r.warehouseId))],
-  };
-}
-
-/**
- * `cancelDocument.apply` adımı: belgenin ACTIVE rezervasyonlarını aynı transaction'da, kilitli görüntü üzerinde kapatır (`RELEASED`) ve boyut
- * `reserved_quantity`'sini düşürür; böylece ertelenmiş denetim (reserved = Σ ACTIVE) iptal sonrası tutar. Plan sonrası kümeye giren ya da
- * boyutu değişen rezervasyon (taşıma işlemi araya girdi) → `VERSION_CONFLICT` (kilit planı genişletilip baştan çalıştırılır; I-15).
- * Döner: kapanan satır kimlikleri.
- */
-export async function releaseForCancellation(tx: AccessTx, tenantId: string, locked: LockedState, documentId: string): Promise<string[]> {
-  const fresh = await readReservationPlanRows(tx, tenantId, { documentId });
-  if (fresh.length === 0) return [];
-  const lockedById = new Map(locked.reservations.map((r) => [r.id.toLowerCase(), r]));
-  const dimIds = lockedDimensionIdByIdentity(locked);
-  const ops: ReservationOp[] = [];
-  const deltas = new Map<string, bigint>();
-  for (const r of fresh) {
-    const lr = lockedById.get(r.id.toLowerCase());
-    const dimId = dimIds.get(dimensionIdentity(r.key));
-    if (lr === undefined || lr.status !== "ACTIVE" || dimId === undefined || lr.stockDimensionId !== dimId) throw versionConflict();
-    const q = toMicro(lr.quantity);
-    ops.push({ id: lr.id, take: q, rest: 0n, dimensionId: dimId, documentLineId: lr.documentLineId });
-    deltas.set(dimId, (deltas.get(dimId) ?? 0n) - q);
-  }
-  const closed = await closeReservations(tx, tenantId, "RELEASED", ops);
-  await applyReservedDeltas(tx, tenantId, deltas);
-  return closed;
 }
 
 // --- depo kapsamı süzgeçli kullanılabilir stok ----------------------------------------------------------------------------------
