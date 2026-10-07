@@ -435,13 +435,25 @@
     "soonLabel": "Yakında",
     "soonWarehouse": "Bu iş depo kurulumundan sonra açılacak.",
     "soonScreen": "Bu ekran yakında açılacak.",
+    "myTasks": {
+      "title": "Görevlerim",
+      "assigned": "Sana atanmış {count} iş",
+      "empty": "Şu an sana atanmış iş yok."
+    },
+    "lockedList": {
+      "toggle": "Yetkin olmayan işler ({count})"
+    },
+    "soonList": {
+      "toggle": "Yakında gelecekler ({count})",
+      "back": "İşlere dön"
+    },
     "tasks": {
       "members": {
         "title": "Ekibimi yönet",
         "description": "Kimin hangi işi yapabileceğini belirle"
       },
       "settings": {
-        "title": "Çalışma alanı ayarları",
+        "title": "Ayarlar",
         "description": "Ad, dil ve saat dilimi"
       },
       "audit": {

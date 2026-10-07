@@ -36,6 +36,26 @@ export function contrast(a: string, b: string): number {
   return (hi + 0.05) / (lo + 0.05);
 }
 
+function lab(hex: string): [number, number, number] {
+  const lin = (i: number) => {
+    const c = parseInt(hex.slice(i, i + 2), 16) / 255;
+    return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  };
+  const [r, g, b] = [lin(1), lin(3), lin(5)] as [number, number, number];
+  const f = (t: number) => (t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116);
+  const x = f((r * 0.4124 + g * 0.3576 + b * 0.1805) / 0.95047);
+  const y = f(r * 0.2126 + g * 0.7152 + b * 0.0722);
+  const z = f((r * 0.0193 + g * 0.1192 + b * 0.9505) / 1.08883);
+  return [116 * y - 16, 500 * (x - y), 200 * (y - z)];
+}
+
+/** CIE76 renk farkı (algısal yakınlık için kaba ama yeterli ölçü). */
+export function deltaE76(a: string, b: string): number {
+  const [l1, a1, b1] = lab(a);
+  const [l2, a2, b2] = lab(b);
+  return Math.hypot(l1 - l2, a1 - a2, b1 - b2);
+}
+
 const T = 4.5;
 const U = 3;
 // [ön plan, zemin, eşik] — palette.md §7.1 sırası, 41 çift.
@@ -78,6 +98,73 @@ describe("palet kontrastı (palette.md §7)", () => {
   for (const [view, map] of [["Akış", flow], ["Kokpit", cockpit]] as const) {
     describe(view, () => {
       it.each(PAIRS)("%s / %s >= eşik", (fg, bg, min) => {
+        const f = map.get(fg);
+        const b = map.get(bg);
+        if (!f || !b) throw new Error(`belirteç eksik: ${f ? bg : fg}`);
+        const ratio = contrast(f, b);
+        expect(ratio, `${fg} ${f} / ${bg} ${b} = ${ratio.toFixed(2)}`).toBeGreaterThanOrEqual(min);
+      });
+    });
+  }
+});
+
+// --- T-270 (ADR-020 ek, kural 8): iş kategorisi renk tonları (`cat-*`, durum anlam renklerinden ayrı) ---
+// Döşeme beyaz (`surface`); renk yalnız ikon dairesinde: `cat-<ton>-ink` ikon/metin, `cat-<ton>-bg` daire zemini. İkon çifti de
+// 4,5:1 ile denetlenir (3:1 ikon eşiğinden sıkı). Belirteçler `globals.css` içindeki AYRI ikinci `@theme` bloğundan okunur
+// (palette.md §2 tablosu 28 belirteçle sabit; tablo güncellemesi ADR-020 ekinde takip).
+const CAT_HUES = ["green", "orange", "teal", "purple", "sky", "rose", "amber", "cyan", "indigo", "slate", "lilac"] as const;
+const CATEGORY_PAIRS: ReadonlyArray<readonly [string, string, number]> = CAT_HUES.flatMap((h) => [
+  [`cat-${h}-ink`, `cat-${h}-bg`, T] as const,
+  [`cat-${h}-ink`, `cat-${h}-bg`, U] as const,
+  [`cat-${h}-ink`, "surface", T] as const,
+  ["ink", `cat-${h}-bg`, T] as const,
+]);
+
+function secondThemeBlock(): string {
+  const first = css.indexOf("@theme");
+  const second = css.indexOf("@theme", css.indexOf("\n}", first));
+  if (first < 0 || second < 0) throw new Error("globals.css: ikinci @theme bloğu (T-270 kategori belirteçleri) yok");
+  const open = css.indexOf("{", second);
+  return css.slice(open + 1, css.indexOf("\n}", open));
+}
+
+const categoryExtra = tokens(secondThemeBlock());
+const categoryFlow = new Map([...flow, ...categoryExtra]);
+const categoryCockpit = new Map([...cockpit, ...categoryExtra]);
+
+describe("iş kategorisi renk tonları (T-270)", () => {
+  it("yeni belirteçler yalnız ikinci @theme bloğundadır: 11 ton x (bg, ink)", () => {
+    expect([...categoryExtra.keys()].sort()).toEqual(CAT_HUES.flatMap((h) => [`cat-${h}-bg`, `cat-${h}-ink`]).sort());
+    expect([...flow.keys()].some((k) => k.startsWith("cat-"))).toBe(false);
+  });
+
+  it("tonlar birbirinden ve seçili alt sekme mavisinden (accent-soft) farklıdır", () => {
+    const bgs = CAT_HUES.map((h) => categoryExtra.get(`cat-${h}-bg`));
+    expect(new Set(bgs).size).toBe(CAT_HUES.length);
+    const inks = CAT_HUES.map((h) => categoryExtra.get(`cat-${h}-ink`));
+    expect(new Set(inks).size).toBe(CAT_HUES.length);
+    for (const view of [flow, cockpit]) {
+      expect(bgs).not.toContain(view.get("accent-soft"));
+      expect(inks).not.toContain(view.get("accent-ink"));
+    }
+  });
+
+  it("hiçbir ton seçili alt sekme mavisine algısal olarak yakın değildir (CIE76 dE: zemin >= 5, ikon rengi >= 20)", () => {
+    for (const view of [flow, cockpit]) {
+      for (const h of CAT_HUES) {
+        expect(deltaE76(categoryExtra.get(`cat-${h}-bg`) as string, view.get("accent-soft") as string), `${h} zemin`).toBeGreaterThanOrEqual(5);
+        expect(deltaE76(categoryExtra.get(`cat-${h}-ink`) as string, view.get("accent-ink") as string), `${h} ikon`).toBeGreaterThanOrEqual(20);
+      }
+    }
+  });
+
+  it("tonlar pastel: zemin göreli parlaklığı >= 0,80", () => {
+    for (const h of CAT_HUES) expect(luminance(categoryExtra.get(`cat-${h}-bg`) as string), h).toBeGreaterThanOrEqual(0.8);
+  });
+
+  for (const [view, map] of [["Akış", categoryFlow], ["Kokpit", categoryCockpit]] as const) {
+    describe(view, () => {
+      it.each(CATEGORY_PAIRS)("%s / %s >= eşik", (fg, bg, min) => {
         const f = map.get(fg);
         const b = map.get(bg);
         if (!f || !b) throw new Error(`belirteç eksik: ${f ? bg : fg}`);
