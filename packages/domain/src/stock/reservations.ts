@@ -366,6 +366,17 @@ export interface ReservationMoveInput {
   readonly allowOrderReservations?: true;
 }
 
+/**
+ * T-308: YALNIZ domain içi sevk yolu (`postApprovedDocumentInTx`, shipping.ts) bir `STOCK_OUT` satırının tüketeceği SİPARİŞ satırı rezervasyonlarını bildirir.
+ * Genel `postDocument` yolu bu alanı taşıyamaz (`PostInTxOptions`'a yalnız iç çağıran koyar): belge `STOCK_OUT`'u sipariş rezervasyonuna dokunamaz (A-134).
+ * Bildirilen satırda çıkışın TAMAMI bu rezervasyonlardan karşılanmalıdır (rezervasyonsuz sevk yolu yok); `orderLineId` kısmi payın yeni (CONSUMED) satırının kaynağıdır.
+ */
+export interface ReservationConsumeInput {
+  readonly lineId: string;
+  readonly orderLineId: string;
+  readonly reservationIds: readonly string[];
+}
+
 export interface ReservationEffects {
   readonly consumeOps: readonly ReservationOp[];
   readonly moveOps: readonly ReservationMoveOp[];
@@ -391,11 +402,13 @@ export function planReservationEffects(args: {
   readonly locked: LockedState;
   readonly dimIdByIdentity: ReadonlyMap<string, string>;
   readonly moves?: readonly ReservationMoveInput[] | undefined;
+  readonly consumes?: readonly ReservationConsumeInput[] | undefined;
 }): ReservationEffects {
   const { kind, entries, locked, dimIdByIdentity } = args;
   const moves = args.moves ?? [];
+  const consumes = args.consumes ?? [];
   if (kind === "STOCK_IN") {
-    if (moves.length > 0) throw invalid();
+    if (moves.length > 0 || consumes.length > 0) throw invalid();
     return NO_EFFECTS;
   }
   const dimOf = (k: StockDimensionKey): string => {
@@ -415,17 +428,38 @@ export function planReservationEffects(args: {
 
   if (kind === "STOCK_OUT") {
     if (moves.length > 0) throw invalid();
+    const consumeByLine = new Map<string, ReservationConsumeInput>();
+    for (const c of consumes) {
+      const id = uuid(c.lineId);
+      if (consumeByLine.has(id) || !byLine.has(id)) throw invalid(); // satır başına tek bildirim; bildirilen satır çıkış satırı olmalı
+      consumeByLine.set(id, c);
+    }
+    const seenConsumed = new Set<string>();
     for (const [lineId, es] of byLine) {
       const e = es[0] as LedgerEntry;
       const dimId = dimOf(e.key);
-      const slices = [...lockedActive.values()]
-        .filter((r) => r.documentLineId !== null && r.documentLineId.toLowerCase() === lineId && r.stockDimensionId === dimId)
-        .map((r) => ({ id: r.id, quantity: toMicro(r.quantity) }));
+      const declared = consumeByLine.get(lineId);
+      const slices =
+        declared === undefined
+          ? [...lockedActive.values()]
+              .filter((r) => r.documentLineId !== null && r.documentLineId.toLowerCase() === lineId && r.stockDimensionId === dimId)
+              .map((r) => ({ id: r.id, quantity: toMicro(r.quantity) }))
+          : declared.reservationIds.map((raw) => {
+              const id = uuid(raw);
+              if (seenConsumed.has(id)) throw invalid(); // aynı rezervasyon iki satırda (ya da iki kez) tüketilemez
+              seenConsumed.add(id);
+              const r = lockedActive.get(id);
+              // Yalnız bu çıkış boyutundaki, SİPARİŞ satırı rezervasyonu (documentLineId boş); belge satırı rezervasyonuna bu yoldan dokunulmaz.
+              if (r === undefined || r.stockDimensionId !== dimId || r.documentLineId !== null) throw invalid();
+              return { id: r.id, quantity: toMicro(r.quantity) };
+            });
       const sum = slices.reduce((a, s) => a + s.quantity, 0n);
       const out = -e.delta;
+      if (declared !== undefined && sum < out) throw invalid(); // A-134: sevk edilen her birim rezervasyondan gelir
       const amount = sum < out ? sum : out;
       if (amount <= 0n) continue;
-      for (const t of allocateAcross(slices, amount)) consumeOps.push({ ...t, dimensionId: dimId, source: { kind: "DOCUMENT_LINE", lineId } });
+      const source: ReservationSource = declared === undefined ? { kind: "DOCUMENT_LINE", lineId } : { kind: "ORDER_LINE", lineId: uuid(declared.orderLineId) };
+      for (const t of allocateAcross(slices, amount)) consumeOps.push({ ...t, dimensionId: dimId, source });
       bump(reservedDelta, dimId, -amount);
       bump(ownReserved, dimensionIdentity(e.key), amount);
     }
@@ -433,6 +467,7 @@ export function planReservationEffects(args: {
   }
 
   // STOCK_MOVE
+  if (consumes.length > 0) throw invalid();
   const seenLines = new Set<string>();
   const seenReservations = new Set<string>();
   for (const mv of moves) {
