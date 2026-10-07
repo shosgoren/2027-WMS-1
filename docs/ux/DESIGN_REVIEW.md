@@ -76,3 +76,45 @@ Giderilen maddeler: (P1.1) döşeme biçemi tek ve beyaz, renk yalnız ikon dair
 - **PICKER:** döşemeler en çok 140 px, altta; boşalan alan gerçek içerikle dolu: "Görevlerim" özet kartı (`listMyTasks` = mevcut domain sorgusu, `stock.view`, tenant bağlamı domain'de; sayım yalnız bana atanmış ASSIGNED işler, tek sayfaya sığmazsa "n+") — n>0 ise tek dokunuşla `/t/<slug>/field/tasks`, n=0 ise sakin boş durum satırı, sorgu hatasında sunucu mesajı + kod. Kart yalnız yönetim yetkisi (`users.manage`) olmayan rollerde çizilir. Alt sekme "Görevlerim" gerçek ekrana bağlandı, "Yakında" noktası kalktı.
 - **Açık listeler:** yetkisiz ve Yakında listeleri alttan yukarı: tek açıklama paneli (boşluğu doldurur, `emptyRatio` ≤ %15 üç boyutta ölçülür) + kompakt (56-64 px), gölgesiz, nötr renkli, oksuz satırlar; "İşlere dön" düğmesinde kilit ikonu yok.
 - **Ton ayrımı (ΔE):** Ekip indigo → violet-indigo (`cat-indigo` bg #ebe5fc / ink #47299c; Sayım purple bg #f0e5fb / ink #6a1fb0). Seçili sekme `accent-soft` #e3ecfa / `accent-ink` #0f4699'a göre: indigo daire zemini önce ΔE2000 5,1 (kontrast oranı 1,037) idi, şimdi ΔE2000 8,5 (1,029); indigo ikon rengi önce ΔE2000 6,8, şimdi 13,1 (kontrast oranı 1,141). Pastel zeminler doğası gereği birbirine yakındır; ayrımı ikon rengi + ikon şekli + metin taşır. `theme-contrast.test.ts` artık tüm tonlar için CIE76 ΔE zemin ≥ 5 ve ikon ≥ 20 (seçili sekme mavisine göre) denetler.
+
+## 7. T-313 mal kabul ve yerleştirme ekranları — tasarım ölçütleri (görüntüden ÖNCE yazıldı)
+
+> Bu bölüm T-313 ekran görüntüsü üretilmeden önce ayrı commit olarak yazıldı; eşikler görüntüden sonra değiştirilmez. Şablon §1 ile aynı (2/1/0; 0 yok ve toplam ≥ %90). Dayanak: UX_NOVICE N-01, N-02, N-06, N-07, N-09, N-13, N-16; 08-ux-i18n §Kurallar; ADR-020.
+> Not: istek metni "§7.2 geçmişi" andı; bu belgede §7.2 yoktu, geçmiş kaydı bu bölümün altına (§7.3) yazılır.
+
+### 7.1 Kapsam ve ölçüm
+
+Ekranlar: saha kabulü (`/field/receive`: teslim seç → ürün okut → miktar → bitti), saha yerleştirme (`/field/putaway`: ürün okut → hedef lokasyon okut → miktar → bitti), masaüstü `receipts` (liste + oluşturma formu). Telefon boyutları 360×740, 390×844, 430×932; masaüstü 1280×800. "Adım ekranı" = akışın tek bir adımı. "Eylem bölgesi" = alt sabit çubuğun üstü ile saha alt gezinme çubuğu arası. Ölçümler Playwright mobil projesinden alınır (`.artifacts/t-313/`).
+
+| No | Ölçüt | Ölçüm | Geçer (2) | Kısmen (1) | Geçmez (0) |
+|---|---|---|---|---|---|
+| R-01 | Tek birincil eylem, altta sabit | Her adım ekranında görünür `[data-variant=primary]` sayısı; konumu | Tam 1; alt kenarı gezinme çubuğunun üstünden ≤ 16 px; yüksekliği ≥ 56 px; kaydırmada yerinde | 2 birincil ya da boşluk 17–32 px | 0 ya da > 2 birincil, ya da kaydırınca kayıyor |
+| R-02 | Dokunma hedefi | Görünür tüm etkileşimli öğeler (miktar +/− dahil) | Hepsi ≥ 48×48 px, komşu aralık ≥ 8 px | 44–47 px | < 44 px |
+| R-03 | Taşma ve kayma | 360/390/430'da `scrollWidth > clientWidth`; adım ekranında sayfa dikey kayması (390×664 dahil) | 0 yatay taşma; adım ekranı kaydırmasız sığar (yalnız liste kendi içinde kayar) | 1 adım ekranı 1–40 px kayar | yatay taşma ya da > 40 px kayma |
+| R-04 | Yanlış tarama engeli | Ürün/lokasyon uyuşmazlığında DOM; hareket yazımı | `role=alertdialog`, tam ekran, sebep cümlesi + tek "tekrar okut" düğmesi; onaysız devam yok; sunucuya yazma isteği gitmedi | uyarı tam ekran değil | uyarı yok ya da devam edilebiliyor |
+| R-05 | Miktar girişi | Miktar alanı ve adım tuşları | `inputmode="numeric"` yalnız miktar alanında; +/− 48 px; üst sınır kalan miktar; tam sayı; varsayılan ön dolu (koli barkodu adedi ya da kalan) | varsayılan ön dolu değil | serbest metin, sınırsız ya da ondalık |
+| R-06 | Adım yönlendirmesi | Her adımda ne yapılacağı | Görünür "Adım n / m" ve tek cümlelik yönerge; geri dönüş yolu; çıkmaz ekran yok (hata ve bitti dahil) | yönerge ya da geri yok | adım belirsiz |
+| R-07 | Yumuşak kategori rengi | Kabul ekranları `cat-green`; yerleştirme `cat-teal` (taşıma ailesi); renk yalnız ikon dairesi ve başlık şeridinde | `cat-*-bg` daire + `cat-*-ink` ikon, doygun zemin yok, ana mavi yalnız birincil düğme/odak | 1 sapma | ≥ 2 sapma ya da renk tek anlam taşıyıcı |
+| R-08 | Düz Türkçe | Tüm görünür metin (TR) | Cümle ≤ 15 kelime, düğme ≤ 3 kelime ve fiille başlar, teknik terim ("SKU", "FIFO", "RLS") yok | 1–2 sapma | ≥ 3 sapma |
+| R-09 | Hata gösterimi | Sunucu reddi (`OVER_RECEIPT`, `SCAN_MISMATCH`, `LOCATION_LOCKED`, `FORBIDDEN`, ağ) | Neden + sonraki eylem cümlesi + "Ayrıntı" altında kod; hata `aria-live` ile okunur; alan kuralı UI'da yeniden yazılmamış | kod ya da eylem eksik | ham hata, kod yok ya da hata yutuluyor |
+| R-10 | Dokunuş bütçesi (N-16) | e2e `pointerdown` sayacı; tarama dokunuş değildir; akış başlangıcı = akış ekranı açık | Kabul (teslim seçili, tam miktar) ≤ 3; yerleştirme (görev ya da serbest, tam miktar) ≤ 3; teslim seçme ≤ +1 | +1 aşım | > +1 aşım |
+| R-11 | Büyük liste | Teslim/satır listesi | TanStack Virtual, liste içi dikey kaydırma, kart görünümü (tablo yok), keyset "daha fazla" | virtualizer var ama kaydırma sayfaya taşıyor | tüm satırlar DOM'da |
+| R-12 | Durum yalnız renk değil | Satır durumu (beklenen/kabul/hasarlı/açık) ve sonuç | Her durum ikon + metin + renk; beklenen ve kabul sayıları görünür | 1 durum yalnız renk | ≥ 2 |
+| R-13 | Sonuç ve sıradaki iş | Kayıttan sonra ekran | "Kaydedildi" onayı (kabul/hasarlı/açık sayıları ile) + tek birincil "Sıradaki" düğmesi; çift gönderim engelli (gönderirken düğme kapalı) | onay var, sonraki yok | sessiz başarı ya da çift gönderim mümkün |
+| R-14 | Yetki ve kilit | Yetkisiz kullanıcı (kalite onayı `document.approve` yok; saha `stock.view`/`stock.adjust` yok) | Gizlenmez; kilitli + gerekçe cümlesi + "Yardım çağır" yolu; sunucu `FORBIDDEN`'ı da gösterilir | kilit var, gerekçe yok | gizli ya da tıklanınca sessiz hata |
+| R-15 | Masaüstü liste + form | 1280 px `receipts` | Liste ve oluşturma formu aynı ekranda; tedarikçi referansı altında "kişisel veri girmeyin" uyarısı; kalite onayı eylemi var; tek birincil | uyarı ya da eylem eksik | form yok ya da > 1 birincil |
+| R-16 | Dil ve kontrast | i18n TR+EN eşit anahtar; `theme-contrast` yeni çiftleri; belirteç dışı hex yok | 0 sabit metin, kontrast test yeşil | 1 sabit metin | ≥ 2 sabit metin ya da test kırmızı |
+
+Toplam 16 ölçüt × 2 = 32 puan; birleştirme eşiği ≥ 29 ve hiçbirinde 0 yok (§1.4 gereği ölçüt başına 1 yalnız gerekçeli kabul riskiyle).
+
+### 7.2 Puan kaydı
+
+Ayrı denetçi puanı ve Supervisor'ın kullanıcıya görüntü gösterimi birleştirmeden önce zorunludur (kart §Supervisor notu). Uygulayıcı özpuanı karar kanıtı sayılmaz (§6 dersi). Kayıt şablonu:
+
+| Aday | R-01 | R-02 | R-03 | R-04 | R-05 | R-06 | R-07 | R-08 | R-09 | R-10 | R-11 | R-12 | R-13 | R-14 | R-15 | R-16 | Toplam | Karar |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| (doldurulacak) | | | | | | | | | | | | | | | | | /32 | |
+
+### 7.3 Geçmiş
+
+Bu bölüm önce ölçütleri yazar; uygulama sonrası ölçüm özeti ve denetçi puanı buraya eklenir (ölçüt metinleri değişmez).
