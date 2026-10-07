@@ -212,3 +212,25 @@ export async function getAvailableAtLocation(
     return { quantity: sum[0]?.q ?? "0" };
   });
 }
+
+export interface LocationBrief {
+  readonly id: string;
+  readonly warehouseId: string;
+  readonly code: string;
+  readonly name: string;
+  readonly kind: "RECEIVING" | "STORAGE" | "STAGING" | "TRANSIT";
+}
+
+/** Tek lokasyonun kısa kartı (görev kaynağını göstermek için). Başka tenant'ın/olmayan/kapsam dışı depodaki kimlik `NOT_FOUND`. */
+export async function getLocationBrief(params: TaskCallParams, input: { readonly locationId: string }): Promise<LocationBrief> {
+  const locationId = uuid(input.locationId);
+  return runTenantQuery({ ...params, permission: "stock.view" }, async (tx, m) => {
+    const rows = await tx.execute<{ id: string; warehouse_id: string; code: string; name: string; kind: LocationBrief["kind"] }>(
+      sql`SELECT id, warehouse_id, code, name, kind FROM public.locations WHERE tenant_id = ${m.tenantId}::uuid AND id = ${locationId}::uuid`,
+    );
+    const r = rows[0];
+    if (r === undefined) throw new AppError("NOT_FOUND");
+    await assertWarehouseVisible(tx, m, [r.warehouse_id]);
+    return { id: r.id, warehouseId: r.warehouse_id, code: r.code, name: r.name, kind: r.kind };
+  });
+}

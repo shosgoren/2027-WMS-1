@@ -108,6 +108,10 @@ export default async function FieldTasksPage({ params, searchParams }: { params:
                     {t("field.claim")}
                   </button>
                 </form>
+              ) : task.kind === "PUTAWAY" ? (
+                <Link href={`/t/${encodeURIComponent(slug)}/field/putaway?task=${encodeURIComponent(task.id)}`} className={`${BTN} bg-accent text-on-accent`}>
+                  {t("field.start")}
+                </Link>
               ) : (
                 <>
                   <button type="button" disabled aria-describedby={`start-${task.id}`} className={`${BTN} border-2 border-border-strong bg-surface text-ink opacity-60`}>

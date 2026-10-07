@@ -152,6 +152,7 @@ let settings: { saveSettingsAction: (f: FormData) => Promise<void> };
 let inviteAccept: Actions;
 let itemActions: Actions;
 let taskActions: Actions;
+let receiptActions: Actions;
 /** T-304: B tenant'ının sentetik görevi (eylem tablosu bu kimlikle çağırır). */
 let bTask: string;
 /** T-216: her tenant için sentetik birim/ürün/barkod kimlikleri (eylem tablosu B'nin kimlikleriyle çağırır). */
@@ -200,6 +201,7 @@ beforeAll(async () => {
   inviteAccept = (await load("app/invite/[token]/actions.ts")) as Actions;
   itemActions = (await load("app/t/[slug]/items/actions.ts")) as Actions;
   taskActions = (await load("app/t/[slug]/tasks/actions.ts")) as Actions;
+  receiptActions = (await load("app/t/[slug]/receipts/actions.ts")) as Actions;
   bTask = (await adm.query<{ id: string }>("INSERT INTO public.warehouse_tasks (tenant_id, warehouse_id, kind) VALUES ($1, $2, 'PICK') RETURNING id", [B.tenant, B.warehouse])).rows[0]!.id;
   const mkFx = async (t: Fx): Promise<ItemFx> => {
     const unit = (await adm.query<{ id: string }>("INSERT INTO public.units (tenant_id, id, code, name) VALUES ($1, gen_random_uuid(), $2, 'Birim') RETURNING id", [t.tenant, `U${rnd()}`])).rows[0]!.id;
@@ -253,6 +255,10 @@ const LOADERS = [
   // T-304: görev ekranları; üyelik/izin `listTasks`/`listMyTasks`/üyelik özeti ile sayfanın kendisinde çözülür.
   "tasks/page.tsx",
   "field/tasks/page.tsx",
+  // T-313: kabul ve yerleştirme ekranları; üyelik özeti + `listInboundReceipts`/`getInboundReceipt`/`listMyTasks` ile sayfanın kendisinde çözülür.
+  "receipts/page.tsx",
+  "field/receive/page.tsx",
+  "field/putaway/page.tsx",
 ] as const;
 /**
  * T-304: tenant verisi çizmeyen saha kabuğu sayfaları. Üyelik kararı üst `layout.tsx`'tedir (yukarıdaki LOADERS satırı çapraz tenant
@@ -528,16 +534,35 @@ const TASK_ACTIONS: Record<string, Call> = {
   cancelTaskAction: (slug) => taskActions.cancelTaskAction!({ slug, taskId: bTask, expectedVersion: 1, reason: "Ele geçirme" }),
 };
 
+/**
+ * T-313: kabul/yerleştirme eylemleri; hepsi B'nin ürün/depo kimlikleri (ve B'ye ait olmayan rastgele kimlikler) ile çağrılır. Yazma eylemleri
+ * `limitVerifiedTenant` ile üyelik çözümünde, okuma eylemleri domain sorgusunda `NOT_FOUND` verir; A slug'ında B kimlikleri etkisizdir.
+ */
+const RECEIPT_ACTIONS: Record<string, Call> = {
+  createReceiptAction: (slug) =>
+    receiptActions.createReceiptAction!({ slug, clientKey: randomUUID(), warehouseId: B.warehouse, supplierRef: "Ele geçirme", lines: [{ itemId: fx.B.item, unitId: fx.B.unit, expectedQuantity: "5" }] }),
+  receiveGoodsAction: (slug) =>
+    receiptActions.receiveGoodsAction!({ slug, clientKey: randomUUID(), receiptId: randomUUID(), lines: [{ lineId: randomUUID(), received: "5", locationId: randomUUID() }] }),
+  approveQualityAction: (slug) => receiptActions.approveQualityAction!({ slug, clientKey: randomUUID(), receiptId: randomUUID() }),
+  putawayAction: (slug) =>
+    receiptActions.putawayAction!({ slug, clientKey: randomUUID(), sourceLocationId: randomUUID(), targetLocationId: randomUUID(), itemId: fx.B.item, quantity: "5" }),
+  resolveItemScanAction: (slug) => receiptActions.resolveItemScanAction!({ slug, code: "8000000000000" }),
+  resolveLocationScanAction: (slug) => receiptActions.resolveLocationScanAction!({ slug, warehouseId: B.warehouse, code: "A-01" }),
+  availableAtLocationAction: (slug) => receiptActions.availableAtLocationAction!({ slug, locationId: randomUUID(), itemId: fx.B.item }),
+  itemUnitsAction: (slug) => receiptActions.itemUnitsAction!({ slug, itemId: fx.B.item }),
+};
+
 describe("Server Action'lar", () => {
   it("@AC-04 kapsam: members/actions.ts dışa aktarımlarının tamamı tabloda; ayarlar eylemi ayrıca sınanır", () => {
     expect(Object.keys(members).sort()).toEqual(Object.keys(ACTIONS).sort());
     expect(Object.keys(itemActions).sort()).toEqual(Object.keys(ITEM_ACTIONS).sort());
     expect(Object.keys(taskActions).sort()).toEqual(Object.keys(TASK_ACTIONS).sort());
+    expect(Object.keys(receiptActions).sort()).toEqual(Object.keys(RECEIPT_ACTIONS).sort());
     expect(Object.keys(settings)).toEqual(["saveSettingsAction"]);
     expect(Object.keys(inviteAccept)).toEqual(["acceptInvitationAction"]);
   });
 
-  for (const [name, call] of Object.entries({ ...ACTIONS, ...ITEM_ACTIONS, ...TASK_ACTIONS })) {
+  for (const [name, call] of Object.entries({ ...ACTIONS, ...ITEM_ACTIONS, ...TASK_ACTIONS, ...RECEIPT_ACTIONS })) {
     it(`@AC-04 ${name}: A yöneticisi B'nin slug'ıyla -> NOT_FOUND (var olmayan slug ile aynı yanıt); B'de hiçbir değişiklik yok`, async () => {
       const victim = { membership: B.managerMembership, invitation: bInvite.invitationId };
       const beforeB = await snapshot(B);

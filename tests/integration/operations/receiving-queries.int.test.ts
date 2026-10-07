@@ -14,6 +14,7 @@ import {
   RECEIPT_LIST_LIMIT_MAX,
   getAvailableAtLocation,
   getInboundReceipt,
+  getLocationBrief,
   listInboundReceipts,
   openInboundReceipt,
   receiveGoods,
@@ -167,6 +168,9 @@ describe("tenant yalıtımı (AC-04 okuma katmanı)", () => {
     const bLoc = await mkLoc(B, B.warehouseId, "RECEIVING");
     const aItem = await mkItem(A);
     expect((await failure(getAvailableAtLocation(owner(A), { locationId: bLoc, itemId: aItem }))).code).toBe("NOT_FOUND");
+    expect((await failure(getLocationBrief(owner(A), { locationId: bLoc }))).code).toBe("NOT_FOUND");
+    const aLoc = await mkLoc(A, A.warehouseId, "STORAGE", `BR-${hex(6)}`);
+    expect(await getLocationBrief(picker(A), { locationId: aLoc })).toMatchObject({ id: aLoc, warehouseId: A.warehouseId, kind: "STORAGE" });
   });
 });
 
@@ -191,6 +195,7 @@ describe("depo kapsamı (A-46)", () => {
       // Kapsam dışı depodaki lokasyon miktarı da NOT_FOUND.
       const outLoc = await mkLoc(A, otherWh, "RECEIVING");
       expect((await failure(getAvailableAtLocation(picker(A), { locationId: outLoc, itemId: item }))).code).toBe("NOT_FOUND");
+      expect((await failure(getLocationBrief(picker(A), { locationId: outLoc }))).code).toBe("NOT_FOUND");
 
       // MUTASYON: kapsam süzgeci olmayan eşdeğer sorgu kapsam dışı satırı döndürür → yukarıdaki `not.toContain` iddiası ayırt edicidir.
       const mutated = await runTenantQuery({ ...picker(A), permission: "stock.view" }, async (tx, m) => {

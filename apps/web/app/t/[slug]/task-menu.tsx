@@ -37,7 +37,7 @@ export type MyTasksSummary =
 
 export interface TaskMenuProps {
   readonly slug: string;
-  readonly allowed: { readonly usersManage: boolean; readonly settingsManage: boolean; readonly auditView: boolean; readonly stockView: boolean };
+  readonly allowed: { readonly usersManage: boolean; readonly settingsManage: boolean; readonly auditView: boolean; readonly stockView: boolean; readonly stockPost?: boolean };
   /** Verilirse (yalnız saha rolleri) ızgaranın üstünde telefon özet kartı çizilir. */
   readonly myTasks?: MyTasksSummary;
 }
@@ -189,6 +189,8 @@ export async function TaskMenu({ slug, allowed, myTasks }: TaskMenuProps) {
     items: { allowed: allowed.stockView, href: `${base}/items` },
     // Okuma `stock.view` (her rol); yazma kilidi hedef sayfada gösterilir, asıl yetki sunucudadır (T-205).
     warehouses: { allowed: true, href: `${base}/warehouses` },
+    // Saha kabulü (T-313): yazma `stock.post`; yetkisiz kullanıcıya bağlantı verilmez (kilit + gerekçe), FORBIDDEN ekranına götürmez.
+    receive: { allowed: allowed.stockPost === true, href: `${base}/field/receive` },
   };
   const ordered = orderTasks(TASKS);
   const real = ordered.filter((d) => hrefs[d.key] !== undefined);

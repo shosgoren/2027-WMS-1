@@ -246,7 +246,7 @@ describe("görev komutları", () => {
     expect("completeTask" in ops).toBe(false);
     expect("createTasks" in ops).toBe(false);
     expect(Object.keys(ops).sort()).toEqual(
-      ["REASON_MAX", "TASK_KINDS", "TASK_KIND_PERMISSION", "TASK_LIST_LIMIT_DEFAULT", "TASK_LIST_LIMIT_MAX", "TASK_SOURCE_KINDS", "TASK_STATUSES", "assignTask", "cancelTask", "claimTask", "listMyTasks", "listTasks", "nextTaskStatus", "approveQuality", "cancelInboundReceipt", "createInboundReceipt", "openInboundReceipt", "putaway", "receiveGoods", "RECEIPT_LIST_LIMIT_DEFAULT", "RECEIPT_LIST_LIMIT_MAX", "RECEIPT_STATUSES", "getAvailableAtLocation", "getInboundReceipt", "listInboundReceipts"].sort(),
+      ["REASON_MAX", "TASK_KINDS", "TASK_KIND_PERMISSION", "TASK_LIST_LIMIT_DEFAULT", "TASK_LIST_LIMIT_MAX", "TASK_SOURCE_KINDS", "TASK_STATUSES", "assignTask", "cancelTask", "claimTask", "listMyTasks", "listTasks", "nextTaskStatus", "approveQuality", "cancelInboundReceipt", "createInboundReceipt", "openInboundReceipt", "putaway", "receiveGoods", "RECEIPT_LIST_LIMIT_DEFAULT", "RECEIPT_LIST_LIMIT_MAX", "RECEIPT_STATUSES", "getAvailableAtLocation", "getInboundReceipt", "getLocationBrief", "listInboundReceipts"].sort(),
     );
     const pkg = JSON.parse(readFileSync(new URL("../../../packages/domain/package.json", import.meta.url), "utf8")) as { exports: Record<string, string> };
     expect(pkg.exports["./operations"]).toBe("./src/operations/index.ts");
