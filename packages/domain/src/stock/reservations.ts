@@ -28,9 +28,11 @@ import {
   dimensionIdentity,
   fromMicro,
   remainingToReserve,
+  sourceColumns,
   toMicro,
   type LedgerEntry,
   type PostingKind,
+  type ReservationSource,
   type ReservationSlice,
   type ReservationTake,
 } from "./plan.ts";
@@ -183,8 +185,19 @@ export async function assertReservableDimensions(
   tenantId: string,
   dims: readonly { readonly id: string; readonly key: StockDimensionKey }[],
 ): Promise<void> {
+  const ok = await reservableDimensionIds(tx, tenantId, dims);
+  if (dims.some((d) => !ok.has(d.id))) throw new AppError("INSUFFICIENT_STOCK");
+}
+
+/** Kural 5'e uyan boyut kimlikleri (AVAILABLE ∧ STORAGE|STAGING ∧ !pick_blocked). Lokasyonu olmayan boyut → `NOT_FOUND`. */
+async function reservableDimensionIds(
+  tx: AccessTx,
+  tenantId: string,
+  dims: readonly { readonly id: string; readonly key: StockDimensionKey }[],
+): Promise<Set<string>> {
+  const out = new Set<string>();
   const locIds = [...new Set(dims.map((d) => d.key.locationId))].sort(cmp);
-  if (locIds.length === 0) return;
+  if (locIds.length === 0) return out;
   const rows = await tx.execute<{ id: string; kind: string; pick_blocked: boolean }>(
     sql`SELECT id, kind, pick_blocked FROM public.locations WHERE tenant_id = ${tenantId}::uuid AND id = ANY(${pgUuidArray(locIds)}::uuid[])`,
   );
@@ -192,8 +205,9 @@ export async function assertReservableDimensions(
   for (const d of dims) {
     const l = byId.get(d.key.locationId.toLowerCase());
     if (l === undefined) throw new AppError("NOT_FOUND");
-    if (d.key.stockStatus !== "AVAILABLE" || (l.kind !== "STORAGE" && l.kind !== "STAGING") || l.pick_blocked) throw new AppError("INSUFFICIENT_STOCK");
+    if (d.key.stockStatus === "AVAILABLE" && (l.kind === "STORAGE" || l.kind === "STAGING") && !l.pick_blocked) out.add(d.id);
   }
+  return out;
 }
 
 // --- ortak yazıcılar (posting.ts ve cancelDocument kullanır) ---------------------------------------------------------------------
@@ -218,7 +232,8 @@ export async function applyReservedDeltas(tx: AccessTx, tenantId: string, deltas
 /** Kilitli rezervasyonun işlenecek payı. */
 export interface ReservationOp extends ReservationTake {
   readonly dimensionId: string;
-  readonly documentLineId: string;
+  /** Talep kaynağı; bölünen payın yeni satırı aynı kaynağa yazılır (T-306: belge satırı | sipariş satırı). */
+  readonly source: ReservationSource;
 }
 
 /**
@@ -240,11 +255,11 @@ export async function closeReservations(tx: AccessTx, tenantId: string, status: 
           RETURNING r.id`,
     );
     if (shrunk.length !== part.length) throw new AppError("INTERNAL");
-    const slices = JSON.stringify(part.map((o, ord) => ({ ord, dimension_id: o.dimensionId, line_id: o.documentLineId, quantity: fromMicro(o.take) })));
+    const slices = JSON.stringify(part.map((o, ord) => ({ ord, dimension_id: o.dimensionId, ...sourceColumns(o.source), quantity: fromMicro(o.take) })));
     const inserted = await tx.execute<{ id: string }>(
-      sql`INSERT INTO public.reservations (tenant_id, stock_dimension_id, document_line_id, quantity)
-          SELECT ${tenantId}::uuid, w.dimension_id, w.line_id, w.quantity
-            FROM jsonb_to_recordset(${slices}::jsonb) AS w(ord int, dimension_id uuid, line_id uuid, quantity numeric)
+      sql`INSERT INTO public.reservations (tenant_id, stock_dimension_id, document_line_id, order_line_id, quantity)
+          SELECT ${tenantId}::uuid, w.dimension_id, w.document_line_id, w.order_line_id, w.quantity
+            FROM jsonb_to_recordset(${slices}::jsonb) AS w(ord int, dimension_id uuid, document_line_id uuid, order_line_id uuid, quantity numeric)
            ORDER BY w.ord
           RETURNING id`,
     );
@@ -279,7 +294,7 @@ export async function releaseForCancellation(tx: AccessTx, tenantId: string, loc
     const dimId = dimIds.get(dimensionIdentity(r.key));
     if (lr === undefined || lr.status !== "ACTIVE" || dimId === undefined || lr.stockDimensionId !== dimId) throw versionConflict();
     const q = toMicro(lr.quantity);
-    ops.push({ id: lr.id, take: q, rest: 0n, dimensionId: dimId, documentLineId: lr.documentLineId });
+    ops.push({ id: lr.id, take: q, rest: 0n, dimensionId: dimId, source: r.source });
     deltas.set(dimId, (deltas.get(dimId) ?? 0n) - q);
   }
   const closed = await closeReservations(tx, tenantId, "RELEASED", ops);
@@ -288,7 +303,7 @@ export async function releaseForCancellation(tx: AccessTx, tenantId: string, loc
 }
 
 export interface ReservationMoveOp extends ReservationTake {
-  readonly documentLineId: string;
+  readonly source: ReservationSource;
   readonly sourceDimensionId: string;
   readonly targetDimensionId: string;
 }
@@ -325,8 +340,8 @@ export async function moveReservations(tx: AccessTx, tenantId: string, ops: read
     if (shrunk.length !== part.length) throw new AppError("INTERNAL");
     const slices = JSON.stringify(part.map((o, ord) => ({ ord, src: o.id, dimension_id: o.targetDimensionId, quantity: fromMicro(o.take) })));
     const inserted = await tx.execute<{ id: string }>(
-      sql`INSERT INTO public.reservations (tenant_id, stock_dimension_id, document_line_id, quantity, expires_at)
-          SELECT ${tenantId}::uuid, w.dimension_id, s.document_line_id, w.quantity, s.expires_at
+      sql`INSERT INTO public.reservations (tenant_id, stock_dimension_id, document_line_id, order_line_id, quantity, expires_at)
+          SELECT ${tenantId}::uuid, w.dimension_id, s.document_line_id, s.order_line_id, w.quantity, s.expires_at
             FROM jsonb_to_recordset(${slices}::jsonb) AS w(ord int, src uuid, dimension_id uuid, quantity numeric)
             JOIN public.reservations s ON s.tenant_id = ${tenantId}::uuid AND s.id = w.src
            ORDER BY w.ord
@@ -399,13 +414,13 @@ export function planReservationEffects(args: {
       const e = es[0] as LedgerEntry;
       const dimId = dimOf(e.key);
       const slices = [...lockedActive.values()]
-        .filter((r) => r.documentLineId.toLowerCase() === lineId && r.stockDimensionId === dimId)
+        .filter((r) => r.documentLineId !== null && r.documentLineId.toLowerCase() === lineId && r.stockDimensionId === dimId)
         .map((r) => ({ id: r.id, quantity: toMicro(r.quantity) }));
       const sum = slices.reduce((a, s) => a + s.quantity, 0n);
       const out = -e.delta;
       const amount = sum < out ? sum : out;
       if (amount <= 0n) continue;
-      for (const t of allocateAcross(slices, amount)) consumeOps.push({ ...t, dimensionId: dimId, documentLineId: lineId });
+      for (const t of allocateAcross(slices, amount)) consumeOps.push({ ...t, dimensionId: dimId, source: { kind: "DOCUMENT_LINE", lineId } });
       bump(reservedDelta, dimId, -amount);
       bump(ownReserved, dimensionIdentity(e.key), amount);
     }
@@ -426,21 +441,23 @@ export function planReservationEffects(args: {
     const sourceId = dimOf(from.key);
     const targetId = dimOf(to.key);
     const slices: ReservationSlice[] = [];
-    const lineOf = new Map<string, string>();
+    const lineOf = new Map<string, ReservationSource>();
     for (const raw of mv.reservationIds) {
       const id = uuid(raw);
       if (seenReservations.has(id)) throw invalid();
       seenReservations.add(id);
       const r = lockedActive.get(id);
       if (r === undefined || r.stockDimensionId !== sourceId) throw invalid();
+      // Sipariş satırı rezervasyonunun toplamada hedef boyuta taşınması T-307'nin kapsamıdır (LockedReservation sipariş kaynağını taşımaz): burada reddedilir.
+      if (r.documentLineId === null) throw invalid();
       slices.push({ id: r.id, quantity: toMicro(r.quantity) });
-      lineOf.set(r.id, r.documentLineId);
+      lineOf.set(r.id, { kind: "DOCUMENT_LINE", lineId: r.documentLineId });
     }
     const sum = slices.reduce((a, s) => a + s.quantity, 0n);
     const qty = to.delta;
     const amount = sum < qty ? sum : qty;
     for (const t of allocateAcross(slices, amount)) {
-      moveOps.push({ ...t, documentLineId: lineOf.get(t.id) as string, sourceDimensionId: sourceId, targetDimensionId: targetId });
+      moveOps.push({ ...t, source: lineOf.get(t.id) as ReservationSource, sourceDimensionId: sourceId, targetDimensionId: targetId });
     }
     bump(reservedDelta, sourceId, -amount);
     bump(reservedDelta, targetId, amount);
@@ -448,6 +465,174 @@ export function planReservationEffects(args: {
     targetDims.set(targetId, { id: targetId, key: to.key });
   }
   return { consumeOps, moveOps, reservedDelta, ownReserved, targetDims: [...targetDims.values()] };
+}
+
+// --- tahsis / serbest bırakma çekirdeği (T-306: belge satırı ve sipariş satırı ortak; aynı kilit planı, aynı kural 5 süzgeci) ----------------------
+
+/** Bir talep kaynağı için normalleştirilmiş tahsis isteği (boyutlar ürüne göre kurulmuştur). */
+export interface AllocationRequest {
+  readonly source: ReservationSource;
+  readonly itemId: string;
+  readonly allocations: readonly { readonly key: StockDimensionKey; readonly qty: bigint }[];
+  /** Bu çağrıda eklenebilecek en çok miktar (satır miktarı − Σ ACTIVE; sipariş satırı: açık − Σ ACTIVE). */
+  readonly capacity: bigint;
+  /**
+   * `true` (A-138 önerisi): kilitli bakiye plandan bayatsa (eşzamanlı tahsis, `pick_blocked`) istek KIRPILIR — yetmeyen kısım tahsissiz kalır (ret değil).
+   * `false` (elle/belge): yetersiz → `INSUFFICIENT_STOCK`, kapasite aşımı → `VALIDATION_FAILED`.
+   */
+  readonly clamp: boolean;
+}
+export interface AllocationOutcome {
+  /** Eklenen rezervasyon satırları (istek sırasıyla, istek içinde verilen sırayla). */
+  readonly reservationIds: readonly string[];
+  /** İstek başına tahsis edilen toplam (1e-6 ölçekli). */
+  readonly allocated: readonly bigint[];
+}
+
+/**
+ * Atomik tahsis: `acquireStockLocks` SONRASI, kilitli görüntü üzerinde. Sıra (T-221 ile aynı): lokasyon (FOR SHARE, ACTIVE) → ürün (FOR SHARE) →
+ * ölçek → kural 5 uygunluğu → yeterlilik (quantity − reserved ≥ tahsis) → satır kapasitesi → rezervasyon satırları → `reserved_quantity`.
+ * Kilit sorgusu YOKTUR; planda bildirilmemiş boyut `VERSION_CONFLICT`. `opts.warehouseId`: belge deposu (A-145 eşitliği) ya da `null` (sipariş).
+ */
+export async function allocateInTx(
+  tx: AccessTx,
+  locked: LockedState,
+  tenantId: string,
+  requests: readonly AllocationRequest[],
+  opts: { readonly warehouseId: string | null; readonly expiresAt: string | null },
+): Promise<AllocationOutcome> {
+  const allKeys = uniqueKeys(requests.flatMap((r) => r.allocations.map((a) => a.key)));
+  if (allKeys.length === 0) return { reservationIds: [], allocated: requests.map(() => 0n) };
+  await assertLocationsActiveInWarehouse(tx, tenantId, allKeys.map((d) => d.locationId), opts.warehouseId);
+  const itemIds = [...new Set(requests.map((r) => r.itemId.toLowerCase()))].sort(cmp);
+  await assertItemsActive(tx, tenantId, itemIds, { archivedDetail: "IN_USE" });
+  const scales = await tx.execute<{ id: string; quantity_scale: number }>(
+    sql`SELECT id, quantity_scale FROM public.items WHERE tenant_id = ${tenantId}::uuid AND id = ANY(${pgUuidArray(itemIds)}::uuid[])`,
+  );
+  const divisorOf = new Map(scales.map((x) => [x.id.toLowerCase(), 10n ** BigInt(6 - Number(x.quantity_scale ?? 0))]));
+  for (const r of requests) {
+    const d = divisorOf.get(r.itemId.toLowerCase());
+    if (d === undefined) throw new AppError("NOT_FOUND");
+    if (!r.clamp && r.allocations.some((a) => a.qty % d !== 0n)) throw new AppError("VALIDATION_FAILED", { detail: "QUANTITY_SCALE" });
+  }
+
+  const dimIds = lockedDimensionIdByIdentity(locked);
+  const idOf = (k: StockDimensionKey): string => {
+    const id = dimIds.get(dimensionIdentity(k));
+    if (id === undefined) throw versionConflict(); // plan bayat: boyut kilit planında yok
+    return id;
+  };
+  const resolved = allKeys.map((k) => ({ id: idOf(k), key: k }));
+  const reservable = await reservableDimensionIds(tx, tenantId, resolved);
+  for (const r of requests) {
+    if (!r.clamp && r.allocations.some((a) => !reservable.has(idOf(a.key)))) throw new AppError("INSUFFICIENT_STOCK");
+  }
+
+  // Yeterlilik (kilitli bakiye): quantity − reserved − bu komutta önceki tahsisler ≥ tahsis.
+  const balanceByDim = new Map(locked.balances.map((b) => [b.stockDimensionId, b]));
+  const taken = new Map<string, bigint>();
+  const finals: { readonly req: AllocationRequest; readonly rows: { readonly dimId: string; readonly qty: bigint }[] }[] = [];
+  for (const r of requests) {
+    const divisor = divisorOf.get(r.itemId.toLowerCase()) as bigint;
+    const rows: { dimId: string; qty: bigint }[] = [];
+    let left = r.capacity;
+    for (const a of r.allocations) {
+      const id = idOf(a.key);
+      const b = balanceByDim.get(id);
+      if (b === undefined) throw new AppError("INTERNAL");
+      const free = toMicro(b.quantity) - toMicro(b.reservedQuantity) - (taken.get(id) ?? 0n);
+      let qty = a.qty;
+      if (r.clamp) {
+        if (!reservable.has(id)) continue;
+        if (qty > free) qty = free;
+        if (qty > left) qty = left;
+        qty -= qty % divisor;
+        if (qty <= 0n) continue;
+      } else if (free < qty) {
+        throw new AppError("INSUFFICIENT_STOCK");
+      }
+      taken.set(id, (taken.get(id) ?? 0n) + qty);
+      left -= qty;
+      rows.push({ dimId: id, qty });
+    }
+    finals.push({ req: r, rows });
+  }
+  // Satır başına Σ ACTIVE ≤ satır miktarı (çağıranın kilitli kaynağı üzerinde hesaplanan kapasite).
+  const allocated = finals.map((f) => f.rows.reduce((a, x) => a + x.qty, 0n));
+  finals.forEach((f, i) => {
+    if ((allocated[i] as bigint) > f.req.capacity) throw invalid();
+  });
+  const flat = finals.flatMap((f) => f.rows.map((row) => ({ source: f.req.source, ...row })));
+  if (flat.length === 0) return { reservationIds: [], allocated };
+  const json = JSON.stringify(flat.map((x, ord) => ({ ord, dimension_id: x.dimId, ...sourceColumns(x.source), quantity: fromMicro(x.qty) })));
+  const inserted = await tx.execute<{ id: string }>(
+    sql`INSERT INTO public.reservations (tenant_id, stock_dimension_id, document_line_id, order_line_id, quantity, expires_at)
+        SELECT ${tenantId}::uuid, w.dimension_id, w.document_line_id, w.order_line_id, w.quantity, ${opts.expiresAt}::timestamptz
+          FROM jsonb_to_recordset(${json}::jsonb) AS w(ord int, dimension_id uuid, document_line_id uuid, order_line_id uuid, quantity numeric)
+         ORDER BY w.ord
+        RETURNING id`,
+  );
+  if (inserted.length !== flat.length) throw new AppError("INTERNAL");
+  await applyReservedDeltas(tx, tenantId, taken);
+  return { reservationIds: inserted.map((r) => r.id), allocated };
+}
+
+export interface ReleasedPart {
+  readonly row: ReservationPlanRow;
+  readonly take: bigint;
+}
+/**
+ * Seçili (kilit sonrası yeniden okunmuş, ACTIVE) rezervasyonlardan `wanted` (null = tamamı) kadarını serbest bırakır: kısmi payda satır bölünür
+ * (A-221-4). `stagedLast`: serbest bırakma önceliği — sevk alanında (STAGING) bekleyen mal en sona bırakılır (önce toplanmamış pay; sipariş iptali).
+ * Kilitli görüntüyle uyumsuz satır → `VERSION_CONFLICT` (plan bayat). Fiziksel stok yerinde (kural 7). `wanted` seçimi aşarsa `VALIDATION_FAILED`.
+ */
+export async function releaseSelected(
+  tx: AccessTx,
+  tenantId: string,
+  locked: LockedState,
+  selected: readonly ReservationPlanRow[],
+  wanted: bigint | null,
+  opts: { readonly stagedLast?: boolean } = {},
+): Promise<{ readonly closedIds: string[]; readonly amount: bigint; readonly parts: ReleasedPart[] }> {
+  const lockedById = new Map(locked.reservations.map((r) => [r.id.toLowerCase(), r]));
+  const dimIds = lockedDimensionIdByIdentity(locked);
+  const slices: ReservationSlice[] = [];
+  const meta = new Map<string, { dimensionId: string; row: ReservationPlanRow }>();
+  for (const r of selected) {
+    const lr = lockedById.get(r.id.toLowerCase());
+    const dimId = dimIds.get(dimensionIdentity(r.key));
+    if (lr === undefined || lr.status !== "ACTIVE" || dimId === undefined || lr.stockDimensionId !== dimId) throw versionConflict();
+    slices.push({ id: lr.id, quantity: toMicro(lr.quantity) });
+    meta.set(lr.id, { dimensionId: dimId, row: r });
+  }
+  const available = slices.reduce((a, s) => a + s.quantity, 0n);
+  const amount = wanted ?? available;
+  if (amount <= 0n || amount > available) throw invalid();
+  const first = selected[0] as ReservationPlanRow;
+  const scale = await tx.execute<{ quantity_scale: number }>(
+    sql`SELECT quantity_scale FROM public.items WHERE tenant_id = ${tenantId}::uuid AND id = ${first.key.itemId}::uuid`,
+  );
+  if (amount % 10n ** BigInt(6 - Number(scale[0]?.quantity_scale ?? 0)) !== 0n) throw new AppError("VALIDATION_FAILED", { detail: "QUANTITY_SCALE" });
+
+  const staged = (s: ReservationSlice): boolean => (meta.get(s.id) as { row: ReservationPlanRow }).row.locationKind === "STAGING";
+  const tiers: ReservationSlice[][] = opts.stagedLast === true ? [slices.filter((s) => !staged(s)), slices.filter(staged)] : [slices];
+  const takes: ReservationTake[] = [];
+  let left = amount;
+  for (const tier of tiers) {
+    const have = tier.reduce((a, s) => a + s.quantity, 0n);
+    const part = have < left ? have : left;
+    if (part > 0n) takes.push(...allocateAcross(tier, part));
+    left -= part;
+  }
+  const ops: ReservationOp[] = takes.map((t) => {
+    const m = meta.get(t.id) as { dimensionId: string; row: ReservationPlanRow };
+    return { ...t, dimensionId: m.dimensionId, source: m.row.source };
+  });
+  const closedIds = await closeReservations(tx, tenantId, "RELEASED", ops);
+  const deltas = new Map<string, bigint>();
+  for (const o of ops) deltas.set(o.dimensionId, (deltas.get(o.dimensionId) ?? 0n) - o.take);
+  await applyReservedDeltas(tx, tenantId, deltas);
+  return { closedIds, amount, parts: takes.map((t) => ({ row: (meta.get(t.id) as { row: ReservationPlanRow }).row, take: t.take })) };
 }
 
 // --- reserve -----------------------------------------------------------------------------------------------------------------
@@ -533,58 +718,28 @@ export async function reserve(params: StockDocCallParams, input: ReserveInput): 
         if (header.status !== "APPROVED" || !RESERVABLE_KINDS.has(header.kind)) throw documentState();
         const itemId = line.item_id.toLowerCase();
         const allocs = normalizeAllocations(itemId, input.allocations);
-        const dims = uniqueKeys(allocs.map((a) => a.key));
-
-        // Kilitten SONRA: lokasyon (FOR SHARE, ACTIVE, belge deposu — A-145) → ürün (FOR SHARE, ACTIVE).
-        await assertLocationsActiveInWarehouse(tx, ctx.tenantId, dims.map((d) => d.locationId), header.warehouseId);
-        await assertItemsActive(tx, ctx.tenantId, [itemId], { archivedDetail: "IN_USE" });
-        const scale = await tx.execute<{ quantity_scale: number }>(
-          sql`SELECT quantity_scale FROM public.items WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${itemId}::uuid`,
-        );
-        const divisor = 10n ** BigInt(6 - Number(scale[0]?.quantity_scale ?? 0));
-        if (allocs.some((a) => a.qty % divisor !== 0n)) throw new AppError("VALIDATION_FAILED", { detail: "QUANTITY_SCALE" });
-
-        const dimIds = lockedDimensionIdByIdentity(locked);
-        const resolved = dims.map((k) => {
-          const id = dimIds.get(dimensionIdentity(k));
-          if (id === undefined) throw versionConflict();
-          return { id, key: k };
-        });
-        await assertReservableDimensions(tx, ctx.tenantId, resolved);
-
-        // Yeterlilik (kilitli bakiye): quantity − reserved ≥ aynı boyuta toplam tahsis.
-        const need = new Map<string, bigint>();
-        for (const a of allocs) {
-          const id = dimIds.get(dimensionIdentity(a.key)) as string;
-          need.set(id, (need.get(id) ?? 0n) + a.qty);
-        }
-        const balanceByDim = new Map(locked.balances.map((b) => [b.stockDimensionId, b]));
-        for (const [id, n] of need) {
-          const b = balanceByDim.get(id);
-          if (b === undefined) throw new AppError("INTERNAL");
-          if (toMicro(b.quantity) - toMicro(b.reservedQuantity) < n) throw new AppError("INSUFFICIENT_STOCK");
-        }
-
         // Satır başına Σ ACTIVE ≤ satır miktarı (belge kilitli: aynı satıra başka tahsis giremez; taşıma/tüketim toplamı artırmaz).
         const sum = await tx.execute<{ s: string }>(
           sql`SELECT COALESCE(sum(quantity), 0)::text AS s FROM public.reservations
                WHERE tenant_id = ${ctx.tenantId}::uuid AND document_line_id = ${documentLineId}::uuid AND status = 'ACTIVE'`,
         );
-        const total = allocs.reduce((a, x) => a + x.qty, 0n);
-        if (total > remainingToReserve(toMicro(line.base_quantity), toMicro(sum[0]?.s ?? "0"))) throw invalid();
-
-        const json = JSON.stringify(
-          allocs.map((a, ord) => ({ ord, dimension_id: dimIds.get(dimensionIdentity(a.key)), quantity: fromMicro(a.qty) })),
+        const out = await allocateInTx(
+          tx,
+          locked,
+          ctx.tenantId,
+          [
+            {
+              source: { kind: "DOCUMENT_LINE", lineId: documentLineId },
+              itemId,
+              allocations: allocs,
+              capacity: remainingToReserve(toMicro(line.base_quantity), toMicro(sum[0]?.s ?? "0")),
+              clamp: false,
+            },
+          ],
+          { warehouseId: header.warehouseId, expiresAt },
         );
-        const inserted = await tx.execute<{ id: string }>(
-          sql`INSERT INTO public.reservations (tenant_id, stock_dimension_id, document_line_id, quantity, expires_at)
-              SELECT ${ctx.tenantId}::uuid, w.dimension_id, ${documentLineId}::uuid, w.quantity, ${expiresAt}::timestamptz
-                FROM jsonb_to_recordset(${json}::jsonb) AS w(ord int, dimension_id uuid, quantity numeric)
-               ORDER BY w.ord
-              RETURNING id`,
-        );
-        if (inserted.length !== allocs.length) throw new AppError("INTERNAL");
-        await applyReservedDeltas(tx, ctx.tenantId, need);
+        const total = out.allocated.reduce((a, x) => a + x, 0n);
+        const inserted = out.reservationIds.map((id) => ({ id }));
 
         return {
           result: {
@@ -635,7 +790,8 @@ export async function release(params: StockDocCallParams, input: ReleaseInput): 
         if (reservationId !== null) {
           const r = rows[0];
           if (r === undefined) throw new AppError("NOT_FOUND");
-          lineId = r.documentLineId;
+          if (r.source.kind !== "DOCUMENT_LINE") throw invalid(); // sipariş rezervasyonu `cancelOrderLine` ile bırakılır (T-306)
+          lineId = r.source.lineId;
         }
         const line = await readLine(tx, m.tenantId, lineId as string);
         const active = rows.filter((r) => r.status === "ACTIVE");
@@ -655,47 +811,27 @@ export async function release(params: StockDocCallParams, input: ReleaseInput): 
         assertNotProcessing(header); // M-6: işleme sırasında serbest bırakma yok
         // Kilitten sonra seçimi yeniden oku (belge kilitli ⇒ satırın ACTIVE kümesi büyüyemez); kümede olmayan ⇒ plan bayat.
         const fresh = await readReservationPlanRows(tx, ctx.tenantId, reservationId !== null ? { ids: [reservationId] } : { lineId: lineSel as string });
-        const lockedById = new Map(locked.reservations.map((r) => [r.id.toLowerCase(), r]));
         const selected = fresh.filter((r) => r.status === "ACTIVE");
         if (reservationId !== null && fresh[0] !== undefined && fresh[0].status !== "ACTIVE") throw invalid(); // kapalı rezervasyon serbest bırakılamaz
         if (selected.length === 0) throw invalid(); // bırakılacak aktif rezervasyon yok
-        const dimIds = lockedDimensionIdByIdentity(locked);
-        const slices: ReservationSlice[] = [];
-        const meta = new Map<string, { dimensionId: string; documentLineId: string }>();
-        for (const r of selected) {
-          const lr = lockedById.get(r.id.toLowerCase());
-          const dimId = dimIds.get(dimensionIdentity(r.key));
-          if (lr === undefined || lr.status !== "ACTIVE" || dimId === undefined || lr.stockDimensionId !== dimId) throw versionConflict();
-          slices.push({ id: lr.id, quantity: toMicro(lr.quantity) });
-          meta.set(lr.id, { dimensionId: dimId, documentLineId: lr.documentLineId });
-        }
-        const available = slices.reduce((a, s) => a + s.quantity, 0n);
-        const amount = wanted ?? available;
-        if (amount > available) throw invalid();
         const first = selected[0] as ReservationPlanRow;
-        const scale = await tx.execute<{ quantity_scale: number }>(
-          sql`SELECT quantity_scale FROM public.items WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${first.key.itemId}::uuid`,
-        );
-        if (amount % 10n ** BigInt(6 - Number(scale[0]?.quantity_scale ?? 0)) !== 0n) throw new AppError("VALIDATION_FAILED", { detail: "QUANTITY_SCALE" });
-
-        const takes = allocateAcross(slices, amount);
-        const ops: ReservationOp[] = takes.map((t) => ({ ...t, ...(meta.get(t.id) as { dimensionId: string; documentLineId: string }) }));
-        const closed = await closeReservations(tx, ctx.tenantId, "RELEASED", ops);
-        const deltas = new Map<string, bigint>();
-        for (const o of ops) deltas.set(o.dimensionId, (deltas.get(o.dimensionId) ?? 0n) - o.take);
-        await applyReservedDeltas(tx, ctx.tenantId, deltas);
+        if (first.source.kind !== "DOCUMENT_LINE") throw invalid();
+        const rel = await releaseSelected(tx, ctx.tenantId, locked, selected, wanted);
+        const closed = rel.closedIds;
+        const amount = rel.amount;
+        const firstLineId = first.source.lineId;
         return {
           result: {
             documentId: locked.document.id,
             reservationIds: closed,
-            lines: [{ lineId: first.documentLineId, quantity: fromMicro(amount) }],
+            lines: [{ lineId: firstLineId, quantity: fromMicro(amount) }],
           },
           audit: {
             action: "reservation.released",
             entityType: "stock_document",
             entityId: locked.document.id,
             requestId: input.requestId ?? null,
-            changeSummary: { documentLineId: first.documentLineId, reservationCount: closed.length, quantity: fromMicro(amount), via: "release" },
+            changeSummary: { documentLineId: firstLineId, reservationCount: closed.length, quantity: fromMicro(amount), via: "release" },
           },
         };
       },

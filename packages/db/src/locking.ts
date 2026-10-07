@@ -86,7 +86,8 @@ export interface LockedBalance {
 export interface LockedReservation {
   readonly id: string;
   readonly stockDimensionId: string;
-  readonly documentLineId: string;
+  /** 0016: `document_line_id` NULL olabilir (sipariş satırı rezervasyonu; `order_line_id` ile tam biri dolu). NULL → `null` (metin değil). */
+  readonly documentLineId: string | null;
   readonly quantity: string;
   readonly status: string;
 }
@@ -341,7 +342,7 @@ async function lockReservations(tx: TenantTx, tenantId: string, ids: readonly st
   return rows.map((r) => ({
     id: str(r.id),
     stockDimensionId: str(r.stock_dimension_id),
-    documentLineId: str(r.document_line_id),
+    documentLineId: strOrNull(r.document_line_id),
     quantity: str(r.quantity),
     status: str(r.status),
   }));
