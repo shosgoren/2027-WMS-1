@@ -128,6 +128,17 @@ ve açılışta bir kez) TÜM iş türleri için tek mekanizmadır; `wms_worker`
 `email.send` aynı `Idempotency-Key` (= iş kimliği) ile yeniden gönderir, sağlayıcı tekilleştirir (Resend); `invitation.deliver` yeniden denemede yeni belirteç üretir (eski bağlantı geçersiz; ADR-019 §4). `demo.reseed` doğası gereği tekrarlanabilirdir (singleton + onarım).
 **Test:** `tests/integration/queue/crash-recovery.int.test.ts` (gerçek `kill -9`, çocuk süreç; gerçek süre aşımı beklenir).
 
+## Worker izleme: heartbeat ve kuyruk ilerleme alarmı (T-282)
+`/api/health` (uptime ve deploy-smoke içindir) artık `worker` ve `queue` alanlarında worker'ın yaşadığını ve kuyruğun ilerlediğini ölçer; Fly makine kontrolü `/api/health/live` SIĞ kalır (DB'ye dokunmaz).
+Worker (`apps/worker/src/jobs/worker-heartbeat.ts`) açılışta ve her 30 sn'de `wms_health.worker_heartbeats` satırını (0025; yalnız `wms_worker` yazar, `wms_app` yalnız SELECT) günceller ve `pgboss.job` sayaçlarını aynı yazımda kaydeder.
+Yanıt: `{ status, db, queue, worker, metrics: { workerAgeSeconds, oldestWaitingSeconds, expiredActive, failedRecent }, version }`. Kırmızı koşullar (A-282-1…4; sabitler `WORKER_HEALTH_THRESHOLDS`):
+- `worker: fail`: son heartbeat > 120 sn eski ya da hiç satır yok (worker durdu/çöktü/DB'ye yazamıyor/kuyruk sayacı sorgusu başarısız). Önce `fly status -a <worker uygulaması>` ve worker günlüğünde `worker.heartbeat.failed` (error) arayın.
+- `queue: fail`: pgboss okunamıyor VEYA en eski hazır iş > 300 sn (tüketici takılı/yetersiz) VEYA süresi dolmuş `active` iş (bakım turu çalışmıyor; bkz. Kuyruk bakımı) VEYA son 30 dk'da kalıcı `failed` iş (`queue.maintenance.expired_exhausted`/`job handler failed (permanent)` günlüklerine bakın).
+- Hangi eşiğin aşıldığı `metrics` sayılarından okunur; `uptime-check` çıktısında yalnız alan adı ve durum görünür (sayı yazmaz). Yanıtta iş yükü/tenant/kişisel veri yoktur.
+- Dağıtım sırası: worker önce başlarsa ilk atış açılışta hemen yazılır; web yeni sürümde worker henüz yeni sürümde değilken `worker: fail` görebilir (eski worker heartbeat yazmaz) — worker'ı dağıtmadan uptime kırmızısı beklenir, worker dağıtıldığında kendiliğinden yeşile döner.
+- Eski örnek satırları (1 günden eski) her atışta temizlenir; Fly'da makine değişince eski satır bayatlar ama en taze satır belirleyicidir.
+**Test:** `tests/integration/health/worker-health.int.test.ts` (heartbeat durunca, eski bekleyen iş, süresi dolmuş aktif iş, kalıcı failed → kırmızı; temizken yeşil).
+
 ## Restore tatbikatı: stok içerik özeti ve restore sonrası tutarlılık (T-284)
 `scripts/restore-drill.mjs` (yalnız GitHub Actions) iki ek kanıt üretir; ikisi de salt okunur `REPEATABLE READ READ ONLY` transaction'dır ve BYPASSRLS sahip rolü ister (aksi `rls_bypass=false` → kırmızı):
 - **İçerik özeti** (`scripts/db-fingerprint.mjs`, `CONTENT_TABLES`): her stok/belge/seri-lot tablosu için satır sayısı + satır başına sha256'ların anahtar sıralı özeti. Satır sayısı aynı kalıp tek bir miktar değişse bile ilgili `content_<tablo>` bölümü farklı çıkar ve tatbikat kırmızı olur. Özet `summary.json > sections` altında bölüm adlarıyla görünür (değer yok).
