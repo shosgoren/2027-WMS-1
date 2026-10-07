@@ -352,7 +352,7 @@ export async function getLocationTree(params: WarehouseCallParams, input: GetLoc
   });
 }
 
-/** Depo içinde koda göre tam eşleşme (kod normalleştirilir). Yoksa `null`. */
+/** Depo içinde koda göre tam eşleşme (kod normalleştirilir). Yoksa `null`; eski kod birden çok karta aitse `CODE_AMBIGUOUS`. */
 export async function findLocationByCode(
   params: WarehouseCallParams,
   input: { readonly warehouseId: string; readonly code: string },
@@ -367,14 +367,18 @@ export async function findLocationByCode(
            WHERE tenant_id = ${m.tenantId}::uuid AND warehouse_id = ${warehouseId}::uuid AND code = ${code}`,
     );
     if (rows[0] !== undefined) return toRow(rows[0]);
-    // T-251: güncel eşleşme yoksa eski kod geçmişi; aynı depodaki en son eşleşen kart döner ("bu kod X olarak değişti").
+    // T-251: güncel eşleşme yoksa eski kod geçmişi. T-257: aynı eski kod birden çok kartın geçmişinde varsa (A-69, barkod
+    // belirsizliği deseni) sessizce en yenisi seçilmez: `VALIDATION_FAILED`/`CODE_AMBIGUOUS`; kullanıcı güncel kodla arar.
     const old = await tx.execute<LocationDbRow>(
       sql`SELECT ${sql.raw(COLS_L)} FROM public.code_history h
             JOIN public.locations l ON l.tenant_id = h.tenant_id AND l.id = h.entity_id
            WHERE h.tenant_id = ${m.tenantId}::uuid AND h.entity_type = 'location' AND h.old_code = ${code}
              AND l.warehouse_id = ${warehouseId}::uuid
-           ORDER BY h.changed_at DESC, h.id DESC LIMIT 1`,
+           GROUP BY l.tenant_id, l.id
+           ORDER BY max(h.changed_at) DESC, l.id
+           LIMIT 2`,
     );
+    if (old.length > 1) throw new AppError("VALIDATION_FAILED", { detail: "CODE_AMBIGUOUS" });
     return old[0] === undefined ? null : { ...toRow(old[0]), renamedFrom: code };
   });
 }

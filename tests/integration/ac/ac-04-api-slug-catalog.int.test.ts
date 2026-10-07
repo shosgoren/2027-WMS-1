@@ -168,6 +168,7 @@ describe("katalog eylemleri (API: Server Action)", () => {
       "setConversion(B itemId)": (i) => act.setConversionAction!({ slug: A.slug, itemId: i.item, unitId: A.boxUnitId, factor: "5" }),
       "setConversion(A itemId + B unitId)": (i) => act.setConversionAction!({ slug: A.slug, itemId: A.itemId, unitId: i.box, factor: "5" }),
       "updateItem(B itemId)": (i) => act.updateItemAction!({ slug: A.slug, itemId: i.item, name: "Ele Gecirildi" }),
+      "updateItem code(B itemId)": (i) => act.updateItemAction!({ slug: A.slug, itemId: i.item, code: `X-${rnd()}` }),
       "archiveItem(B itemId)": (i) => act.archiveItemAction!({ slug: A.slug, itemId: i.item }),
       "removeBarcode(B barcodeId)": (i) => act.removeBarcodeAction!({ slug: A.slug, barcodeId: i.barcode }),
       "createItem(B baseUnitId)": (i) => act.createItemAction!({ slug: A.slug, code: `X-${rnd()}`, name: "Ele geçirme", baseUnitId: i.unit }),

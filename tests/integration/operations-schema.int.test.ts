@@ -729,32 +729,60 @@ describe("T-301 belge kaynak bağlantısı ve tenant_settings.receiving_qc_enabl
     );
   });
 
-  it("document_lines.target_stock_status: NULL ve geçerli değerler kabul; geçersiz değer 23514; DRAFT'ta app UPDATE geçer", async () => {
+  // T-258 (0020 tetikleyicisi): hedef durum yalnızca STOCK_MOVE belgesinde ve izinli (kaynak, hedef) çiftinde yazılabilir (A-154). Eski test STOCK_IN
+  // belgesine DAMAGED/BLOCKED dahil her değeri yazıyordu; yeni kurala hizalandı (gevşetme yok: reddedilen durum kümesi büyüdü, kabul edilen küçüldü).
+  it("document_lines.target_stock_status: STOCK_MOVE'da NULL/aynı durum/izinli çift kabul; izinsiz çift ve geçersiz değer 23514; STOCK_IN + hedef durum 23514; DRAFT'ta app UPDATE geçer", async () => {
+    const insMoveDoc = insDoc.replaceAll("STOCK_IN", "STOCK_MOVE");
     const withStatus = (v: string | null): string => insDocLine.replace("source_line_id)", "source_line_id, target_stock_status)").replace("$7)", `$7, ${v === null ? "NULL" : `'${v}'`})`);
-    for (const v of [null, "AVAILABLE", "QUARANTINE", "DAMAGED", "BLOCKED"]) {
+    const lineArgs = (d: string): unknown[] => [A.tenantId, randomUUID(), d, A.itemNoneId, A.unitId, A.childLocationId, null];
+    // kaynak durum AVAILABLE (varsayılan): NULL, AVAILABLE (aynı), QUARANTINE (izinli çift)
+    for (const v of [null, "AVAILABLE", "QUARANTINE"]) {
       expectOk(
         await asApp(A.tenantId, async (q) => {
           const d = randomUUID();
-          await q(insDoc, [A.tenantId, d, A.warehouseId, randomUUID(), null, null]);
-          await q(withStatus(v), [A.tenantId, randomUUID(), d, A.itemNoneId, A.unitId, A.childLocationId, null]);
+          await q(insMoveDoc, [A.tenantId, d, A.warehouseId, randomUUID(), null, null]);
+          await q(withStatus(v), lineArgs(d));
         }),
-        `değer ${String(v)}`,
+        `STOCK_MOVE değer ${String(v)}`,
       );
     }
-    expectFail(
+    // izinsiz çift (AVAILABLE>DAMAGED/BLOCKED) ve geçersiz değer
+    for (const v of ["DAMAGED", "BLOCKED", "RESERVED"]) {
+      expectFail(
+        await asApp(A.tenantId, async (q) => {
+          const d = randomUUID();
+          await q(insMoveDoc, [A.tenantId, d, A.warehouseId, randomUUID(), null, null]);
+          await q(withStatus(v), lineArgs(d));
+        }),
+        CHECK_VIOLATION,
+        `STOCK_MOVE izinsiz ${v}`,
+      );
+    }
+    // STOCK_IN + herhangi bir hedef durum (aynı durum dahil) reddedilir; NULL kabul
+    for (const v of ["AVAILABLE", "QUARANTINE"]) {
+      expectFail(
+        await asApp(A.tenantId, async (q) => {
+          const d = randomUUID();
+          await q(insDoc, [A.tenantId, d, A.warehouseId, randomUUID(), null, null]);
+          await q(withStatus(v), lineArgs(d));
+        }),
+        CHECK_VIOLATION,
+        `STOCK_IN + ${v}`,
+      );
+    }
+    expectOk(
       await asApp(A.tenantId, async (q) => {
         const d = randomUUID();
         await q(insDoc, [A.tenantId, d, A.warehouseId, randomUUID(), null, null]);
-        await q(withStatus("RESERVED"), [A.tenantId, randomUUID(), d, A.itemNoneId, A.unitId, A.childLocationId, null]);
+        await q(withStatus(null), lineArgs(d));
       }),
-      CHECK_VIOLATION,
-      "geçersiz değer",
+      "STOCK_IN NULL hedef",
     );
     expectOk(
       await asApp(A.tenantId, async (q) => {
         const d = randomUUID();
         const l = randomUUID();
-        await q(insDoc, [A.tenantId, d, A.warehouseId, randomUUID(), null, null]);
+        await q(insMoveDoc, [A.tenantId, d, A.warehouseId, randomUUID(), null, null]);
         await q(insDocLine, [A.tenantId, l, d, A.itemNoneId, A.unitId, A.childLocationId, null]);
         await q("UPDATE public.document_lines SET target_stock_status = 'QUARANTINE' WHERE tenant_id = $1 AND id = $2", [A.tenantId, l]);
         await q("UPDATE public.document_lines SET target_stock_status = NULL WHERE tenant_id = $1 AND id = $2", [A.tenantId, l]);
@@ -765,7 +793,7 @@ describe("T-301 belge kaynak bağlantısı ve tenant_settings.receiving_qc_enabl
       await asApp(A.tenantId, async (q) => {
         const d = randomUUID();
         const l = randomUUID();
-        await q(insDoc, [A.tenantId, d, A.warehouseId, randomUUID(), null, null]);
+        await q(insMoveDoc, [A.tenantId, d, A.warehouseId, randomUUID(), null, null]);
         await q(insDocLine, [A.tenantId, l, d, A.itemNoneId, A.unitId, A.childLocationId, null]);
         await q("UPDATE public.document_lines SET target_stock_status = 'BOGUS' WHERE tenant_id = $1 AND id = $2", [A.tenantId, l]);
       }),

@@ -285,6 +285,41 @@ describe("lokasyon kodu değişimi", () => {
   });
 });
 
+describe("T-257: eski kod belirsizliği (A-69, MINOR-1)", () => {
+  it("aynı eski kod aynı depoda iki lokasyonun geçmişindeyse findLocationByCode sessizce seçmez: VALIDATION_FAILED/CODE_AMBIGUOUS; güncel kod ve tek adaylı eski kod çalışır", async () => {
+    const w = await createWarehouse(admin(A), { code: `AM-${rnd()}`, name: "Belirsiz" });
+    const x = await createLocation(admin(A), { warehouseId: w.warehouseId, code: "R-01", name: "X", kind: "STORAGE" });
+    // X eski kodu R-01'i bırakır; Y aynı kodu alır ve o da bırakır → "R-01" iki kartın geçmişinde.
+    await renameLocation(admin(A), { locationId: x.locationId, code: "R-11" });
+    const y = await createLocation(admin(A), { warehouseId: w.warehouseId, code: "R-01", name: "Y", kind: "STORAGE" });
+    // Y henüz R-01 iken güncel eşleşme önceliklidir (belirsizlik yok).
+    expect((await findLocationByCode(picker(A), { warehouseId: w.warehouseId, code: "R-01" }))?.id).toBe(y.locationId);
+    await renameLocation(admin(A), { locationId: y.locationId, code: "R-12" });
+    await expectFail(findLocationByCode(picker(A), { warehouseId: w.warehouseId, code: "R-01" }), "VALIDATION_FAILED", "CODE_AMBIGUOUS");
+    await expectFail(findLocationByCode(picker(A), { warehouseId: w.warehouseId, code: "r-01" }), "VALIDATION_FAILED", "CODE_AMBIGUOUS");
+    // Güncel kodlar belirsiz değil; yalnızca tek karta ait eski kod yönlenir.
+    expect((await findLocationByCode(picker(A), { warehouseId: w.warehouseId, code: "R-11" }))?.id).toBe(x.locationId);
+    await renameLocation(admin(A), { locationId: x.locationId, code: "R-21" });
+    expect(await findLocationByCode(picker(A), { warehouseId: w.warehouseId, code: "R-11" })).toMatchObject({ id: x.locationId, code: "R-21", renamedFrom: "R-11" });
+    // Aynı karta ait tekrarlı geçmiş satırları belirsizlik sayılmaz: X "R-21"i iki kez bırakır (R-21 → R-31 → R-21 → R-32), ama kart tektir.
+    await renameLocation(admin(A), { locationId: x.locationId, code: "R-31" });
+    await renameLocation(admin(A), { locationId: x.locationId, code: "R-21" });
+    await renameLocation(admin(A), { locationId: x.locationId, code: "R-32" });
+    expect(await findLocationByCode(picker(A), { warehouseId: w.warehouseId, code: "R-21" })).toMatchObject({ id: x.locationId, renamedFrom: "R-21" });
+    // Arama yolu: eski kod iki kartın geçmişindeyse her ikisi de aday döner (sessiz seçim yok).
+    const i1 = await createItem(admin(A), { code: `AI-${rnd()}`, name: "A1", baseUnitId: A.unitId });
+    const i2 = await createItem(admin(A), { code: `AI-${rnd()}`, name: "A2", baseUnitId: A.unitId });
+    const shared = `SH-${rnd()}`;
+    await updateItem(admin(A), { itemId: i1.itemId, code: shared });
+    await updateItem(admin(A), { itemId: i1.itemId, code: `AJ-${rnd()}` });
+    await updateItem(admin(A), { itemId: i2.itemId, code: shared });
+    await updateItem(admin(A), { itemId: i2.itemId, code: `AK-${rnd()}` });
+    const r = await searchItems(picker(A), { q: shared });
+    expect(r.items.map((i) => i.id).sort()).toEqual([i1.itemId, i2.itemId].sort());
+    expect(r.renamedFrom?.map((h) => h.itemId).sort()).toEqual([i1.itemId, i2.itemId].sort());
+  });
+});
+
 describe("code_history: RLS, izolasyon ve ekle-yalnız yetki (wms_app)", () => {
   it("A bağlamı yalnızca A satırlarını görür; B anahtarlı INSERT RLS ile reddedilir; bağlamsız 0 satır", async () => {
     const own = await asApp(A.tenantId, async (q) => (await q("SELECT DISTINCT tenant_id FROM public.code_history")).rows);

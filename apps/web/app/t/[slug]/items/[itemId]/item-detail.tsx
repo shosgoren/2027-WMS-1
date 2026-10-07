@@ -8,6 +8,8 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { Banner, Button, ConfirmDialog, TextField } from "@wms/ui";
+import { PageBody } from "../../easy-setup/sheet.tsx";
+import { CodeChangedNotice, CodeEditDialog } from "../../code-edit-dialog.tsx";
 import { addBarcodeAction, archiveItemAction, removeBarcodeAction, setConversionAction, updateItemAction } from "../actions.ts";
 import { BADGE, LINK_CLS, SELECT_CLS, ServerErrorBanner, toServerError } from "../items-view.tsx";
 import type { ServerError, UnitOption } from "../items-view.tsx";
@@ -83,6 +85,9 @@ export function ItemDetail({
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [removing, setRemoving] = useState<BarcodeView | null>(null);
   const [round, setRound] = useState(0);
+  const [codeOpen, setCodeOpen] = useState(false);
+  const [codeChanged, setCodeChanged] = useState<{ readonly from: string; readonly to: string } | null>(null);
+  const [undoing, setUndoing] = useState(false);
   const otherUnits = units.filter((u) => u.id !== item.baseUnitId);
 
   /** Ortak eylem sarmalayıcısı: hata banner'da kalır; başarıda bildirim + sunucu verisini yenile. */
@@ -100,6 +105,26 @@ export function ItemDetail({
     setRound((n) => n + 1);
     router.refresh();
     return true;
+  }
+
+  async function changeCode(code: string) {
+    const r = await updateItemAction({ slug, itemId: item.id, code });
+    return r.ok ? ({ ok: true, changed: r.data.changed } as const) : ({ ok: false, error: toServerError(r.error) } as const);
+  }
+  /** "Geri al" (N-03): eski koda dönüş aynı sunucu komutudur; eski kod başkasına verildiyse sunucu reddi gösterilir. */
+  async function undoCode() {
+    if (codeChanged === null) return;
+    setUndoing(true);
+    setError(null);
+    const r = await changeCode(codeChanged.from);
+    setUndoing(false);
+    if (!r.ok) {
+      setError(r.error);
+      return;
+    }
+    setCodeChanged(null);
+    setNotice(td("done.codeUndone"));
+    router.refresh();
   }
 
   async function onSave(event: FormEvent<HTMLFormElement>) {
@@ -148,6 +173,7 @@ export function ItemDetail({
 
   return (
     <>
+      <PageBody hide={codeOpen}>
       <div className="flex min-w-0 flex-col gap-2">
         <Link href={base} className={`${LINK_CLS} self-start`}>
           {td("back")}
@@ -157,10 +183,18 @@ export function ItemDetail({
           <span className={`${BADGE} ${active ? "bg-accent-soft text-accent-ink" : "bg-locked-bg text-locked-ink"}`}>{active ? t("status.ACTIVE") : t("status.ARCHIVED")}</span>
         </div>
         <p className="min-w-0 break-all text-base text-ink-muted">{t("codeLabel", { code: item.code })}</p>
+        {writable ? (
+          <div>
+            <Button variant="secondary" onClick={() => setCodeOpen(true)} aria-label={td("codeEdit.for", { name: item.name })}>
+              {td("codeEdit.button")}
+            </Button>
+          </div>
+        ) : null}
         {canManage ? null : <p className="break-words text-sm text-ink-muted">{t("lockedReason")}</p>}
         {active ? null : <Banner kind="info">{td("archivedNote")}</Banner>}
       </div>
 
+      {codeChanged ? <CodeChangedNotice from={codeChanged.from} to={item.code === codeChanged.from ? codeChanged.to : item.code} busy={undoing} onUndo={() => void undoCode()} /> : null}
       {notice ? <Banner kind="info">{notice}</Banner> : null}
       {error ? <ServerErrorBanner error={error} returnTo={returnTo} /> : null}
 
@@ -302,6 +336,26 @@ export function ItemDetail({
         </Section>
       ) : null}
 
+      </PageBody>
+
+      <CodeEditDialog
+        open={codeOpen}
+        subject={item.name}
+        current={item.code}
+        titleId="code-edit-item-title"
+        onClose={() => setCodeOpen(false)}
+        submit={changeCode}
+        renderError={(e) => <ServerErrorBanner error={e} returnTo={returnTo} />}
+        onDone={(r) => {
+          setCodeOpen(false);
+          setError(null);
+          if (r.changed) {
+            setNotice(null);
+            setCodeChanged({ from: r.from, to: r.to });
+          } else setNotice(td("done.codeSame"));
+          router.refresh();
+        }}
+      />
       <ConfirmDialog
         open={archiveOpen}
         title={td("confirmArchive.title", { name: item.name })}
