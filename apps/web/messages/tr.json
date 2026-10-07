@@ -577,7 +577,14 @@
     "external_ref": {
       "linked": "Bir dış sistem referansı bağladın veya güncelledin."
     },
-    "other": "Bir işlem yaptın."
+    "other": "Bir işlem yaptın.",
+    "warehouse_task": {
+      "created": "Bir depo görevi oluşturdun.",
+      "assigned": "Bir depo görevini atadın.",
+      "claimed": "Bir depo görevini üstlendin.",
+      "cancelled": "Bir depo görevini iptal ettin.",
+      "completed": "Bir depo görevini tamamladın."
+    }
   },
   "auditLog": {
     "title": "Kim ne yaptı?",
@@ -1101,5 +1108,97 @@
     "submit": "Kodu değiştir",
     "done": "Kod değişti: {from} → {to}.",
     "undo": "Geri al ({code} koduna dön)"
+  },
+  "tasks": {
+    "title": "Görevler",
+    "intro": "Depo görevlerini kişilere ata veya iptal et.",
+    "kind": {
+      "PUTAWAY": "Yerleştirme",
+      "PICK": "Toplama",
+      "REPUTAWAY": "Yeniden yerleştirme",
+      "COUNT": "Sayım"
+    },
+    "status": {
+      "OPEN": "Açık",
+      "ASSIGNED": "Atandı",
+      "DONE": "Tamamlandı",
+      "CANCELLED": "İptal edildi"
+    },
+    "filters": {
+      "label": "Görevleri süz",
+      "kind": "Tür",
+      "status": "Durum",
+      "all": "Tümü",
+      "apply": "Uygula"
+    },
+    "listLabel": "Görev listesi",
+    "unassigned": "Henüz kimseye atanmadı",
+    "assignee": "Sorumlu: {name}",
+    "assigneeUnknown": "Sorumlu: bilinmiyor",
+    "quantity": "Miktar: {quantity}",
+    "assign": "Ata",
+    "reassign": "Yeniden ata",
+    "cancel": "İptal et",
+    "lockedReason": "Atamak ve iptal etmek için görev onay yetkisi gerekir. Sorumluna sor.",
+    "empty": {
+      "title": "Görev yok",
+      "action": "Görevler mal kabul, sipariş ve sayım işlemlerinden oluşur; süzgeci değiştirip yeniden bak."
+    },
+    "nextPage": "Sonraki sayfa",
+    "firstPage": "İlk sayfa",
+    "assignTitle": "Görevi ata",
+    "member": "Kişi",
+    "memberPlaceholder": "Kişi seç",
+    "noEligible": "Bu görev türünü yapabilecek kişi yok. Önce ekip ekranından uygun rol ver.",
+    "cancelTitle": "Görevi iptal et",
+    "reasonLabel": "İptal gerekçesi",
+    "reasonHint": "Zorunlu; denetim kaydına yazılır. En çok 500 karakter.",
+    "back": "Vazgeç",
+    "submit": "Kaydet",
+    "confirmCancel": "Görevi iptal et",
+    "done": {
+      "assigned": "Görev atandı.",
+      "cancelled": "Görev iptal edildi."
+    },
+    "field": {
+      "title": "Görevlerim",
+      "intro": "Sana atanan ve üstlenebileceğin işler.",
+      "listLabel": "Görevlerim listesi",
+      "claim": "Üstlen",
+      "start": "Başla",
+      "startLocked": "Bu iş ekranı henüz açılmadı. Görev sende kalır; ekran açılınca buradan başlayacaksın.",
+      "claimed": "Görevi üstlendin.",
+      "empty": {
+        "title": "Şu an görevin yok",
+        "action": "Yeni iş geldiğinde burada görünür; sayfayı yenileyebilirsin."
+      },
+      "mine": "Sana atanmış",
+      "available": "Üstlenebilirsin",
+      "more": "Daha fazla göster",
+      "backToField": "Saha işleri"
+    },
+    "errors": {
+      "code": "Hata kodu: {code}",
+      "forbidden": "Bu işlem için yetkin yok.",
+      "forbiddenAction": "Sorumluna sor.",
+      "unauthenticated": "Oturumun sona ermiş.",
+      "unauthenticatedAction": "Yeniden giriş yapıp işlemi yinele.",
+      "not_found": "Görev bulunamadı.",
+      "not_foundAction": "Sayfayı yenileyip yeniden dene.",
+      "validation_failed": "Girilen bilgiler geçersiz.",
+      "validation_failedAction": "Seçimi ve gerekçeyi kontrol edip yeniden dene. Seçilen kişi bu görev türünü yapamıyor olabilir.",
+      "validation_failed_document_state": "Görev artık bu işleme uygun değil (tamamlanmış, iptal edilmiş veya başkası üstlenmiş).",
+      "validation_failed_document_stateAction": "Sayfayı yenileyip güncel durumu gör.",
+      "version_conflict": "Görev aynı anda başka biri tarafından değiştirildi.",
+      "version_conflictAction": "Sayfayı yenileyip yeniden dene.",
+      "rate_limited": "Çok fazla işlem yapıldı.",
+      "rate_limitedAction": "Biraz bekleyip yeniden dene.",
+      "tenant_suspended": "Çalışma alanı askıda.",
+      "tenant_suspendedAction": "Sorumluna veya destek ekibine başvur.",
+      "tenant_closing": "Çalışma alanı kapatılıyor.",
+      "tenant_closingAction": "Sorumluna başvur.",
+      "internal": "Bir sorun oluştu.",
+      "internalAction": "Biraz sonra yeniden dene; sürerse hata kodunu destek ekibine ilet."
+    }
   }
 }
