@@ -14,8 +14,11 @@
 // A-222-2: durum geçmişi satırı yalnızca durum DEĞİŞİMİNDE DB tetikleyicisiyle yazılır (doğrudan INSERT yasak, 0012); FAILED'da durum değişmez
 //   (APPROVED kalır) → durum geçmişi satırı oluşmaz. FAILED için audit eylemi (`AUDIT_ACTIONS`) tanımlı değil (packages/db kapsam dışı) → audit yazılmaz;
 //   kayıt idempotency `FAILED` + `error_code` + log + `processed_events`tir (rapor Bulgusu).
-// A-222-3: worker principal'ı `mfaVerified: false` (T-113 MINOR-4): TENANT_ADMIN istek sahibinin işi worker'da `FORBIDDEN/MFA_REQUIRED` ile kalıcı başarısız olur
-//   (rapor Bulgusu; yetkili rol PICKER/WAREHOUSE_MANAGER için etkisiz).
+// A-222-3: worker principal'ının MFA kararı KOŞULLUDUR (T-222 inceleme MAJOR-1; T-113 MINOR-4 genel kuralı `workerPrincipal` bu işe uygulanmaz):
+//   `mfaVerified: true` yalnızca `mayVouchMfa` doğrularsa (istek anında sunucu tarafında yazılmış MFA damgası + pencere + sonradan MFA/parola sıfırlanmadı +
+//   kilit/aktör/kayıt eşleşmesi); damga yoksa/geçersizse `false` → TENANT_ADMIN istek sahibinin işi worker'da `FORBIDDEN/MFA_REQUIRED` ile kalıcı başarısız olur
+//   (fail-closed; yetkili rol PICKER/WAREHOUSE_MANAGER için etkisiz). Damganın yazılması 0024 tetikleyicisiyle yalnızca tek yere (deferToWorker) kilitlidir.
+// A-222-4: askıda/kapanıştaki (geri alınabilir) kiracının işleme işi kalıcı başarısız sayılmaz, sonlandırma ertelenir (docs/OPEN_QUESTIONS.md A-222-4).
 import { currentTenantId } from "@wms/db";
 import { AppError, type ErrorCode } from "@wms/shared/errors";
 import type { Logger } from "@wms/shared/log";

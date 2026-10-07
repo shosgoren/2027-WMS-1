@@ -78,13 +78,17 @@ function auditOf(action: AuditEntry["action"], receiptId: string, requestId: str
   return { action, entityType: "inbound_receipt", entityId: receiptId, requestId: requestId ?? null, reason: reason ?? null, changeSummary };
 }
 
+/**
+ * Ondalık girdiler NORMALLEŞTİRİLİR (T-305 MINOR-5): idempotency özeti `hashInput`'tan türer; "10" ile "10.000000" aynı miktardır → aynı özet
+ * (yeniden deneme farklı gösterimle gelirse IDEMPOTENCY_MISMATCH olmaz). Biçim: 6 basamaklı sabit (`microToDecimal`).
+ */
 function positiveDecimal(raw: unknown): string {
   if (typeof raw !== "string" || !DECIMAL_RE.test(raw) || decimalToMicro(raw) <= 0n) throw new AppError("VALIDATION_FAILED");
-  return raw;
+  return microToDecimal(decimalToMicro(raw));
 }
 function nonNegativeDecimal(raw: unknown): string {
   if (typeof raw !== "string" || !DECIMAL_RE.test(raw)) throw new AppError("VALIDATION_FAILED");
-  return raw;
+  return microToDecimal(decimalToMicro(raw));
 }
 function versionOf(raw: unknown): number {
   if (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw < 1) throw new AppError("VALIDATION_FAILED");
@@ -172,6 +176,13 @@ export async function createInboundReceipt(
           sql`SELECT id FROM public.items WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ANY(${pgUuidArray(itemIds)}::uuid[]) AND tracking_mode <> 'NONE'`,
         );
         if (tracked.length > 0) throw new AppError("VALIDATION_FAILED");
+        // Birim satırları da burada (numaradan ÖNCE) paylaşımlı kilitlenir: satır INSERT'indeki FK denetimi onlara `FOR KEY SHARE` alır; bu kilit numaradan
+        // sonra alınırsa `number_sequences` son kilit olmaktan çıkar (T-305 MINOR-3). Kilit sırası: depo → ürünler → birimler → number_sequences.
+        const unitIds = [...new Set(lines.map((l) => l.unitId))].sort();
+        const lockedUnits = await tx.execute<{ id: string }>(
+          sql`SELECT id FROM public.units WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ANY(${pgUuidArray(unitIds)}::uuid[]) ORDER BY id FOR SHARE`,
+        );
+        if (lockedUnits.length !== unitIds.length) throw new AppError("VALIDATION_FAILED");
         const factors = await tx.execute<{ item_id: string; unit_id: string; factor: string }>(
           sql`SELECT i.id AS item_id, i.base_unit_id AS unit_id, '1.000000' AS factor FROM public.items i
                WHERE i.tenant_id = ${ctx.tenantId}::uuid AND i.id = ANY(${pgUuidArray(itemIds)}::uuid[])
@@ -186,14 +197,16 @@ export async function createInboundReceipt(
           return { ...l, factor: f };
         });
         const date = await tenantToday(tx, ctx.tenantId);
-        const number = await nextDocumentNumber(tx, ctx.tenantId, "INBOUND_RECEIPT", date);
         const receiptId = randomUUID();
+        const json = JSON.stringify(
+          resolved.map((l, i) => ({ id: randomUUID(), line_no: i + 1, item_id: l.itemId, unit_id: l.unitId, factor: l.factor, expected: l.expectedQuantity })),
+        );
+        // ADR-018 §7: `number_sequences` satırı komutun SON kilididir (T-305 MINOR-3). `number` NOT NULL ve wms_app başlıkta `number` UPDATE yetkisi yok →
+        // numara başlık INSERT'inden hemen önce alınır; bundan sonra yalnızca bu komutun kendi yeni satırları yazılır (başka kilit/okuma yok).
+        const number = await nextDocumentNumber(tx, ctx.tenantId, "INBOUND_RECEIPT", date);
         await tx.execute(
           sql`INSERT INTO public.inbound_receipts (tenant_id, id, warehouse_id, number, supplier_ref, created_by)
               VALUES (${ctx.tenantId}::uuid, ${receiptId}::uuid, ${warehouseId}::uuid, ${number}, ${supplierRef}, ${ctx.userId}::uuid)`,
-        );
-        const json = JSON.stringify(
-          resolved.map((l, i) => ({ id: randomUUID(), line_no: i + 1, item_id: l.itemId, unit_id: l.unitId, factor: l.factor, expected: l.expectedQuantity })),
         );
         await tx.execute(
           sql`INSERT INTO public.inbound_receipt_lines (tenant_id, id, receipt_id, line_no, item_id, unit_id, conversion_factor, expected_quantity)
@@ -317,6 +330,7 @@ type ReceiptLineRow = {
   id: string;
   item_id: string;
   unit_id: string;
+  base_unit_id: string;
   conversion_factor: string;
   expected_quantity: string;
   received_quantity: string;
@@ -324,9 +338,10 @@ type ReceiptLineRow = {
 }
 const readReceiptLines = (tx: AccessTx, tenantId: string, receiptId: string): Promise<ReceiptLineRow[]> =>
   tx.execute<ReceiptLineRow>(
-    sql`SELECT id, item_id, unit_id, conversion_factor::text AS conversion_factor, expected_quantity::text AS expected_quantity,
-               received_quantity::text AS received_quantity, damaged_quantity::text AS damaged_quantity
-          FROM public.inbound_receipt_lines WHERE tenant_id = ${tenantId}::uuid AND receipt_id = ${receiptId}::uuid ORDER BY line_no`,
+    sql`SELECT l.id, l.item_id, l.unit_id, i.base_unit_id, l.conversion_factor::text AS conversion_factor, l.expected_quantity::text AS expected_quantity,
+               l.received_quantity::text AS received_quantity, l.damaged_quantity::text AS damaged_quantity
+          FROM public.inbound_receipt_lines l JOIN public.items i ON i.tenant_id = l.tenant_id AND i.id = l.item_id
+         WHERE l.tenant_id = ${tenantId}::uuid AND l.receipt_id = ${receiptId}::uuid ORDER BY l.line_no`,
   );
 
 async function qcEnabled(tx: AccessTx, tenantId: string): Promise<boolean> {
@@ -362,11 +377,32 @@ function parseReceive(input: ReceiveGoodsInput): { receiptId: string; lines: Par
     if (seen.has(lineId)) throw new AppError("VALIDATION_FAILED"); // A-305-6: komutta satır başına tek giriş
     seen.add(lineId);
     const received = positiveDecimal(x.received);
-    const damaged = x.damaged === undefined ? "0" : nonNegativeDecimal(x.damaged);
+    const damaged = x.damaged === undefined ? "0.000000" : nonNegativeDecimal(x.damaged);
     if (decimalToMicro(damaged) > decimalToMicro(received)) throw new AppError("VALIDATION_FAILED"); // hasarlı > kabul
     return { lineId, received, damaged, locationId: uuidOf(x.locationId) };
   });
   return { receiptId, lines };
+}
+
+/**
+ * Kabulün temel birim bölünmesi (tek yer): toplam = `round(received × factor)`, hasarlı = `round(damaged × factor)` (≤ toplam: yuvarlama monoton),
+ * iyi = toplam − hasarlı. Mikro (1e-6) tamsayı.
+ */
+export function splitReceivedBase(received: string, damaged: string, factor: string): { readonly total: bigint; readonly good: bigint; readonly damaged: bigint } {
+  const total = decimalToMicro(baseQuantityOf(received, factor));
+  const dmg = decimalToMicro(baseQuantityOf(damaged, factor));
+  if (dmg > total) throw new AppError("INTERNAL"); // received ≥ damaged (ayrıştırmada denetlendi) ⇒ ulaşılamaz
+  return { total, good: total - dmg, damaged: dmg };
+}
+
+/**
+ * Kısmi onay miktarının (kabul birimi) temel birime tek dönüşümü (T-305 MINOR-2): `round(q × factor)`; ama istenen miktar kabul satırının kalan
+ * bekleyenini yalnızca yuvarlama kadar (≤ 1 mikro) aşıyorsa istek "kalanın tamamı"dır → `kalan = toplam − dağıtılan` (bekleyen) onaylanır.
+ * Daha fazlası bekleyeni aşar (çağıran reddeder).
+ */
+export function approvalBaseOf(quantity: string, factor: string, pending: bigint): bigint {
+  const raw = decimalToMicro(baseQuantityOf(quantity, factor));
+  return raw > pending && raw - pending <= 1n ? pending : raw;
 }
 
 /** Kabul satırlarından primitif `STOCK_IN` spesifikasyonu. Kural denetimleri (fazla kabul, lokasyon türü) çağıranındır. */
@@ -376,16 +412,22 @@ function receiveSpec(warehouseId: string, receiptId: string, qc: boolean, lines:
   for (const l of lines) {
     const row = byId.get(l.lineId);
     if (row === undefined) throw new AppError("NOT_FOUND"); // A-152: satır bu belgeye ait değil (varlık sızdırılmaz)
-    const damaged = decimalToMicro(l.damaged);
-    const good = decimalToMicro(l.received) - damaged;
-    const base = (qty: bigint, status: "AVAILABLE" | "QUARANTINE" | "DAMAGED"): FieldLine => {
-      const quantity = microToDecimal(qty);
+    // Temel birime TEK yerden (T-305 MINOR-2): satır toplamı bir kez dönüştürülür; hasarlı ayrıca dönüştürülür ve iyi = toplam − hasarlı.
+    // Böylece iyi + hasarlı temel miktarı HER ZAMAN toplamın temel miktarına eşittir (iki ayrı yuvarlamanın kayması olmaz). Çekirdek kuralı (I-09,
+    // rules.ts) her satırda `base = round(quantity × factor)` ister: parça kabul biriminde bu eşitliği sağlıyorsa satır biriminde/katsayısıyla yazılır; sağlamıyorsa
+    // (yuvarlama payı) parça ürünün TEMEL biriminde, katsayı 1 yazılır (onay satırlarıyla aynı biçim). Temel miktarı 0 olan parça satır oluşturmaz
+    // (document_lines.base_quantity > 0; ör. toplamın tamamı hasarlıya yuvarlanırsa iyi satır yok).
+    const damagedUnits = decimalToMicro(l.damaged);
+    const goodUnits = decimalToMicro(l.received) - damagedUnits;
+    const split = splitReceivedBase(l.received, l.damaged, row.conversion_factor);
+    const base = (units: bigint, baseQuantity: bigint, status: "AVAILABLE" | "QUARANTINE" | "DAMAGED"): FieldLine => {
+      const exact = decimalToMicro(baseQuantityOf(microToDecimal(units), row.conversion_factor)) === baseQuantity;
       return {
         itemId: row.item_id,
-        unitId: row.unit_id,
-        quantity,
-        conversionFactor: row.conversion_factor,
-        baseQuantity: baseQuantityOf(quantity, row.conversion_factor),
+        unitId: exact ? row.unit_id : row.base_unit_id,
+        quantity: microToDecimal(exact ? units : baseQuantity),
+        conversionFactor: exact ? row.conversion_factor : "1.000000",
+        baseQuantity: microToDecimal(baseQuantity),
         sourceLocationId: null,
         targetLocationId: l.locationId,
         stockStatus: status,
@@ -393,8 +435,8 @@ function receiveSpec(warehouseId: string, receiptId: string, qc: boolean, lines:
         sourceLineId: row.id,
       };
     };
-    if (good > 0n) out.push(base(good, qc ? "QUARANTINE" : "AVAILABLE"));
-    if (damaged > 0n) out.push(base(damaged, "DAMAGED")); // hasarlı hiçbir zaman kullanılabilir sayılmaz
+    if (goodUnits > 0n && split.good > 0n) out.push(base(goodUnits, split.good, qc ? "QUARANTINE" : "AVAILABLE"));
+    if (damagedUnits > 0n && split.damaged > 0n) out.push(base(damagedUnits, split.damaged, "DAMAGED")); // hasarlı hiçbir zaman kullanılabilir sayılmaz
   }
   return { kind: "STOCK_IN", warehouseId, sourceKind: "INBOUND_RECEIPT", sourceId: receiptId, lines: out };
 }
@@ -633,7 +675,7 @@ async function buildApproval(tx: AccessTx, tenantId: string, p: ParsedApproval, 
         : p.lines.map((l) => {
             const row = byId.get(l.lineId);
             if (row === undefined) throw new AppError("NOT_FOUND"); // A-152: satır bu belgeye ait değil
-            return { lineId: l.lineId, locationId: l.locationId, base: decimalToMicro(baseQuantityOf(l.quantity, row.conversion_factor)) };
+            return { lineId: l.lineId, locationId: l.locationId, base: approvalBaseOf(l.quantity, row.conversion_factor, pendingOf.get(`${l.lineId}|${l.locationId}`) ?? 0n) };
           });
     if (wanted.length === 0) throw new AppError("VALIDATION_FAILED"); // onaylanacak karantina yok
     const units = await readApprovalItems(tx, tenantId, wanted.map((w) => (byId.get(w.lineId) as ReceiptLineRow).item_id.toLowerCase()));
