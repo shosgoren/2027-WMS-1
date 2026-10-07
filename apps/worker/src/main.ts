@@ -1,11 +1,13 @@
 // Worker giriş noktası: `node dist/main.js`. Web'den bağımsız, uzun ömürlü süreç (ADR-001).
 import { DEMO_TENANT_ID, createDbClient, withSystemTenant, withUser } from "@wms/db";
-import { createJobQueue } from "@wms/queue-adapter";
+import { consumeOnce, createJobQueue } from "@wms/queue-adapter";
+import type { ConsumeOnceFn } from "@wms/domain/stock/jobs";
 import { assertMailModeAllowed, loadMailConfig } from "@wms/shared/mailer";
 import { createSealer } from "@wms/shared/seal";
 import { JOB_TYPES, PLATFORM_NO_USER_ID, type JobHandler, type JobType } from "@wms/shared/queue";
 import { createDeliverInvitationHandler } from "./jobs/deliver-invitation.js";
 import { DEMO_RESEED_SINGLETON_KEY, registerDemoReseed } from "./jobs/demo-reseed.js";
+import { createPostStockDocumentHandler, startPostingJobRecovery } from "./jobs/post-stock-document.js";
 import { createMailer, createSendEmailHandler } from "./jobs/send-email.js";
 import { createJsonLogger, createLifecycle, EXIT_FAILURE, parseShutdownTimeoutMs } from "./lifecycle.js";
 
@@ -31,9 +33,9 @@ const HANDLERS: { [T in JobType]?: JobHandler<T> } = {};
 // Koşullu/henüz yazılmamış türler açıkça listelenir: `demo.reseed` yalnızca demo açıkken (T-123: WMS_ENV local|staging +
 // DEMO_MODE=1 + DEMO_PASSWORD) kaydedilir; aksi halde bu türden işler tüketici gelene kadar kuyrukta bekler (kaybolmaz,
 // sahte başarıyla tamamlanmaz). Registry'ye yeni tür eklenirse burada karar verilmeden açılış düşer.
-// `stock.document.post` (T-222) ve `stock.consistency.check` (T-225) handler'ları kendi kartlarında gelir; o zamana dek
-// işler kuyrukta bekler (sahte başarı yok) ve ilgili kart kendi türünü bu listeden çıkarır (ADR-019 §5).
-const DEFERRED_JOB_TYPES: readonly JobType[] = ["demo.reseed", "stock.document.post", "stock.consistency.check"];
+// `stock.consistency.check` (T-225) handler'ı kendi kartında gelir; o zamana dek işler kuyrukta bekler (sahte başarı yok) ve
+// ilgili kart kendi türünü bu listeden çıkarır (ADR-019 §5). `stock.document.post` T-222 ile kaydedildi.
+const DEFERRED_JOB_TYPES: readonly JobType[] = ["demo.reseed", "stock.consistency.check"];
 
 // Platform işleri (`enqueuePlatform`) için tenant bağlamı BOŞ `wms_app` transaction'ı (processed_events `tenant_id NULL`,
 // ADR-019 §2). `@wms/db` genel yüzeyinde bağlamsız transaction yoktur; `withUser` yalnızca `app.current_user_id` kurar
@@ -79,15 +81,18 @@ try {
   process.exit(EXIT_FAILURE);
 }
 
+// Handler'lar tenant verisine yalnızca `ctx.inTenant` ile erişir; bu, withSystemTenant ile (tenant ACTIVE
+// denetimli, transaction-local bağlam) kurulur (ADR-016 §6). Havuz ayarları `DB_CLIENT_SETTINGS` ile aynıdır.
+const db = createDbClient({ url: databaseUrl, poolMax: 10, prepare: false });
+
+// Eşik üstü belge işleme (T-222): istek sahibi adına tek transaction; `processed_events` aynı transaction'da (ADR-019 §2).
+HANDLERS["stock.document.post"] = createPostStockDocumentHandler({ db, consumeOnce: consumeOnce as unknown as ConsumeOnceFn, logger });
+
 const undecided = JOB_TYPES.filter((t) => HANDLERS[t] === undefined && !DEFERRED_JOB_TYPES.includes(t));
 if (undecided.length > 0) {
   logger.error("job types without handler", { types: undecided });
   process.exit(EXIT_FAILURE);
 }
-
-// Handler'lar tenant verisine yalnızca `ctx.inTenant` ile erişir; bu, withSystemTenant ile (tenant ACTIVE
-// denetimli, transaction-local bağlam) kurulur (ADR-016 §6). Havuz ayarları `DB_CLIENT_SETTINGS` ile aynıdır.
-const db = createDbClient({ url: databaseUrl, poolMax: 10, prepare: false });
 
 // Demo (T-123/T-123a, A-63): fail-closed; ayrıntı registerDemoReseed'de. Kapalıyken `wms_auth` havuzu açılmaz, bağdaştırıcı
 // (ve argon2 yerel ikilisi) yüklenmez. Rol/ortam hataları açılışı düşürür.
@@ -130,6 +135,11 @@ logger.info("queue started", {
   deferred: DEFERRED_JOB_TYPES.filter((t) => HANDLERS[t] === undefined),
 });
 
+// pg-boss bakım eşdeğeri (T-222 ZORUNLU notu): adaptör `supervise: false`; süresi dolan `active` `stock.document.post` işini `retry`'a çeviren
+// tarayıcı `wms_worker` bağlantısında çalışır (çöken worker'ın işi yeniden teslim edilir; AC-16).
+const workerDb = createDbClient({ url: workerDatabaseUrl, poolMax: 1, prepare: false });
+const postingRecovery = startPostingJobRecovery({ workerDb, db, logger });
+
 // Demo yeniden tohumlama zamanlaması: açılışta bir kez + günlük 03:00 UTC; `singletonKey` ile tek iş.
 const demoSchedule = demo.startSchedule(() =>
   // Tenant kimliği sabittir (iş yükünde yok); bağlam withSystemTenant ile kurulur (gerekçe üyelik/rol yazmaz).
@@ -140,8 +150,10 @@ const demoSchedule = demo.startSchedule(() =>
 
 // Kapanış sırası: önce zamanlayıcı, sonra kuyruk (çalışan işler biter), sonra DB havuzu.
 lifecycle.register({ name: "demo-schedule", run: () => demoSchedule?.stop() });
+lifecycle.register({ name: "posting-recovery", run: () => postingRecovery.stop() });
 lifecycle.register({ name: "job-queue", run: () => queue.stop() });
 lifecycle.register({ name: "db", run: () => db.close() });
+lifecycle.register({ name: "worker-db", run: () => workerDb.close() });
 lifecycle.register({ name: "demo-auth-db", run: () => demo.close() });
 
 lifecycle.installProcessHandlers(process);

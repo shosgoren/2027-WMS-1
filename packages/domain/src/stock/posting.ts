@@ -20,14 +20,32 @@
 //
 // A-xx: A-248-1 durum geçişi fail-closed beyaz liste (bkz. plan.ts; A-217-1/A-147 kaldırıldı); rezerveli kısım durum değiştirmez (aşağıda); A-217-2 yeterlilik girişleri saymaz; A-217-3 defter nedeni belge türünden gelir
 // (STOCK_IN→RECEIPT, STOCK_OUT→SHIPMENT, STOCK_MOVE→MOVE; diğer nedenler 3A belge türlerinde); A-145 satır lokasyonları belge deposunda;
-// A-07 senkron üst sınırı 200 satır (üstü T-222; o zamana dek `VALIDATION_FAILED`/`DOCUMENT_STATE`, sahte başarı yok).
+// A-07 senkron üst sınırı 200 satır; üstü (≤ 2.000, A-07) T-222 ile worker'da işlenir: istek yalnızca belgeyi kilitler, `posting_job_id` yazar, işi kuyruğa
+// bırakır ve idempotency kaydını `IN_PROGRESS` tutar (`deferred`); worker aynı `plan/apply` çiftiyle (`buildPostCommand`, `worker: true`) `resume` ile tamamlar.
+// A-222-1: eşik üstü `STOCK_MOVE` rezervasyon taşıması (`reservationMoves`) desteklenmez (iş yükünde taşıma yok) → `VALIDATION_FAILED`.
 import { sql } from "drizzle-orm";
 import type { LockedState } from "@wms/db";
 import { AppError } from "@wms/shared/errors";
-import type { AccessTx } from "../identity/access.ts";
-import { pgUuidArray } from "../warehouse/scope.ts";
-import { EMPTY_LOCK_PLAN, executeStockCommand, type StockCommandApplied, type StockCommandContext, type StockCommandPlan } from "./command.ts";
-import { assertItemsActive, assertLocationsActiveInWarehouse, assertNotProcessing, readDocumentHeader, type StockDocCallParams } from "./documents.ts";
+import type { JobQueue } from "@wms/shared/queue";
+import { runTenantQuery, type AccessTx } from "../identity/access.ts";
+import { assertWarehouseVisible, pgUuidArray } from "../warehouse/scope.ts";
+import {
+  EMPTY_LOCK_PLAN,
+  executeStockCommand,
+  type StockCommandApplied,
+  type StockCommandContext,
+  type StockCommandParams,
+  type StockCommandPlan,
+} from "./command.ts";
+import {
+  MAX_DOCUMENT_LINES,
+  assertItemsActive,
+  assertLocationsActiveInWarehouse,
+  assertNotProcessing,
+  readDocumentHeader,
+  type DocumentHeader,
+  type StockDocCallParams,
+} from "./documents.ts";
 import type { StockCommandResult } from "./idempotency.ts";
 import {
   buildPostingPlan,
@@ -176,11 +194,107 @@ function assertCovered(p: PostingPlan, locked: LockedState): void {
   if (!ok) throw new AppError("VERSION_CONFLICT", { retryable: true });
 }
 
+const tooLarge = (): AppError => new AppError("VALIDATION_FAILED", { detail: "DOCUMENT_TOO_LARGE" });
+
+export interface PostDocumentParams extends StockDocCallParams {
+  /** Eşik üstü belge için kuyruk (yalnızca `enqueue`); verilmezse eşik üstü belge `FEATURE_DISABLED` ile reddedilir (sahte başarı yok). */
+  readonly queue?: Pick<JobQueue<AccessTx>, "enqueue">;
+}
+
+/** `postDocument` yanıtı: senkron sonuç ya da eşik üstü belge için `PROCESSING` (yoklama: `getPostingStatus`). */
+export type PostDocumentResult = Omit<StockCommandResult, "status"> & {
+  readonly status?: StockCommandResult["status"] | "PROCESSING";
+  readonly replayed: boolean;
+};
+
+export interface PostCommandOptions {
+  readonly documentId: string;
+  /** `null`: worker (belge işleme kilidi altında, sürüm kilit planında okunur). */
+  readonly expectedVersion: number | null;
+  readonly moves: readonly ReservationMoveInput[] | undefined;
+  readonly requestId: string | null | undefined;
+  /** Worker yolu: eşik üstü belge işlenir (≤ 2.000) ve işleme kilidi (`posting_job_id`) beklenen durumdur; çağıran (jobs.ts) kimliği doğrular. */
+  readonly worker: boolean;
+  readonly queue?: PostDocumentParams["queue"];
+  /** İstek yolu: isteği yapan oturum MFA doğrulanmış mı (eşik üstü belgede sunucu tarafında `posting_mfa_verified_at` olur; worker MFA'yı yalnızca buradan türetir). */
+  readonly requesterMfaVerified?: boolean;
+}
+
+/** Senkron ve worker yolunun ORTAK `plan/apply` çifti (`executeStockCommand`'a verilir). */
+export function buildPostCommand(o: PostCommandOptions): Pick<StockCommandParams<unknown>, "plan" | "apply"> {
+  const { documentId, moves } = o;
+  const maxPlanLines = o.worker ? MAX_DOCUMENT_LINES : SYNC_POST_MAX_LINES;
+  return {
+    plan: async (tx, _i, m) => {
+      // Salt okuma; iş kuralı DENETLENMEZ (yeniden oynatma saklı sonuca ulaşır). Geçersiz/aşırı belge → yalnızca belge kilidi; apply reddeder.
+      const head = await tx.execute<{ warehouse_id: string; kind: string; version: number | string }>(
+        sql`SELECT warehouse_id, kind, version FROM public.documents WHERE tenant_id = ${m.tenantId}::uuid AND id = ${documentId}::uuid`,
+      );
+      const h = head[0];
+      if (h === undefined) throw new AppError("NOT_FOUND");
+      const expectedVersion = o.expectedVersion ?? Number(h.version);
+      const lines = await loadLines(tx, m.tenantId, documentId);
+      let built: PostingPlan | undefined;
+      if (KINDS.has(h.kind) && lines.length >= 1 && lines.length <= maxPlanLines) {
+        try {
+          built = buildPostingPlan(h.kind as PostingKind, lines);
+        } catch (e) {
+          if (!(e instanceof AppError)) throw e;
+        }
+      }
+      // T-221: STOCK_OUT satırlarının rezervasyonları (tüketim) ve STOCK_MOVE'un taşıdığı rezervasyonlar kilit planındadır (I-15 adım 5).
+      const reservationIds =
+        built === undefined ? [] : h.kind === "STOCK_OUT" ? await activeReservationIdsOfDocument(tx, m.tenantId, documentId) : (moves ?? []).flatMap((x) => x.reservationIds);
+      // A-145: satır lokasyonlarının depoları da kapsam denetimine girer (depo uyuşmazlığı apply'da reddedilir).
+      const extra = built === undefined ? [] : await locationWarehouses(tx, m.tenantId, built.locationIds);
+      return { warehouseIds: [...new Set([h.warehouse_id, ...extra])], locks: lockPlanOf(documentId, expectedVersion, built, [...new Set(reservationIds)].sort()) };
+    },
+    apply: async (tx, locked, ctx): Promise<StockCommandApplied> => {
+      if (locked.document === undefined) throw new AppError("INTERNAL");
+      return postCore(tx, locked, ctx, documentId, {
+        moves,
+        requestId: o.requestId ?? null,
+        worker: o.worker,
+        ...(o.worker ? {} : { defer: (header: DocumentHeader) => deferToWorker(tx, ctx, header, o) }),
+      });
+    },
+  };
+}
+
+/**
+ * Eşik üstü belge (T-222, ADR-018 §6): belge kilitli (acquireStockLocks) ve APPROVED iken işi kuyruğa bırakır, `posting_job_id` +
+ * `posting_requested_by` yazar. İdempotency kaydı `IN_PROGRESS` kalır (`deferred`). `enqueue` aynı transaction'dadır: geri alma işi de geri alır.
+ */
+async function deferToWorker(
+  tx: AccessTx,
+  ctx: { readonly tenantId: string; readonly userId: string; readonly idempotencyRecordId: string },
+  header: DocumentHeader,
+  o: PostCommandOptions,
+): Promise<StockCommandApplied> {
+  if (o.moves !== undefined && o.moves.length > 0) throw new AppError("VALIDATION_FAILED"); // A-222-1
+  // Kuyruk bağlanmamışsa eşik üstü belge işlenemez: açık hata (sahte başarı yok); T-217'den beri değişmeyen davranış.
+  if (o.queue === undefined) throw documentState();
+  const enq = await o.queue.enqueue(tx, {
+    type: "stock.document.post",
+    actorUserId: ctx.userId,
+    payload: { documentId: header.id, idempotencyRecordId: ctx.idempotencyRecordId },
+    singletonKey: header.id,
+  });
+  // `singletonKey` çakışması: önceki iş hâlâ sonlanıyor (FAILED yazıldı, kuyruk satırı kapanmadı). Yeniden denenebilir geçici durum.
+  if (enq.jobId === null) throw new AppError("VERSION_CONFLICT", { retryable: true });
+  const rows = await tx.execute<{ id: string }>(
+    // Bağlam `posting_job_id` ile AYNI ifadede, sunucu tarafında yazılır (0023): MFA damgası DB saati; kayıt kimliği bu isteğin IN_PROGRESS kaydı.
+    sql`UPDATE public.documents SET posting_job_id = ${enq.jobId}::uuid, posting_requested_by = ${ctx.userId}::uuid,
+               posting_mfa_verified_at = CASE WHEN ${o.requesterMfaVerified === true}::boolean THEN now() ELSE NULL END,
+               posting_idempotency_record_id = ${ctx.idempotencyRecordId}::uuid
+         WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${header.id}::uuid AND status = 'APPROVED' AND posting_job_id IS NULL RETURNING id`,
+  );
+  if (rows[0] === undefined) throw documentState();
+  return { result: { documentId: header.id, status: "APPROVED" }, audit: null, deferred: true };
+}
+
 /** `stock.post`: bkz. dosya başı. */
-export async function postDocument(
-  params: StockDocCallParams,
-  input: PostDocumentInput,
-): Promise<StockCommandResult & { readonly replayed: boolean }> {
+export async function postDocument(params: PostDocumentParams, input: PostDocumentInput): Promise<PostDocumentResult> {
   if (typeof input.documentId !== "string" || !UUID_RE.test(input.documentId)) throw new AppError("VALIDATION_FAILED");
   if (typeof input.expectedVersion !== "number" || !Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) {
     throw new AppError("VALIDATION_FAILED");
@@ -201,36 +315,42 @@ export async function postDocument(
     ...(params.retry === undefined ? {} : { retry: params.retry }),
     ...(params.timeouts === undefined ? {} : { timeouts: params.timeouts }),
     ...(params.logger === undefined ? {} : { logger: params.logger }),
-    plan: async (tx, _i, m) => {
-      // Salt okuma; iş kuralı DENETLENMEZ (yeniden oynatma saklı sonuca ulaşır). Geçersiz/aşırı belge → yalnızca belge kilidi; apply reddeder.
-      const head = await tx.execute<{ warehouse_id: string; kind: string }>(
-        sql`SELECT warehouse_id, kind FROM public.documents WHERE tenant_id = ${m.tenantId}::uuid AND id = ${documentId}::uuid`,
-      );
-      const h = head[0];
-      if (h === undefined) throw new AppError("NOT_FOUND");
-      const lines = await loadLines(tx, m.tenantId, documentId);
-      let built: PostingPlan | undefined;
-      if (KINDS.has(h.kind) && lines.length >= 1 && lines.length <= SYNC_POST_MAX_LINES) {
-        try {
-          built = buildPostingPlan(h.kind as PostingKind, lines);
-        } catch (e) {
-          if (!(e instanceof AppError)) throw e;
-        }
-      }
-      // T-221: STOCK_OUT satırlarının rezervasyonları (tüketim) ve STOCK_MOVE'un taşıdığı rezervasyonlar kilit planındadır (I-15 adım 5).
-      const reservationIds =
-        built === undefined ? [] : h.kind === "STOCK_OUT" ? await activeReservationIdsOfDocument(tx, m.tenantId, documentId) : (moves ?? []).flatMap((x) => x.reservationIds);
-      // A-145: satır lokasyonlarının depoları da kapsam denetimine girer (depo uyuşmazlığı apply'da reddedilir).
-      const extra = built === undefined ? [] : await locationWarehouses(tx, m.tenantId, built.locationIds);
-      return { warehouseIds: [...new Set([h.warehouse_id, ...extra])], locks: lockPlanOf(documentId, expectedVersion, built, [...new Set(reservationIds)].sort()) };
-    },
-    apply: async (tx, locked, ctx) => {
-      if (locked.document === undefined) throw new AppError("INTERNAL");
-      return postApprovedDocumentInTx(tx, locked, ctx, documentId, { moves, requestId: input.requestId ?? null });
-    },
+    ...buildPostCommand({ documentId, expectedVersion, moves, requestId: input.requestId, worker: false, requesterMfaVerified: params.principal?.mfaVerified === true, ...(params.queue === undefined ? {} : { queue: params.queue }) }),
   });
-  if (outcome.status !== "COMPLETED") throw new AppError("VERSION_CONFLICT", { retryable: true }); // senkron yolda beklenmez
+  // IN_PROGRESS: eşik üstü belge kuyrukta (bu istek ya da aynı anahtarlı önceki istek); sonuç `getPostingStatus` ile yoklanır.
+  // Yeni istek ile aynı anahtarlı tekrar ayırt edilmez (ikisi de IN_PROGRESS): `replayed` bu yanıtta anlamsızdır, false.
+  if (outcome.status !== "COMPLETED") return { documentId, status: "PROCESSING", replayed: false };
   return { ...outcome.result, replayed: outcome.replayed };
+}
+
+export type PostingStatusView =
+  | { readonly status: "DRAFT" | "APPROVED" | "PROCESSING" | "POSTED" | "CANCELLED" }
+  | { readonly status: "FAILED"; readonly errorCode: string };
+
+/**
+ * `stock.view`: `DRAFT|APPROVED|PROCESSING|POSTED|FAILED(kod)` (UI yoklar, T-229). `FAILED`: belge `APPROVED`, işleme kilidi yok ve en son worker
+ * kaydı `FAILED` (kayıtta yalnızca `result.documentId` bağıdır).
+ */
+export async function getPostingStatus(params: Omit<StockDocCallParams, "clientKey">, documentId: string): Promise<PostingStatusView> {
+  if (typeof documentId !== "string" || !UUID_RE.test(documentId)) throw new AppError("VALIDATION_FAILED");
+  const id = documentId.toLowerCase();
+  return runTenantQuery({ ...params, permission: "stock.view" }, async (tx, m) => {
+    const rows = await tx.execute<{ status: DocumentHeader["status"]; posting_job_id: string | null; warehouse_id: string }>(
+      sql`SELECT status, posting_job_id, warehouse_id FROM public.documents WHERE tenant_id = ${m.tenantId}::uuid AND id = ${id}::uuid`,
+    );
+    const d = rows[0];
+    if (d === undefined) throw new AppError("NOT_FOUND");
+    await assertWarehouseVisible(tx, m, [d.warehouse_id]); // kapsam dışı belge varlık sızdırmaz: NOT_FOUND (T-222 inceleme MAJOR-3)
+    if (d.posting_job_id !== null) return { status: "PROCESSING" } as const;
+    if (d.status !== "APPROVED") return { status: d.status } as const;
+    const failed = await tx.execute<{ error_code: string | null }>(
+      sql`SELECT error_code FROM public.idempotency_records
+           WHERE tenant_id = ${m.tenantId}::uuid AND command_type = 'stock.document.post' AND status = 'FAILED' AND result->>'documentId' = ${id}
+           ORDER BY completed_at DESC LIMIT 1`,
+    );
+    const code = failed[0]?.error_code;
+    return code === undefined || code === null ? ({ status: "APPROVED" } as const) : ({ status: "FAILED", errorCode: code } as const);
+  });
 }
 
 /**
@@ -238,7 +358,7 @@ export async function postDocument(
  * belge kilidi yoktur. Kayıt `tx` nesnesine bağlıdır (WeakMap): başka transaction'a ya da çağıranın uydurduğu kimliğe taşınamaz.
  */
 const createdInTx = new WeakMap<object, Set<string>>();
-/** İÇ (yalnızca saha komutları; apps/** import edemez — eslint `no-restricted-imports`): belge bu `tx`'te yaratıldı. */
+/** İÇ (domain içi saha komutları): belge bu `tx`'te yaratıldı. `apps/web` bu adı (ve `postApprovedDocumentInTx`'i) import edemez: eslint `WEB_STOCK_CORE_NAMES` (`no-restricted-imports`); `apps/worker` yalnızca `@wms/domain/stock/jobs` kullanır. */
 export function registerTxCreatedDocument(tx: AccessTx, documentId: string): void {
   const set = createdInTx.get(tx) ?? new Set<string>();
   set.add(documentId.toLowerCase());
@@ -252,17 +372,39 @@ export interface PostInTxOptions {
 }
 
 /**
+ * İÇ seçenekler (index.ts'ten dışa AÇILMAZ): `worker` yalnızca jobs.ts'in `buildPostCommand({ worker: true })` yolundan gelir; genel
+ * `postApprovedDocumentInTx` bu alanları kabul etmez (T-222 inceleme MINOR-1).
+ */
+interface InternalPostOptions extends PostInTxOptions {
+  /** Worker yolu: işleme kilidi (`posting_job_id`) beklenen durumdur (jobs.ts işi doğrular) ve eşik üstü belge (≤ 2.000) burada işlenir. */
+  readonly worker?: boolean;
+  /** İstek yolu: eşik üstü belgeyi işlemek yerine kuyruğa bırakır. Verilmezse eşik üstü belge `DOCUMENT_STATE` (saha komutları). */
+  readonly defer?: (header: DocumentHeader) => Promise<StockCommandApplied>;
+}
+
+/**
  * Posting çekirdeği (T-305 ayrımı): `APPROVED` belgeyi KİLİTLİ görüntü üzerinde işler. Çağıran `executeStockCommand`'ın `apply`'ı içindedir; kilit planı
  * (boyutlar/lokasyonlar/seriler) çağıranca ÖNCEDEN tam bildirilmiş olmalıdır (aksi `assertCovered` → `VERSION_CONFLICT`). Belge kilidi: `postDocument`
  * belgeyi plan ile kilitler; saha komutları belgeyi aynı transaction'da kendileri oluşturur (başka transaction göremez), bu yüzden kilit gerekmez.
  * Tek yazım yolu korunur (G-01): defter/bakiye yazımı yalnızca bu dosyadadır.
  */
-export async function postApprovedDocumentInTx(
+export function postApprovedDocumentInTx(
   tx: AccessTx,
   locked: LockedState,
   ctx: StockCommandContext,
   documentId: string,
   opts: PostInTxOptions,
+): Promise<StockCommandApplied> {
+  // Yalnızca genel alanlar taşınır: çağıran `worker`/`defer` uydurup işleme kilidini atlayamaz.
+  return postCore(tx, locked, ctx, documentId, { moves: opts.moves, requestId: opts.requestId });
+}
+
+async function postCore(
+  tx: AccessTx,
+  locked: LockedState,
+  ctx: StockCommandContext,
+  documentId: string,
+  opts: InternalPostOptions,
 ): Promise<StockCommandApplied> {
   const moves = opts.moves;
   // Kilit/sahiplik koruması: belge ya bu komutun planıyla KİLİTLENMİŞ (`locked.document`) ya da bu transaction'da oluşturulmuş olmalı; aksi
@@ -271,13 +413,17 @@ export async function postApprovedDocumentInTx(
   const lockedHere = locked.document !== undefined && locked.document.id.toLowerCase() === docKey;
   if (!lockedHere && createdInTx.get(tx)?.has(docKey) !== true) throw new AppError("INTERNAL");
   const header = await readDocumentHeader(tx, ctx.tenantId, documentId); // belge kilitli
-  assertNotProcessing(header); // M-6
+  if (opts.worker !== true) assertNotProcessing(header); // M-6 (worker'da kilit beklenen durumdur; jobs.ts işi doğrular)
   if (header.status !== "APPROVED") throw documentState();
   if (!KINDS.has(header.kind)) throw new AppError("VALIDATION_FAILED");
   const kind = header.kind as PostingKind;
   const lines = await loadLines(tx, ctx.tenantId, documentId);
   if (lines.length < 1) throw new AppError("VALIDATION_FAILED");
-  if (lines.length > SYNC_POST_MAX_LINES) throw documentState(); // T-222 gelene dek kapalı yol: açık hata
+  if (lines.length > MAX_DOCUMENT_LINES) throw tooLarge(); // sert sınır; işleme anında yeniden denetlenir
+  if (lines.length > SYNC_POST_MAX_LINES && opts.worker !== true) {
+    if (opts.defer === undefined) throw documentState(); // kuyruksuz çağıran: açık hata (sahte başarı yok)
+    return opts.defer(header);
+  }
   const built = buildPostingPlan(kind, lines);
   assertCovered(built, locked);
 
