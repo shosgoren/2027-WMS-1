@@ -151,9 +151,7 @@ html {
 /* Masaüstü/tablet: döşemede sağ ok yok; üst düğmeler ve yetki notu telefona özgü (telefon bloğu aşağıda geçersiz kılar). */
 .tile-chevron,
 .top-rows,
-.my-tasks-row,
-.locked-note,
-.soon-note {
+.my-tasks-row {
   display: none;
 }
 
@@ -202,8 +200,8 @@ html {
   }
 
   /* Ana ekran (T-270): ızgara kalan dikey alanı doldurur ve alt sekmeye yaslanır. Satır 1 = üstteki düğmeler (`.top-rows`, otomatik
-     yükseklik); altında `--rows` eşit satır, ilk iş en alt satırda (`--row`, task-menu.tsx). Yetkisiz ve "Yakında" işler varsayılan
-     gizli; düğme açılınca ayrı liste olur (alttan yukarı, kapatma düğmesi altta). */
+     yükseklik); altında `--rows` eşit satır, ilk iş en alt satırda (`--row`, task-menu.tsx). Yetkisiz ve "Yakında" işler ızgarada
+     yer kaplamaz: düğmeler kararmış ana ekran üzerinde ALT SAYFA açar (T-274, DESIGN_REVIEW §7.3 B-01). */
   .task-grid {
     flex: 1 1 0%;
   }
@@ -223,111 +221,47 @@ html {
     gap: 0.5rem;
   }
 
-  .top-rows > details > summary {
+  .top-rows > button {
     gap: 0.375rem;
     font-size: 0.8125rem;
   }
 
-  .top-rows > details > summary::-webkit-details-marker {
-    display: none;
-  }
-
-  .top-rows .when-open {
-    display: none;
-  }
-
-  .top-rows details[open] .when-open {
-    display: block;
-  }
-
-  .top-rows details[open] .when-closed,
-  .top-rows details[open] .soon-preview {
-    display: none;
-  }
-
-  .top-rows details[open] .row-chevron {
+  .top-rows > button[aria-expanded="true"] .row-chevron {
     transform: rotate(180deg);
   }
 
-  /* Biri açıkken kardeş düğme gizlenir (yalnız kapatma düğmesi kalır). */
-  .top-rows:has(details[open]) > details:not([open]) {
-    display: none;
-  }
-
   .task-grid > .soon-item,
-  .task-grid > .locked-item,
-  .task-grid > .locked-note {
+  .task-grid > .locked-item {
     display: none;
   }
 
-  /* Açık liste görünümü: ızgara dikey akışa geçer, alttan yukarı dolar; satırlar yüksekliği paylaşır (üst sınırlı), kapatma düğmesi en altta. */
-  .task-grid:has(.top-rows details[open]) {
-    display: flex;
-    flex: 1 1 0%;
-    flex-direction: column;
-    justify-content: flex-end;
-    min-height: 0;
-    overflow-y: auto;
-  }
-
-  .task-grid:has(.top-rows details[open]) > .task-item {
-    display: none;
-  }
-
-  .task-grid:has(.top-rows details[open]) > .top-rows {
-    order: 99;
-  }
-
-  /* Açık listelerde satırlar KOMPAKT ve nötr (döşeme gibi dokunmaya çağırmaz): 60 px, gölgesiz, tek açıklama paneli boşluğu doldurur. */
-  .task-grid:has(.soon-toggle[open]) > .soon-item,
-  .task-grid:has(.locked-toggle[open]) > .locked-item {
-    display: flex;
+  /* Alt sayfa: içeriğine uyar (en çok %85), altta sabit; satırlar ızgara kurallarını paylaşır (`task-grid sheet-rows`). */
+  .sheet-rows {
     flex: none;
+  }
+
+  .sheet-rows > li > .task-tile {
     height: 4.5rem;
   }
 
-  /* Açıklama TEK kompakt başlık satırıdır (dolgu kutusu yok, T-274 Supervisor kararı): düz zemin, satırların hemen üstünde. */
-  .task-grid:has(.locked-toggle[open]) > .locked-note,
-  .task-grid:has(.soon-toggle[open]) > .soon-note {
-    display: flex;
-    flex: none;
-    flex-direction: row;
-    align-items: center;
-    justify-content: flex-start;
-    gap: 0.5rem;
-    padding: 0.25rem 0.25rem 0.5rem;
-    font-size: 0.9375rem;
-    text-align: left;
-  }
-
-  .locked-note svg,
-  .soon-note svg {
-    width: 1.25rem;
-    height: 1.25rem;
-  }
-
-  .top-rows details[open] .row-lock {
+  .sheet-rows .tile-chevron {
     display: none;
   }
 
   /* "Görevlerim" özeti (saha rolleri): ızgaranın üstünde esnek satır; döşemeler en çok 140 px, altta. */
   .task-grid-card {
-    grid-template-rows: auto minmax(5rem, 1fr) repeat(var(--rows), minmax(5.5rem, 8.75rem));
-    min-height: calc(var(--rows) * 6rem + 11rem);
+    grid-template-rows: minmax(13.5rem, 1fr) repeat(var(--rows), minmax(5.5rem, 8.75rem));
+    min-height: calc(var(--rows) * 6rem + 14rem);
   }
 
   .task-grid-card > .my-tasks-row {
     display: flex;
-    grid-row: 2;
+    grid-row: 1;
   }
 
-  .task-grid-card > .my-tasks-row > .my-tasks,
-  .task-grid-card > .my-tasks-row > [role="alert"] {
+  .my-tasks-stack > .my-tasks:not(.my-tasks-empty),
+  .my-tasks-stack > [role="alert"] {
     flex: 1 1 auto;
-  }
-
-  .task-grid:has(.top-rows details[open]) > .my-tasks-row {
-    display: none;
   }
 
   /* Döşeme: tek sütun yatay satır (ikon dairesi solda, başlık + açıklama, sağ ok). Boyutlar görünür yüksekliğe göre ölçeklenir

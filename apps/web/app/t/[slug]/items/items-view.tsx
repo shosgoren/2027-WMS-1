@@ -7,9 +7,9 @@ import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
-import { Banner, Button, ChevronDown, EmptyState, TextField } from "@wms/ui";
+import { Banner, Button, ChevronDown, ChevronRight, CircleCheck, EmptyState, Search, TextField } from "@wms/ui";
 import { PageBody, Sheet } from "../easy-setup/sheet.tsx";
-import { SetupGuide, isSetupComplete, useSetupProgress } from "../easy-setup/setup-guide.tsx";
+import { isSetupComplete, useSetupProgress } from "../easy-setup/setup-guide.tsx";
 import { Typeahead } from "../easy-setup/typeahead.tsx";
 import { createItemAction, searchItemsAction, suggestItemCodeAction } from "./actions.ts";
 
@@ -302,6 +302,84 @@ function CreateItemDialog({ open, slug, units, returnTo, onClose, onDone }: { op
   );
 }
 
+type SetupStep = { readonly key: "warehouse" | "locations" | "items"; readonly done: boolean; readonly href: string | null };
+
+function setupSteps(slug: string, p: { hasWarehouse: boolean; hasLocation: boolean; hasItem: boolean; nextWarehouseId: string | null }): SetupStep[] {
+  const base = `/t/${encodeURIComponent(slug)}`;
+  return [
+    { key: "warehouse", done: p.hasWarehouse, href: `${base}/warehouses?new=1` },
+    { key: "locations", done: p.hasLocation, href: p.nextWarehouseId === null ? null : `${base}/warehouses/${encodeURIComponent(p.nextWarehouseId)}?bulk=1` },
+    { key: "items", done: p.hasItem, href: null },
+  ];
+}
+
+const ROW_CLS =
+  "flex min-h-12 w-full min-w-0 items-center gap-2 rounded-card border-2 border-border bg-surface px-3 text-left text-sm font-semibold text-ink focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus";
+
+/** Kurulum satırı: sıradaki adım tek satırda; ürün adımında satır "Yeni ürün" ile aynı eylemi açar (ikinci dolu düğme yok). */
+function SetupRow({ slug, progress, onCreate }: { slug: string; progress: { hasWarehouse: boolean; hasLocation: boolean; hasItem: boolean; nextWarehouseId: string | null }; onCreate: () => void }) {
+  const t = useTranslations("items.setup");
+  const steps = setupSteps(slug, progress);
+  const next = steps.find((s) => !s.done);
+  if (next === undefined) return null;
+  const label = next.key === "warehouse" ? t("warehouse") : next.key === "locations" ? t("locations") : t("item");
+  const chevron = <ChevronRight aria-hidden="true" className="size-5 shrink-0" />;
+  if (next.key === "items" || next.href === null) {
+    return (
+      <button type="button" data-testid="setup-row" onClick={onCreate} className={ROW_CLS}>
+        <span className="min-w-0 flex-1 break-words">{label}</span>
+        {chevron}
+      </button>
+    );
+  }
+  return (
+    <Link href={next.href} data-testid="setup-row" className={ROW_CLS}>
+      <span className="min-w-0 flex-1 break-words">{label}</span>
+      {chevron}
+    </Link>
+  );
+}
+
+/** Ürün yokken öğreten boş durum: sıralı kurulum adımları (adım + ipucu + ikincil metin bağlantısı); dolu düğme yok. */
+function SetupSteps({ slug, progress, onCreate }: { slug: string; progress: { hasWarehouse: boolean; hasLocation: boolean; hasItem: boolean; nextWarehouseId: string | null }; onCreate: () => void }) {
+  const t = useTranslations("items");
+  const tg = useTranslations("easySetup.guide");
+  const steps = setupSteps(slug, progress);
+  return (
+    <div data-testid="setup-steps" className="flex min-w-0 flex-col gap-3">
+      <h2 className="m-0 break-words text-lg font-bold text-ink">{t("empty")}</h2>
+      <p className="m-0 break-words text-base text-ink-muted">{t("setup.teach")}</p>
+      <ol aria-label={tg("listLabel")} className="m-0 flex min-w-0 list-none flex-col gap-5 p-0">
+        {steps.map((st, i) => {
+          const locked = st.key === "locations" && st.href === null && !st.done;
+          return (
+            <li key={st.key} data-done={st.done} className="flex min-w-0 items-start gap-3">
+              <span aria-hidden="true" className="flex size-8 shrink-0 items-center justify-center rounded-full bg-accent-soft text-sm font-bold text-accent-ink">
+                {st.done ? <CircleCheck className="size-5" /> : i + 1}
+              </span>
+              <span className="flex min-w-0 flex-1 flex-col">
+                <span className="break-words text-base font-semibold text-ink">
+                  {tg(`${st.key}.title`)} <span className="text-sm text-ink-muted">· {st.done ? tg("done") : tg("todo")}</span>
+                </span>
+                <span className="break-words text-sm text-ink-muted">{locked ? tg("locations.locked") : tg(`${st.key}.hint`)}</span>
+                {st.done || locked ? null : st.href === null ? (
+                  <button type="button" onClick={onCreate} className={`${LINK_CLS} self-start px-0! text-left`}>
+                    {tg(`${st.key}.action`)}
+                  </button>
+                ) : (
+                  <Link href={st.href} className={`${LINK_CLS} self-start px-0!`}>
+                    {tg(`${st.key}.action`)}
+                  </Link>
+                )}
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+    </div>
+  );
+}
+
 export function ItemsView({
   slug,
   canManage,
@@ -322,7 +400,6 @@ export function ItemsView({
 }) {
   const t = useTranslations("items");
   const te = useTranslations("easySetup.items");
-  const tg = useTranslations("easySetup.guide");
   const router = useRouter();
   const pathname = usePathname();
   const params = useSearchParams();
@@ -393,6 +470,7 @@ export function ItemsView({
           label={t("search.label")}
           hint={t("search.hint")}
           placeholder={t("search.placeholder")}
+          icon={<Search aria-hidden="true" className="size-5" />}
           name="q"
           defaultValue={query.q}
           listLabel={te("searchSuggestLabel")}
@@ -407,8 +485,11 @@ export function ItemsView({
           })}
           onSelect={(i) => router.push(`${base}/${encodeURIComponent(i.id)}`)}
         />
-        <details className="min-w-0" open={query.status !== "" ? true : undefined}>
-          <summary className="flex min-h-12 cursor-pointer items-center text-base font-semibold text-accent-ink focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus">{t("search.advanced")}</summary>
+        <details className="group min-w-0" open={query.status !== "" ? true : undefined}>
+          <summary className="flex min-h-12 cursor-pointer list-none items-center gap-2 text-base font-semibold text-accent-ink focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus [&::-webkit-details-marker]:hidden">
+            <span className="min-w-0 flex-1">{t("search.advanced")}</span>
+            <ChevronDown aria-hidden="true" className="size-5 shrink-0 transition-transform group-open:rotate-180" />
+          </summary>
           <div className="flex min-w-0 flex-col gap-1 pb-2">
             <label htmlFor="item-status" className="text-base font-semibold">
               {t("search.status")}
@@ -421,33 +502,24 @@ export function ItemsView({
           </div>
         </details>
         {filtered ? (
-          <Link href={base} className={`${LINK_CLS} self-start`}>
+          <Link href={base} className={`${LINK_CLS} self-start px-0!`}>
             {t("search.clear")}
           </Link>
         ) : null}
       </form>
 
-      {/* Kurulum rehberi aramanın altında: ilk görünümde arama + birincil eylem her zaman görünür (T-274). */}
-      {guide && progress !== null ? (
-        <details data-testid="setup-collapsed" className="group min-w-0 rounded-card border-2 border-border bg-surface px-3">
-          <summary className="flex min-h-12 cursor-pointer list-none items-center gap-2 text-sm font-semibold text-ink focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus [&::-webkit-details-marker]:hidden">
-            <span className="min-w-0 flex-1 break-words">
-              {t("search.setupSummary", {
-                done: [progress.hasWarehouse, progress.hasLocation, progress.hasItem].filter(Boolean).length,
-                next: tg(!progress.hasWarehouse ? "warehouse.title" : !progress.hasLocation ? "locations.title" : "items.title"),
-              })}
-            </span>
-            <ChevronDown aria-hidden="true" className="size-5 shrink-0 transition-transform group-open:rotate-180" />
-          </summary>
-          <div className="pb-3">
-            <SetupGuide slug={slug} progress={progress} />
-          </div>
-        </details>
-      ) : null}
+      {/* Kurulum satırı (S-01): eylem gibi okunur, sağda şevron, doğrudan sıradaki adıma gider; ürün adımında "Yeni ürün" ile AYNI eylemi açar. */}
+      {guide && progress !== null ? <SetupRow slug={slug} progress={progress} onCreate={() => setCreateOpen(true)} /> : null}
 
       <section aria-label={t("listLabel")} className="flex min-w-0 flex-col gap-3">
         {items.length === 0 ? (
-          guide && !filtered ? null : <EmptyState title={filtered ? t("emptyFiltered") : t("empty")} description={filtered ? t("emptyFilteredAction") : canManage ? t("emptyAction") : t("emptyReadOnly")} />
+          guide && !filtered && progress !== null ? (
+            <SetupSteps slug={slug} progress={progress} onCreate={() => setCreateOpen(true)} />
+          ) : filtered ? (
+            <EmptyState title={query.q === "" ? t("emptyStatus") : t("emptyFiltered")} description={query.q === "" ? t("emptyStatusAction") : t("emptyFilteredAction")} />
+          ) : (
+            <EmptyState title={t("empty")} description={canManage ? t("emptyAction") : t("emptyReadOnly")} />
+          )
         ) : (
           <ul className="m-0 flex min-w-0 list-none flex-col gap-3 p-0">
             {items.map((it) => {

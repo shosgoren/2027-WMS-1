@@ -164,6 +164,13 @@ test("kolay kurulum: rehberle depo + raf + ürün, öneri, önizleme, arama (mob
     await expect(item.locator("#create-base-unit")).toContainText("ADET");
     await expect(item.locator("#create-base-unit")).toBeDisabled(); // birim yok: ADET ilk ürünle kendiliğinden oluşur
     await expect(item.locator("details")).not.toHaveAttribute("open", ""); // gelişmiş ayarlar kapalı
+    // T-274 S-01: ürün adımında kurulum satırı "Sıradaki: ilk ürünü ekle" ve "Yeni ürün" ile AYNI eylemi (bu formu) açar; ikinci dolu düğme yok.
+    await page.keyboard.press("Escape");
+    await expect(item).toBeHidden();
+    const rowNext = page.getByTestId("setup-row");
+    await expect(rowNext).toHaveText("Sıradaki: ilk ürünü ekle");
+    await rowNext.click();
+    await expect(page.getByRole("dialog").locator('input[name="code"]')).toHaveValue("URN-0001");
     await item.locator('input[name="name"]').fill(ITEM_NAME);
     await noPageScroll(page, "ürün formu");
     await shot("item-form");

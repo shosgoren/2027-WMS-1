@@ -432,6 +432,7 @@
     "intro": "Yapmak istediğin işe dokun. Seni adım adım götüreceğim; yanlış bir şey yapmana izin vermem.",
     "tasksLabel": "İşler",
     "lockedReason": "Bu iş için yetkin yok. Sorumluna sorabilirsin.",
+    "soonListNote": "Bu işler depo kurulumundan sonra açılacak.",
     "lockedListNote": "Bu işler için yetkin yok. Sorumluna sorabilirsin.",
     "soonLabel": "Yakında",
     "soonWarehouse": "Bu iş depo kurulumundan sonra açılacak.",
@@ -680,7 +681,15 @@
     "emptyAction": "“Yeni ürün” ile ilk ürününü ekle.",
     "emptyReadOnly": "Ürün eklemesi için sorumluna sor.",
     "emptyFiltered": "Aramana uyan ürün yok.",
-    "emptyFilteredAction": "Kodun ilk harflerini, adı ya da barkodu tam yaz; ya da aramayı temizle.",
+    "emptyFilteredAction": "Adı ya da kodu değiştirip yeniden dene; barkodu tam yaz. Ya da aramayı temizle.",
+    "emptyStatus": "Bu filtreye uyan ürün yok.",
+    "emptyStatusAction": "Başka bir durum seç ya da aramayı temizle.",
+    "setup": {
+      "warehouse": "Önce depo ekle · 1. adım / 3",
+      "locations": "Sıradaki: rafları oluştur · 2. adım / 3",
+      "item": "Sıradaki: ilk ürünü ekle",
+      "teach": "Ürün eklemeden önce üç kısa adım var."
+    },
     "codeLabel": "Kod: {code}",
     "baseUnitLabel": "Temel birim: {unit}",
     "status": {
@@ -694,10 +703,9 @@
     "firstPage": "Başa dön",
     "search": {
       "label": "Ürün ara",
-      "hint": "Kod, ad ya da barkod yaz; barkodu okutabilirsin.",
-      "placeholder": "Örn. URN-0001, koli ya da barkod",
+      "hint": "Adı ya da kodu yaz; barkodu okutabilirsin.",
+      "placeholder": "Örn. URN-0001 ya da Koli 40x30",
       "advanced": "Gelişmiş",
-      "setupSummary": "Kurulum {done}/3 · Sıradaki: {next}",
       "status": "Durum",
       "all": "Hepsi",
       "clear": "Aramayı temizle"
