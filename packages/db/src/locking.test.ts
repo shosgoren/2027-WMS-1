@@ -26,6 +26,8 @@ interface Fixture {
   visibleLocations?: string[];
   /** Transaction'daki tenant bağlamı (`undefined` = ayarlı değil). Varsayılan: TENANT. */
   contextTenant?: string | null;
+  /** `FROM public.reservations` sorgusunun döneceği ham satırlar (verilmezse yalnızca `{ id }`). */
+  reservationRows?: Record<string, unknown>[];
 }
 
 function fakeTx(fx: Fixture = {}): { tx: TenantTx; calls: Call[]; probes: () => number } {
@@ -55,6 +57,7 @@ function fakeTx(fx: Fixture = {}): { tx: TenantTx; calls: Call[]; probes: () => 
       const ids = q.params.filter((p): p is string => typeof p === "string" && p.startsWith("00000000-") && p !== TENANT);
       return Promise.resolve(ids.map((d) => ({ stock_dimension_id: d, quantity: "0.000000", reserved_quantity: "0.000000", version: "0" })));
     }
+    if (text.includes("FROM public.reservations") && fx.reservationRows !== undefined) return Promise.resolve(fx.reservationRows);
     if (text.includes("FROM public.reservations") || text.includes("FROM public.serials")) {
       const ids = q.params.filter((p): p is string => typeof p === "string" && p !== TENANT);
       return Promise.resolve(ids.map((d) => ({ id: d })));
@@ -98,6 +101,18 @@ async function withFlag<T>(value: string | undefined, fn: () => Promise<T>): Pro
   }
 }
 
+describe("rezervasyon kaynağı (0016: document_line_id NULL olabilir)", () => {
+  it("sipariş satırı rezervasyonunda document_line_id NULL kalır (\"null\" metni DEĞİL); belge satırı olduğu gibi gelir", async () => {
+    const row = (rid: number, line: string | null) => ({
+      id: id(rid), stock_dimension_id: id(50), document_line_id: line, quantity: "1.000000", status: "ACTIVE",
+    });
+    const { tx } = fakeTx({ reservationRows: [row(1, null), row(2, id(77))] });
+    const state = await acquireStockLocks(tx, TENANT, plan({ reservationIds: [id(1), id(2)] }));
+    expect(state.reservations.map((r) => r.documentLineId)).toEqual([null, id(77)]);
+    expect(state.reservations[0]?.documentLineId).not.toBe("null");
+  });
+});
+
 describe("plan normalizasyonu", () => {
   it("boş plan yalnızca tenant bağlamı yoklamasını yapar (boş adımlar atlanır)", async () => {
     const { tx, calls } = fakeTx();
@@ -114,7 +129,7 @@ describe("plan normalizasyonu", () => {
     expect(res?.params.filter((p) => p !== TENANT)).toEqual([id(1), id(2), id(3)]);
     expect(res?.text).toContain("ORDER BY id FOR UPDATE");
     expect(ser?.params.filter((p) => p !== TENANT)).toEqual([id(7), id(9)]);
-    expect(ser?.text).toContain("ORDER BY id FOR UPDATE");
+    expect(ser?.text).toContain("ORDER BY id FOR NO KEY UPDATE");
   });
 
   it("yinelenen boyut anahtarı tekilleşir; aynı anahtarın büyük harfli yazımı da aynıdır", async () => {

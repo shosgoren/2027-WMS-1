@@ -66,8 +66,16 @@ test("yönetim ekranları: Akış/Kokpit x 375/1280 px", async ({ page }) => {
         };
 
         // Görünüm anahtarı: seçili durum aria-pressed + metinle (renk tek taşıyıcı değil).
+        // T-254: telefon genişliğinde anahtar menüdedir; önce menü açılır, aynı düğme kullanılır.
+        const menuButton = page.getByTestId("app-bar-menu");
+        const inMenu = await menuButton.isVisible();
+        if (inMenu) await menuButton.click();
         await page.getByRole("button", { name: view.label, exact: true }).click();
         await expect(page.getByRole("button", { name: view.label, exact: true })).toHaveAttribute("aria-pressed", "true");
+        if (inMenu) {
+          await page.keyboard.press("Escape");
+          await expect(page.getByRole("dialog")).toBeHidden();
+        }
         await expect(page.locator("html")).toHaveAttribute("data-view", view.id);
 
           // Ayarlar.
@@ -113,6 +121,7 @@ test("yönetim ekranları: Akış/Kokpit x 375/1280 px", async ({ page }) => {
           await page.goto("/t/demo/items");
           await expect(page.getByRole("heading", { level: 1, name: "Ürünler" })).toBeVisible();
           await expectBorderStrong(page, page.getByRole("searchbox", { name: "Ürün ara" }), "ürünler: arama");
+          await page.getByText("Gelişmiş", { exact: true }).click(); // T-274: durum seçimi "Gelişmiş" altında
           await expectBorderStrong(page, page.locator("#item-status"), "ürünler: durum seçimi");
           await expectFocusRing(page, page.locator("#item-status"), "ürünler: durum seçimi");
           await expectNoHorizontalOverflow(page, "ürünler");

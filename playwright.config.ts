@@ -10,9 +10,21 @@ const port = Number(process.env.E2E_PORT ?? "3100");
 const remoteBaseURL = process.env.E2E_BASE_URL?.trim();
 const baseURL = remoteBaseURL || `https://localhost:${port}`;
 
+// T-278: masaüstü ve mobil ayrı cihazlardır; yerel TLS vekili (global-setup, Fly kenarı taklidi) her projeye ayrı
+// istemci adresi (TEST-NET-2) verir → ayrı hız sınırı kovaları. Hız sınırı kuralı değişmez. Uzak hedefte başlık
+// eklenmez (Fly kenarı `Fly-Client-IP`'i kendisi koyar; uygulama bu başlığı okumaz).
+function localClient(ip: string): { extraHTTPHeaders?: Record<string, string> } {
+  return remoteBaseURL ? {} : { extraHTTPHeaders: { "x-e2e-client-ip": ip } };
+}
+
+// T-279: boş tenant fikstürü yalnızca yerel yığında (global-setup) kurulur; uzak hedefte (E2E_BASE_URL) o fikstüre bağlı spec dosyaları dışlanır
+// (atlama/skip değil: bu koşuda fikstür kavramı yoktur; demo kapsamı diğer spec dosyalarında sürer).
+const EMPTY_TENANT_SPECS = ["**/empty-tenant.spec.ts", "**/z-easy-setup.spec.ts"];
+
 export default defineConfig({
   testDir: "tests/e2e",
   testMatch: "**/*.spec.ts",
+  testIgnore: remoteBaseURL ? EMPTY_TENANT_SPECS : [],
   globalSetup: "./tests/e2e/global-setup.ts",
   outputDir: ".artifacts/e2e/test-results",
   reporter: [["list"], ["html", { outputFolder: ".artifacts/e2e/report", open: "never" }]],
@@ -33,8 +45,8 @@ export default defineConfig({
     screenshot: "only-on-failure",
   },
   projects: [
-    { name: "desktop", use: { ...devices["Desktop Chrome"], viewport: { width: 1280, height: 800 } } },
+    { name: "desktop", use: { ...devices["Desktop Chrome"], viewport: { width: 1280, height: 800 }, ...localClient("198.51.100.1") } },
     // Pixel 5 = 393x727, dokunmatik, mobil Chromium.
-    { name: "mobile", use: { ...devices["Pixel 5"] } },
+    { name: "mobile", use: { ...devices["Pixel 5"], ...localClient("198.51.100.2") } },
   ],
 });

@@ -1,7 +1,6 @@
 // T-217: stok belgesi işleme (postDocument). GERÇEK roller (wms_app, pooler); fikstür/gözlem yalnızca DATABASE_URL_DIRECT ile.
 // Beklenen değerler docs/spec/16-stock-effects.md Senaryo A (adım 1-3 ve varyantlar). Fikstürler sentetiktir (G-09).
-// A-217-1 (kart eki gerekli): belge satırında hedef durum sütunu yok → durum değişimi (KAR→KUL) uçtan uca test edilemez; plan/rules
-// birim testleri (plan.test.ts) kaynak ≠ hedef durumu ayrı kapsar.
+// T-248: durum değişimi (KAR→KUL, AVAILABLE→QUARANTINE) `document_lines.target_stock_status` ile uçtan uca test edilir (A-248-1/A-248-2).
 import { readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import pg from "pg";
@@ -14,9 +13,13 @@ import {
   createStockDocument,
   postDocument,
   readAvailability,
+  reserve,
+  updateDraft,
   type DocumentLineInput,
   type StockDocCallParams,
 } from "../../../packages/domain/src/stock/index.ts";
+import { assertTargetStatusAllowed } from "../../../packages/domain/src/stock/documents.ts";
+import { ALLOWED_STATUS_TRANSITION_PAIRS, isStatusTransitionAllowed } from "../../../packages/domain/src/stock/plan.ts";
 import { archiveLocation } from "../../../packages/domain/src/warehouse/index.ts";
 import { runTenantQuery } from "../../../packages/domain/src/identity/access.ts";
 import { newRegistry, seedWorld, type TenantWorld } from "../fixtures/tenants.ts";
@@ -62,6 +65,41 @@ async function failure(p: Promise<unknown>): Promise<AppError> {
     return e as AppError;
   }
   throw new Error("expected rejection");
+}
+const DENIED_CASES: [DocumentLineInput["stockStatus"], DocumentLineInput["targetStockStatus"]][] = [
+  ["DAMAGED", "AVAILABLE"], ["AVAILABLE", "DAMAGED"], ["AVAILABLE", "BLOCKED"], ["BLOCKED", "AVAILABLE"], ["QUARANTINE", "DAMAGED"],
+];
+/** Bakım yolu simülasyonu: süper kullanıcı, ENABLE ORIGIN tetikleyicilerini (satır bekçileri dahil) atlayarak yazar; yalnızca savunma derinliği testleri için. */
+async function bypassGuardsUpdate(text: string, params: unknown[]): Promise<void> {
+  await adm.query("BEGIN");
+  try {
+    await adm.query("SET LOCAL session_replication_role = replica");
+    await adm.query(text, params);
+    await adm.query("COMMIT");
+  } catch (e) {
+    await adm.query("ROLLBACK").catch(() => undefined);
+    throw e;
+  }
+}
+/** wms_app (havuzlayıcı) rolüyle, tenant bağlamında tek ifade; hata varsa {code,message}, yoksa null. İfade her durumda geri alınır. */
+async function appSqlError(text: string, params: unknown[]): Promise<{ code: string | undefined; message: string } | null> {
+  const c = new pg.Client({ connectionString: env.databaseUrl });
+  c.on("error", () => undefined);
+  await c.connect();
+  try {
+    await c.query("BEGIN");
+    await c.query("SELECT set_config('app.current_tenant_id', $1, true)", [A.tenantId]);
+    try {
+      await c.query(text, params);
+    } catch (e) {
+      return { code: (e as { code?: string }).code, message: (e as Error).message };
+    } finally {
+      await c.query("ROLLBACK").catch(() => undefined);
+    }
+    return null;
+  } finally {
+    await c.end();
+  }
 }
 const codeOf = (e: AppError): string => (e.detail === undefined ? e.code : `${e.code}/${e.detail}`);
 
@@ -166,7 +204,7 @@ afterAll(async () => {
 }, 60_000);
 
 describe("Senaryo A adım 1-3 (16-stock-effects) ve varyantlar", () => {
-  it("kalite kontrol açık: +10 KABUL·KAR → (kalite onayı durum değişimi: bkz. A-217-1) ; kapalı varyant: +10 KABUL·KUL → yerleştirme → R-01", async () => {
+  it("kalite kontrol açık: +10 KABUL·KAR → (kalite onayı durum değişimi: bkz. T-248 testleri) ; kapalı varyant: +10 KABUL·KUL → yerleştirme → R-01", async () => {
     const x = await mkItem();
     const kabul = await mkLoc("RECEIVING");
     const r01 = await mkLoc("STORAGE");
@@ -239,6 +277,226 @@ describe("Senaryo A adım 1-3 (16-stock-effects) ve varyantlar", () => {
     await post(d);
     expect(await bal({ item: x, loc: recv })).toBe("3.000000");
     expect((await ledgerRows(d.id))[0]).toEqual({ quantity: "-2.000000", reason: "SHIPMENT" });
+  });
+});
+
+describe("T-248: hedef stok durumu ve STOCK_MOVE ile durum değişimi", () => {
+  const availOf = async (x: string) => runTenantQuery({ ...ownerP(), permission: "stock.view" }, (tx, m) => readAvailability(tx, m.tenantId, { itemId: x }));
+
+  it("Senaryo A adım 2: kalite onayı −10 KAR / +10 KUL aynı lokasyonda; fiziksel sabit; kullanılabilir artar; defter = bakiye", async () => {
+    const x = await mkItem();
+    const kabul = await mkLoc("RECEIVING");
+    await post(await mkApproved("STOCK_IN", [ln(x, { targetLocationId: kabul, stockStatus: "QUARANTINE", ...qty("10") })]));
+    const d = await mkApproved("STOCK_MOVE", [
+      ln(x, { sourceLocationId: kabul, targetLocationId: kabul, stockStatus: "QUARANTINE", targetStockStatus: "AVAILABLE", ...qty("10") }),
+    ]);
+    await post(d);
+    expect(await bal({ item: x, loc: kabul, status: "QUARANTINE" })).toBe("0.000000");
+    expect(await bal({ item: x, loc: kabul })).toBe("10.000000");
+    expect(await physical(x)).toBe("10.000000");
+    expect((await ledgerRows(d.id)).map((r) => [r.quantity, r.reason])).toEqual([["-10.000000", "MOVE"], ["10.000000", "MOVE"]]);
+    expect(await ledgerMatchesBalances(x)).toBe(true);
+    expect(await availOf(x)).toEqual([]); // KABUL RECEIVING: sevke uygun değil (kural 5)
+    // kullanılabilir artışı: STORAGE lokasyonunda KAR → KUL
+    const y = await mkItem();
+    const r01 = await mkLoc("STORAGE");
+    await post(await mkApproved("STOCK_IN", [ln(y, { targetLocationId: r01, stockStatus: "QUARANTINE", ...qty("4") })]));
+    expect(await availOf(y)).toEqual([]);
+    await post(await mkApproved("STOCK_MOVE", [ln(y, { sourceLocationId: r01, targetLocationId: r01, stockStatus: "QUARANTINE", targetStockStatus: "AVAILABLE", ...qty("4") })]));
+    expect((await availOf(y)).map((r) => [r.locationId, r.available])).toEqual([[r01, "4.000000"]]);
+    expect(await physical(y)).toBe("4.000000");
+    expect(await ledgerMatchesBalances(y)).toBe(true);
+  });
+
+  it("aynı seri AVAILABLE→QUARANTINE (aynı lokasyon) ve geri: seri tek boyutta pozitif kalır; defter = bakiye", async () => {
+    process.env.STOCK_SERIAL_LOCK_ENABLED = "true";
+    const x = await mkItem("SERIAL");
+    const r1 = await mkLoc();
+    const s = await mkSerial(x);
+    await post(await mkApproved("STOCK_IN", [ln(x, { targetLocationId: r1, serialId: s })]));
+    await post(await mkApproved("STOCK_MOVE", [ln(x, { sourceLocationId: r1, targetLocationId: r1, serialId: s, targetStockStatus: "QUARANTINE" })]));
+    expect(await bal({ item: x, loc: r1, serial: s })).toBe("0.000000");
+    expect(await bal({ item: x, loc: r1, serial: s, status: "QUARANTINE" })).toBe("1.000000");
+    await post(await mkApproved("STOCK_MOVE", [ln(x, { sourceLocationId: r1, targetLocationId: r1, serialId: s, stockStatus: "QUARANTINE", targetStockStatus: "AVAILABLE" })]));
+    expect(await bal({ item: x, loc: r1, serial: s })).toBe("1.000000");
+    expect(await bal({ item: x, loc: r1, serial: s, status: "QUARANTINE" })).toBe("0.000000");
+    expect(await physical(x)).toBe("1.000000");
+    expect(await ledgerMatchesBalances(x)).toBe(true);
+  });
+
+  it("hedef durum NULL/verilmedi = kaynakla aynı: aynı lokasyonda durum değişmeden hareket boş harekettir (VALIDATION_FAILED)", async () => {
+    const x = await mkItem();
+    const r1 = await mkLoc();
+    await post(await mkApproved("STOCK_IN", [ln(x, { targetLocationId: r1, ...qty("2") })]));
+    for (const t of [undefined, null, "AVAILABLE" as const]) {
+      const d = await mkApproved("STOCK_MOVE", [ln(x, { sourceLocationId: r1, targetLocationId: r1, ...(t === undefined ? {} : { targetStockStatus: t }) })]);
+      expect(codeOf(await failure(post(d)))).toBe("VALIDATION_FAILED");
+    }
+    expect(await bal({ item: x, loc: r1 })).toBe("2.000000");
+  });
+
+  it("izinsiz geçiş taslakta reddedilir (T-258): DAMAGED→AVAILABLE, AVAILABLE→DAMAGED/BLOCKED, BLOCKED→AVAILABLE, KUL→DAMAGED; belge yaratılmaz", async () => {
+    const x = await mkItem();
+    const r1 = await mkLoc();
+    const before = (await q<{ n: string }>("SELECT count(*)::text AS n FROM public.documents WHERE tenant_id=$1", [A.tenantId]))[0]?.n;
+    for (const [from, to] of DENIED_CASES) {
+      const lines = [ln(x, { sourceLocationId: r1, targetLocationId: r1, stockStatus: from, targetStockStatus: to })];
+      expect(codeOf(await failure(createStockDocument(ownerP(), { kind: "STOCK_MOVE", warehouseId: A.warehouseId, lines })))).toBe("VALIDATION_FAILED");
+    }
+    expect((await q<{ n: string }>("SELECT count(*)::text AS n FROM public.documents WHERE tenant_id=$1", [A.tenantId]))[0]?.n).toBe(before);
+  });
+
+  it("alan denetimi DB'den bağımsız kanıtlanır (T-258, M1): assertTargetStatusAllowed izinsiz çifti ve STOCK_IN+hedefi VALIDATION_FAILED ile reddeder; izinli/NULL geçer", () => {
+    const l = (stock_status: string, target_stock_status: string | null) => ({ stock_status, target_stock_status });
+    for (const [from, to] of DENIED_CASES) {
+      expect(() => assertTargetStatusAllowed("STOCK_MOVE", [l(from as string, to as string)])).toThrowError(expect.objectContaining({ code: "VALIDATION_FAILED" }));
+    }
+    expect(() => assertTargetStatusAllowed("STOCK_IN", [l("AVAILABLE", "QUARANTINE")])).toThrowError(expect.objectContaining({ code: "VALIDATION_FAILED" }));
+    expect(() => assertTargetStatusAllowed("STOCK_OUT", [l("AVAILABLE", "AVAILABLE")])).toThrowError(expect.objectContaining({ code: "VALIDATION_FAILED" }));
+    expect(() => assertTargetStatusAllowed("STOCK_MOVE", [l("QUARANTINE", "AVAILABLE"), l("AVAILABLE", "QUARANTINE"), l("AVAILABLE", "AVAILABLE"), l("DAMAGED", null)])).not.toThrow();
+    expect(() => assertTargetStatusAllowed("STOCK_IN", [l("AVAILABLE", null)])).not.toThrow();
+  });
+
+  it("izinsiz geçiş updateDraft'ta reddedilir (T-258): izinli taslak DAMAGED→AVAILABLE'a güncellenemez; satır ve sürüm değişmez", async () => {
+    const x = await mkItem();
+    const r1 = await mkLoc();
+    const ok = [ln(x, { sourceLocationId: r1, targetLocationId: r1, stockStatus: "QUARANTINE", targetStockStatus: "AVAILABLE" })];
+    const c = await createStockDocument(ownerP(), { kind: "STOCK_MOVE", warehouseId: A.warehouseId, lines: ok });
+    const id = c.documentId as string;
+    const v = (await docRow(id)).version;
+    const bad = [ln(x, { sourceLocationId: r1, targetLocationId: r1, stockStatus: "DAMAGED", targetStockStatus: "AVAILABLE" })];
+    expect(codeOf(await failure(updateDraft(ownerP(), { documentId: id, expectedVersion: v, lines: bad })))).toBe("VALIDATION_FAILED");
+    expect((await docRow(id)).version).toBe(v);
+    const row = (await q<{ s: string; t: string }>("SELECT stock_status AS s, target_stock_status AS t FROM public.document_lines WHERE document_id=$1", [id]))[0];
+    expect([row?.s, row?.t]).toEqual(["QUARANTINE", "AVAILABLE"]);
+  });
+
+  it("izinsiz geçiş onayda reddedilir (T-258): kayıtlı taslak satırı bozulmuşsa approve VALIDATION_FAILED, belge DRAFT kalır", async () => {
+    const x = await mkItem();
+    const r1 = await mkLoc();
+    const c = await createStockDocument(ownerP(), {
+      kind: "STOCK_MOVE", warehouseId: A.warehouseId,
+      lines: [ln(x, { sourceLocationId: r1, targetLocationId: r1, stockStatus: "QUARANTINE", targetStockStatus: "AVAILABLE" })],
+    });
+    const id = c.documentId as string;
+    await bypassGuardsUpdate("UPDATE public.document_lines SET stock_status='DAMAGED', target_stock_status='AVAILABLE' WHERE document_id=$1", [id]);
+    const v = (await docRow(id)).version;
+    expect(codeOf(await failure(approveDocument(ownerP(), { documentId: id, expectedVersion: v })))).toBe("VALIDATION_FAILED");
+    expect((await docRow(id)).status).toBe("DRAFT");
+  });
+
+  it("posting'deki denetim savunma derinliği olarak kalır: onaylı belgeye (bakım yoluyla) yazılan izinsiz çift VALIDATION_FAILED, hiçbir şey yazılmaz", async () => {
+    const x = await mkItem();
+    const r1 = await mkLoc();
+    await post(await mkApproved("STOCK_IN", [ln(x, { targetLocationId: r1, stockStatus: "DAMAGED", ...qty("3") }), ln(x, { targetLocationId: r1, stockStatus: "BLOCKED", ...qty("3") }), ln(x, { targetLocationId: r1, ...qty("3") })]));
+    for (const [from, to] of DENIED_CASES) {
+      const d = await mkApproved("STOCK_MOVE", [ln(x, { sourceLocationId: r1, targetLocationId: r1, stockStatus: "QUARANTINE", targetStockStatus: "AVAILABLE" })]);
+      await bypassGuardsUpdate("UPDATE public.document_lines SET stock_status=$2, target_stock_status=$3 WHERE document_id=$1", [d.id, from, to]);
+      expect(codeOf(await failure(post(d)))).toBe("VALIDATION_FAILED");
+      expect((await docRow(d.id)).status).toBe("APPROVED");
+      expect(await ledgerCount(d.id)).toBe(0);
+    }
+    expect(await physical(x)).toBe("9.000000");
+    expect(await bal({ item: x, loc: r1, status: "DAMAGED" })).toBe("3.000000");
+    expect(await ledgerMatchesBalances(x)).toBe(true);
+  });
+
+  it("DB ikinci emniyet (T-258): wms_app doğrudan SQL ile STOCK_IN/OUT satırına hedef durum yazamaz (23514); STOCK_MOVE izinsiz çift de reddedilir", async () => {
+    const x = await mkItem();
+    const r1 = await mkLoc();
+    const inDoc = (await createStockDocument(ownerP(), { kind: "STOCK_IN", warehouseId: A.warehouseId, lines: [ln(x, { targetLocationId: r1 })] })).documentId as string;
+    const outDoc = (await createStockDocument(ownerP(), { kind: "STOCK_OUT", warehouseId: A.warehouseId, lines: [ln(x, { sourceLocationId: r1 })] })).documentId as string;
+    const insLine = (doc: string, from: string, to: string): [string, unknown[]] =>
+      [`INSERT INTO public.document_lines (tenant_id, id, document_id, line_no, item_id, unit_id, quantity, conversion_factor, base_quantity, source_location_id, target_location_id, stock_status, target_stock_status)
+        VALUES ($1, $2, $3, 9, $4, $5, 1, 1, 1, $6, $6, $7, $8)`, [A.tenantId, uuid(), doc, x, A.unitId, r1, from, to]];
+    for (const doc of [inDoc, outDoc]) {
+      expect(await appSqlError(...insLine(doc, "QUARANTINE", "AVAILABLE"))).toMatchObject({ code: "23514", message: expect.stringContaining("TARGET_STATUS_KIND") });
+      expect(await appSqlError(...insLine(doc, "AVAILABLE", "AVAILABLE"))).toMatchObject({ code: "23514", message: expect.stringContaining("TARGET_STATUS_KIND") });
+      expect(await appSqlError("UPDATE public.document_lines SET target_stock_status='QUARANTINE' WHERE tenant_id=$1 AND document_id=$2", [A.tenantId, doc])).toMatchObject({
+        code: "23514", message: expect.stringContaining("TARGET_STATUS_KIND"),
+      });
+    }
+    const mv = (await createStockDocument(ownerP(), { kind: "STOCK_MOVE", warehouseId: A.warehouseId, lines: [ln(x, { sourceLocationId: r1, targetLocationId: r1, stockStatus: "QUARANTINE", targetStockStatus: "AVAILABLE" })] })).documentId as string;
+    expect(await appSqlError(...insLine(mv, "DAMAGED", "AVAILABLE"))).toMatchObject({ code: "23514", message: expect.stringContaining("TARGET_STATUS_TRANSITION") });
+    expect(await appSqlError(...insLine(mv, "QUARANTINE", "AVAILABLE"))).toBeNull();
+    expect(await appSqlError("UPDATE public.document_lines SET stock_status='BLOCKED' WHERE tenant_id=$1 AND document_id=$2", [A.tenantId, mv])).toMatchObject({ code: "23514" });
+  });
+
+  it("SQL beyaz listesi = TS listesi (T-258): 4x4 (kaynak, hedef) çiftinde DB kabulü isStatusTransitionAllowed ile aynıdır", async () => {
+    const x = await mkItem();
+    const r1 = await mkLoc();
+    const mv = (await createStockDocument(ownerP(), { kind: "STOCK_MOVE", warehouseId: A.warehouseId, lines: [ln(x, { sourceLocationId: r1, targetLocationId: r1, stockStatus: "QUARANTINE", targetStockStatus: "AVAILABLE" })] })).documentId as string;
+    type PostingStatusArg = Parameters<typeof isStatusTransitionAllowed>[0];
+    // Durum kümesi sabit yazılmaz: CHECK tanımından (pg_constraint) okunur (T-271 MINOR-3); küme değişirse test kendiliğinden genişler.
+    const def = (await q<{ d: string }>("SELECT pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conname='document_lines_target_stock_status_chk' AND conrelid='public.document_lines'::regclass"))[0]?.d ?? "";
+    const all = [...def.matchAll(/'([A-Z_]+)'::text/g)].map((m) => m[1] as string);
+    expect(all.length, def).toBeGreaterThanOrEqual(4);
+    expect(new Set(all).size).toBe(all.length);
+    expect(ALLOWED_STATUS_TRANSITION_PAIRS.length).toBe(2);
+    for (const from of all) {
+      for (const to of all) {
+        const err = await appSqlError("UPDATE public.document_lines SET stock_status=$3, target_stock_status=$4 WHERE tenant_id=$1 AND document_id=$2", [A.tenantId, mv, from, to]);
+        const allowed = isStatusTransitionAllowed(from as PostingStatusArg, to as PostingStatusArg);
+        expect([from, to, err === null]).toEqual([from, to, allowed]);
+        // Ret nedeni: yalnız tetikleyicinin geçiş reddi (SQLSTATE 23514 + TARGET_STATUS_TRANSITION); başka nedenle (CHECK, yetki...) ret sayılmaz.
+        if (!allowed) expect(err, `${from}>${to}`).toMatchObject({ code: "23514", message: expect.stringContaining("TARGET_STATUS_TRANSITION") });
+      }
+    }
+  });
+
+  it("hedef durum yalnız STOCK_MOVE'da: STOCK_IN/OUT (create ve updateDraft) ve bilinmeyen değer VALIDATION_FAILED", async () => {
+    const x = await mkItem();
+    const r1 = await mkLoc();
+    const bad = ln(x, { targetLocationId: r1, targetStockStatus: "QUARANTINE" });
+    expect(codeOf(await failure(createStockDocument(ownerP(), { kind: "STOCK_IN", warehouseId: A.warehouseId, lines: [bad] })))).toBe("VALIDATION_FAILED");
+    expect(codeOf(await failure(createStockDocument(ownerP(), { kind: "STOCK_OUT", warehouseId: A.warehouseId, lines: [ln(x, { sourceLocationId: r1, targetStockStatus: "QUARANTINE" })] })))).toBe("VALIDATION_FAILED");
+    expect(codeOf(await failure(createStockDocument(ownerP(), { kind: "STOCK_MOVE", warehouseId: A.warehouseId, lines: [ln(x, { sourceLocationId: r1, targetLocationId: r1, targetStockStatus: "NOPE" as never })] })))).toBe("VALIDATION_FAILED");
+    const c = await createStockDocument(ownerP(), { kind: "STOCK_IN", warehouseId: A.warehouseId, lines: [ln(x, { targetLocationId: r1 })] });
+    const id = c.documentId as string;
+    expect(codeOf(await failure(updateDraft(ownerP(), { documentId: id, expectedVersion: (await docRow(id)).version, lines: [bad] })))).toBe("VALIDATION_FAILED");
+    // STOCK_MOVE satırı hedef durumu saklar ve updateDraft ile korunur
+    const m = await createStockDocument(ownerP(), { kind: "STOCK_MOVE", warehouseId: A.warehouseId, lines: [ln(x, { sourceLocationId: r1, targetLocationId: r1, targetStockStatus: "QUARANTINE" })] });
+    const mid = m.documentId as string;
+    expect((await q<{ t: string | null }>("SELECT target_stock_status AS t FROM public.document_lines WHERE document_id=$1", [mid]))[0]?.t).toBe("QUARANTINE");
+    await updateDraft(ownerP(), { documentId: mid, expectedVersion: (await docRow(mid)).version, lines: [ln(x, { sourceLocationId: r1, targetLocationId: r1, targetStockStatus: "AVAILABLE", stockStatus: "QUARANTINE" })] });
+    expect((await q<{ t: string | null }>("SELECT target_stock_status AS t FROM public.document_lines WHERE document_id=$1", [mid]))[0]?.t).toBe("AVAILABLE");
+  });
+
+  it("kaynak durumda stok yoksa INSUFFICIENT_STOCK (KAR boş iken KAR→KUL); fazla miktar da reddedilir", async () => {
+    const x = await mkItem();
+    const r1 = await mkLoc();
+    await post(await mkApproved("STOCK_IN", [ln(x, { targetLocationId: r1, stockStatus: "QUARANTINE", ...qty("2") })]));
+    const d = await mkApproved("STOCK_MOVE", [ln(x, { sourceLocationId: r1, targetLocationId: r1, stockStatus: "QUARANTINE", targetStockStatus: "AVAILABLE", ...qty("3") })]);
+    expect(codeOf(await failure(post(d)))).toBe("INSUFFICIENT_STOCK");
+    const e = await mkApproved("STOCK_MOVE", [ln(x, { sourceLocationId: r1, targetLocationId: r1, targetStockStatus: "QUARANTINE" })]); // KUL boş
+    expect(codeOf(await failure(post(e)))).toBe("INSUFFICIENT_STOCK");
+    expect(await bal({ item: x, loc: r1, status: "QUARANTINE" })).toBe("2.000000");
+    expect(await ledgerMatchesBalances(x)).toBe(true);
+  });
+
+  it("A-248-2 rezerve kısım durum değiştirmez: serbest kısım karantinaya alınır, rezerveli kısım INSUFFICIENT_STOCK; rezervasyon taşımayla da QUARANTINE'e gitmez", async () => {
+    const x = await mkItem();
+    const r01 = await mkLoc("STORAGE");
+    const sevk = await mkLoc("STAGING");
+    await post(await mkApproved("STOCK_IN", [ln(x, { targetLocationId: r01, ...qty("6") })]));
+    const s1 = await mkApproved("STOCK_OUT", [ln(x, { sourceLocationId: sevk, ...qty("4") })]);
+    const lineId = (await q<{ id: string }>("SELECT id FROM public.document_lines WHERE document_id=$1", [s1.id]))[0]?.id as string;
+    const rs = await reserve(ownerP(), { documentLineId: lineId, allocations: [{ dimension: { locationId: r01 }, quantity: "4" }] });
+    const toQ = (n: string) => mkApproved("STOCK_MOVE", [ln(x, { sourceLocationId: r01, targetLocationId: r01, targetStockStatus: "QUARANTINE", ...qty(n) })]);
+    const tooMuch = await toQ("3"); // serbest = 6 − 4 = 2
+    expect(codeOf(await failure(post(tooMuch)))).toBe("INSUFFICIENT_STOCK");
+    const viaMove = await toQ("2");
+    expect(codeOf(await failure(postDocument(ownerP(), {
+      documentId: viaMove.id, expectedVersion: viaMove.version, reservationMoves: [{ lineId: (await q<{ id: string }>("SELECT id FROM public.document_lines WHERE document_id=$1", [viaMove.id]))[0]?.id as string, reservationIds: rs.reservationIds as string[] }],
+    })))).toBe("INSUFFICIENT_STOCK");
+    expect(await bal({ item: x, loc: r01 })).toBe("6.000000");
+    await post(viaMove); // yalnız serbest 2
+    expect(await bal({ item: x, loc: r01 })).toBe("4.000000");
+    expect(await bal({ item: x, loc: r01, status: "QUARANTINE" })).toBe("2.000000");
+    const res = await q<{ r: string }>(
+      "SELECT b.reserved_quantity::text AS r FROM public.stock_balances b JOIN public.stock_dimensions d ON d.tenant_id=b.tenant_id AND d.id=b.stock_dimension_id WHERE d.tenant_id=$1 AND d.item_id=$2 AND d.stock_status='AVAILABLE'", [A.tenantId, x]);
+    expect(res[0]?.r).toBe("4.000000");
+    expect(await ledgerMatchesBalances(x)).toBe(true);
   });
 });
 

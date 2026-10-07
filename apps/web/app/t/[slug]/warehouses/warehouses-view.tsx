@@ -4,11 +4,14 @@
 // Mobilde kart görünümü (tablo yok → yatay taşma yok). Sunucu reddi neden + sonraki eylemle gösterilir.
 import { useTranslations } from "next-intl";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { Banner, Button, ConfirmDialog, EmptyState, TextField } from "@wms/ui";
-import { archiveWarehouseAction, createWarehouseAction } from "./actions.ts";
+import { PageBody, Sheet } from "../easy-setup/sheet.tsx";
+import { SetupGuide, isSetupComplete, useSetupProgress } from "../easy-setup/setup-guide.tsx";
+import { CodeChangedNotice, CodeEditDialog } from "../code-edit-dialog.tsx";
+import { archiveWarehouseAction, createWarehouseAction, renameWarehouseAction, suggestCodeAction } from "./actions.ts";
 
 /** Sunucu eylem hatası (`ActionResult.error`): yalnızca kod + ayrıntı + istek kimliği kullanılır. */
 export interface ServerError {
@@ -17,37 +20,46 @@ export interface ServerError {
   readonly requestId?: string | undefined;
 }
 
-const KNOWN = ["forbidden", "unauthenticated", "not_found", "validation_failed", "version_conflict", "rate_limited", "tenant_suspended", "tenant_closing", "internal"];
+const KNOWN = ["idempotency_mismatch", "forbidden", "unauthenticated", "not_found", "validation_failed", "version_conflict", "rate_limited", "tenant_suspended", "tenant_closing", "internal"];
 const DETAILED = [
   "forbidden_mfa_required",
   "forbidden_warehouse_out_of_scope",
   "unauthenticated_recent_auth_required",
   "validation_failed_code_taken",
+  "validation_failed_code_ambiguous",
   "validation_failed_in_use",
   "validation_failed_parent_invalid",
+  "validation_failed_document_too_large",
+  "validation_failed_idempotency_key_required",
 ];
 
 /**
  * Sunucu hatası → `warehouses.errors.<anahtar>` (+ `<anahtar>Action` sonraki eylem). Kod/ayrıntı sunucudan gelir;
  * yalnızca bilinen eşlemeler kullanılır, aksi halde genel `internal`. `IN_USE` metni kapsama göre (depo/lokasyon) ayrışır.
  */
-export function errorKey(error: Pick<ServerError, "code" | "detail">, scope: "warehouse" | "location" = "warehouse"): string {
+export function errorKey(error: Pick<ServerError, "code" | "detail">, scope: "warehouse" | "location" | "bulk" = "warehouse"): string {
   const base = error.code.toLowerCase();
   const key = KNOWN.includes(base) ? base : "internal";
   if (error.detail !== undefined) {
     const detailed = `${key}_${error.detail.toLowerCase()}`;
-    if (DETAILED.includes(detailed)) return detailed === "validation_failed_in_use" && scope === "location" ? "validation_failed_in_use_location" : detailed;
+    if (DETAILED.includes(detailed)) {
+      if (detailed === "validation_failed_in_use" && scope === "location") return "validation_failed_in_use_location";
+      if (detailed === "validation_failed_code_taken" && scope === "bulk") return "validation_failed_code_taken_bulk";
+      return detailed;
+    }
   }
   return key;
 }
 
+/** Kod önerisi yanıt süresi sınırı; aşılırsa kod alanı açılır (T-259). */
+const SUGGEST_TIMEOUT_MS = 5000;
 const LINK_CLS =
   "inline-flex min-h-12 min-w-12 items-center justify-center rounded-control px-2 text-base font-semibold text-accent-ink underline focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus";
 const BADGE = "inline-flex items-center rounded-full px-2 text-xs font-bold";
 export const SELECT_CLS =
   "min-h-12 w-full min-w-0 rounded-card border-2 border-border-strong bg-surface px-4 text-base text-ink focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus";
 
-export function ServerErrorBanner({ error, returnTo, scope = "warehouse" }: { error: ServerError; returnTo: string; scope?: "warehouse" | "location" }) {
+export function ServerErrorBanner({ error, returnTo, scope = "warehouse" }: { error: ServerError; returnTo: string; scope?: "warehouse" | "location" | "bulk" }) {
   const t = useTranslations("warehouses.errors");
   const key = errorKey(error, scope);
   return (
@@ -77,11 +89,13 @@ export interface CreateValues {
   readonly code: string;
   readonly name: string;
   readonly kind: string;
+  /** Kod kullanıcı tarafından değiştirilmedi (önerilen kod): çakışmada sunucu sıradaki öneriyle yeniden dener (T-250). */
+  readonly autoCode: boolean;
 }
 
 /**
- * Oluşturma penceresi (depo ve lokasyon ortak). `submit` sunucu eylemini çağırır; hata pencerede kalır ve form
- * YENİDEN oluşturulur (çift gönderim `CODE_TAKEN` ile biter; kullanıcı yeni formla yeniden dener).
+ * Oluşturma penceresi (depo ve lokasyon ortak, T-250). Açılışta sıradaki kod SUNUCUDAN istenir ve hazır gelir; zorunlu olan yalnızca ad.
+ * `submit` sunucu eylemini çağırır; hata pencerede kalır, yazılanlar korunur. Telefonda tam ekran tek sütun, eylem çubuğu altta sabit.
  */
 export function CreateDialog({
   open,
@@ -90,6 +104,8 @@ export function CreateDialog({
   kinds,
   returnTo,
   scope,
+  defaultName = "",
+  suggest,
   onClose,
   onDone,
   submit,
@@ -101,83 +117,129 @@ export function CreateDialog({
   kinds?: readonly string[];
   returnTo: string;
   scope: "warehouse" | "location";
+  /** Ad alanının önerilen başlangıç değeri (akıllı varsayılan). */
+  defaultName?: string;
+  /** Sıradaki kodu sunucudan ister; başarısızsa `null` (kullanıcı kodu kendisi yazar). */
+  suggest: () => Promise<string | null>;
   onClose: () => void;
-  onDone: () => void;
-  submit: (v: CreateValues) => Promise<{ ok: true } | { ok: false; error: ServerError }>;
+  onDone: (result: unknown) => void;
+  submit: (v: CreateValues) => Promise<{ ok: true; data?: unknown } | { ok: false; error: ServerError }>;
 }) {
   const t = useTranslations("warehouses.form");
+  const te = useTranslations("easySetup.code");
   const tk = useTranslations("warehouses.kind");
-  const ref = useRef<HTMLDialogElement>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ServerError | null>(null);
-  const [round, setRound] = useState(0);
+  const [name, setName] = useState(defaultName);
+  const [code, setCode] = useState("");
+  const [kind, setKind] = useState("STORAGE");
+  const [touched, setTouched] = useState(false);
+  // Gecikmeli öneri yanıtı kapanışın (closure) bayat `touched` değerini görmesin diye ref (T-259 MINOR-2).
+  const touchedRef = useRef(false);
+  const [codeState, setCodeState] = useState<"loading" | "ready" | "failed">("loading");
 
   useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    if (open && !el.open) el.showModal();
-    if (!open && el.open) el.close();
-    if (open) setError(null);
+    if (!open) return;
+    let live = true;
+    setError(null);
+    setName(defaultName);
+    setKind("STORAGE");
+    setTouched(false);
+    touchedRef.current = false;
+    setCode("");
+    setCodeState("loading");
+    // Öneri hiç dönmezse alan sonsuza dek salt okunur kalmasın: süre dolunca "failed" (kullanıcı kodu kendisi yazar).
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (live && !settled) {
+        settled = true;
+        setCodeState("failed");
+      }
+    }, SUGGEST_TIMEOUT_MS);
+    void suggest().then((c) => {
+      if (!live || settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (c === null) setCodeState("failed");
+      else {
+        // Kullanıcı kodu değiştirdiyse (`touched`; silip boş bırakmak dahil) öneri uygulanmaz (N-14: sessiz değişiklik yok).
+        if (!touchedRef.current) setCode(c);
+        setCodeState("ready");
+      }
+    });
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
+    // `suggest`/`defaultName` her açılışta okunur; kimlikleri değişse de form yeniden başlamaz.
   }, [open]);
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
     setBusy(true);
     setError(null);
-    const res = await submit({ code: String(form.get("code") ?? ""), name: String(form.get("name") ?? ""), kind: String(form.get("kind") ?? "") });
+    const res = await submit({ code, name, kind, autoCode: !touched && codeState === "ready" });
     setBusy(false);
     if (!res.ok) {
       setError(res.error);
-      setRound((n) => n + 1);
       return;
     }
-    onDone();
+    onDone(res.data);
   }
 
   return (
-    <dialog
-      ref={ref}
-      aria-labelledby="create-dialog-title"
-      onClose={() => {
-        if (open) onClose();
-      }}
-      className="m-auto w-[min(32rem,calc(100vw-2rem))] rounded-card border-0 bg-surface p-6 text-ink shadow-card backdrop:bg-ink/50"
+    <Sheet
+      open={open}
+      title={title}
+      titleId="create-dialog-title"
+      onClose={onClose}
+      onSubmit={(e) => void onSubmit(e)}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose} disabled={busy}>
+            {t("cancel")}
+          </Button>
+          <Button type="submit" loading={busy} disabled={codeState === "loading"}>
+            {t("submit")}
+          </Button>
+        </>
+      }
     >
-      <h2 id="create-dialog-title" className="mb-2 break-words text-xl font-bold">
-        {title}
-      </h2>
-      {open ? (
-        <form key={round} onSubmit={(e) => void onSubmit(e)} className="flex min-w-0 flex-col gap-4">
-          {intro ? <div className="break-words text-base text-ink-muted">{intro}</div> : null}
-          <TextField label={t("code")} hint={t("codeHint")} name="code" autoComplete="off" autoCapitalize="characters" required maxLength={512} />
-          <TextField label={t("name")} name="name" autoComplete="off" required maxLength={512} />
-          {kinds === undefined ? null : (
-            <div className="flex min-w-0 flex-col gap-1">
-              <label htmlFor="create-kind" className="text-base font-semibold">
-                {t("kind")}
-              </label>
-              <select id="create-kind" name="kind" defaultValue="STORAGE" className={SELECT_CLS}>
-                {kinds.map((k) => (
-                  <option key={k} value={k}>
-                    {tk(k)}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-          {error ? <ServerErrorBanner error={error} returnTo={returnTo} scope={scope} /> : null}
-          <div className="flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
-            <Button variant="secondary" onClick={onClose} disabled={busy}>
-              {t("cancel")}
-            </Button>
-            <Button type="submit" loading={busy}>
-              {t("submit")}
-            </Button>
-          </div>
-        </form>
-      ) : null}
-    </dialog>
+      {intro ? <div className="break-words text-base text-ink-muted">{intro}</div> : null}
+      <TextField label={t("name")} name="name" value={name} onChange={(e) => setName(e.target.value)} autoComplete="off" required maxLength={512} />
+      <TextField
+        label={t("code")}
+        hint={codeState === "loading" ? te("loading") : codeState === "failed" ? te("failed") : touched ? `${te("custom")} ${t("codeHint")}` : `${te("suggested")} ${t("codeHint")}`}
+        name="code"
+        value={code}
+        readOnly={codeState === "loading"}
+        aria-busy={codeState === "loading"}
+        onChange={(e) => {
+          touchedRef.current = true;
+          setTouched(true);
+          setCode(e.target.value);
+        }}
+        autoComplete="off"
+        autoCapitalize="characters"
+        required
+        maxLength={512}
+      />
+      {kinds === undefined ? null : (
+        <div className="flex min-w-0 flex-col gap-1">
+          <label htmlFor="create-kind" className="text-base font-semibold">
+            {t("kind")}
+          </label>
+          <select id="create-kind" name="kind" value={kind} onChange={(e) => setKind(e.target.value)} className={SELECT_CLS}>
+            {kinds.map((k) => (
+              <option key={k} value={k}>
+                {tk(k)}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+      {error ? <ServerErrorBanner error={error} returnTo={returnTo} scope={scope} /> : null}
+    </Sheet>
   );
 }
 
@@ -206,13 +268,50 @@ export function WarehousesView({
   firstPage: boolean;
 }) {
   const t = useTranslations("warehouses");
+  const te = useTranslations("easySetup");
   const router = useRouter();
   const base = `/t/${encodeURIComponent(slug)}/warehouses`;
   const [createOpen, setCreateOpen] = useState(false);
   const [archiving, setArchiving] = useState<WarehouseView | null>(null);
+  const [editing, setEditing] = useState<WarehouseView | null>(null);
+  const [codeChanged, setCodeChanged] = useState<{ readonly id: string; readonly from: string; readonly to: string } | null>(null);
+  const [undoing, setUndoing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ServerError | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [version, setVersion] = useState(0);
+  const progress = useSetupProgress(slug, canManage, version);
+  const guide = canManage && progress !== null && !isSetupComplete(progress);
+  const pathname = usePathname();
+  const params = useSearchParams();
+
+  // Rehberin büyük düğmesi `?new=1` ile gelir: formu aç, adresi temizle (yenilemede yeniden açılmasın).
+  useEffect(() => {
+    if (params.get("new") === "1" && canManage) {
+      setCreateOpen(true);
+      router.replace(pathname);
+    }
+  }, [params, canManage, pathname, router]);
+
+  async function changeCode(id: string, code: string) {
+    const r = await renameWarehouseAction({ slug, warehouseId: id, code });
+    return r.ok ? ({ ok: true, changed: r.data.changed } as const) : ({ ok: false, error: { code: r.error.code, detail: r.error.detail, requestId: r.error.requestId } } as const);
+  }
+  /** "Geri al" (N-03): eski koda dönüş aynı sunucu komutudur. */
+  async function undoCode() {
+    if (codeChanged === null) return;
+    setUndoing(true);
+    setError(null);
+    const r = await changeCode(codeChanged.id, codeChanged.from);
+    setUndoing(false);
+    if (!r.ok) {
+      setError(r.error);
+      return;
+    }
+    setCodeChanged(null);
+    setNotice(t("done.codeUndone"));
+    router.refresh();
+  }
 
   async function archive() {
     if (archiving === null) return;
@@ -232,6 +331,7 @@ export function WarehousesView({
 
   return (
     <>
+      <PageBody hide={createOpen || editing !== null}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <h1 className="break-words text-2xl font-extrabold text-ink">{t("title")}</h1>
@@ -249,12 +349,14 @@ export function WarehousesView({
         </div>
       </div>
 
+      {codeChanged ? <CodeChangedNotice from={codeChanged.from} to={codeChanged.to} busy={undoing} onUndo={() => void undoCode()} /> : null}
       {notice ? <Banner kind="info">{notice}</Banner> : null}
       {error ? <ServerErrorBanner error={error} returnTo={base} /> : null}
+      {guide && progress !== null ? <SetupGuide slug={slug} progress={progress} /> : null}
 
       <section aria-label={t("listLabel")} className="flex min-w-0 flex-col gap-3">
         {warehouses.length === 0 ? (
-          <EmptyState title={t("empty")} description={canManage ? t("emptyAction") : t("emptyReadOnly")} />
+          guide ? null : <EmptyState title={t("empty")} description={canManage ? t("emptyAction") : t("emptyReadOnly")} />
         ) : (
           <ul className="m-0 flex min-w-0 list-none flex-col gap-3 p-0">
             {warehouses.map((w) => {
@@ -272,6 +374,11 @@ export function WarehousesView({
                     <Link href={`${base}/${encodeURIComponent(w.id)}`} className={LINK_CLS}>
                       {t("open")}
                     </Link>
+                    {active ? (
+                      <Button variant="secondary" disabled={!canManage} aria-describedby={canManage ? undefined : noteId} aria-label={t("codeEdit.for", { name: w.name })} onClick={() => setEditing(w)}>
+                        {t("codeEdit.button")}
+                      </Button>
+                    ) : null}
                     {active ? (
                       <Button variant="danger" disabled={!canManage} aria-describedby={canManage ? undefined : noteId} onClick={() => setArchiving(w)}>
                         {t("archive")}
@@ -301,21 +408,50 @@ export function WarehousesView({
           )}
         </nav>
       </section>
+      </PageBody>
 
       <CreateDialog
         open={createOpen}
         title={t("createTitle")}
         returnTo={base}
         scope="warehouse"
+        defaultName={progress !== null && !progress.hasWarehouse ? te("form.defaultWarehouseName") : ""}
+        suggest={async () => {
+          const r = await suggestCodeAction({ slug, kind: "warehouse" });
+          return r.ok ? r.data.code : null;
+        }}
         onClose={() => setCreateOpen(false)}
-        onDone={() => {
+        onDone={(data) => {
           setCreateOpen(false);
           setNotice(t("done.created"));
-          router.refresh();
+          setVersion((n) => n + 1);
+          // İlk depo: doğrudan raf oluşturucuya git (rehberin 2. adımı).
+          const id = (data as { warehouseId?: string } | undefined)?.warehouseId;
+          if (progress !== null && !progress.hasLocation && id !== undefined) router.push(`${base}/${encodeURIComponent(id)}?bulk=1`);
+          else router.refresh();
         }}
         submit={async (v) => {
-          const res = await createWarehouseAction({ slug, code: v.code, name: v.name });
-          return res.ok ? { ok: true } : { ok: false, error: { code: res.error.code, detail: res.error.detail, requestId: res.error.requestId } };
+          const res = await createWarehouseAction({ slug, code: v.code, name: v.name, autoCode: v.autoCode });
+          return res.ok ? { ok: true, data: res.data } : { ok: false, error: { code: res.error.code, detail: res.error.detail, requestId: res.error.requestId } };
+        }}
+      />
+      <CodeEditDialog
+        open={editing !== null}
+        subject={editing?.name ?? ""}
+        current={editing?.code ?? ""}
+        titleId="code-edit-warehouse-title"
+        onClose={() => setEditing(null)}
+        submit={(code) => (editing === null ? Promise.resolve({ ok: false, error: { code: "NOT_FOUND" } } as const) : changeCode(editing.id, code))}
+        renderError={(e) => <ServerErrorBanner error={e} returnTo={base} />}
+        onDone={(r) => {
+          const id = editing?.id;
+          setEditing(null);
+          setError(null);
+          if (r.changed && id !== undefined) {
+            setNotice(null);
+            setCodeChanged({ id, from: r.from, to: r.to });
+          } else setNotice(t("done.codeSame"));
+          router.refresh();
         }}
       />
       <ConfirmDialog

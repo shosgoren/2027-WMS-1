@@ -18,21 +18,31 @@
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { AppError } from "@wms/shared/errors";
-import type { AccessTx, TenantAccessParams } from "../identity/access.ts";
+import type { AccessTx } from "../identity/access.ts";
 import { hasPermission } from "../identity/permissions.ts";
 import { pgUuidArray } from "../warehouse/scope.ts";
 import { EMPTY_LOCK_PLAN, executeStockCommand, type StockCommandOutcome, type StockCommandParams } from "./command.ts";
 import type { StockCommandResult, StockResultLine } from "./idempotency.ts";
 import { yearOfBusinessDate } from "./numbering.ts";
-import { readCancellationLockSet, releaseForCancellation } from "./reservations.ts";
+import { isStatusTransitionAllowed, type PostingStatus } from "./plan.ts";
+import {
+  assertItemsActive,
+  assertNotProcessing,
+  readCancellationLockSet,
+  readDocumentHeader,
+  type StockDocCallParams,
+} from "./reservation-reads.ts";
+import { releaseForCancellation } from "./reservations.ts";
 
-/** Çağıran bağlamı: izin komuta bağlıdır; `clientKey` her komutta zorunludur (A-73). */
-export type StockDocCallParams = Omit<TenantAccessParams, "permission" | "recentAuth"> & {
-  readonly clientKey: string | null | undefined;
-  readonly retry?: StockCommandParams<unknown>["retry"];
-  readonly timeouts?: StockCommandParams<unknown>["timeouts"];
-  readonly logger?: StockCommandParams<unknown>["logger"];
-};
+// Döngüyü kıran ortak okuma modülünden taşınan adlar buradan da erişilir kalır (index.ts/posting.ts yolu değişmez).
+export {
+  assertItemsActive,
+  assertLocationsActiveInWarehouse,
+  assertNotProcessing,
+  readDocumentHeader,
+  type DocumentHeader,
+  type StockDocCallParams,
+} from "./reservation-reads.ts";
 
 /** A-07: belge başına en çok 2.000 satır. */
 export const MAX_DOCUMENT_LINES = 2000;
@@ -58,6 +68,8 @@ export interface DocumentLineInput {
   readonly lotId?: string | null;
   readonly serialId?: string | null;
   readonly stockStatus?: "AVAILABLE" | "QUARANTINE" | "DAMAGED" | "BLOCKED";
+  /** Yalnız `STOCK_MOVE` (T-248): hedef durum; verilmezse/NULL ise kaynak durumla aynı (durum değişimi yok). Diğer türlerde `VALIDATION_FAILED`. */
+  readonly targetStockStatus?: "AVAILABLE" | "QUARANTINE" | "DAMAGED" | "BLOCKED" | null;
   readonly inventoryOwnerId?: string | null;
   readonly handlingUnitId?: string | null;
 }
@@ -75,6 +87,7 @@ interface NormalizedLine {
   readonly lot_id: string | null;
   readonly serial_id: string | null;
   readonly stock_status: string;
+  readonly target_stock_status: string | null;
   readonly inventory_owner_id: string | null;
   readonly handling_unit_id: string | null;
 }
@@ -117,6 +130,8 @@ function normalizeLines(raw: unknown): NormalizedLine[] {
     const x = l as Record<string, unknown>;
     const status = x.stockStatus === undefined ? "AVAILABLE" : x.stockStatus;
     if (typeof status !== "string" || !LINE_STOCK_STATUSES.has(status)) throw new AppError("VALIDATION_FAILED");
+    const target = x.targetStockStatus === undefined || x.targetStockStatus === null ? null : x.targetStockStatus;
+    if (target !== null && (typeof target !== "string" || !LINE_STOCK_STATUSES.has(target))) throw new AppError("VALIDATION_FAILED");
     return {
       id: randomUUID(),
       line_no: i + 1,
@@ -130,6 +145,7 @@ function normalizeLines(raw: unknown): NormalizedLine[] {
       lot_id: uuidOrNull(x.lotId),
       serial_id: uuidOrNull(x.serialId),
       stock_status: status,
+      target_stock_status: target,
       inventory_owner_id: uuidOrNull(x.inventoryOwnerId),
       handling_unit_id: uuidOrNull(x.handlingUnitId),
     };
@@ -139,7 +155,19 @@ function normalizeLines(raw: unknown): NormalizedLine[] {
 function recordset(lines: readonly NormalizedLine[]) {
   const json = JSON.stringify(lines);
   return sql`jsonb_to_recordset(${json}::jsonb) AS w(id uuid, line_no int, item_id uuid, unit_id uuid, quantity numeric, conversion_factor numeric, base_quantity numeric,
-     source_location_id uuid, target_location_id uuid, lot_id uuid, serial_id uuid, stock_status text, inventory_owner_id uuid, handling_unit_id uuid)`;
+     source_location_id uuid, target_location_id uuid, lot_id uuid, serial_id uuid, stock_status text, target_stock_status text, inventory_owner_id uuid, handling_unit_id uuid)`;
+}
+
+/**
+ * T-248/T-258: hedef durum yalnız `STOCK_MOVE` satırında ve izinli (kaynak, hedef) çiftinde kabul edilir (16 kural 3: durum değişimi bir −/+
+ * çiftidir; IN/OUT tek uçludur; A-154 beyaz liste). Taslak/onay aşamasında erken ret; posting denetimi savunma derinliği olarak kalır.
+ */
+export function assertTargetStatusAllowed(kind: string, lines: readonly { readonly stock_status: string; readonly target_stock_status: string | null }[]): void {
+  for (const l of lines) {
+    if (l.target_stock_status === null) continue;
+    if (kind !== "STOCK_MOVE") throw new AppError("VALIDATION_FAILED");
+    if (!isStatusTransitionAllowed(l.stock_status as PostingStatus, l.target_stock_status as PostingStatus)) throw new AppError("VALIDATION_FAILED");
+  }
 }
 
 /** Açık sütun listeli, tek ifadelik satır yazımı (sunucu türetimli sütun yok). Başlık ÖNCEDEN kilitli olmalıdır. */
@@ -152,9 +180,9 @@ async function insertLines(tx: AccessTx, tenantId: string, documentId: string, l
   await tx.execute(
     sql`INSERT INTO public.document_lines
           (tenant_id, id, document_id, line_no, item_id, unit_id, quantity, conversion_factor, base_quantity,
-           source_location_id, target_location_id, lot_id, serial_id, stock_status, inventory_owner_id, handling_unit_id)
+           source_location_id, target_location_id, lot_id, serial_id, stock_status, target_stock_status, inventory_owner_id, handling_unit_id)
         SELECT ${tenantId}::uuid, w.id, ${documentId}::uuid, w.line_no, w.item_id, w.unit_id, w.quantity, w.conversion_factor, w.base_quantity,
-               w.source_location_id, w.target_location_id, w.lot_id, w.serial_id, w.stock_status, w.inventory_owner_id, w.handling_unit_id
+               w.source_location_id, w.target_location_id, w.lot_id, w.serial_id, w.stock_status, w.target_stock_status, w.inventory_owner_id, w.handling_unit_id
           FROM ${recordset(lines)}
          ORDER BY w.line_no`,
   );
@@ -163,72 +191,8 @@ async function insertLines(tx: AccessTx, tenantId: string, documentId: string, l
 
 // --- ortak yardımcılar (T-217/T-221 de kullanır) ----------------------------------------------------------------------
 
-export interface DocumentHeader {
-  readonly id: string;
-  readonly kind: string;
-  readonly status: "DRAFT" | "APPROVED" | "POSTED" | "CANCELLED";
-  readonly version: number;
-  readonly warehouseId: string;
-  readonly businessDate: string;
-  readonly reason: string | null;
-  readonly postingJobId: string | null;
-}
-
-/**
- * Belge başlığını okur. ÇAĞIRAN başlığı daha önce `acquireStockLocks` ile `FOR UPDATE` kilitlemiş olmalıdır (kilitli görüntü: durum
- * ve `posting_job_id` kilit altında okunur). Yoksa `NOT_FOUND`.
- */
-export async function readDocumentHeader(tx: AccessTx, tenantId: string, documentId: string): Promise<DocumentHeader> {
-  const rows = await tx.execute<{
-    id: string; kind: string; status: DocumentHeader["status"]; version: number | string; warehouse_id: string; business_date: string; reason: string | null; posting_job_id: string | null;
-  }>(
-    sql`SELECT id, kind, status, version, warehouse_id, business_date::text AS business_date, reason, posting_job_id
-          FROM public.documents WHERE tenant_id = ${tenantId}::uuid AND id = ${documentId}::uuid`,
-  );
-  const r = rows[0];
-  if (r === undefined) throw new AppError("NOT_FOUND");
-  return {
-    id: r.id,
-    kind: r.kind,
-    status: r.status,
-    version: Number(r.version),
-    warehouseId: r.warehouse_id,
-    businessDate: r.business_date,
-    reason: r.reason,
-    postingJobId: r.posting_job_id,
-  };
-}
-
-/** İşleme kilidi (M-6, ADR-018 §6): `posting_job_id` doluyken düzenleme/onay/iptal/rezervasyon/yeni işleme → `DOCUMENT_STATE`. */
-export function assertNotProcessing(header: Pick<DocumentHeader, "postingJobId">): void {
-  if (header.postingJobId !== null) throw new AppError("VALIDATION_FAILED", { detail: "DOCUMENT_STATE" });
-}
-
 function documentState(): AppError {
   return new AppError("VALIDATION_FAILED", { detail: "DOCUMENT_STATE" });
-}
-
-/**
- * Ürünleri `FOR SHARE` okur ve hepsinin ACTIVE olduğunu denetler (ARCHIVED ürüne hareket reddedilir; arşivleme `FOR NO KEY UPDATE`
- * ile çakışır). Eksik ürün → `NOT_FOUND`; ACTIVE değil → `VALIDATION_FAILED`. Kimliğe göre sıralı (kilit sırası sabit).
- */
-export async function assertItemsActive(
-  tx: AccessTx,
-  tenantId: string,
-  itemIds: readonly string[],
-  opts: { readonly archivedDetail?: "IN_USE" } = {},
-): Promise<void> {
-  const ids = [...new Set(itemIds.map((i) => i.toLowerCase()))].sort();
-  if (ids.length === 0) return;
-  const rows = await tx.execute<{ id: string; status: string }>(
-    sql`SELECT id, status FROM public.items
-         WHERE tenant_id = ${tenantId}::uuid AND id = ANY(${pgUuidArray(ids)}::uuid[])
-         ORDER BY id FOR SHARE`,
-  );
-  if (rows.length !== ids.length) throw new AppError("NOT_FOUND");
-  if (rows.some((r) => r.status !== "ACTIVE")) {
-    throw new AppError("VALIDATION_FAILED", opts.archivedDetail === undefined ? {} : { detail: opts.archivedDetail });
-  }
 }
 
 async function assertWarehouseActive(tx: AccessTx, tenantId: string, warehouseId: string): Promise<void> {
@@ -298,31 +262,6 @@ export async function assertLocationsInWarehouse(tx: AccessTx, tenantId: string,
   }
 }
 
-/**
- * T-217 (T-243 MAJOR): stok yazıcısı için lokasyon denetimi. Kimliğe göre sıralı `FOR SHARE` (arşivin `FOR NO KEY UPDATE`'iyle çakışır),
- * sonra: yok/başka tenant → `NOT_FOUND`; başka depo → `VALIDATION_FAILED`/`LOCATION_WAREHOUSE_MISMATCH` (A-145);
- * `ACTIVE` değil → `VALIDATION_FAILED`/`IN_USE`. `acquireStockLocks` SONRASI çağrılır (kilit sırası: sayım kilidi → lokasyon).
- */
-export async function assertLocationsActiveInWarehouse(
-  tx: AccessTx,
-  tenantId: string,
-  locationIds: readonly string[],
-  warehouseId: string,
-): Promise<void> {
-  if (locationIds.length === 0) return;
-  const ids = [...new Set(locationIds.map((i) => i.toLowerCase()))].sort();
-  const rows = await tx.execute<{ id: string; warehouse_id: string; status: string }>(
-    sql`SELECT id, warehouse_id, status FROM public.locations
-         WHERE tenant_id = ${tenantId}::uuid AND id = ANY(${pgUuidArray(ids)}::uuid[])
-         ORDER BY id FOR SHARE`,
-  );
-  if (rows.length !== ids.length) throw new AppError("NOT_FOUND");
-  if (rows.some((r) => r.warehouse_id.toLowerCase() !== warehouseId.toLowerCase())) {
-    throw new AppError("VALIDATION_FAILED", { detail: "LOCATION_WAREHOUSE_MISMATCH" });
-  }
-  if (rows.some((r) => r.status !== "ACTIVE")) throw new AppError("VALIDATION_FAILED", { detail: "IN_USE" });
-}
-
 async function existingLineLocationIds(tx: AccessTx, tenantId: string, documentId: string): Promise<string[]> {
   const rows = await tx.execute<{ id: string }>(
     sql`SELECT source_location_id AS id FROM public.document_lines WHERE tenant_id = ${tenantId}::uuid AND document_id = ${documentId}::uuid AND source_location_id IS NOT NULL
@@ -389,6 +328,7 @@ export async function createStockDocument(
   const businessDate = businessDateOf(input.businessDate);
   const reason = reasonOf(input.reason);
   const lines = normalizeLines(input.lines ?? []);
+  assertTargetStatusAllowed(kind, lines);
   // İstek özeti yalnızca düz girdidir (satır kimlikleri sunucuda üretilir → özete girmez).
   const hashInput = { kind, warehouseId, businessDate, reason, lines: (input.lines ?? []) as unknown };
   return completed(
@@ -465,6 +405,7 @@ export async function updateDraft(
         const header = await readDocumentHeader(tx, ctx.tenantId, documentId); // kilit altında
         assertNotProcessing(header);
         if (header.status !== "DRAFT") throw documentState();
+        if (lines !== undefined) assertTargetStatusAllowed(header.kind, lines);
         if (warehouseId !== undefined && warehouseId !== header.warehouseId) await assertWarehouseActive(tx, ctx.tenantId, warehouseId);
         const date = await assertBusinessDateNotFuture(tx, ctx.tenantId, businessDate ?? header.businessDate);
         if (lines !== undefined) await assertItemsActive(tx, ctx.tenantId, lines.map((l) => l.item_id));
@@ -532,6 +473,12 @@ export async function approveDocument(
           sql`SELECT count(*)::text AS n FROM public.document_lines WHERE tenant_id = ${ctx.tenantId}::uuid AND document_id = ${documentId}::uuid`,
         );
         if (Number(count[0]?.n ?? "0") < 1) throw new AppError("VALIDATION_FAILED");
+        // T-258: kayıtlı satırların hedef durumu onayda yeniden doğrulanır (taslak APPROVED'a izinsiz geçişle ulaşmaz).
+        const targets = await tx.execute<{ stock_status: string; target_stock_status: string }>(
+          sql`SELECT DISTINCT stock_status, target_stock_status FROM public.document_lines
+               WHERE tenant_id = ${ctx.tenantId}::uuid AND document_id = ${documentId}::uuid AND target_stock_status IS NOT NULL`,
+        );
+        assertTargetStatusAllowed(header.kind, targets);
         await tx.execute(
           sql`UPDATE public.documents SET status = 'APPROVED' WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${documentId}::uuid`,
         );

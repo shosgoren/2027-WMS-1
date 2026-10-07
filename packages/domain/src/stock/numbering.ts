@@ -1,7 +1,7 @@
 // Fiş numaralama (T-213; 05 §Rezervasyon ve hareketler, A-70, A-05; ADR-018 §7).
 //
 // - Kapsam: tenant + belge türü + dönem. Dönem = iş tarihinin takvim yılı (A-70); biçim `<önek>-<YYYY>-<6 hane>`; önekler `GRS`
-//   (STOCK_IN), `CKS` (STOCK_OUT), `TSM` (STOCK_MOVE), `TRS` (REVERSAL). Boşluk kabul (A-05; yalnızca geri alınan transaction'da yok).
+//   (STOCK_IN), `CKS` (STOCK_OUT), `TSM` (STOCK_MOVE), `TRS` (REVERSAL), `KBL` (INBOUND_RECEIPT; A-305-1). Boşluk kabul (A-05; yalnızca geri alınan transaction'da yok).
 // - Atomik: `INSERT … ON CONFLICT DO UPDATE … RETURNING` tek ifadede satır kilidi alır; eşzamanlı iki komut sırayla numara alır.
 // - Kilit sırası (ADR-018 §7): `number_sequences` satırı komutun SON kilididir; çağıran bunu apply'dan sonra, idempotency
 //   tamamlanmadan hemen önce çağırır (`executeStockCommand` bunu yapar).
@@ -9,13 +9,15 @@ import { sql } from "drizzle-orm";
 import { AppError } from "@wms/shared/errors";
 import type { AccessTx } from "../identity/access.ts";
 
-export type NumberedDocumentKind = "STOCK_IN" | "STOCK_OUT" | "STOCK_MOVE" | "REVERSAL";
+export type NumberedDocumentKind = "STOCK_IN" | "STOCK_OUT" | "STOCK_MOVE" | "REVERSAL" | "INBOUND_RECEIPT";
 
 export const NUMBER_PREFIX: Readonly<Record<NumberedDocumentKind, string>> = {
   STOCK_IN: "GRS",
   STOCK_OUT: "CKS",
   STOCK_MOVE: "TSM",
   REVERSAL: "TRS",
+  // A-305-1 (A-139/Q-79 varsayılanı; kartlarda önek tanımı yok): beklenen teslim (kabul belgesi) numarası `KBL-<YYYY>-<6 hane>`.
+  INBOUND_RECEIPT: "KBL",
 };
 
 const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;

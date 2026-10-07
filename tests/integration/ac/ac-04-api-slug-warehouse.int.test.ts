@@ -215,8 +215,17 @@ const ACTIONS: Record<string, Call> = {
   archiveWarehouseAction: (slug) => actions.archiveWarehouseAction!({ slug, warehouseId: B.warehouseId }),
   createLocationAction: (slug) => actions.createLocationAction!({ slug, warehouseId: B.warehouseId, parentId: null, code: loc("L"), name: "Ele Gecirildi", kind: "STORAGE" }),
   archiveLocationAction: (slug) => actions.archiveLocationAction!({ slug, locationId: B.childLocationId }),
+  renameWarehouseAction: (slug) => actions.renameWarehouseAction!({ slug, warehouseId: B.warehouseId, code: loc("W") }),
+  renameLocationAction: (slug) => actions.renameLocationAction!({ slug, locationId: B.childLocationId, code: loc("L") }),
   loadMoreLocationsAction: (slug) =>
     actions.loadMoreLocationsAction!({ slug, warehouseId: B.warehouseId, after: { depth: 0, code: "A", id: randomUUID() } }),
+  suggestCodeAction: (slug) => actions.suggestCodeAction!({ slug, kind: "location", warehouseId: B.warehouseId }),
+  previewBulkLocationsAction: (slug) =>
+    actions.previewBulkLocationsAction!({ slug, warehouseId: B.warehouseId, parentId: null, zone: "Z", rackFrom: 1, rackTo: 1, levelFrom: 1, levelTo: 1 }),
+  createBulkLocationsAction: (slug) =>
+    actions.createBulkLocationsAction!({ slug, warehouseId: B.warehouseId, parentId: null, zone: "Z", rackFrom: 1, rackTo: 1, levelFrom: 1, levelTo: 1, idempotencyKey: `k-${rnd()}` }),
+  searchLocationsAction: (slug) => actions.searchLocationsAction!({ slug, warehouseId: B.warehouseId, q: "A" }),
+  getSetupProgressAction: (slug) => actions.getSetupProgressAction!({ slug }),
 };
 
 describe("depo Server Action'ları", () => {
@@ -263,9 +272,11 @@ describe("depo Server Action'ları", () => {
       ["archiveWarehouse", (id) => actions.archiveWarehouseAction!({ slug: A.slug, warehouseId: id })],
       ["loadMore", (id) => actions.loadMoreLocationsAction!({ slug: A.slug, warehouseId: id, after: { depth: 0, code: "A", id: randomUUID() } })],
       ["archiveLocation", (id) => actions.archiveLocationAction!({ slug: A.slug, locationId: id })],
+      ["renameWarehouse", (id) => actions.renameWarehouseAction!({ slug: A.slug, warehouseId: id, code: "ZZ4" })],
+      ["renameLocation", (id) => actions.renameLocationAction!({ slug: A.slug, locationId: id, code: "ZZ5" })],
     ];
     for (const [name, fn] of pairs) {
-      const foreign = name === "archiveLocation" ? B.childLocationId : B.warehouseId;
+      const foreign = name === "archiveLocation" || name === "renameLocation" ? B.childLocationId : B.warehouseId;
       as(A.ownerUserId);
       const cross = await fn(foreign);
       as(A.ownerUserId);

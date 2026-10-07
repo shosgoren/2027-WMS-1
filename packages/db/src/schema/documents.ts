@@ -22,10 +22,13 @@ const xid8 = customType<{ data: string }>({
   },
 });
 
-export const DOCUMENT_KINDS = ["STOCK_IN", "STOCK_OUT", "STOCK_MOVE", "REVERSAL"] as const;
+export const DOCUMENT_KINDS = ["STOCK_IN", "STOCK_OUT", "STOCK_MOVE", "REVERSAL", "COUNT_ADJUSTMENT"] as const;
 export type DocumentKind = (typeof DOCUMENT_KINDS)[number];
 export const DOCUMENT_STATUSES = ["DRAFT", "APPROVED", "POSTED", "CANCELLED"] as const;
 export type DocumentStatus = (typeof DOCUMENT_STATUSES)[number];
+/** T-301 (ADR-021 §2): `documents.source_kind` beyaz listesi (CHECK documents_source_kind_chk). */
+export const DOCUMENT_SOURCE_KINDS = ["INBOUND_RECEIPT", "SALES_ORDER", "CUSTOMER_RETURN", "COUNT_SESSION", "TASK"] as const;
+export type DocumentSourceKind = (typeof DOCUMENT_SOURCE_KINDS)[number];
 export const REVERSAL_STATUSES = ["NONE", "PARTIAL", "FULL"] as const;
 export type ReversalStatus = (typeof REVERSAL_STATUSES)[number];
 export const LINE_STOCK_STATUSES = ["AVAILABLE", "QUARANTINE", "DAMAGED", "BLOCKED"] as const;
@@ -75,7 +78,13 @@ export const documents = pgTable(
     reversalOfDocumentId: uuid("reversal_of_document_id"),
     postingJobId: uuid("posting_job_id"),
     postingRequestedBy: uuid("posting_requested_by"),
+    // T-222 (0023): işleme isteği bağlamı; `posting_job_id` ile aynı transaction'da sunucu tarafında yazılır, kilit kalkınca temizlenir.
+    postingMfaVerifiedAt: timestamptz("posting_mfa_verified_at"),
+    postingIdempotencyRecordId: uuid("posting_idempotency_record_id"),
     reason: text("reason"),
+    // T-301 (ADR-021 §2): saha belgesi kaynağı (polimorfik; FK yok, A-152). İkisi birlikte dolu/boş; yalnızca INSERT'te yazılır.
+    sourceKind: text("source_kind").$type<DocumentSourceKind>(),
+    sourceId: uuid("source_id"),
     createdBy: uuid("created_by").notNull(),
     createdAt: timestamptz("created_at").notNull().defaultNow(),
   },
@@ -109,6 +118,11 @@ export const documentLines = pgTable(
     stockStatus: text("stock_status").$type<LineStockStatus>().notNull().default("AVAILABLE"),
     inventoryOwnerId: uuid("inventory_owner_id"),
     handlingUnitId: uuid("handling_unit_id"),
+    // T-301: kaynak saha belgesi satırı (polimorfik, FK yok; yalnızca INSERT).
+    sourceLineId: uuid("source_line_id"),
+    // T-301: STOCK_MOVE hedef durumu (NULL = kaynak durumla aynı); stock_status ile aynı küme.
+    // T-258 (0020 tetikleyicisi, Drizzle ifade etmez): NULL değilse belge türü STOCK_MOVE ve (stock_status, hedef) çifti beyaz listede olmalı (A-154).
+    targetStockStatus: text("target_stock_status").$type<LineStockStatus>(),
     reversedQuantity: numeric("reversed_quantity").notNull().default("0"),
     reversalStatus: text("reversal_status").$type<ReversalStatus>().notNull().default("NONE"),
     createdAt: timestamptz("created_at").notNull().defaultNow(),

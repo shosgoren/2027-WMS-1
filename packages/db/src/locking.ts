@@ -86,7 +86,8 @@ export interface LockedBalance {
 export interface LockedReservation {
   readonly id: string;
   readonly stockDimensionId: string;
-  readonly documentLineId: string;
+  /** 0016: `document_line_id` NULL olabilir (sipariş satırı rezervasyonu; `order_line_id` ile tam biri dolu). NULL → `null` (metin değil). */
+  readonly documentLineId: string | null;
   readonly quantity: string;
   readonly status: string;
 }
@@ -341,17 +342,24 @@ async function lockReservations(tx: TenantTx, tenantId: string, ids: readonly st
   return rows.map((r) => ({
     id: str(r.id),
     stockDimensionId: str(r.stock_dimension_id),
-    documentLineId: str(r.document_line_id),
+    documentLineId: strOrNull(r.document_line_id),
     quantity: str(r.quantity),
     status: str(r.status),
   }));
 }
 
+/**
+ * T-256 (40P01 kök nedeni): adım 3'te YENİ boyut satırı eklenirken `stock_dimensions_serial_fkey` `serials` satırında `FOR KEY SHARE`
+ * alır (transaction sonuna dek). Burada `FOR UPDATE` olsaydı KEY SHARE ile çakışırdı: aynı seriyi isteyen iki işlem adım 3'te
+ * KEY SHARE'i birlikte alıp adım 6'da birbirini beklerdi (tek anahtar olduğundan id sırası çözmez). `FOR NO KEY UPDATE` KEY SHARE ile
+ * çakışmaz, kendisiyle çakışır: aynı seriyi kilitleyen komutlar yine seri çalışır; seri satırı değişmez (anahtar sütunlar zaten
+ * değişmez; 0015 tetikleyicisi). Sıra (id artan) ve adım yeri (I-15: en son) aynı kalır.
+ */
 async function lockSerials(tx: TenantTx, tenantId: string, ids: readonly string[]): Promise<LockedSerial[]> {
   const rows = await tx.execute<Row>(
     sql`SELECT id, item_id, serial_no, lot_id FROM public.serials
          WHERE tenant_id = ${tenantId}::uuid AND id = ANY(${uuidArray(ids)})
-         ORDER BY id FOR UPDATE`,
+         ORDER BY id FOR NO KEY UPDATE`,
   );
   if (rows.length !== ids.length) throw new StockLockErrorImpl("NOT_FOUND", "serial");
   return rows.map((r) => ({ id: str(r.id), itemId: str(r.item_id), serialNo: str(r.serial_no), lotId: strOrNull(r.lot_id) }));

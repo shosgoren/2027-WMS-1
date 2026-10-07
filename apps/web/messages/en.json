@@ -16,6 +16,19 @@
     "help": {
       "full": "Call for help",
       "short": "Help"
+    },
+    "menu": {
+      "open": "Open menu",
+      "title": "Menu",
+      "close": "Close"
+    },
+    "nav": {
+      "label": "Main navigation",
+      "home": "Home",
+      "scan": "Scan",
+      "tasks": "My tasks",
+      "menu": "Menu",
+      "soon": "Soon"
     }
   },
   "auth": {
@@ -304,6 +317,8 @@
     "validation_failed_handling_unit_cycleAction": "Choose a different parent handling unit.",
     "validation_failed_barcode_ambiguous": "This barcode matches more than one item or unit.",
     "validation_failed_barcode_ambiguousAction": "Choose the item from the list.",
+    "validation_failed_code_ambiguous": "This old code matches more than one record.",
+    "validation_failed_code_ambiguousAction": "Search the record by its current code.",
     "validation_failed_unit_conversion_invalid": "The unit conversion factor is not valid.",
     "validation_failed_unit_conversion_invalidAction": "Enter a factor greater than zero with at most 6 decimals.",
     "validation_failed_quantity_scale": "The quantity has more decimals than the item allows.",
@@ -417,16 +432,31 @@
     "intro": "Tap the task you want. I will guide you step by step and will not let you do something wrong.",
     "tasksLabel": "Tasks",
     "lockedReason": "You are not allowed to do this. Ask your manager.",
+    "soonListNote": "These tasks will open after warehouse setup.",
+    "lockedListNote": "You are not allowed to do these tasks. Ask your manager.",
     "soonLabel": "Coming soon",
     "soonWarehouse": "This task will open after warehouse setup.",
     "soonScreen": "This screen will open soon.",
+    "myTasks": {
+      "title": "My tasks",
+      "assigned": "{count} tasks assigned to you",
+      "empty": "No tasks are assigned to you right now.",
+      "start": "Start with Scan"
+    },
+    "lockedList": {
+      "toggle": "Tasks you cannot use ({count})"
+    },
+    "soonList": {
+      "toggle": "Coming soon ({count})",
+      "back": "Back to tasks"
+    },
     "tasks": {
       "members": {
         "title": "Manage my team",
         "description": "Decide who can do which tasks"
       },
       "settings": {
-        "title": "Workspace settings",
+        "title": "Settings",
         "description": "Name, language and time zone"
       },
       "audit": {
@@ -501,12 +531,14 @@
     "warehouse": {
       "created": "You created a warehouse.",
       "updated": "You updated a warehouse.",
-      "archived": "You archived a warehouse."
+      "archived": "You archived a warehouse.",
+      "code_changed": "You changed a warehouse code."
     },
     "location": {
       "created": "You created a location.",
       "updated": "You updated a location.",
-      "archived": "You archived a location."
+      "archived": "You archived a location.",
+      "code_changed": "You changed a location code."
     },
     "warehouse_scope": {
       "changed": "You changed a member's warehouse scope."
@@ -518,7 +550,8 @@
     "item": {
       "created": "You created an item.",
       "updated": "You updated an item.",
-      "archived": "You archived an item."
+      "archived": "You archived an item.",
+      "code_changed": "You changed an item code."
     },
     "item_barcode": {
       "added": "You added a barcode to an item.",
@@ -549,7 +582,29 @@
       "created": "You reserved stock.",
       "released": "You released a reservation."
     },
-    "other": "You did something."
+    "external_ref": {
+      "linked": "You linked or updated an external system reference."
+    },
+    "other": "You did something.",
+    "warehouse_task": {
+      "created": "You created a warehouse task.",
+      "assigned": "You assigned a warehouse task.",
+      "claimed": "You took a warehouse task.",
+      "cancelled": "You cancelled a warehouse task.",
+      "completed": "You completed a warehouse task."
+    },
+    "inbound_receipt": {
+      "created": "You created an expected delivery.",
+      "opened": "You opened an expected delivery for receiving.",
+      "cancelled": "You cancelled an expected delivery.",
+      "received": "You received goods against a delivery."
+    },
+    "sales_order": {
+      "created": "You created a customer order.",
+      "updated": "You updated a draft order.",
+      "cancelled": "You cancelled an order.",
+      "line_cancelled": "You cancelled an order line."
+    }
   },
   "auditLog": {
     "title": "Who did what?",
@@ -624,7 +679,7 @@
   },
   "items": {
     "title": "Products",
-    "intro": "Manage product cards, their units and barcodes here.",
+    "intro": "Find a product or add a new one.",
     "lockedReason": "You do not have permission for this. Ask your manager.",
     "listLabel": "Product list",
     "create": "New product",
@@ -632,7 +687,15 @@
     "emptyAction": "Add your first product with “New product”.",
     "emptyReadOnly": "Ask your manager to add products.",
     "emptyFiltered": "No products match your search.",
-    "emptyFilteredAction": "Type the first letters of the code or name, or the full barcode; or clear the search.",
+    "emptyFilteredAction": "Change the name or code and try again; type the full barcode. Or clear the search.",
+    "emptyStatus": "No products match this filter.",
+    "emptyStatusAction": "Pick another status or clear the search.",
+    "setup": {
+      "warehouse": "First add a warehouse · step 1 / 3",
+      "locations": "Next: create the shelves · step 2 / 3",
+      "item": "Next: add your first product",
+      "teach": "There are three short steps before you add products."
+    },
     "codeLabel": "Code: {code}",
     "baseUnitLabel": "Base unit: {unit}",
     "status": {
@@ -646,10 +709,11 @@
     "firstPage": "Back to start",
     "search": {
       "label": "Search products",
-      "hint": "First letters of the code or name; for a barcode type or scan the whole value.",
+      "hint": "Type a name or code; you can scan the barcode.",
+      "placeholder": "E.g. URN-0001 or Box 40x30",
+      "advanced": "More options",
       "status": "Status",
       "all": "All",
-      "submit": "Search",
       "clear": "Clear search"
     },
     "tracking": {
@@ -665,10 +729,12 @@
     "form": {
       "createTitle": "New product",
       "code": "Product code",
-      "codeHint": "Cannot be changed later; the server tidies the format.",
+      "codeHint": "The server tidies the format. The code can be changed later; searching by the old code finds the renamed card.",
       "name": "Product name",
       "baseUnit": "Base unit",
       "baseUnitHint": "Stock is counted in this unit; it cannot be changed later.",
+      "baseUnitChoose": "Pick a unit. There is no ADET unit.",
+      "baseUnitPlaceholder": "Pick a unit",
       "scale": "Quantity precision",
       "scaleHint": "How many digits after the decimal point; it cannot be changed later.",
       "scaleInteger": "Whole numbers (0 digits)",
@@ -729,7 +795,13 @@
         "conversion": "Conversion saved.",
         "barcodeAdded": "Barcode added.",
         "barcodeRemoved": "Barcode removed.",
-        "archived": "Product archived."
+        "archived": "Product archived.",
+        "codeSame": "The code is already this; nothing changed.",
+        "codeUndone": "The code is back to the old one."
+      },
+      "codeEdit": {
+        "button": "Change code",
+        "for": "Change code for {name}"
       }
     },
     "errors": {
@@ -766,7 +838,8 @@
       "internalAction": "Try again shortly; if it continues, send the error code to support."
     },
     "locked": "You do not have permission to view products.",
-    "lockedAction": "Ask your workspace manager."
+    "lockedAction": "Ask your workspace manager.",
+    "renamedNote": "This code changed to {code} (old code: {old})"
   },
   "warehouses": {
     "title": "Warehouses and racks",
@@ -793,7 +866,9 @@
     "firstPage": "Back to start",
     "done": {
       "created": "Warehouse added.",
-      "archived": "Warehouse archived."
+      "archived": "Warehouse archived.",
+      "codeSame": "The code is already this; nothing changed.",
+      "codeUndone": "The code is back to the old one."
     },
     "confirmArchive": {
       "title": "Archive {name}?",
@@ -808,7 +883,7 @@
     },
     "form": {
       "code": "Code",
-      "codeHint": "Letters are uppercased automatically; it cannot be changed later.",
+      "codeHint": "Letters are uppercased automatically. The code can be changed later.",
       "name": "Name",
       "kind": "Type",
       "submit": "Save",
@@ -839,7 +914,9 @@
       "parentIs": "Placed under: {parent}",
       "done": {
         "created": "Location added.",
-        "archived": "Location archived."
+        "archived": "Location archived.",
+        "codeSame": "The code is already this; nothing changed.",
+        "codeUndone": "The code is back to the old one."
       },
       "confirmArchive": {
         "title": "Archive {name}?",
@@ -882,7 +959,276 @@
       "tenant_closing": "The workspace is being closed.",
       "tenant_closingAction": "Contact your manager.",
       "internal": "Something went wrong.",
-      "internalAction": "Try again shortly; if it persists, send the error code to support."
+      "internalAction": "Try again shortly; if it persists, send the error code to support.",
+      "validation_failed_code_taken_bulk": "Some codes are already in use.",
+      "validation_failed_code_taken_bulkAction": "Check the conflicting codes in the preview; change the range or zone code.",
+      "validation_failed_document_too_large": "At most 2,000 locations can be created at once, and a warehouse can hold at most 50,000 locations in total; this addition exceeds the limit.",
+      "validation_failed_document_too_largeAction": "Make the range smaller and try again; if the warehouse is full, open another one.",
+      "validation_failed_idempotency_key_required": "The request id is missing.",
+      "validation_failed_idempotency_key_requiredAction": "Reload the page and try again.",
+      "idempotency_mismatch": "This request id was used with different input.",
+      "idempotency_mismatchAction": "Close and reopen the form, then try again.",
+      "validation_failed_code_ambiguous": "This old code appears in the history of more than one location, so it is unclear which one you mean.",
+      "validation_failed_code_ambiguousAction": "Search using the location's current code."
+    },
+    "codeEdit": {
+      "button": "Change code",
+      "for": "Change code for {name}"
+    }
+  },
+  "field": {
+    "title": "Field",
+    "intro": "Pick a job; scan, verify, confirm the quantity.",
+    "menuLabel": "Field jobs",
+    "actionBarLabel": "Field actions",
+    "fieldHome": "Field jobs",
+    "mainMenu": "Home",
+    "lockedReason": "This screen is not open yet.",
+    "tasks": {
+      "receive": {
+        "title": "Receiving",
+        "description": "Scan and count incoming goods."
+      },
+      "putaway": {
+        "title": "Putaway",
+        "description": "Put goods on a shelf."
+      },
+      "pick": {
+        "title": "Picking",
+        "description": "Pick goods for an order."
+      },
+      "ship": {
+        "title": "Shipping",
+        "description": "Ship the picked goods."
+      },
+      "return": {
+        "title": "Returns",
+        "description": "Receive returned goods."
+      },
+      "count": {
+        "title": "Counting",
+        "description": "Count a shelf and show the difference."
+      }
+    }
+  },
+  "labels": {
+    "title": "Print labels",
+    "preview": "Label preview",
+    "print": "Print",
+    "downloadZpl": "Download ZPL",
+    "bridge": "Send via local bridge (not ready)",
+    "summary": "{count} labels · template {version}",
+    "noSource": "No item or location was selected for labels.",
+    "noSourceAction": "Open this page from an item detail or the location tree.",
+    "locked": "You do not have permission to view labels.",
+    "lockedAction": "Ask your workspace administrator.",
+    "errors": {
+      "copies": "Copies must be a number from 1 to {max}, and the total label count must not exceed {max}.",
+      "charset": "Barcode content can only contain ASCII characters (no Turkish letters such as ö, ş, ğ).",
+      "charsetAction": "Fix the item code or barcode to use ASCII characters.",
+      "tooLong": "The barcode does not fit the label width.",
+      "tooLongAction": "Shorten the code or barcode."
+    }
+  },
+  "easySetup": {
+    "guide": {
+      "title": "Get started",
+      "intro": "Three steps and you are ready. The next step is below.",
+      "listLabel": "Setup steps",
+      "done": "Done",
+      "todo": "To do",
+      "stepOf": "Step {n}",
+      "next": "Next step",
+      "warehouse": {
+        "title": "Add a warehouse",
+        "hint": "The place where goods are kept. Just type its name.",
+        "action": "Add the warehouse"
+      },
+      "locations": {
+        "title": "Create the racks",
+        "hint": "Enter how many zones, racks and bins; codes are made for you.",
+        "action": "Create the racks",
+        "locked": "Add a warehouse first."
+      },
+      "items": {
+        "title": "Add a product",
+        "hint": "Type the product name; code and unit come ready.",
+        "action": "Add the product"
+      },
+      "allDone": "Setup is complete. You can add a warehouse, racks or products any time."
+    },
+    "code": {
+      "suggested": "Suggested automatically. You can change it.",
+      "custom": "You typed your own code.",
+      "loading": "Preparing the code…",
+      "failed": "Could not get a suggestion; you can type the code yourself."
+    },
+    "form": {
+      "advanced": "Advanced settings",
+      "required": "Required",
+      "defaultWarehouseName": "Main warehouse"
+    },
+    "picker": {
+      "listLabel": "Suggestions",
+      "searching": "Searching…",
+      "none": "No matching record.",
+      "hintType": "Type the first letters; suggestions appear.",
+      "scanLabel": "Scan barcode",
+      "scanManual": "Type it",
+      "scanConfirm": "Find",
+      "scanCancel": "Cancel",
+      "scanPlaceholder": "Scan the barcode",
+      "scanNotFound": "No record found for this barcode.",
+      "scanNotFoundAction": "Check the barcode and scan again.",
+      "scanMany": "This barcode matches more than one record.",
+      "scanManyAction": "Type the code in search to choose.",
+      "selected": "Selected: {name}"
+    },
+    "items": {
+      "searchSuggestLabel": "Product suggestions",
+      "unitAuto": "There is no unit yet; the “ADET” unit is created automatically with your first product.",
+      "unitDefaultOption": "ADET · Piece (automatic)"
+    },
+    "bulk": {
+      "open": "Create racks in bulk",
+      "title": "Create the racks",
+      "intro": "Enter the zone, rack and bin ranges. You preview first, then they are created.",
+      "zone": "Zone code",
+      "zoneHint": "Example: A",
+      "rackFrom": "First rack no.",
+      "rackTo": "Last rack no.",
+      "levelFrom": "First bin no.",
+      "levelTo": "Last bin no.",
+      "advanced": "Advanced settings",
+      "parent": "Parent location (optional)",
+      "parentHint": "Leave empty to create under the warehouse.",
+      "parentClear": "Remove parent location",
+      "parentNone": "Under the warehouse",
+      "scanParent": "Scan the location label",
+      "previewTitle": "Preview",
+      "previewLoading": "Preparing the preview…",
+      "previewSummary": "{count} locations will be created: {first} … {last}",
+      "previewOne": "1 location will be created: {first}",
+      "previewListLabel": "Codes to be created",
+      "previewMore": "Only the first {shown} codes are listed.",
+      "conflictsTitle": "{count} codes already exist; they will not be created",
+      "conflictsAction": "Change the range or the zone code.",
+      "conflictsListLabel": "Conflicting codes",
+      "conflictsMore": "Only the first {shown} codes are listed.",
+      "tooMany": "At most {max} locations are created at once.",
+      "tooManyAction": "Make the range smaller.",
+      "invalid": "The range is not valid.",
+      "invalidAction": "Check the zone code (letters/digits) and ranges between 1 and 999, small to large.",
+      "submit": "Create",
+      "submitCount": "Create {count} locations",
+      "cancel": "Cancel",
+      "done": "{count} locations created: {first} … {last}",
+      "doneReplayed": "This request was already processed; {count} locations exist."
+    }
+  },
+  "codeEdit": {
+    "title": "Change code",
+    "current": "Current code: {code}",
+    "newCode": "New code",
+    "newCodeHint": "If this code is already used by another record, we will tell you right away.",
+    "preview": "{from} → {to}",
+    "previewSame": "Type a new code; the change shows here.",
+    "history": "Past movements are not affected: old records stay linked to this record. Anyone who scans or searches the old code is sent to the new one.",
+    "cancel": "Cancel",
+    "submit": "Change code",
+    "done": "Code changed: {from} → {to}.",
+    "undo": "Undo (go back to {code})"
+  },
+  "tasks": {
+    "title": "Tasks",
+    "intro": "Assign warehouse tasks to people or cancel them.",
+    "kind": {
+      "PUTAWAY": "Put-away",
+      "PICK": "Picking",
+      "REPUTAWAY": "Re-put-away",
+      "COUNT": "Counting"
+    },
+    "status": {
+      "OPEN": "Open",
+      "ASSIGNED": "Assigned",
+      "DONE": "Done",
+      "CANCELLED": "Cancelled"
+    },
+    "filters": {
+      "label": "Filter tasks",
+      "kind": "Type",
+      "status": "Status",
+      "all": "All",
+      "apply": "Apply"
+    },
+    "listLabel": "Task list",
+    "unassigned": "Not assigned yet",
+    "assignee": "Assigned to: {name}",
+    "assigneeUnknown": "Assigned to: unknown",
+    "quantity": "Quantity: {quantity}",
+    "assign": "Assign",
+    "reassign": "Reassign",
+    "cancel": "Cancel",
+    "lockedReason": "Assigning and cancelling need the task approval permission. Ask your manager.",
+    "empty": {
+      "title": "No tasks",
+      "action": "Tasks come from goods receipt, orders and counts; change the filter and look again."
+    },
+    "nextPage": "Next page",
+    "firstPage": "First page",
+    "assignTitle": "Assign task",
+    "member": "Person",
+    "memberPlaceholder": "Choose a person",
+    "noEligible": "Nobody can do this kind of task yet. Give a suitable role on the team screen first.",
+    "cancelTitle": "Cancel task",
+    "reasonLabel": "Reason for cancelling",
+    "reasonHint": "Required; written to the audit log. At most 500 characters. Do not write personal information such as a person's name or health details.",
+    "back": "Go back",
+    "submit": "Save",
+    "confirmCancel": "Cancel task",
+    "done": {
+      "assigned": "Task assigned.",
+      "cancelled": "Task cancelled."
+    },
+    "field": {
+      "title": "My tasks",
+      "intro": "Work assigned to you and work you can pick up.",
+      "listLabel": "My task list",
+      "claim": "Take it",
+      "start": "Start",
+      "startLocked": "This work screen is not open yet. The task stays with you; you will start it here once the screen opens.",
+      "claimed": "You took the task.",
+      "empty": {
+        "title": "No tasks right now",
+        "action": "New work shows up here; you can refresh the page."
+      },
+      "mine": "Assigned to you",
+      "available": "You can take it",
+      "more": "Show more",
+      "backToField": "Field work"
+    },
+    "errors": {
+      "code": "Error code: {code}",
+      "forbidden": "You are not allowed to do this.",
+      "forbiddenAction": "Ask your manager.",
+      "unauthenticated": "Your session has ended.",
+      "unauthenticatedAction": "Sign in again and repeat the action.",
+      "not_found": "Task not found.",
+      "not_foundAction": "Refresh the page and try again.",
+      "validation_failed": "The information entered is not valid.",
+      "validation_failedAction": "Check the selection and the reason, then try again. The chosen person may not be able to do this kind of task.",
+      "validation_failed_document_state": "The task no longer allows this action (done, cancelled or taken by someone else).",
+      "validation_failed_document_stateAction": "Refresh the page to see the current state.",
+      "version_conflict": "Someone else changed the task at the same time.",
+      "version_conflictAction": "Refresh the page and try again.",
+      "rate_limited": "Too many actions.",
+      "rate_limitedAction": "Wait a moment and try again.",
+      "tenant_suspended": "The workspace is suspended.",
+      "tenant_suspendedAction": "Contact your manager or support.",
+      "tenant_closing": "The workspace is being closed.",
+      "tenant_closingAction": "Contact your manager.",
+      "internal": "Something went wrong.",
+      "internalAction": "Try again shortly; if it continues, send the error code to support."
     }
   }
 }

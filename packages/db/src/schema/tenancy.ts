@@ -5,7 +5,7 @@
 // - `admin_reset_grants` platform (RLS'siz) tablosudur; `wms_app` yalnızca INSERT yapabilir.
 // - Tablo nesneleri yalnızca `@wms/db/internal/schema` alt yolundan açılır, genel yüzeye yalnızca tipler çıkar.
 import { sql } from "drizzle-orm";
-import { boolean, index, integer, jsonb, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { boolean, index, integer, jsonb, pgTable, smallint, text, timestamp, uuid } from "drizzle-orm/pg-core";
 
 const timestamptz = (name: string) => timestamp(name, { withTimezone: true, mode: "date" });
 
@@ -79,6 +79,10 @@ export const tenantSettings = pgTable("tenant_settings", {
   terminology: jsonb("terminology").notNull().default(sql`'{}'::jsonb`),
   onboardingStatus: text("onboarding_status").notNull(),
   onboardingSteps: jsonb("onboarding_steps").notNull().default(sql`'[]'::jsonb`),
+  // T-301 (A-06): mal kabulde kalite kontrol varsayılan açık; wms_app yalnızca bu sütunu ek olarak UPDATE eder.
+  receivingQcEnabled: boolean("receiving_qc_enabled").notNull().default(true),
+  // T-302 (A-136): terk edilmiş sayım süresi (saat, 1-168); wms_app yalnızca bu sütunu ek olarak UPDATE eder.
+  countAbandonHours: smallint("count_abandon_hours").notNull().default(8),
 });
 
 export const adminResetGrants = pgTable(

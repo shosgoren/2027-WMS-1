@@ -4,11 +4,14 @@
 // OFFSET yok); barkod alanına okutma düz metin girişidir (tarama yolu ADR-010). Mobilde kart görünümü (tablo yok → yatay taşma yok).
 import { useTranslations } from "next-intl";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
-import { Banner, Button, EmptyState, TextField } from "@wms/ui";
-import { createItemAction } from "./actions.ts";
+import { Banner, Button, ChevronDown, ChevronRight, CircleCheck, EmptyState, Search, TextField } from "@wms/ui";
+import { PageBody, Sheet } from "../easy-setup/sheet.tsx";
+import { isSetupComplete, useSetupProgress } from "../easy-setup/setup-guide.tsx";
+import { Typeahead } from "../easy-setup/typeahead.tsx";
+import { createItemAction, searchItemsAction, suggestItemCodeAction } from "./actions.ts";
 
 /** Sunucu eylem hatası (`ActionResult.error`): yalnızca kod + ayrıntı + istek kimliği kullanılır. */
 export interface ServerError {
@@ -79,100 +82,188 @@ export interface UnitOption {
   readonly name: string;
 }
 
+/** Arama sonucu (T-257): `oldCode` doluysa arama ESKİ kodla eşleşti ("bu kod {code} olarak değişti"). */
+export interface ItemHit {
+  readonly id: string;
+  readonly code: string;
+  readonly name: string;
+  readonly oldCode?: string;
+}
+
 export interface ItemListView {
   readonly id: string;
   readonly code: string;
   readonly name: string;
   readonly status: "ACTIVE" | "ARCHIVED";
   readonly baseUnitCode: string;
+  /** Arama eski kodla eşleştiyse o eski kod (T-257). */
+  readonly oldCode?: string;
 }
 
+/** Kod önerisi yanıt süresi sınırı; aşılırsa kod alanı açılır (T-259). */
+const SUGGEST_TIMEOUT_MS = 5000;
 const TRACKING = ["NONE", "LOT", "SERIAL", "LOT_AND_SERIAL"] as const;
 const PICK = ["FIFO", "FEFO"] as const;
 const SCALES = [0, 1, 2, 3, 4, 5, 6] as const;
 
-function CreateItemDialog({ open, slug, units, returnTo, onClose }: { open: boolean; slug: string; units: readonly UnitOption[]; returnTo: string; onClose: () => void }) {
+/** Akıllı varsayılan (A-250-5): birim ADET (sektör şablonları temel birim olarak ADET önerir). ADET yoksa SESSİZ SEÇİM YOK (T-259): boş kalır, kullanıcı seçer. */
+function defaultUnitId(units: readonly UnitOption[]): string {
+  return units.find((u) => u.code.toUpperCase() === "ADET")?.id ?? "";
+}
+
+/** Sunucunun `renamedFrom` bilgisini sonuç satırlarına işler; birden çok aday varsa hepsi listelenir (sessiz seçim yok, N-14). */
+function withRenamed(data: {
+  readonly items: readonly { readonly id: string; readonly code: string; readonly name: string }[];
+  readonly renamedFrom: readonly { readonly itemId: string; readonly oldCode: string }[];
+}): readonly ItemHit[] {
+  const old = new Map(data.renamedFrom.map((r) => [r.itemId, r.oldCode] as const));
+  return data.items.map((i) => {
+    const oldCode = old.get(i.id);
+    return oldCode === undefined ? i : { ...i, oldCode };
+  });
+}
+
+function CreateItemDialog({ open, slug, units, returnTo, onClose, onDone }: { open: boolean; slug: string; units: readonly UnitOption[]; returnTo: string; onClose: () => void; onDone: (itemId: string) => void }) {
   const t = useTranslations("items.form");
+  const te = useTranslations("easySetup");
   const tt = useTranslations("items.tracking");
   const tp = useTranslations("items.pick");
-  const router = useRouter();
-  const ref = useRef<HTMLDialogElement>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ServerError | null>(null);
-  const [round, setRound] = useState(0);
-  // Reddedilen gönderimde yazılanlar korunur (form yeniden oluşturulurken varsayılan değer olur); pencere kapanınca silinir.
-  const [last, setLast] = useState<Record<string, string>>({});
+  const [name, setName] = useState("");
+  const [code, setCode] = useState("");
+  const [touched, setTouched] = useState(false);
+  // Gecikmeli öneri yanıtı kapanışın (closure) bayat `touched` değerini görmesin diye ref (T-259 MINOR-2).
+  const touchedRef = useRef(false);
+  const [codeState, setCodeState] = useState<"loading" | "ready" | "failed">("loading");
+  const [unitId, setUnitId] = useState(() => defaultUnitId(units));
+  const [scale, setScale] = useState("0");
+  const [tracking, setTracking] = useState("NONE");
+  const [pick, setPick] = useState("FIFO");
 
+  // Her açılışta akıllı varsayılanlar: ADET, 0 ondalık, takip yok, FIFO; sıradaki kod sunucudan hazır gelir.
   useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    if (open && !el.open) el.showModal();
-    if (!open && el.open) el.close();
-    if (open) setError(null);
-    else setLast({});
-  }, [open]);
+    if (!open) return;
+    let live = true;
+    setError(null);
+    setName("");
+    setCode("");
+    setTouched(false);
+    touchedRef.current = false;
+    setCodeState("loading");
+    setUnitId(defaultUnitId(units));
+    setScale("0");
+    setTracking("NONE");
+    setPick("FIFO");
+    // Öneri hiç dönmezse alan sonsuza dek salt okunur kalmasın: süre dolunca "failed" (kullanıcı kodu kendisi yazar).
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (live && !settled) {
+        settled = true;
+        setCodeState("failed");
+      }
+    }, SUGGEST_TIMEOUT_MS);
+    void suggestItemCodeAction({ slug }).then((r) => {
+      if (!live || settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (r.ok) {
+        // Kullanıcı kodu değiştirdiyse (`touched`; silip boş bırakmak dahil) öneri uygulanmaz (N-14: sessiz değişiklik yok).
+        if (!touchedRef.current) setCode(r.data.code);
+        setCodeState("ready");
+      } else setCodeState("failed");
+    });
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
+    // units yalnızca açılışta okunur.
+  }, [open, slug]);
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
     setBusy(true);
     setError(null);
-    setLast(Object.fromEntries([...form.entries()].map(([k, v]) => [k, String(v)])));
     const res = await createItemAction({
       slug,
-      code: String(form.get("code") ?? ""),
-      name: String(form.get("name") ?? ""),
-      baseUnitId: String(form.get("baseUnitId") ?? ""),
-      quantityScale: Number(form.get("quantityScale") ?? "0"),
-      trackingMode: String(form.get("trackingMode") ?? "NONE"),
-      pickPolicy: String(form.get("pickPolicy") ?? "FIFO"),
+      code,
+      name,
+      ...(units.length === 0 ? {} : { baseUnitId: unitId }),
+      quantityScale: Number(scale),
+      trackingMode: tracking,
+      pickPolicy: pick,
+      autoCode: !touched && codeState === "ready",
     });
     setBusy(false);
     if (!res.ok) {
       setError(toServerError(res.error));
-      setRound((n) => n + 1);
       return;
     }
-    onClose();
-    router.push(`/t/${encodeURIComponent(slug)}/items/${encodeURIComponent((res.data as { itemId: string }).itemId)}`);
+    onDone((res.data as { itemId: string }).itemId);
   }
 
   return (
-    <dialog
-      ref={ref}
-      aria-labelledby="create-item-title"
-      onClose={() => {
-        if (open) onClose();
-      }}
-      className="m-auto max-h-[calc(100dvh-2rem)] w-[min(32rem,calc(100vw-2rem))] overflow-y-auto rounded-card border-0 bg-surface p-6 text-ink shadow-card backdrop:bg-ink/50"
+    <Sheet
+      open={open}
+      title={t("createTitle")}
+      titleId="create-item-title"
+      onClose={onClose}
+      onSubmit={(e) => void onSubmit(e)}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose} disabled={busy}>
+            {t("cancel")}
+          </Button>
+          <Button type="submit" loading={busy} disabled={codeState === "loading"}>
+            {t("submit")}
+          </Button>
+        </>
+      }
     >
-      <h2 id="create-item-title" className="mb-2 break-words text-xl font-bold">
-        {t("createTitle")}
-      </h2>
-      {open ? (
-        <form key={round} onSubmit={(e) => void onSubmit(e)} className="flex min-w-0 flex-col gap-4">
-          <TextField label={t("code")} hint={t("codeHint")} name="code" defaultValue={last.code ?? ""} autoComplete="off" required maxLength={512} />
-          <TextField label={t("name")} name="name" defaultValue={last.name ?? ""} autoComplete="off" required maxLength={512} />
-          {units.length === 0 ? <Banner kind="warning">{t("noUnits")}</Banner> : null}
-          <div className="flex min-w-0 flex-col gap-1">
-            <label htmlFor="create-base-unit" className="text-base font-semibold">
-              {t("baseUnit")}
-            </label>
-            <span className="text-sm text-ink-muted">{t("baseUnitHint")}</span>
-            <select id="create-base-unit" name="baseUnitId" required defaultValue={last.baseUnitId ?? units[0]?.id ?? ""} className={SELECT_CLS}>
-              {units.map((u) => (
-                <option key={u.id} value={u.id}>
-                  {u.code} · {u.name}
-                </option>
-              ))}
-            </select>
-          </div>
+      <TextField label={t("name")} name="name" value={name} onChange={(e) => setName(e.target.value)} autoComplete="off" required maxLength={512} />
+      <TextField
+        label={t("code")}
+        hint={codeState === "loading" ? te("code.loading") : codeState === "failed" ? te("code.failed") : touched ? `${te("code.custom")} ${t("codeHint")}` : `${te("code.suggested")} ${t("codeHint")}`}
+        name="code"
+        value={code}
+        readOnly={codeState === "loading"}
+        aria-busy={codeState === "loading"}
+        onChange={(e) => {
+          touchedRef.current = true;
+          setTouched(true);
+          setCode(e.target.value);
+        }}
+        autoComplete="off"
+        required
+        maxLength={512}
+      />
+      {units.length === 0 ? <Banner kind="info">{te("items.unitAuto")}</Banner> : null}
+      <div className="flex min-w-0 flex-col gap-1">
+        <label htmlFor="create-base-unit" className="text-base font-semibold">
+          {t("baseUnit")}
+        </label>
+        <span className="text-sm text-ink-muted">{t("baseUnitHint")}</span>
+        {units.length > 0 && !units.some((u) => u.code.toUpperCase() === "ADET") ? <span className="text-sm font-semibold text-ink">{t("baseUnitChoose")}</span> : null}
+        <select id="create-base-unit" name="baseUnitId" required={units.length > 0} disabled={units.length === 0} value={unitId} onChange={(e) => setUnitId(e.target.value)} className={SELECT_CLS}>
+          {units.length === 0 ? <option value="">{te("items.unitDefaultOption")}</option> : null}
+          {units.length > 0 && unitId === "" ? <option value="">{t("baseUnitPlaceholder")}</option> : null}
+          {units.map((u) => (
+            <option key={u.id} value={u.id}>
+              {u.code} · {u.name}
+            </option>
+          ))}
+        </select>
+      </div>
+      <details className="min-w-0 rounded-card border-2 border-border p-3">
+        <summary className="flex min-h-12 cursor-pointer items-center text-base font-semibold">{t("advanced")}</summary>
+        <div className="mt-2 flex min-w-0 flex-col gap-4">
+          <p className="break-words text-sm text-ink-muted">{t("advancedHint")}</p>
           <div className="flex min-w-0 flex-col gap-1">
             <label htmlFor="create-scale" className="text-base font-semibold">
               {t("scale")}
             </label>
             <span className="text-sm text-ink-muted">{t("scaleHint")}</span>
-            <select id="create-scale" name="quantityScale" defaultValue={last.quantityScale ?? "0"} className={SELECT_CLS}>
+            <select id="create-scale" name="quantityScale" value={scale} onChange={(e) => setScale(e.target.value)} className={SELECT_CLS}>
               {SCALES.map((n) => (
                 <option key={n} value={n}>
                   {n === 0 ? t("scaleInteger") : t("scaleDecimals", { count: n })}
@@ -180,48 +271,112 @@ function CreateItemDialog({ open, slug, units, returnTo, onClose }: { open: bool
               ))}
             </select>
           </div>
-          <details className="min-w-0 rounded-card border-2 border-border p-3">
-            <summary className="flex min-h-12 cursor-pointer items-center text-base font-semibold">{t("advanced")}</summary>
-            <div className="mt-2 flex min-w-0 flex-col gap-4">
-              <p className="break-words text-sm text-ink-muted">{t("advancedHint")}</p>
-              <div className="flex min-w-0 flex-col gap-1">
-                <label htmlFor="create-tracking" className="text-base font-semibold">
-                  {t("tracking")}
-                </label>
-                <select id="create-tracking" name="trackingMode" defaultValue={last.trackingMode ?? "NONE"} className={SELECT_CLS}>
-                  {TRACKING.map((k) => (
-                    <option key={k} value={k}>
-                      {tt(k)}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="flex min-w-0 flex-col gap-1">
-                <label htmlFor="create-pick" className="text-base font-semibold">
-                  {t("pick")}
-                </label>
-                <select id="create-pick" name="pickPolicy" defaultValue={last.pickPolicy ?? "FIFO"} className={SELECT_CLS}>
-                  {PICK.map((k) => (
-                    <option key={k} value={k}>
-                      {tp(k)}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-          </details>
-          {error ? <ServerErrorBanner error={error} returnTo={returnTo} /> : null}
-          <div className="flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
-            <Button variant="secondary" onClick={onClose} disabled={busy}>
-              {t("cancel")}
-            </Button>
-            <Button type="submit" loading={busy} disabled={units.length === 0}>
-              {t("submit")}
-            </Button>
+          <div className="flex min-w-0 flex-col gap-1">
+            <label htmlFor="create-tracking" className="text-base font-semibold">
+              {t("tracking")}
+            </label>
+            <select id="create-tracking" name="trackingMode" value={tracking} onChange={(e) => setTracking(e.target.value)} className={SELECT_CLS}>
+              {TRACKING.map((k) => (
+                <option key={k} value={k}>
+                  {tt(k)}
+                </option>
+              ))}
+            </select>
           </div>
-        </form>
-      ) : null}
-    </dialog>
+          <div className="flex min-w-0 flex-col gap-1">
+            <label htmlFor="create-pick" className="text-base font-semibold">
+              {t("pick")}
+            </label>
+            <select id="create-pick" name="pickPolicy" value={pick} onChange={(e) => setPick(e.target.value)} className={SELECT_CLS}>
+              {PICK.map((k) => (
+                <option key={k} value={k}>
+                  {tp(k)}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+      </details>
+      {error ? <ServerErrorBanner error={error} returnTo={returnTo} /> : null}
+    </Sheet>
+  );
+}
+
+type SetupStep = { readonly key: "warehouse" | "locations" | "items"; readonly done: boolean; readonly href: string | null };
+
+function setupSteps(slug: string, p: { hasWarehouse: boolean; hasLocation: boolean; hasItem: boolean; nextWarehouseId: string | null }): SetupStep[] {
+  const base = `/t/${encodeURIComponent(slug)}`;
+  return [
+    { key: "warehouse", done: p.hasWarehouse, href: `${base}/warehouses?new=1` },
+    { key: "locations", done: p.hasLocation, href: p.nextWarehouseId === null ? null : `${base}/warehouses/${encodeURIComponent(p.nextWarehouseId)}?bulk=1` },
+    { key: "items", done: p.hasItem, href: null },
+  ];
+}
+
+const ROW_CLS =
+  "flex min-h-12 w-full min-w-0 items-center gap-2 rounded-card border-2 border-border bg-surface px-3 text-left text-sm font-semibold text-ink focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus";
+
+/** Kurulum satırı: sıradaki adım tek satırda; ürün adımında satır "Yeni ürün" ile aynı eylemi açar (ikinci dolu düğme yok). */
+function SetupRow({ slug, progress, onCreate }: { slug: string; progress: { hasWarehouse: boolean; hasLocation: boolean; hasItem: boolean; nextWarehouseId: string | null }; onCreate: () => void }) {
+  const t = useTranslations("items.setup");
+  const steps = setupSteps(slug, progress);
+  const next = steps.find((s) => !s.done);
+  if (next === undefined) return null;
+  const label = next.key === "warehouse" ? t("warehouse") : next.key === "locations" ? t("locations") : t("item");
+  const chevron = <ChevronRight aria-hidden="true" className="size-5 shrink-0" />;
+  if (next.key === "items" || next.href === null) {
+    return (
+      <button type="button" data-testid="setup-row" onClick={onCreate} className={ROW_CLS}>
+        <span className="min-w-0 flex-1 break-words">{label}</span>
+        {chevron}
+      </button>
+    );
+  }
+  return (
+    <Link href={next.href} data-testid="setup-row" className={ROW_CLS}>
+      <span className="min-w-0 flex-1 break-words">{label}</span>
+      {chevron}
+    </Link>
+  );
+}
+
+/** Ürün yokken öğreten boş durum: sıralı kurulum adımları (adım + ipucu + ikincil metin bağlantısı); dolu düğme yok. */
+function SetupSteps({ slug, progress, onCreate }: { slug: string; progress: { hasWarehouse: boolean; hasLocation: boolean; hasItem: boolean; nextWarehouseId: string | null }; onCreate: () => void }) {
+  const t = useTranslations("items");
+  const tg = useTranslations("easySetup.guide");
+  const steps = setupSteps(slug, progress);
+  return (
+    <div data-testid="setup-steps" className="flex min-w-0 flex-col gap-3">
+      <h2 className="m-0 break-words text-lg font-bold text-ink">{t("empty")}</h2>
+      <p className="m-0 break-words text-base text-ink-muted">{t("setup.teach")}</p>
+      <ol aria-label={tg("listLabel")} className="m-0 flex min-w-0 list-none flex-col gap-5 p-0">
+        {steps.map((st, i) => {
+          const locked = st.key === "locations" && st.href === null && !st.done;
+          return (
+            <li key={st.key} data-done={st.done} className="flex min-w-0 items-start gap-3">
+              <span aria-hidden="true" className="flex size-8 shrink-0 items-center justify-center rounded-full bg-accent-soft text-sm font-bold text-accent-ink">
+                {st.done ? <CircleCheck className="size-5" /> : i + 1}
+              </span>
+              <span className="flex min-w-0 flex-1 flex-col">
+                <span className="break-words text-base font-semibold text-ink">
+                  {tg(`${st.key}.title`)} <span className="text-sm text-ink-muted">· {st.done ? tg("done") : tg("todo")}</span>
+                </span>
+                <span className="break-words text-sm text-ink-muted">{locked ? tg("locations.locked") : tg(`${st.key}.hint`)}</span>
+                {st.done || locked ? null : st.href === null ? (
+                  <button type="button" onClick={onCreate} className={`${LINK_CLS} self-start px-0! text-left`}>
+                    {tg(`${st.key}.action`)}
+                  </button>
+                ) : (
+                  <Link href={st.href} className={`${LINK_CLS} self-start px-0!`}>
+                    {tg(`${st.key}.action`)}
+                  </Link>
+                )}
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+    </div>
   );
 }
 
@@ -244,8 +399,23 @@ export function ItemsView({
   query: { readonly q: string; readonly status: "" | "ACTIVE" | "ARCHIVED" };
 }) {
   const t = useTranslations("items");
+  const te = useTranslations("easySetup.items");
+  const router = useRouter();
+  const pathname = usePathname();
+  const params = useSearchParams();
   const base = `/t/${encodeURIComponent(slug)}/items`;
   const [createOpen, setCreateOpen] = useState(false);
+  const [version, setVersion] = useState(0);
+  const progress = useSetupProgress(slug, canManage, version);
+  const guide = canManage && progress !== null && !isSetupComplete(progress);
+
+  // Rehberin büyük düğmesi `?new=1` ile gelir: formu aç, adresi temizle.
+  useEffect(() => {
+    if (params.get("new") === "1" && canManage) {
+      setCreateOpen(true);
+      router.replace(pathname);
+    }
+  }, [params, canManage, pathname, router]);
   const filtered = query.q !== "" || query.status !== "";
   const keep = new URLSearchParams();
   if (query.q !== "") keep.set("q", query.q);
@@ -257,50 +427,99 @@ export function ItemsView({
     return s === "" ? base : `${base}?${s}`;
   };
 
+  const formRef = useRef<HTMLFormElement>(null);
+  const [submitting, setSubmitting] = useState(false);
+  // Aramanın sunucudaki karşılığı (GET `?q=&status=`): yalnızca adres üretir; arama kuralı sunucudadır.
+  const goSearch = (status: string): void => {
+    const form = formRef.current;
+    const q = form === null ? "" : String(new FormData(form).get("q") ?? "").trim();
+    const p = new URLSearchParams();
+    if (q !== "") p.set("q", q);
+    if (status !== "") p.set("status", status);
+    const s = p.toString();
+    router.push(s === "" ? base : `${base}?${s}`);
+  };
+  // Enter (klavye ya da barkod okuyucunun sonundaki Enter): tek eşleşme varsa doğrudan ürünü aç, yoksa/çoksa sonuç listesine git.
+  async function onSearchSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const q = String(new FormData(form).get("q") ?? "").trim();
+    const status = String(new FormData(form).get("status") ?? "");
+    if (q === "") {
+      goSearch(status);
+      return;
+    }
+    setSubmitting(true);
+    const r = await searchItemsAction({ slug, q, limit: 2 });
+    setSubmitting(false);
+    const hits = r.ok ? withRenamed(r.data) : [];
+    if (hits.length === 1 && hits[0] !== undefined) router.push(`${base}/${encodeURIComponent(hits[0].id)}`);
+    else goSearch(status);
+  }
+
   return (
     <>
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <h1 className="break-words text-2xl font-extrabold text-ink">{t("title")}</h1>
-          <p className="break-words text-base text-ink-muted">{t("intro")}</p>
-        </div>
-        <div className="flex w-full min-w-0 flex-col gap-1 sm:w-auto sm:*:shrink-0 sm:*:whitespace-nowrap">
-          <Button onClick={() => setCreateOpen(true)} disabled={!canManage} aria-describedby={canManage ? undefined : "item-locked"}>
-            {t("create")}
-          </Button>
-          {canManage ? null : (
-            <p id="item-locked" className="max-w-xs break-words text-sm text-ink-muted">
-              {t("lockedReason")}
-            </p>
-          )}
-        </div>
+      <PageBody hide={createOpen}>
+      <div className="min-w-0">
+        <h1 className="break-words text-2xl font-extrabold text-ink phone:text-xl">{t("title")}</h1>
+        <p className="break-words text-base text-ink-muted phone:truncate phone:text-sm">{t("intro")}</p>
       </div>
 
-      <form method="get" action={base} role="search" aria-label={t("search.label")} className="flex min-w-0 flex-col gap-3 rounded-card border-2 border-border bg-surface p-4">
-        <TextField label={t("search.label")} hint={t("search.hint")} name="q" type="search" defaultValue={query.q} autoComplete="off" maxLength={128} />
-        <div className="flex min-w-0 flex-col gap-1">
-          <label htmlFor="item-status" className="text-base font-semibold">
-            {t("search.status")}
-          </label>
-          <select id="item-status" name="status" defaultValue={query.status} className={SELECT_CLS}>
-            <option value="">{t("search.all")}</option>
-            <option value="ACTIVE">{t("status.ACTIVE")}</option>
-            <option value="ARCHIVED">{t("status.ARCHIVED")}</option>
-          </select>
-        </div>
-        <div className="flex flex-col gap-2 sm:flex-row">
-          <Button type="submit">{t("search.submit")}</Button>
-          {filtered ? (
-            <Link href={base} className={LINK_CLS}>
-              {t("search.clear")}
-            </Link>
-          ) : null}
-        </div>
+      <form ref={formRef} method="get" action={base} role="search" aria-label={t("search.label")} aria-busy={submitting} onSubmit={(e) => void onSearchSubmit(e)} className="flex min-w-0 flex-col gap-2">
+        <Typeahead<ItemHit>
+          label={t("search.label")}
+          hint={t("search.hint")}
+          placeholder={t("search.placeholder")}
+          icon={<Search aria-hidden="true" className="size-5" />}
+          name="q"
+          defaultValue={query.q}
+          listLabel={te("searchSuggestLabel")}
+          search={async (q) => {
+            const r = await searchItemsAction({ slug, q, limit: 8 });
+            return r.ok ? withRenamed(r.data) : [];
+          }}
+          toSuggestion={(i) => ({
+            key: i.id,
+            primary: i.name,
+            secondary: i.oldCode === undefined ? t("codeLabel", { code: i.code }) : t("renamedNote", { code: i.code, old: i.oldCode }),
+          })}
+          onSelect={(i) => router.push(`${base}/${encodeURIComponent(i.id)}`)}
+        />
+        <details className="group min-w-0" open={query.status !== "" ? true : undefined}>
+          <summary className="flex min-h-12 cursor-pointer list-none items-center gap-2 text-base font-semibold text-accent-ink focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus [&::-webkit-details-marker]:hidden">
+            <span className="min-w-0 flex-1">{t("search.advanced")}</span>
+            <ChevronDown aria-hidden="true" className="size-5 shrink-0 transition-transform group-open:rotate-180" />
+          </summary>
+          <div className="flex min-w-0 flex-col gap-1 pb-2">
+            <label htmlFor="item-status" className="text-base font-semibold">
+              {t("search.status")}
+            </label>
+            <select id="item-status" name="status" defaultValue={query.status} onChange={(e) => goSearch(e.target.value)} className={SELECT_CLS}>
+              <option value="">{t("search.all")}</option>
+              <option value="ACTIVE">{t("status.ACTIVE")}</option>
+              <option value="ARCHIVED">{t("status.ARCHIVED")}</option>
+            </select>
+          </div>
+        </details>
+        {filtered ? (
+          <Link href={base} className={`${LINK_CLS} self-start px-0!`}>
+            {t("search.clear")}
+          </Link>
+        ) : null}
       </form>
+
+      {/* Kurulum satırı (S-01): eylem gibi okunur, sağda şevron, doğrudan sıradaki adıma gider; ürün adımında "Yeni ürün" ile AYNI eylemi açar. */}
+      {guide && progress !== null ? <SetupRow slug={slug} progress={progress} onCreate={() => setCreateOpen(true)} /> : null}
 
       <section aria-label={t("listLabel")} className="flex min-w-0 flex-col gap-3">
         {items.length === 0 ? (
-          <EmptyState title={filtered ? t("emptyFiltered") : t("empty")} description={filtered ? t("emptyFilteredAction") : canManage ? t("emptyAction") : t("emptyReadOnly")} />
+          guide && !filtered && progress !== null ? (
+            <SetupSteps slug={slug} progress={progress} onCreate={() => setCreateOpen(true)} />
+          ) : filtered ? (
+            <EmptyState title={query.q === "" ? t("emptyStatus") : t("emptyFiltered")} description={query.q === "" ? t("emptyStatusAction") : t("emptyFilteredAction")} />
+          ) : (
+            <EmptyState title={t("empty")} description={canManage ? t("emptyAction") : t("emptyReadOnly")} />
+          )
         ) : (
           <ul className="m-0 flex min-w-0 list-none flex-col gap-3 p-0">
             {items.map((it) => {
@@ -312,6 +531,7 @@ export function ItemsView({
                     <span className={`${BADGE} ${active ? "bg-accent-soft text-accent-ink" : "bg-locked-bg text-locked-ink"}`}>{active ? t("status.ACTIVE") : t("status.ARCHIVED")}</span>
                   </div>
                   <p className="min-w-0 break-all text-base text-ink-muted">{t("codeLabel", { code: it.code })}</p>
+                  {it.oldCode === undefined ? null : <p className="min-w-0 break-words text-sm font-semibold text-ink">{t("renamedNote", { code: it.code, old: it.oldCode })}</p>}
                   <p className="min-w-0 break-all text-sm text-ink-muted">{t("baseUnitLabel", { unit: it.baseUnitCode })}</p>
                   <div>
                     <Link href={`${base}/${encodeURIComponent(it.id)}`} className={LINK_CLS} aria-label={t("openFor", { name: it.name })}>
@@ -336,8 +556,32 @@ export function ItemsView({
           )}
         </nav>
       </section>
+      </PageBody>
 
-      <CreateItemDialog open={createOpen} slug={slug} units={units} returnTo={base} onClose={() => setCreateOpen(false)} />
+      {/* Birincil eylem altta sabit (başparmak bölgesi); form açıkken gizli. */}
+      <div data-hide={createOpen} className="sticky bottom-0 z-10 -mx-4 mt-auto flex min-w-0 flex-col gap-1 border-t border-border bg-bg px-4 py-2 data-[hide=true]:hidden">
+        <Button onClick={() => setCreateOpen(true)} disabled={!canManage} aria-describedby={canManage ? undefined : "item-locked"}>
+          {t("create")}
+        </Button>
+        {canManage ? null : (
+          <p id="item-locked" className="break-words text-sm text-ink-muted">
+            {t("lockedReason")}
+          </p>
+        )}
+      </div>
+
+      <CreateItemDialog
+        open={createOpen}
+        slug={slug}
+        units={units}
+        returnTo={base}
+        onClose={() => setCreateOpen(false)}
+        onDone={(itemId) => {
+          setCreateOpen(false);
+          setVersion((n) => n + 1);
+          router.push(`${base}/${encodeURIComponent(itemId)}`);
+        }}
+      />
     </>
   );
 }

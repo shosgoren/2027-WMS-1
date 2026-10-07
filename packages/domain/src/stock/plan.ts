@@ -4,10 +4,8 @@
 // STOCK_IN hedef `+`; STOCK_OUT kaynak `−`; STOCK_MOVE kaynak `−` + hedef `+` (kural 3: toplam fiziksel değişmez).
 // Plan SIRALIDIR ve satır sırasından bağımsızdır (ters sıralı satırlar → aynı plan); tekrarlı boyut birleşir.
 //
-// A-217-1: `document_lines` tek `stock_status` taşır; hedef durum ayrı sütunu yoktur. Bu yüzden satırdan kaynak ve
-// hedef durumu AYNIDIR (yükleyici `sourceStatus = targetStatus = stock_status` doldurur). Bu katman ikisini ayrı alır. Hedef durum sütunu
-// `document_lines.target_stock_status` T-301'deki 0016 migration'ındadır; belge/`DocumentLineInput`/yükleyici güncellemesi T-248'dedir
-// (durum değişimi KAR→KUL, AVAILABLE→QUARANTINE orada açılır).
+// T-248 (A-147/A-217-1 kaldırıldı): satır kaynak durumu `stock_status`, hedef durumu `target_stock_status` (NULL = kaynakla aynı); yükleyici
+// ikisini ayrı doldurur ve bu katman kaynak/hedef boyutlarını ayrı anahtarlar. Durum geçişi yalnız STOCK_MOVE'da ve izinli çiftlerdedir (A-248-1).
 import { AppError } from "@wms/shared/errors";
 import type { StockDimensionKey } from "@wms/db";
 
@@ -15,6 +13,19 @@ export type PostingKind = "STOCK_IN" | "STOCK_OUT" | "STOCK_MOVE";
 export type PostingStatus = StockDimensionKey["stockStatus"];
 /** 16 kural 4 + A-79: bu kartta yalnızca belge türünden türeyen nedenler. */
 export type LedgerReason = "RECEIPT" | "SHIPMENT" | "MOVE";
+
+/**
+ * A-248-1 (Q-49; 16 kural 3 yalnız "durum değişimi = −/+ çifti" der, geçiş matrisi tanımsızdır): fail-closed beyaz liste — yalnızca kalite onayı
+ * (QUARANTINE→AVAILABLE) ve karantinaya alma (AVAILABLE→QUARANTINE). DAMAGED/BLOCKED'a ya da DAMAGED/BLOCKED'dan geçiş, matris netleşene dek reddedilir
+ * (hasarlı stok hiçbir zaman kullanılabilir sayılmaz; Senaryo A varyantı).
+ */
+export const ALLOWED_STATUS_TRANSITION_PAIRS: readonly (readonly [PostingStatus, PostingStatus])[] = [
+  ["QUARANTINE", "AVAILABLE"],
+  ["AVAILABLE", "QUARANTINE"],
+];
+// T-258: aynı liste DB'de `0020_target_status_guard` tetikleyicisinde sabittir; eşitlik posting.int.test.ts'te 4x4 çift üzerinden doğrulanır.
+const ALLOWED_STATUS_TRANSITIONS: ReadonlySet<string> = new Set(ALLOWED_STATUS_TRANSITION_PAIRS.map(([a, b]) => `${a}>${b}`));
+export const isStatusTransitionAllowed = (from: PostingStatus, to: PostingStatus): boolean => from === to || ALLOWED_STATUS_TRANSITIONS.has(`${from}>${to}`);
 
 export const REASON_BY_KIND: Readonly<Record<PostingKind, LedgerReason>> = {
   STOCK_IN: "RECEIPT",
@@ -126,6 +137,8 @@ export function buildPostingPlan(kind: PostingKind, lines: readonly PostingLine[
     if (qty <= 0n) throw invalid();
     const reason = REASON_BY_KIND[kind];
     const { sourceLocationId: src, targetLocationId: dst } = line;
+    // Hedef durum yalnız STOCK_MOVE'da anlamlıdır (IN/OUT tek uçlu); aksi kaynak ≠ hedef durum sessizce yanlış boyuta yazardı.
+    if (kind !== "STOCK_MOVE" && line.sourceStatus !== line.targetStatus) throw invalid();
     if (kind === "STOCK_IN") {
       if (dst === null || src !== null) throw invalid();
       entries.push({ lineId: line.lineId, lineNo: line.lineNo, key: key(line, dst, line.targetStatus), delta: qty, reason });
@@ -134,6 +147,7 @@ export function buildPostingPlan(kind: PostingKind, lines: readonly PostingLine[
       entries.push({ lineId: line.lineId, lineNo: line.lineNo, key: key(line, src, line.sourceStatus), delta: -qty, reason });
     } else {
       if (src === null || dst === null) throw invalid();
+      if (!isStatusTransitionAllowed(line.sourceStatus, line.targetStatus)) throw invalid();
       const from = key(line, src, line.sourceStatus);
       const to = key(line, dst, line.targetStatus);
       if (dimensionIdentity(from) === dimensionIdentity(to)) throw invalid(); // boş hareket: lokasyon da durum da değişmiyor
@@ -154,6 +168,20 @@ export function buildPostingPlan(kind: PostingKind, lines: readonly PostingLine[
   const locationIds = [...new Set(dimensions.map((d) => d.locationId))].sort(cmp);
   const serialIds = [...new Set(dimensions.flatMap((d) => (d.serialId === null ? [] : [d.serialId])))].sort(cmp);
   return { entries, dimensions, locationIds, serialIds, outTotals, net };
+}
+
+// --- rezervasyon talep kaynağı (T-306; ADR-017 §7, ADR-021 §4) --------------------------------------------------------------
+/**
+ * Rezervasyonun talep kaynağı: belge satırı YA DA sipariş satırı (DB: `reservations_source_xor_chk`, tam olarak biri dolu). Ayrımlı birleşim: iki
+ * kimlik sütunu ayrı alanlar olarak taşınmaz, böylece ikisini karıştırmak ya da ikisini birden vermek tip düzeyinde mümkün değildir.
+ */
+export type ReservationSource =
+  | { readonly kind: "DOCUMENT_LINE"; readonly lineId: string }
+  | { readonly kind: "ORDER_LINE"; readonly lineId: string };
+
+/** `reservations` sütun çifti (INSERT için): biri dolu, diğeri `null`. */
+export function sourceColumns(s: ReservationSource): { readonly document_line_id: string | null; readonly order_line_id: string | null } {
+  return s.kind === "DOCUMENT_LINE" ? { document_line_id: s.lineId, order_line_id: null } : { document_line_id: null, order_line_id: s.lineId };
 }
 
 // --- rezervasyon bölüştürme (T-221; saf) ----------------------------------------------------------------------------------

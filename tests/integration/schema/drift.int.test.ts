@@ -15,11 +15,14 @@ import { describe, expect, it } from "vitest";
 import * as audit from "../../../packages/db/src/schema/audit.ts";
 import * as catalog from "../../../packages/db/src/schema/catalog.ts";
 import * as documents from "../../../packages/db/src/schema/documents.ts";
+import * as operations from "../../../packages/db/src/schema/operations.ts";
+import * as integrations from "../../../packages/db/src/schema/integrations.ts";
 import * as identity from "../../../packages/db/src/schema/identity.ts";
 import * as reliability from "../../../packages/db/src/schema/reliability.ts";
 import * as stock from "../../../packages/db/src/schema/stock.ts";
 import * as tenancy from "../../../packages/db/src/schema/tenancy.ts";
 import * as warehouse from "../../../packages/db/src/schema/warehouse.ts";
+import { NUMBER_PREFIX } from "../../../packages/domain/src/stock/numbering.ts";
 import { readIntEnv, redactErrorChain, secretUrls } from "../harness/env.ts";
 
 const env = readIntEnv(process.env);
@@ -29,7 +32,7 @@ const dbRequire = createRequire(path.resolve(import.meta.dirname, "../../../pack
 const pgCore = (await import(pathToFileURL(dbRequire.resolve("drizzle-orm/pg-core")).href)) as typeof import("../../../packages/db/node_modules/drizzle-orm/pg-core/index.js");
 
 type PgTableAny = Parameters<typeof pgCore.getTableConfig>[0];
-const SCHEMA_MODULES: Record<string, unknown>[] = [identity, tenancy, audit, warehouse, catalog, documents, stock, reliability];
+const SCHEMA_MODULES: Record<string, unknown>[] = [identity, tenancy, audit, warehouse, catalog, documents, stock, reliability, operations, integrations];
 
 function allTables(): PgTableAny[] {
   const out: PgTableAny[] = [];
@@ -161,7 +164,7 @@ describe(`identity schema drift (target=${env.target})`, () => {
       // `id` sütunu olan her Drizzle tablosu (tenant_settings'in PK'si tenant_id'dir, request_rate_limits'in bilesik PK'si vardir; `id` yoktur).
       const withId = allTables().filter((t) => pgCore.getTableConfig(t).columns.some((c) => c.name === "id"));
       expect(ids.rows.length).toBe(withId.length);
-      expect(withId.length).toBe(33); // T-211: + stock_consistency_runs, stock_consistency_signals; T-202: + warehouses, locations; T-204: + units, items, unit_conversions, item_barcodes, inventory_owners, lots, serials, handling_units; T-206: + document_type_versions, documents, document_lines, document_status_history, idempotency_records; T-232: + stock_dimensions, stock_ledger, reservations (stock_balances'ta id yok)
+      expect(withId.length).toBe(47); // T-252: + external_refs, sync_cursors; T-251: + code_history; T-302: + warehouse_tasks, count_sessions, count_session_lines, item_stock_policies, stock_alerts; T-301: + inbound_receipts, inbound_receipt_lines, sales_orders, sales_order_lines, customer_returns, customer_return_lines; T-211: + stock_consistency_runs, stock_consistency_signals; T-202: + warehouses, locations; T-204: + units, items, unit_conversions, item_barcodes, inventory_owners, lots, serials, handling_units; T-206: + document_type_versions, documents, document_lines, document_status_history, idempotency_records; T-232: + stock_dimensions, stock_ledger, reservations (stock_balances'ta id yok)
       for (const r of ids.rows) {
         expect(r.data_type, r.table_name).toBe("uuid");
         expect(r.column_default, r.table_name).toBe("gen_random_uuid()");
@@ -488,5 +491,54 @@ describe(`invitation_preview_for_token (0008, T-117d; target=${env.target})`, ()
       [FN],
     );
     expect(grantees.map((g) => g.grantee).filter((g) => g !== "wms_identity_probe")).toEqual(["wms_app"]);
+  });
+});
+
+describe(`document_lines hedef durum bekçisi (0020, T-258; target=${env.target})`, () => {
+  async function query<T extends pg.QueryResultRow>(sql: string, params: unknown[] = []): Promise<T[]> {
+    const client = new pg.Client({ connectionString: env.databaseUrlDirect });
+    try {
+      await client.connect();
+      return (await client.query<T>(sql, params)).rows;
+    } catch (e) {
+      throw new Error(redactErrorChain(e, secretUrls(env)));
+    } finally {
+      await client.end();
+    }
+  }
+
+  it("tetikleyici BEFORE INSERT OR UPDATE ROW, ENABLE ORIGIN, SECURITY INVOKER, sabit search_path; PUBLIC EXECUTE yok; gövde izinli çift listesini içerir", async () => {
+    const trg = await query<{ tgenabled: string; tgtype: number; tgattrs: number; prosecdef: boolean; proconfig: string[] | null; src: string; acl: string[] | null }>(
+      `SELECT t.tgenabled, t.tgtype, cardinality(t.tgattr::int2[]) AS tgattrs, p.prosecdef, p.proconfig, p.prosrc AS src, p.proacl::text[] AS acl
+         FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
+        WHERE t.tgrelid = 'public.document_lines'::regclass AND t.tgname = 'stock_move_target_status_guard'`,
+    );
+    expect(trg).toHaveLength(1);
+    expect(trg[0]?.tgenabled).toBe("O");
+    expect(trg[0]?.tgtype).toBe(1 | 2 | 4 | 16); // ROW=1, BEFORE=2, INSERT=4, UPDATE=16 (DELETE yok)
+    expect(trg[0]?.tgattrs).toBe(3); // UPDATE OF target_stock_status, stock_status, document_id
+    expect(trg[0]?.prosecdef).toBe(false);
+    expect(trg[0]?.proconfig).toEqual(["search_path=pg_catalog, pg_temp"]);
+    expect(trg[0]?.src).toContain("'QUARANTINE>AVAILABLE', 'AVAILABLE>QUARANTINE'");
+    expect(trg[0]?.src).toContain("'STOCK_MOVE'");
+    expect((trg[0]?.acl ?? []).some((a) => a.startsWith("="))).toBe(false); // PUBLIC girdisi yok
+  });
+});
+
+describe(`number_sequences tür CHECK'i ile numbering.ts eşitliği (0022, T-305; target=${env.target})`, () => {
+  it("CHECK'teki türler = NUMBER_PREFIX anahtarları + COUNT_ADJUSTMENT (0017; T-309 numaralamayı ekleyene dek TS'te yok)", async () => {
+    const client = new pg.Client({ connectionString: env.databaseUrlDirect });
+    try {
+      await client.connect();
+      const r = await client.query<{ def: string }>("SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = 'number_sequences_kind_chk'");
+      expect(r.rows).toHaveLength(1);
+      const kinds = [...((r.rows[0] as { def: string }).def.matchAll(/'([A-Z_]+)'::text/g))].map((m) => m[1] as string).sort();
+      expect(kinds).toEqual([...Object.keys(NUMBER_PREFIX), "COUNT_ADJUSTMENT"].sort());
+      expect(NUMBER_PREFIX.INBOUND_RECEIPT).toBe("KBL");
+    } catch (e) {
+      throw new Error(redactErrorChain(e, secretUrls(env)));
+    } finally {
+      await client.end();
+    }
   });
 });

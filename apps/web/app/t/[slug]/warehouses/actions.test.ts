@@ -1,5 +1,7 @@
 // T-207: Server Action doğrulama hataları ve hata kodu → mesaj anahtarı eşlemesi. Domain komutları sahtedir (iş kuralı T-205'te
 // test edilir); burada yalnızca ince girişin davranışı (zod, hata sözleşmesi) ve UI eşlemesi doğrulanır.
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppError } from "@wms/shared/errors";
 
@@ -8,19 +10,21 @@ const archiveWarehouse = vi.hoisted(() => vi.fn());
 const createLocation = vi.hoisted(() => vi.fn());
 const archiveLocation = vi.hoisted(() => vi.fn());
 const getLocationTree = vi.hoisted(() => vi.fn());
+const renameWarehouse = vi.hoisted(() => vi.fn());
+const renameLocation = vi.hoisted(() => vi.fn());
 const getPrincipal = vi.hoisted(() => vi.fn());
 
 vi.mock("next/headers", () => ({ headers: () => Promise.resolve(new Headers({ origin: "https://app.example.test", "fly-client-ip": "203.0.113.7" })) }));
 vi.mock("@wms/auth", () => ({ getAuthService: () => ({ getPrincipal }) }));
 vi.mock("@wms/db", () => ({ getAppDb: () => ({}) }));
-vi.mock("@wms/domain/warehouse", () => ({ createWarehouse, archiveWarehouse, createLocation, archiveLocation, getLocationTree }));
+vi.mock("@wms/domain/warehouse", () => ({ createWarehouse, archiveWarehouse, createLocation, archiveLocation, getLocationTree, renameWarehouse, renameLocation }));
 vi.mock("../../../../lib/rate-limit.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../../lib/rate-limit.ts")>()),
   createProductionLimiter: () => ({ check: () => Promise.resolve() }),
 }));
 vi.mock("@wms/domain/identity/access", () => ({ runTenantQuery: () => Promise.resolve("t1") }));
 
-import { archiveLocationAction, archiveWarehouseAction, createLocationAction, createWarehouseAction, loadMoreLocationsAction } from "./actions.ts";
+import { archiveLocationAction, archiveWarehouseAction, createLocationAction, createWarehouseAction, loadMoreLocationsAction, renameLocationAction, renameWarehouseAction } from "./actions.ts";
 import { errorKey } from "./warehouses-view.tsx";
 
 const WID = "11111111-1111-4111-8111-111111111111";
@@ -122,5 +126,54 @@ describe("errorKey eşlemesi", () => {
     expect(errorKey({ code: "WHATEVER" })).toBe("internal");
     expect(errorKey({ code: "VALIDATION_FAILED", detail: "UNKNOWN" })).toBe("validation_failed");
     expect(errorKey({ code: "INSUFFICIENT_STOCK" })).toBe("internal");
+  });
+});
+
+describe("T-257: kod değiştirme eylemleri", () => {
+  it("depo: code domain'e ham iletilir; sonuç changed", async () => {
+    renameWarehouse.mockResolvedValue({ changed: true });
+    const res = await renameWarehouseAction({ slug: "acme", warehouseId: WID, code: " yeni " });
+    expect(res).toMatchObject({ ok: true, data: { changed: true } });
+    expect(renameWarehouse.mock.calls[0]?.[1]).toMatchObject({ warehouseId: WID, code: " yeni " });
+  });
+  it("lokasyon: code domain'e ham iletilir", async () => {
+    renameLocation.mockResolvedValue({ changed: false });
+    const res = await renameLocationAction({ slug: "acme", locationId: LID, code: "A-10" });
+    expect(res).toMatchObject({ ok: true, data: { changed: false } });
+    expect(renameLocation.mock.calls[0]?.[1]).toMatchObject({ locationId: LID, code: "A-10" });
+  });
+  it("şemalar strict: boş kod, uuid değil, bilinmeyen alan (ör. name) reddedilir; domain çağrılmaz", async () => {
+    const bad = [
+      () => renameWarehouseAction({ slug: "acme", warehouseId: WID, code: "" }),
+      () => renameWarehouseAction({ slug: "acme", warehouseId: "x", code: "A" }),
+      () => renameWarehouseAction({ slug: "acme", warehouseId: WID, code: "A", name: "n" }),
+      () => renameLocationAction({ slug: "acme", locationId: LID }),
+      () => renameLocationAction({ slug: "acme", locationId: LID, code: "A", parentId: null }),
+    ];
+    for (const call of bad) {
+      const res = await call();
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.error.code).toBe("VALIDATION_FAILED");
+    }
+    expect(renameWarehouse).not.toHaveBeenCalled();
+    expect(renameLocation).not.toHaveBeenCalled();
+  });
+  it("sunucu hatası kod + ayrıntıyla aktarılır (CODE_TAKEN, yetki)", async () => {
+    renameLocation.mockRejectedValueOnce(new AppError("VALIDATION_FAILED", { detail: "CODE_TAKEN" }));
+    const a = await renameLocationAction({ slug: "acme", locationId: LID, code: "A" });
+    expect(a.ok).toBe(false);
+    if (!a.ok) expect(a.error).toMatchObject({ code: "VALIDATION_FAILED", detail: "CODE_TAKEN" });
+    renameWarehouse.mockRejectedValueOnce(new AppError("FORBIDDEN"));
+    const b = await renameWarehouseAction({ slug: "acme", warehouseId: WID, code: "A" });
+    expect(b.ok).toBe(false);
+    if (!b.ok) expect(b.error.code).toBe("FORBIDDEN");
+  });
+  it("CODE_AMBIGUOUS hata anahtarına eşlenir ve tr/en metni var", () => {
+    expect(errorKey({ code: "VALIDATION_FAILED", detail: "CODE_AMBIGUOUS" })).toBe("validation_failed_code_ambiguous");
+    for (const lang of ["tr", "en"]) {
+      const m = JSON.parse(readFileSync(path.resolve(import.meta.dirname, `../../../../messages/${lang}.json`), "utf8")) as { warehouses: { errors: Record<string, unknown> } };
+      expect(typeof m.warehouses.errors.validation_failed_code_ambiguous).toBe("string");
+      expect(typeof m.warehouses.errors.validation_failed_code_ambiguousAction).toBe("string");
+    }
   });
 });

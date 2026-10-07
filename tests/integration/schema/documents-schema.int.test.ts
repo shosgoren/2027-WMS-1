@@ -110,11 +110,11 @@ afterAll(async () => {
 }, 60_000);
 
 describe("T-206 fiş tipi sürümleri ve numara serileri", () => {
-  it("dört sistem sürümü (tenant_id NULL, v1) her iki tenant'a görünür; wms_app yazamaz; satır değişmez (I-11)", async () => {
+  it("beş sistem sürümü (tenant_id NULL, v1) her iki tenant'a görünür; wms_app yazamaz; satır değişmez (I-11)", async () => {
     for (const w of [A, B]) {
       const r = await one(w.tenantId, "SELECT key, version FROM public.document_type_versions WHERE tenant_id IS NULL ORDER BY key");
       expectOk(r);
-      if (r.ok) expect(r.rows).toEqual([{ key: "REVERSAL", version: 1 }, { key: "STOCK_IN", version: 1 }, { key: "STOCK_MOVE", version: 1 }, { key: "STOCK_OUT", version: 1 }]);
+      if (r.ok) expect(r.rows).toEqual([{ key: "COUNT_ADJUSTMENT", version: 1 }, { key: "REVERSAL", version: 1 }, { key: "STOCK_IN", version: 1 }, { key: "STOCK_MOVE", version: 1 }, { key: "STOCK_OUT", version: 1 }]);
     }
     expectFail(await one(A.tenantId, "INSERT INTO public.document_type_versions (tenant_id, key, version) VALUES (NULL, 'X', 1)"), INSUFFICIENT_PRIVILEGE, "INSERT");
     expectFail(await one(A.tenantId, "UPDATE public.document_type_versions SET key = key"), INSUFFICIENT_PRIVILEGE, "UPDATE");
@@ -779,7 +779,7 @@ describe("T-206 migration 0012 ileri/geri/ileri (geçici veritabanı)", () => {
     await withClient(async (c) => {
       expect(await present(c)).toEqual([...NEW_TABLES].sort());
       expect(await fnCount(c)).toBe(11);
-      expect((await c.query("SELECT 1 FROM public.document_type_versions WHERE tenant_id IS NULL")).rowCount).toBe(4);
+      expect((await c.query("SELECT 1 FROM public.document_type_versions WHERE tenant_id IS NULL")).rowCount).toBe(5);
       const t = randomUUID();
       await c.query("INSERT INTO public.tenants (id, slug, name) VALUES ($1, $2, 'doc')", [t, `doc-${rnd()}`]);
       await c.query("BEGIN");
@@ -802,7 +802,7 @@ describe("T-206 migration 0012 ileri/geri/ileri (geçici veritabanı)", () => {
       expect(await fnCount(c)).toBe(11);
       const rls = await c.query<{ n: number }>("SELECT count(*)::int AS n FROM pg_class WHERE relname = ANY($1::text[]) AND relrowsecurity AND relforcerowsecurity", [[...NEW_TABLES]]);
       expect(rls.rows[0]?.n).toBe(NEW_TABLES.length);
-      expect((await c.query("SELECT 1 FROM public.document_type_versions WHERE tenant_id IS NULL")).rowCount).toBe(4);
+      expect((await c.query("SELECT 1 FROM public.document_type_versions WHERE tenant_id IS NULL")).rowCount).toBe(5);
     });
   }, 120_000);
 });

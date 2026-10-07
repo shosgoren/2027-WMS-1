@@ -6,7 +6,7 @@
 import { headers } from "next/headers";
 import { z } from "zod";
 import { getAppDb } from "@wms/db";
-import { addBarcode, archiveItem, createItem, removeBarcode, setUnitConversion, updateItem } from "@wms/domain/catalog";
+import { addBarcode, archiveItem, createItem, createItemWithDefaultUnit, createWithSuggestedCode, removeBarcode, searchItems, setUnitConversion, suggestCode, updateItem } from "@wms/domain/catalog";
 import { createProductionGuard, limitVerifiedTenant, type ActionContext } from "../../../../lib/action-guard.ts";
 
 const guardedAction = createProductionGuard(() => headers());
@@ -26,13 +26,18 @@ const createItemSchema = z
     slug: slugSchema,
     code: textSchema,
     name: textSchema,
-    baseUnitId: idSchema,
+    /** Yoksa (tenant'ta hiç birim yok) sunucu varsayılan `ADET` birimini hazırlar (T-250). */
+    baseUnitId: idSchema.optional(),
     quantityScale: z.number().int().min(0).max(6).optional(),
     trackingMode: trackingSchema.optional(),
     pickPolicy: pickSchema.optional(),
+    /** T-250: kod kullanıcı tarafından değiştirilmedi (önerilen kod) beyanı; sunucu ayrıca kodun önerilen biçimde olduğunu doğrular, çakışmada sıradaki öneriyle yeniden dener. */
+    autoCode: z.boolean().optional(),
   })
   .strict();
-const updateItemSchema = z.object({ slug: slugSchema, itemId: idSchema, name: textSchema.optional(), pickPolicy: pickSchema.optional() }).strict();
+const suggestItemCodeSchema = z.object({ slug: slugSchema, prefix: z.string().max(16).optional() }).strict();
+const searchItemsSchema = z.object({ slug: slugSchema, q: z.string().max(128), limit: z.number().int().min(1).max(10).optional() }).strict();
+const updateItemSchema = z.object({ slug: slugSchema, itemId: idSchema, code: textSchema.optional(), name: textSchema.optional(), pickPolicy: pickSchema.optional() }).strict();
 const archiveItemSchema = z.object({ slug: slugSchema, itemId: idSchema }).strict();
 const conversionSchema = z.object({ slug: slugSchema, itemId: idSchema, unitId: idSchema, factor: decimalSchema }).strict();
 const addBarcodeSchema = z
@@ -51,18 +56,39 @@ async function writeContext(slug: string, ctx: ActionContext) {
 export async function createItemAction(raw: unknown) {
   return guardedAction({ schema: createItemSchema }, async (input, ctx) => {
     const params = await writeContext(input.slug, ctx);
-    const r = await createItem(
-      { ...params, requestId: ctx.requestId },
-      {
-        code: input.code,
-        name: input.name,
-        baseUnitId: input.baseUnitId,
-        ...(input.quantityScale === undefined ? {} : { quantityScale: input.quantityScale }),
-        ...(input.trackingMode === undefined ? {} : { trackingMode: input.trackingMode }),
-        ...(input.pickPolicy === undefined ? {} : { pickPolicy: input.pickPolicy }),
-      },
-    );
+    const base = {
+      name: input.name,
+      ...(input.quantityScale === undefined ? {} : { quantityScale: input.quantityScale }),
+      ...(input.trackingMode === undefined ? {} : { trackingMode: input.trackingMode }),
+      ...(input.pickPolicy === undefined ? {} : { pickPolicy: input.pickPolicy }),
+    };
+    const p = { ...params, requestId: ctx.requestId };
+    const baseUnitId = input.baseUnitId;
+    // Birim verilmediyse varsayılan birim çözümü ve ürün TEK transaction'dadır (domain); ürün reddedilirse birim de geri alınır (T-259).
+    const create = (code: string) => (baseUnitId === undefined ? createItemWithDefaultUnit(p, { ...base, code }) : createItem(p, { ...base, code, baseUnitId }));
+    if (input.autoCode !== true) return { itemId: (await create(input.code)).itemId };
+    // `autoCode` yalnızca istemci beyanıdır: otomatik yeniden deneme için kodun sunucu önerisi biçiminde olması da gerekir (domain, T-259).
+    const r = await createWithSuggestedCode({ kind: "item", code: input.code, auto: true, suggest: (prefix) => suggestCode(params, { kind: "item", prefix }), create });
     return { itemId: r.itemId };
+  })(raw);
+}
+
+/** Sıradaki ürün kodu (T-250): sunucuda hesaplanır, yazımda benzersizlik yine denetlenir. */
+export async function suggestItemCodeAction(raw: unknown) {
+  return guardedAction({ schema: suggestItemCodeSchema }, async (input, ctx) => {
+    const params = await writeContext(input.slug, ctx);
+    return suggestCode(params, { kind: "item", ...(input.prefix === undefined ? {} : { prefix: input.prefix }) });
+  })(raw);
+}
+
+/** Yazdıkça ürün arama (T-250): kod/ad öneki ya da tam barkod; en çok 10 sonuç; okuma izni `stock.view` domain'de. */
+export async function searchItemsAction(raw: unknown) {
+  return guardedAction({ schema: searchItemsSchema }, async (input, ctx) => {
+    const principal = ctx.principal;
+    if (principal === null) throw new Error("unreachable: principal required");
+    const page = await searchItems({ db: getAppDb(), principal, tenantSlug: input.slug }, { q: input.q, status: "ACTIVE", limit: input.limit ?? 8 });
+    // T-257: eski kodla eşleşen kartlar için "bu kod X olarak değişti" bilgisi (eski kod → güncel kod).
+    return { items: page.items.map((i) => ({ id: i.id, code: i.code, name: i.name })), renamedFrom: (page.renamedFrom ?? []).map((r) => ({ itemId: r.itemId, oldCode: r.oldCode, currentCode: r.currentCode })) };
   })(raw);
 }
 
@@ -71,7 +97,7 @@ export async function updateItemAction(raw: unknown) {
     const params = await writeContext(input.slug, ctx);
     const r = await updateItem(
       { ...params, requestId: ctx.requestId },
-      { itemId: input.itemId, ...(input.name === undefined ? {} : { name: input.name }), ...(input.pickPolicy === undefined ? {} : { pickPolicy: input.pickPolicy }) },
+      { itemId: input.itemId, ...(input.code === undefined ? {} : { code: input.code }), ...(input.name === undefined ? {} : { name: input.name }), ...(input.pickPolicy === undefined ? {} : { pickPolicy: input.pickPolicy }) },
     );
     return { changed: r.changed };
   })(raw);

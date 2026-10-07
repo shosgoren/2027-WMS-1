@@ -5,7 +5,20 @@
 import { headers } from "next/headers";
 import { z } from "zod";
 import { getAppDb } from "@wms/db";
-import { archiveLocation, archiveWarehouse, createLocation, createWarehouse, getLocationTree } from "@wms/domain/warehouse";
+import { createWithSuggestedCode, suggestCode } from "@wms/domain/catalog";
+import {
+  archiveLocation,
+  archiveWarehouse,
+  createBulkLocations,
+  createLocation,
+  createWarehouse,
+  getLocationTree,
+  getSetupProgress,
+  previewBulkLocations,
+  renameLocation,
+  renameWarehouse,
+  searchLocations,
+} from "@wms/domain/warehouse";
 import type { LocationKindValue } from "@wms/domain/warehouse";
 import { createProductionGuard, limitVerifiedTenant, type ActionContext } from "../../../../lib/action-guard.ts";
 
@@ -18,11 +31,29 @@ const textSchema = z.string().min(1).max(512);
 // `LocationKindValue` ile birebir olmalıdır (`satisfies` derleme zamanında zorlar).
 const kindSchema = z.enum(["RECEIVING", "STORAGE", "STAGING", "TRANSIT"] as const satisfies readonly LocationKindValue[]);
 
-const createWarehouseSchema = z.object({ slug: slugSchema, code: textSchema, name: textSchema }).strict();
+// `autoCode` (T-250): kod kullanıcı tarafından değiştirilmedi beyanı; sunucu kodun önerilen biçimde olduğunu da doğrular (T-259), çakışmada aynı önekle yeniden dener.
+const createWarehouseSchema = z.object({ slug: slugSchema, code: textSchema, name: textSchema, autoCode: z.boolean().optional() }).strict();
+const suggestCodeSchema = z.object({ slug: slugSchema, kind: z.enum(["warehouse", "location"]), warehouseId: idSchema.optional() }).strict();
+const bulkSpecShape = {
+  slug: slugSchema,
+  warehouseId: idSchema,
+  parentId: idSchema.nullable(),
+  zone: z.string().min(1).max(16),
+  rackFrom: z.number().int(),
+  rackTo: z.number().int(),
+  levelFrom: z.number().int(),
+  levelTo: z.number().int(),
+};
+const previewBulkSchema = z.object(bulkSpecShape).strict();
+const createBulkSchema = z.object({ ...bulkSpecShape, idempotencyKey: z.string().min(1).max(64) }).strict();
+const searchLocationsSchema = z.object({ slug: slugSchema, warehouseId: idSchema, q: z.string().max(128), limit: z.number().int().min(1).max(20).optional() }).strict();
+const setupProgressSchema = z.object({ slug: slugSchema }).strict();
 const archiveWarehouseSchema = z.object({ slug: slugSchema, warehouseId: idSchema }).strict();
 const createLocationSchema = z
-  .object({ slug: slugSchema, warehouseId: idSchema, parentId: idSchema.nullable(), code: textSchema, name: textSchema, kind: kindSchema })
+  .object({ slug: slugSchema, warehouseId: idSchema, parentId: idSchema.nullable(), code: textSchema, name: textSchema, kind: kindSchema, autoCode: z.boolean().optional() })
   .strict();
+const renameWarehouseSchema = z.object({ slug: slugSchema, warehouseId: idSchema, code: textSchema }).strict();
+const renameLocationSchema = z.object({ slug: slugSchema, locationId: idSchema, code: textSchema }).strict();
 const archiveLocationSchema = z.object({ slug: slugSchema, locationId: idSchema }).strict();
 const moreLocationsSchema = z
   .object({ slug: slugSchema, warehouseId: idSchema, after: z.object({ depth: z.number().int().min(0).max(16), code: textSchema, id: idSchema }).strict() })
@@ -39,7 +70,14 @@ async function writeContext(slug: string, ctx: ActionContext) {
 export async function createWarehouseAction(raw: unknown) {
   return guardedAction({ schema: createWarehouseSchema }, async (input, ctx) => {
     const params = await writeContext(input.slug, ctx);
-    const r = await createWarehouse(params, { code: input.code, name: input.name, requestId: ctx.requestId });
+    const create = (code: string) => createWarehouse(params, { code, name: input.name, requestId: ctx.requestId });
+    const r = await createWithSuggestedCode({
+      kind: "warehouse",
+      code: input.code,
+      auto: input.autoCode === true,
+      suggest: (prefix) => suggestCode(params, { kind: "warehouse", prefix }),
+      create,
+    });
     return { warehouseId: r.warehouseId };
   })(raw);
 }
@@ -52,13 +90,36 @@ export async function archiveWarehouseAction(raw: unknown) {
   })(raw);
 }
 
+/** Depo kodunu değiştirir (T-257): normalleştirme, benzersizlik, kod geçmişi ve audit T-251 domain komutundadır. */
+export async function renameWarehouseAction(raw: unknown) {
+  return guardedAction({ schema: renameWarehouseSchema }, async (input, ctx) => {
+    const params = await writeContext(input.slug, ctx);
+    const r = await renameWarehouse(params, { warehouseId: input.warehouseId, code: input.code, requestId: ctx.requestId });
+    return { changed: r.changed };
+  })(raw);
+}
+
+/** Lokasyon kodunu değiştirir (T-257): depo içi benzersizlik ve kod geçmişi domain'dedir. */
+export async function renameLocationAction(raw: unknown) {
+  return guardedAction({ schema: renameLocationSchema }, async (input, ctx) => {
+    const params = await writeContext(input.slug, ctx);
+    const r = await renameLocation(params, { locationId: input.locationId, code: input.code, requestId: ctx.requestId });
+    return { changed: r.changed };
+  })(raw);
+}
+
 export async function createLocationAction(raw: unknown) {
   return guardedAction({ schema: createLocationSchema }, async (input, ctx) => {
     const params = await writeContext(input.slug, ctx);
-    const r = await createLocation(
-      params,
-      { warehouseId: input.warehouseId, parentId: input.parentId, code: input.code, name: input.name, kind: input.kind, requestId: ctx.requestId },
-    );
+    const create = (code: string) =>
+      createLocation(params, { warehouseId: input.warehouseId, parentId: input.parentId, code, name: input.name, kind: input.kind, requestId: ctx.requestId });
+    const r = await createWithSuggestedCode({
+      kind: "location",
+      code: input.code,
+      auto: input.autoCode === true,
+      suggest: (prefix) => suggestCode(params, { kind: "location", warehouseId: input.warehouseId, prefix }),
+      create,
+    });
     return { locationId: r.locationId, depth: r.depth };
   })(raw);
 }
@@ -78,5 +139,65 @@ export async function loadMoreLocationsAction(raw: unknown) {
     if (principal === null) throw new Error("unreachable: principal required");
     const page = await getLocationTree({ db: getAppDb(), principal, tenantSlug: input.slug }, { warehouseId: input.warehouseId, includeArchived: true, after: input.after, limit: 200 });
     return { items: page.items, next: page.next };
+  })(raw);
+}
+
+/** Sıradaki depo/lokasyon kodu (T-250): sunucuda hesaplanır; yazımda benzersizlik yine denetlenir. */
+export async function suggestCodeAction(raw: unknown) {
+  return guardedAction({ schema: suggestCodeSchema }, async (input, ctx) => {
+    const params = await writeContext(input.slug, ctx);
+    return suggestCode(params, { kind: input.kind, ...(input.warehouseId === undefined ? {} : { warehouseId: input.warehouseId }) });
+  })(raw);
+}
+
+/** Toplu raf önizleme (T-250): salt okuma; kod üretimi, sınır ve çakışma denetimi domain'de. */
+export async function previewBulkLocationsAction(raw: unknown) {
+  return guardedAction({ schema: previewBulkSchema }, async (input, ctx) => {
+    const params = await writeContext(input.slug, ctx);
+    return previewBulkLocations(params, {
+      warehouseId: input.warehouseId,
+      parentId: input.parentId,
+      zone: input.zone,
+      rackFrom: input.rackFrom,
+      rackTo: input.rackTo,
+      levelFrom: input.levelFrom,
+      levelTo: input.levelTo,
+    });
+  })(raw);
+}
+
+/** Toplu raf oluşturma (T-250): tek transaction + idempotency anahtarı domain'dedir. */
+export async function createBulkLocationsAction(raw: unknown) {
+  return guardedAction({ schema: createBulkSchema }, async (input, ctx) => {
+    const params = await writeContext(input.slug, ctx);
+    return createBulkLocations(params, {
+      warehouseId: input.warehouseId,
+      parentId: input.parentId,
+      zone: input.zone,
+      rackFrom: input.rackFrom,
+      rackTo: input.rackTo,
+      levelFrom: input.levelFrom,
+      levelTo: input.levelTo,
+      idempotencyKey: input.idempotencyKey,
+      requestId: ctx.requestId,
+    });
+  })(raw);
+}
+
+/** Yazdıkça lokasyon arama (T-250): okuma `stock.view`; sınırlı sonuç. */
+export async function searchLocationsAction(raw: unknown) {
+  return guardedAction({ schema: searchLocationsSchema }, async (input, ctx) => {
+    const principal = ctx.principal;
+    if (principal === null) throw new Error("unreachable: principal required");
+    return searchLocations({ db: getAppDb(), principal, tenantSlug: input.slug }, { warehouseId: input.warehouseId, q: input.q, ...(input.limit === undefined ? {} : { limit: input.limit }) });
+  })(raw);
+}
+
+/** Boş ekran rehberi ilerlemesi (T-250): okuma `stock.view`. */
+export async function getSetupProgressAction(raw: unknown) {
+  return guardedAction({ schema: setupProgressSchema }, async (input, ctx) => {
+    const principal = ctx.principal;
+    if (principal === null) throw new Error("unreachable: principal required");
+    return getSetupProgress({ db: getAppDb(), principal, tenantSlug: input.slug });
   })(raw);
 }

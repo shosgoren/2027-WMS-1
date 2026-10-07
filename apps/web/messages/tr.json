@@ -16,6 +16,19 @@
     "help": {
       "full": "Yardım çağır",
       "short": "Yardım"
+    },
+    "menu": {
+      "open": "Menüyü aç",
+      "title": "Menü",
+      "close": "Kapat"
+    },
+    "nav": {
+      "label": "Ana gezinme",
+      "home": "Ana sayfa",
+      "scan": "Tara",
+      "tasks": "Görevlerim",
+      "menu": "Menü",
+      "soon": "Yakında"
     }
   },
   "auth": {
@@ -304,6 +317,8 @@
     "validation_failed_handling_unit_cycleAction": "Başka bir üst taşıma birimi seç.",
     "validation_failed_barcode_ambiguous": "Bu barkod birden fazla ürün veya birimle eşleşiyor.",
     "validation_failed_barcode_ambiguousAction": "Ürünü listeden elle seç.",
+    "validation_failed_code_ambiguous": "Bu eski kod birden fazla kayıtla eşleşiyor.",
+    "validation_failed_code_ambiguousAction": "Kaydı güncel koduyla ara.",
     "validation_failed_unit_conversion_invalid": "Birim dönüşüm katsayısı geçersiz.",
     "validation_failed_unit_conversion_invalidAction": "Sıfırdan büyük ve en çok 6 ondalıklı bir katsayı gir.",
     "validation_failed_quantity_scale": "Miktar, ürünün izin verdiği ondalık basamak sayısını aşıyor.",
@@ -417,16 +432,31 @@
     "intro": "Yapmak istediğin işe dokun. Seni adım adım götüreceğim; yanlış bir şey yapmana izin vermem.",
     "tasksLabel": "İşler",
     "lockedReason": "Bu iş için yetkin yok. Sorumluna sorabilirsin.",
+    "soonListNote": "Bu işler depo kurulumundan sonra açılacak.",
+    "lockedListNote": "Bu işler için yetkin yok. Sorumluna sorabilirsin.",
     "soonLabel": "Yakında",
     "soonWarehouse": "Bu iş depo kurulumundan sonra açılacak.",
     "soonScreen": "Bu ekran yakında açılacak.",
+    "myTasks": {
+      "title": "Görevlerim",
+      "assigned": "Sana atanmış {count} iş",
+      "empty": "Şu an sana atanmış iş yok.",
+      "start": "Tara ile başla"
+    },
+    "lockedList": {
+      "toggle": "Yetkin olmayan işler ({count})"
+    },
+    "soonList": {
+      "toggle": "Yakında gelecekler ({count})",
+      "back": "İşlere dön"
+    },
     "tasks": {
       "members": {
         "title": "Ekibimi yönet",
         "description": "Kimin hangi işi yapabileceğini belirle"
       },
       "settings": {
-        "title": "Çalışma alanı ayarları",
+        "title": "Ayarlar",
         "description": "Ad, dil ve saat dilimi"
       },
       "audit": {
@@ -501,12 +531,14 @@
     "warehouse": {
       "created": "Bir depo oluşturdun.",
       "updated": "Bir depoyu güncelledin.",
-      "archived": "Bir depoyu arşivledin."
+      "archived": "Bir depoyu arşivledin.",
+      "code_changed": "Bir deponun kodunu değiştirdin."
     },
     "location": {
       "created": "Bir lokasyon oluşturdun.",
       "updated": "Bir lokasyonu güncelledin.",
-      "archived": "Bir lokasyonu arşivledin."
+      "archived": "Bir lokasyonu arşivledin.",
+      "code_changed": "Bir lokasyonun kodunu değiştirdin."
     },
     "warehouse_scope": {
       "changed": "Bir üyenin depo kapsamını değiştirdin."
@@ -518,7 +550,8 @@
     "item": {
       "created": "Bir ürün oluşturdun.",
       "updated": "Bir ürünü güncelledin.",
-      "archived": "Bir ürünü arşivledin."
+      "archived": "Bir ürünü arşivledin.",
+      "code_changed": "Bir ürünün kodunu değiştirdin."
     },
     "item_barcode": {
       "added": "Bir ürüne barkod ekledin.",
@@ -549,7 +582,29 @@
       "created": "Stok rezerve ettin.",
       "released": "Bir rezervasyonu serbest bıraktın."
     },
-    "other": "Bir işlem yaptın."
+    "external_ref": {
+      "linked": "Bir dış sistem referansı bağladın veya güncelledin."
+    },
+    "other": "Bir işlem yaptın.",
+    "warehouse_task": {
+      "created": "Bir depo görevi oluşturdun.",
+      "assigned": "Bir depo görevini atadın.",
+      "claimed": "Bir depo görevini üstlendin.",
+      "cancelled": "Bir depo görevini iptal ettin.",
+      "completed": "Bir depo görevini tamamladın."
+    },
+    "inbound_receipt": {
+      "created": "Beklenen bir teslim kaydı oluşturdun.",
+      "opened": "Beklenen bir teslimi mal kabule açtın.",
+      "cancelled": "Beklenen bir teslimi iptal ettin.",
+      "received": "Gelen malı teslim kaydına karşı kabul ettin."
+    },
+    "sales_order": {
+      "created": "Bir müşteri siparişi oluşturdun.",
+      "updated": "Bir taslak siparişi güncelledin.",
+      "cancelled": "Bir siparişi iptal ettin.",
+      "line_cancelled": "Bir sipariş satırını iptal ettin."
+    }
   },
   "auditLog": {
     "title": "Kim ne yaptı?",
@@ -624,7 +679,7 @@
   },
   "items": {
     "title": "Ürünler",
-    "intro": "Ürün kartlarını, birimlerini ve barkodlarını buradan yönet.",
+    "intro": "Ürün bul ya da yeni ürün ekle.",
     "lockedReason": "Bu iş için yetkin yok. Sorumluna sorabilirsin.",
     "listLabel": "Ürün listesi",
     "create": "Yeni ürün",
@@ -632,7 +687,15 @@
     "emptyAction": "“Yeni ürün” ile ilk ürününü ekle.",
     "emptyReadOnly": "Ürün eklemesi için sorumluna sor.",
     "emptyFiltered": "Aramana uyan ürün yok.",
-    "emptyFilteredAction": "Kodun ilk harflerini, adı ya da barkodu tam yaz; ya da aramayı temizle.",
+    "emptyFilteredAction": "Adı ya da kodu değiştirip yeniden dene; barkodu tam yaz. Ya da aramayı temizle.",
+    "emptyStatus": "Bu filtreye uyan ürün yok.",
+    "emptyStatusAction": "Başka bir durum seç ya da aramayı temizle.",
+    "setup": {
+      "warehouse": "Önce depo ekle · 1. adım / 3",
+      "locations": "Sıradaki: rafları oluştur · 2. adım / 3",
+      "item": "Sıradaki: ilk ürünü ekle",
+      "teach": "Ürün eklemeden önce üç kısa adım var."
+    },
     "codeLabel": "Kod: {code}",
     "baseUnitLabel": "Temel birim: {unit}",
     "status": {
@@ -646,10 +709,11 @@
     "firstPage": "Başa dön",
     "search": {
       "label": "Ürün ara",
-      "hint": "Kodun ya da adın ilk harfleri; barkod için tamamını yaz veya okut.",
+      "hint": "Adı ya da kodu yaz; barkodu okutabilirsin.",
+      "placeholder": "Örn. URN-0001 ya da Koli 40x30",
+      "advanced": "Gelişmiş",
       "status": "Durum",
       "all": "Hepsi",
-      "submit": "Ara",
       "clear": "Aramayı temizle"
     },
     "tracking": {
@@ -665,10 +729,12 @@
     "form": {
       "createTitle": "Yeni ürün",
       "code": "Ürün kodu",
-      "codeHint": "Sonradan değiştirilemez; sunucu biçimi düzeltir.",
+      "codeHint": "Sunucu biçimi düzeltir. Kod sonradan değiştirilebilir; eski kodla arama yeni karta yönlenir.",
       "name": "Ürün adı",
       "baseUnit": "Temel birim",
       "baseUnitHint": "Stok bu birimle sayılır; sonradan değiştirilemez.",
+      "baseUnitChoose": "Bir birim seç. ADET birimi yok.",
+      "baseUnitPlaceholder": "Birim seç",
       "scale": "Miktar hassasiyeti",
       "scaleHint": "Miktarın virgülden sonra kaç basamak olacağı; sonradan değiştirilemez.",
       "scaleInteger": "Tam sayı (0 basamak)",
@@ -729,7 +795,13 @@
         "conversion": "Dönüşüm kaydedildi.",
         "barcodeAdded": "Barkod eklendi.",
         "barcodeRemoved": "Barkod kaldırıldı.",
-        "archived": "Ürün arşivlendi."
+        "archived": "Ürün arşivlendi.",
+        "codeSame": "Kod zaten bu; bir şey değişmedi.",
+        "codeUndone": "Kod eski haline döndü."
+      },
+      "codeEdit": {
+        "button": "Kodu değiştir",
+        "for": "{name} için kodu değiştir"
       }
     },
     "errors": {
@@ -766,7 +838,8 @@
       "internalAction": "Biraz sonra yeniden dene; sürerse hata kodunu destek ekibine ilet."
     },
     "locked": "Ürünleri görme yetkin yok.",
-    "lockedAction": "Çalışma alanı yöneticine sor."
+    "lockedAction": "Çalışma alanı yöneticine sor.",
+    "renamedNote": "Bu kod {code} olarak değişti (eski kod: {old})"
   },
   "warehouses": {
     "title": "Depo ve raflar",
@@ -793,7 +866,9 @@
     "firstPage": "Başa dön",
     "done": {
       "created": "Depo eklendi.",
-      "archived": "Depo arşivlendi."
+      "archived": "Depo arşivlendi.",
+      "codeSame": "Kod zaten bu; bir şey değişmedi.",
+      "codeUndone": "Kod eski haline döndü."
     },
     "confirmArchive": {
       "title": "{name} arşivlensin mi?",
@@ -808,7 +883,7 @@
     },
     "form": {
       "code": "Kod",
-      "codeHint": "Harfler otomatik büyütülür; sonradan değiştirilemez.",
+      "codeHint": "Harfler otomatik büyütülür. Kod sonradan değiştirilebilir.",
       "name": "Ad",
       "kind": "Tür",
       "submit": "Kaydet",
@@ -839,7 +914,9 @@
       "parentIs": "Bağlı olduğu yer: {parent}",
       "done": {
         "created": "Lokasyon eklendi.",
-        "archived": "Lokasyon arşivlendi."
+        "archived": "Lokasyon arşivlendi.",
+        "codeSame": "Kod zaten bu; bir şey değişmedi.",
+        "codeUndone": "Kod eski haline döndü."
       },
       "confirmArchive": {
         "title": "{name} arşivlensin mi?",
@@ -874,6 +951,275 @@
       "validation_failed_parent_invalid": "Üst lokasyon bu işlem için uygun değil.",
       "validation_failed_parent_invalidAction": "Başka bir üst lokasyon seç veya türü değiştir.",
       "version_conflict": "Kayıt aynı anda başka bir işlemle değişti.",
+      "version_conflictAction": "Sayfayı yenileyip yeniden dene.",
+      "rate_limited": "Çok fazla işlem yapıldı.",
+      "rate_limitedAction": "Biraz bekleyip yeniden dene.",
+      "tenant_suspended": "Çalışma alanı askıda.",
+      "tenant_suspendedAction": "Sorumluna veya destek ekibine başvur.",
+      "tenant_closing": "Çalışma alanı kapatılıyor.",
+      "tenant_closingAction": "Sorumluna başvur.",
+      "internal": "Bir sorun oluştu.",
+      "internalAction": "Biraz sonra yeniden dene; sürerse hata kodunu destek ekibine ilet.",
+      "validation_failed_code_taken_bulk": "Bazı kodlar zaten kullanılıyor.",
+      "validation_failed_code_taken_bulkAction": "Önizlemedeki çakışan kodlara bak; aralığı ya da bölge kodunu değiştir.",
+      "validation_failed_document_too_large": "Bir seferde en çok 2.000 lokasyon oluşturulabilir; bir depoda toplam en çok 50.000 lokasyon olabilir ve bu ekleme sınırı aşıyor.",
+      "validation_failed_document_too_largeAction": "Aralığı küçültüp yeniden dene; depo dolduysa başka bir depo aç.",
+      "validation_failed_idempotency_key_required": "İstek kimliği eksik.",
+      "validation_failed_idempotency_key_requiredAction": "Sayfayı yenileyip yeniden dene.",
+      "idempotency_mismatch": "Bu istek kimliği başka bir girdiyle kullanılmış.",
+      "idempotency_mismatchAction": "Formu kapatıp yeniden aç, sonra yeniden dene.",
+      "validation_failed_code_ambiguous": "Bu eski kod birden çok lokasyonun geçmişinde var; hangisi olduğu anlaşılamıyor.",
+      "validation_failed_code_ambiguousAction": "Lokasyonun güncel kodunu yazarak ara."
+    },
+    "codeEdit": {
+      "button": "Kodu değiştir",
+      "for": "{name} için kodu değiştir"
+    }
+  },
+  "field": {
+    "title": "Saha",
+    "intro": "Bir iş seç; tara, doğrula, miktarı onayla.",
+    "menuLabel": "Saha işleri",
+    "actionBarLabel": "Saha eylemleri",
+    "fieldHome": "Saha işleri",
+    "mainMenu": "Ana ekran",
+    "lockedReason": "Bu ekran henüz açılmadı.",
+    "tasks": {
+      "receive": {
+        "title": "Kabul",
+        "description": "Gelen malı tara ve say."
+      },
+      "putaway": {
+        "title": "Yerleştirme",
+        "description": "Malı rafa yerleştir."
+      },
+      "pick": {
+        "title": "Toplama",
+        "description": "Sipariş için malı topla."
+      },
+      "ship": {
+        "title": "Sevk",
+        "description": "Toplanan malı sevk et."
+      },
+      "return": {
+        "title": "İade",
+        "description": "İade gelen malı kabul et."
+      },
+      "count": {
+        "title": "Sayım",
+        "description": "Rafı say, farkı göster."
+      }
+    }
+  },
+  "labels": {
+    "title": "Etiket yazdır",
+    "preview": "Etiket önizleme",
+    "print": "Yazdır",
+    "downloadZpl": "ZPL indir",
+    "bridge": "Yerel köprüyle gönder (hazır değil)",
+    "summary": "{count} etiket · şablon {version}",
+    "noSource": "Etiket için bir ürün ya da lokasyon seçilmedi.",
+    "noSourceAction": "Ürün ayrıntısından ya da lokasyon ağacından bu sayfaya gel.",
+    "locked": "Etiket görme yetkin yok.",
+    "lockedAction": "Çalışma alanı yöneticine sor.",
+    "errors": {
+      "copies": "Adet 1 ile {max} arasında, toplam etiket sayısı {max}'i aşmayan bir sayı olmalı.",
+      "charset": "Barkod içeriği yalnızca ASCII karakter taşıyabilir (Türkçe harf, ö, ş, ğ gibi karakterler olmaz).",
+      "charsetAction": "Ürün kodunu ya da barkodu ASCII karakterlerle düzelt.",
+      "tooLong": "Barkod etiket genişliğine sığmıyor.",
+      "tooLongAction": "Kodu ya da barkodu kısalt."
+    }
+  },
+  "easySetup": {
+    "guide": {
+      "title": "Kuruluma başla",
+      "intro": "Üç adımda hazırsın. Sıradaki adım aşağıda.",
+      "listLabel": "Kurulum adımları",
+      "done": "Tamamlandı",
+      "todo": "Yapılacak",
+      "stepOf": "{n}. adım",
+      "next": "Sıradaki adım",
+      "warehouse": {
+        "title": "Depo ekle",
+        "hint": "Malların durduğu yer. Adını yazman yeter.",
+        "action": "Depoyu ekle"
+      },
+      "locations": {
+        "title": "Rafları oluştur",
+        "hint": "Bölge, raf ve göz sayısını yaz; kodlar kendiliğinden çıkar.",
+        "action": "Rafları oluştur",
+        "locked": "Önce depo ekle."
+      },
+      "items": {
+        "title": "Ürün ekle",
+        "hint": "Ürünün adını yaz; kod ve birim hazır gelir.",
+        "action": "Ürünü ekle"
+      },
+      "allDone": "Kurulum tamam. İstediğin zaman yeni depo, raf ya da ürün ekleyebilirsin."
+    },
+    "code": {
+      "suggested": "Otomatik önerildi. İstersen değiştirebilirsin.",
+      "custom": "Kendi kodunu yazdın.",
+      "loading": "Kod hazırlanıyor…",
+      "failed": "Kod önerisi alınamadı; kodu kendin yazabilirsin."
+    },
+    "form": {
+      "advanced": "Gelişmiş ayarlar",
+      "required": "Zorunlu alan",
+      "defaultWarehouseName": "Ana depo"
+    },
+    "picker": {
+      "listLabel": "Öneriler",
+      "searching": "Aranıyor…",
+      "none": "Eşleşen kayıt yok.",
+      "hintType": "İlk harfleri yaz; öneriler çıkar.",
+      "scanLabel": "Barkod okut",
+      "scanManual": "Elle yaz",
+      "scanConfirm": "Bul",
+      "scanCancel": "Vazgeç",
+      "scanPlaceholder": "Barkodu okut",
+      "scanNotFound": "Bu barkodla kayıt bulunamadı.",
+      "scanNotFoundAction": "Barkodu kontrol edip yeniden okut.",
+      "scanMany": "Bu barkod birden çok kayıtla eşleşti.",
+      "scanManyAction": "Aramaya kodu yazarak seç.",
+      "selected": "Seçildi: {name}"
+    },
+    "items": {
+      "searchSuggestLabel": "Ürün önerileri",
+      "unitAuto": "Henüz birim yok; ilk ürününle “ADET” birimi kendiliğinden oluşturulur.",
+      "unitDefaultOption": "ADET · Adet (otomatik)"
+    },
+    "bulk": {
+      "open": "Toplu raf oluştur",
+      "title": "Rafları oluştur",
+      "intro": "Bölge, raf ve göz aralığını yaz. Önce önizlersin, sonra oluşur.",
+      "zone": "Bölge kodu",
+      "zoneHint": "Örnek: A",
+      "rackFrom": "İlk raf no",
+      "rackTo": "Son raf no",
+      "levelFrom": "İlk göz no",
+      "levelTo": "Son göz no",
+      "advanced": "Gelişmiş ayarlar",
+      "parent": "Üst lokasyon (isteğe bağlı)",
+      "parentHint": "Boş bırakırsan depo altında oluşur.",
+      "parentClear": "Üst lokasyonu kaldır",
+      "parentNone": "Depo altında",
+      "scanParent": "Lokasyon etiketini okut",
+      "previewTitle": "Önizleme",
+      "previewLoading": "Önizleme hazırlanıyor…",
+      "previewSummary": "{count} lokasyon oluşacak: {first} … {last}",
+      "previewOne": "1 lokasyon oluşacak: {first}",
+      "previewListLabel": "Oluşacak kodlar",
+      "previewMore": "Listede yalnızca ilk {shown} kod var.",
+      "conflictsTitle": "{count} kod zaten var; oluşturulmaz",
+      "conflictsAction": "Aralığı ya da bölge kodunu değiştir.",
+      "conflictsListLabel": "Çakışan kodlar",
+      "conflictsMore": "Listede yalnızca ilk {shown} kod var.",
+      "tooMany": "Bir seferde en çok {max} lokasyon oluşturulur.",
+      "tooManyAction": "Aralığı küçült.",
+      "invalid": "Girilen aralık geçersiz.",
+      "invalidAction": "Bölge kodunu (harf/rakam) ve 1–999 arası, küçükten büyüğe aralıkları kontrol et.",
+      "submit": "Oluştur",
+      "submitCount": "{count} lokasyonu oluştur",
+      "cancel": "Vazgeç",
+      "done": "{count} lokasyon oluşturuldu: {first} … {last}",
+      "doneReplayed": "Bu istek zaten işlenmişti; {count} lokasyon var."
+    }
+  },
+  "codeEdit": {
+    "title": "Kodu değiştir",
+    "current": "Şimdiki kod: {code}",
+    "newCode": "Yeni kod",
+    "newCodeHint": "Bu kod başka bir kartta kullanılıyorsa sana hemen söyleriz.",
+    "preview": "{from} → {to}",
+    "previewSame": "Yeni bir kod yaz; değişiklik burada görünür.",
+    "history": "Geçmiş hareketler etkilenmez: eski kayıtlar bu karta bağlı kalır. Eski kodu okutan ya da arayan, yeni koda yönlendirilir.",
+    "cancel": "Vazgeç",
+    "submit": "Kodu değiştir",
+    "done": "Kod değişti: {from} → {to}.",
+    "undo": "Geri al ({code} koduna dön)"
+  },
+  "tasks": {
+    "title": "Görevler",
+    "intro": "Depo görevlerini kişilere ata veya iptal et.",
+    "kind": {
+      "PUTAWAY": "Yerleştirme",
+      "PICK": "Toplama",
+      "REPUTAWAY": "Yeniden yerleştirme",
+      "COUNT": "Sayım"
+    },
+    "status": {
+      "OPEN": "Açık",
+      "ASSIGNED": "Atandı",
+      "DONE": "Tamamlandı",
+      "CANCELLED": "İptal edildi"
+    },
+    "filters": {
+      "label": "Görevleri süz",
+      "kind": "Tür",
+      "status": "Durum",
+      "all": "Tümü",
+      "apply": "Uygula"
+    },
+    "listLabel": "Görev listesi",
+    "unassigned": "Henüz kimseye atanmadı",
+    "assignee": "Sorumlu: {name}",
+    "assigneeUnknown": "Sorumlu: bilinmiyor",
+    "quantity": "Miktar: {quantity}",
+    "assign": "Ata",
+    "reassign": "Yeniden ata",
+    "cancel": "İptal et",
+    "lockedReason": "Atamak ve iptal etmek için görev onay yetkisi gerekir. Sorumluna sor.",
+    "empty": {
+      "title": "Görev yok",
+      "action": "Görevler mal kabul, sipariş ve sayım işlemlerinden oluşur; süzgeci değiştirip yeniden bak."
+    },
+    "nextPage": "Sonraki sayfa",
+    "firstPage": "İlk sayfa",
+    "assignTitle": "Görevi ata",
+    "member": "Kişi",
+    "memberPlaceholder": "Kişi seç",
+    "noEligible": "Bu görev türünü yapabilecek kişi yok. Önce ekip ekranından uygun rol ver.",
+    "cancelTitle": "Görevi iptal et",
+    "reasonLabel": "İptal gerekçesi",
+    "reasonHint": "Zorunlu; denetim kaydına yazılır. En çok 500 karakter. Kişi adı, sağlık bilgisi gibi kişisel bilgi yazma.",
+    "back": "Vazgeç",
+    "submit": "Kaydet",
+    "confirmCancel": "Görevi iptal et",
+    "done": {
+      "assigned": "Görev atandı.",
+      "cancelled": "Görev iptal edildi."
+    },
+    "field": {
+      "title": "Görevlerim",
+      "intro": "Sana atanan ve üstlenebileceğin işler.",
+      "listLabel": "Görevlerim listesi",
+      "claim": "Üstlen",
+      "start": "Başla",
+      "startLocked": "Bu iş ekranı henüz açılmadı. Görev sende kalır; ekran açılınca buradan başlayacaksın.",
+      "claimed": "Görevi üstlendin.",
+      "empty": {
+        "title": "Şu an görevin yok",
+        "action": "Yeni iş geldiğinde burada görünür; sayfayı yenileyebilirsin."
+      },
+      "mine": "Sana atanmış",
+      "available": "Üstlenebilirsin",
+      "more": "Daha fazla göster",
+      "backToField": "Saha işleri"
+    },
+    "errors": {
+      "code": "Hata kodu: {code}",
+      "forbidden": "Bu işlem için yetkin yok.",
+      "forbiddenAction": "Sorumluna sor.",
+      "unauthenticated": "Oturumun sona ermiş.",
+      "unauthenticatedAction": "Yeniden giriş yapıp işlemi yinele.",
+      "not_found": "Görev bulunamadı.",
+      "not_foundAction": "Sayfayı yenileyip yeniden dene.",
+      "validation_failed": "Girilen bilgiler geçersiz.",
+      "validation_failedAction": "Seçimi ve gerekçeyi kontrol edip yeniden dene. Seçilen kişi bu görev türünü yapamıyor olabilir.",
+      "validation_failed_document_state": "Görev artık bu işleme uygun değil (tamamlanmış, iptal edilmiş veya başkası üstlenmiş).",
+      "validation_failed_document_stateAction": "Sayfayı yenileyip güncel durumu gör.",
+      "version_conflict": "Görev aynı anda başka biri tarafından değiştirildi.",
       "version_conflictAction": "Sayfayı yenileyip yeniden dene.",
       "rate_limited": "Çok fazla işlem yapıldı.",
       "rate_limitedAction": "Biraz bekleyip yeniden dene.",

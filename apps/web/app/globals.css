@@ -2,6 +2,10 @@
 /* `packages/ui/src` sınıfları (Button, Banner…) Tailwind 4 otomatik algılamasının dışındadır (T-119). Yol bu dosyaya göredir. */
 @source "../../../packages/ui/src";
 
+/* Cihaz algısı CSS ile (T-254; kullanıcı ajanı koklama yok): "telefon" = dar ekran (<768 px) YA DA dokunmatik + alçak ekran
+   (yatay telefon). Tablet/masaüstü yerleşimi bu kırılımın dışındadır ve değişmez. Aynı sorgu aşağıdaki düz CSS bloklarında tekrarlanır. */
+@custom-variant phone (@media (max-width: 767px), ((pointer: coarse) and (max-height: 500px)));
+
 /* Tasarım belirteçleri (ADR-020 / docs/design/palette.md; kontrast: theme-contrast.test.ts).
    Her anlam rengi üç rol: <ad> (dolu zemin + ikon), <ad>-ink (metin), <ad>-bg (açık zemin).
    Koyu tema bu kartta yok. Dış font indirilmez: sistem yığını. */
@@ -60,6 +64,35 @@
   --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
 }
 
+/* T-270 (ADR-020 ek, kural 8): iş kategorisi renk tonları. Durum anlam renklerinden (success/warning/info/danger/undo) AYRI `cat-*`
+   belirteçleridir; her ton çifttir: `-bg` açık ikon dairesi zemini, `-ink` aynı tonun koyu ikonu. İkinci @theme bloğu bilerek ayrıdır:
+   palette.md §2 tablosu (28 belirteç) bu çiftleri içermez; tablo güncellemesi ADR-020 ekinde takip maddesidir.
+   Kontrast + ayrıklık: theme-contrast.test.ts (KATEGORİ bloğu). */
+@theme {
+  --color-cat-green-bg: #e1f4e4;
+  --color-cat-green-ink: #15602e;
+  --color-cat-orange-bg: #fdeadb;
+  --color-cat-orange-ink: #8a3b06;
+  --color-cat-teal-bg: #d9f3ee;
+  --color-cat-teal-ink: #0b5f55;
+  --color-cat-purple-bg: #f0e5fb;
+  --color-cat-purple-ink: #6a1fb0;
+  --color-cat-sky-bg: #d5eefd;
+  --color-cat-sky-ink: #0b5688;
+  --color-cat-rose-bg: #fde6ec;
+  --color-cat-rose-ink: #9b1c3d;
+  --color-cat-amber-bg: #fcf1cc;
+  --color-cat-amber-ink: #6e4a00;
+  --color-cat-cyan-bg: #d8f1f6;
+  --color-cat-cyan-ink: #0a5766;
+  --color-cat-indigo-bg: #ebe5fc;
+  --color-cat-indigo-ink: #47299c;
+  --color-cat-slate-bg: #ece9f0;
+  --color-cat-slate-ink: #34445e;
+  --color-cat-lilac-bg: #f6e5f4;
+  --color-cat-lilac-ink: #7a2a73;
+}
+
 /* Aralık ölçeği ve dokunma hedefi */
 :root {
   --space-1: 0.25rem;
@@ -95,4 +128,236 @@ body {
 :focus-visible {
   outline: 3px solid var(--color-focus);
   outline-offset: 2px;
+}
+
+/* ---- T-254: cihaza uyumlu kabuk ---------------------------------------------------------------------------------------- */
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+/* Dokunmatik işaretçide çift dokunma yakınlaştırma gecikmesi yok; dokunma vurgusu odak halkasının yerini tutmaz. */
+@media (pointer: coarse) {
+  a,
+  button,
+  summary,
+  [role="button"],
+  [tabindex="0"] {
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
+}
+
+/* Masaüstü/tablet: döşemede sağ ok yok; üst düğmeler ve yetki notu telefona özgü (telefon bloğu aşağıda geçersiz kılar). */
+.tile-chevron,
+.top-rows,
+.my-tasks-row {
+  display: none;
+}
+
+/* Telefon yalnız öğeleri masaüstünde gizlidir; masaüstüne özgü öğeler telefonda gizlenir. */
+.phone-only {
+  display: none;
+}
+
+@media (max-width: 767px), ((pointer: coarse) and (max-height: 500px)) {
+  .phone-only {
+    display: flex;
+  }
+
+  .desk-only {
+    display: none;
+  }
+
+  /* Kök üst bar yerine telefon üst çubuğu (yalnız çalışma alanı ekranlarında). */
+  body:has(.tenant-shell) .app-header {
+    display: none;
+  }
+
+  /* Tek ekran: gövde kaymaz; üst çubuk + içerik + alt sekme çubuğu 100dvh içinde. İçerik taşarsa yalnız içerik alanı kayar. */
+  html:has(.tenant-shell),
+  body:has(.tenant-shell) {
+    height: 100%;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+
+  .tenant-shell {
+    display: flex;
+    flex-direction: column;
+    height: 100dvh;
+    overflow: hidden;
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+
+  .tenant-body {
+    flex: 1 1 0%;
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  /* Ana ekran (T-270): ızgara kalan dikey alanı doldurur ve alt sekmeye yaslanır. Satır 1 = üstteki düğmeler (`.top-rows`, otomatik
+     yükseklik); altında `--rows` eşit satır, ilk iş en alt satırda (`--row`, task-menu.tsx). Yetkisiz ve "Yakında" işler ızgarada
+     yer kaplamaz: düğmeler kararmış ana ekran üzerinde ALT SAYFA açar (T-274, DESIGN_REVIEW §7.3 B-01). */
+  .task-grid {
+    flex: 1 1 0%;
+  }
+
+  .task-grid-fill {
+    grid-template-rows: auto repeat(var(--rows), minmax(0, 1fr));
+    min-height: calc(var(--rows) * 4.5rem + (var(--rows) - 1) * 0.5rem + 3.5rem);
+  }
+
+  .task-grid-fill > .task-item {
+    grid-row: var(--row);
+  }
+
+  .top-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .top-rows > button {
+    gap: 0.375rem;
+    font-size: 0.8125rem;
+  }
+
+  .top-rows > button[aria-expanded="true"] .row-chevron {
+    transform: rotate(180deg);
+  }
+
+  .task-grid > .soon-item,
+  .task-grid > .locked-item {
+    display: none;
+  }
+
+  /* Alt sayfa: içeriğine uyar (en çok %85), altta sabit; satırlar ızgara kurallarını paylaşır (`task-grid sheet-rows`). */
+  .sheet-rows {
+    flex: none;
+  }
+
+  .sheet-rows > li > .task-tile {
+    height: 4.5rem;
+  }
+
+  .sheet-rows .tile-chevron {
+    display: none;
+  }
+
+  /* "Görevlerim" özeti (saha rolleri): ızgaranın üstünde esnek satır; döşemeler en çok 140 px, altta. */
+  .task-grid-card {
+    grid-template-rows: minmax(13.5rem, 1fr) repeat(var(--rows), minmax(5.5rem, 8.75rem));
+    min-height: calc(var(--rows) * 6rem + 14rem);
+  }
+
+  .task-grid-card > .my-tasks-row {
+    display: flex;
+    grid-row: 1;
+  }
+
+  .my-tasks-stack > .my-tasks:not(.my-tasks-empty),
+  .my-tasks-stack > [role="alert"] {
+    flex: 1 1 auto;
+  }
+
+  /* Döşeme: tek sütun yatay satır (ikon dairesi solda, başlık + açıklama, sağ ok). Boyutlar görünür yüksekliğe göre ölçeklenir
+     (düşük ekranda 72 px döşeme, yüksekte büyük ikon ve başlık). */
+  .task-grid .task-tile {
+    flex-direction: row;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 0.875rem;
+    padding: 0.5rem 1rem;
+    overflow: hidden;
+    border-radius: 1rem;
+  }
+
+  .task-grid .tile-head {
+    display: contents;
+  }
+
+  .task-grid .tile-head > :not(.tile-badge) {
+    order: 3;
+  }
+
+  .task-grid .tile-badge {
+    width: clamp(3rem, 7.5dvh, 5rem);
+    height: clamp(3rem, 7.5dvh, 5rem);
+  }
+
+  .task-grid .tile-badge svg {
+    width: 50%;
+    height: 50%;
+  }
+
+  .task-grid .tile-body {
+    flex: 1 1 0%;
+  }
+
+  .task-grid .tile-title {
+    font-size: clamp(1.0625rem, 2.4dvh, 1.5rem);
+    line-height: 1.2;
+  }
+
+  .task-grid .tile-desc {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+    font-size: clamp(0.8125rem, 1.8dvh, 1.0625rem);
+    line-height: 1.25;
+  }
+
+  .task-grid .tile-chevron {
+    display: block;
+  }
+
+  .task-grid:not(.task-grid-fill) .task-tile {
+    min-height: 4.5rem;
+  }
+
+  /* "Yakında" ve yetkisiz işler: kompakt, gölgesiz, nötr satırlar (tıklanamaz; renk yalnız küçük ikon dairesinde). Gerekçe cümlesi
+     bir kez panelde; satırlardaki tekrarı gizli. */
+  .task-grid .task-tile[data-state="soon"],
+  .task-grid .task-tile[data-state="locked"] {
+    gap: 0.75rem;
+    min-height: 0;
+    padding: 0.375rem 0.75rem;
+    box-shadow: none;
+    border-width: 1px;
+  }
+
+  .task-grid .task-tile[data-state="soon"] .tile-badge,
+  .task-grid .task-tile[data-state="locked"] .tile-badge {
+    width: 2.25rem;
+    height: 2.25rem;
+  }
+
+  .task-grid .task-tile[data-state="soon"] .tile-title,
+  .task-grid .task-tile[data-state="locked"] .tile-title {
+    color: var(--color-ink-muted);
+    font-size: 0.9375rem;
+  }
+
+  .task-grid .task-tile[data-state="soon"] .tile-desc,
+  .task-grid .task-tile[data-state="locked"] .tile-desc,
+  .task-grid .task-tile[data-state="soon"] .tile-chevron {
+    display: none;
+  }
+
+  /* Açık listelerde her satır işin ne yaptığını tek satırda söyler (gerçek `tasks.*.description`; T-274). */
+  .task-grid .task-tile[data-state="soon"] .tile-what,
+  .task-grid .task-tile[data-state="locked"] .tile-what {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 1;
+    overflow: hidden;
+    color: var(--color-ink-muted);
+    font-size: 0.8125rem;
+    line-height: 1.25;
+  }
 }

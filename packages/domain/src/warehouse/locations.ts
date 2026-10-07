@@ -7,7 +7,7 @@
 //   arşivli ebeveyn/depo altında aktif lokasyon oluşamaz (FK KEY SHARE tek başına NO KEY UPDATE ile çakışmaz).
 // - Kapsam dışı depo/lokasyon `NOT_FOUND` (varlık sızmaz); stok komutları `assertWarehouseInScope` ile `FORBIDDEN` verir.
 // - Yazma `settings.manage`, okuma `stock.view`; her yazma aynı transaction'da `appendAudit`. Ham INSERT açık sütunlarla
-//   (sütun düzeyi yetki, bkz. warehouses.ts). `code`/`depth`/`parent_id`/`warehouse_id` değişmez (A-83; tetikleyici zorlar).
+//   (sütun düzeyi yetki, bkz. warehouses.ts). `depth`/`parent_id`/`warehouse_id` değişmez (tetikleyici zorlar); `code` T-251'den beri `renameLocation` ile değişir.
 // - `depth` = ebeveyn + 1 (tetikleyici de doğrular, fail-closed). `TRANSIT` yalnızca kök düzeyde. Sayım kilidi satırı 0010
 //   tetikleyicisiyle oluşur; komut aynı transaction'da varlığını doğrular (yoksa `COUNT_LOCK_ROW_MISSING`).
 // - `pick_blocked` değişimi bu kartta yok (3A). Ağaçta taşıma, import ve sayım kilidi alma kapsam dışı.
@@ -20,6 +20,8 @@ import {
   CODE_MAX,
   codeTaken,
   inUse,
+  insertCodeHistory,
+  mapCodeConflict,
   normalizeCode,
   normalizeName,
   parseLimit,
@@ -83,6 +85,23 @@ const toRow = (r: LocationDbRow): LocationRow => ({
   status: r.status,
 });
 const COLS = sql`id, warehouse_id, parent_id, code, name, depth, kind, pick_blocked, status`;
+const COLS_L = "l.id, l.warehouse_id, l.parent_id, l.code, l.name, l.depth, l.kind, l.pick_blocked, l.status";
+
+/** A-259-1: depo başına toplam lokasyon üst sınırı (arşivliler dahil: satır arşivde de durur). Aşım `DOCUMENT_TOO_LARGE` (A-259-2). */
+export const WAREHOUSE_LOCATIONS_MAX = 50_000;
+
+/**
+ * Depo başına toplam lokasyon sınırı (T-259 MINOR-6): mevcut + planlanan > {@link WAREHOUSE_LOCATIONS_MAX} ise `DOCUMENT_TOO_LARGE`.
+ * Eşzamanlı iki komutun (tekli `createLocation` ve toplu dahil; aynı anahtar, aynı kilit sırası: depo `FOR SHARE` → bu kilit) ikisi de sınırın altında görüp aşmasın diye (yalnız yazımda) depo başına transaction-düzeyi advisory
+ * kilit alınır; sayım `(tenant_id, warehouse_id, code)` benzersiz indeksinden yapılır.
+ */
+export async function assertWarehouseCapacity(tx: AccessTx, tenantId: string, warehouseId: string, adding: number, serialize: boolean): Promise<void> {
+  if (serialize) await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`${tenantId}:warehouse-locations-cap:${warehouseId}`}, 0))`);
+  const r = await tx.execute<{ n: string | number }>(
+    sql`SELECT count(*) AS n FROM public.locations WHERE tenant_id = ${tenantId}::uuid AND warehouse_id = ${warehouseId}::uuid`,
+  );
+  if (Number(r[0]?.n ?? 0) + adding > WAREHOUSE_LOCATIONS_MAX) throw new AppError("VALIDATION_FAILED", { detail: "DOCUMENT_TOO_LARGE" });
+}
 
 export interface CreateLocationInput {
   readonly warehouseId: string;
@@ -119,6 +138,7 @@ export async function createLocation(params: WarehouseCallParams, input: CreateL
       parentDepth = Number(parent.depth);
     }
     const depth = childDepth(parentDepth);
+    await assertWarehouseCapacity(tx, m.tenantId, warehouseId, 1, true);
     const id = randomUUID();
     const ins = await tx.execute<{ id: string }>(
       sql`INSERT INTO public.locations (tenant_id, id, warehouse_id, parent_id, code, name, depth, kind)
@@ -154,25 +174,53 @@ async function loadActive(tx: AccessTx, m: Membership, locationId: string): Prom
 
 export interface RenameLocationInput {
   readonly locationId: string;
-  readonly name: string;
+  /** Ad ve/veya kod (en az biri). */
+  readonly name?: string;
+  /** Yeni lokasyon kodu (T-251): depo içi benzersiz; ARCHIVED değiştirilemez; ağaç/derinlik değişmez. */
+  readonly code?: string;
   readonly requestId?: string | null;
 }
 
 export async function renameLocation(params: WarehouseCallParams, input: RenameLocationInput): Promise<{ readonly changed: boolean }> {
   const locationId = parseUuid(input.locationId);
-  const name = normalizeName(input.name);
+  if (input.name === undefined && input.code === undefined) throw new AppError("VALIDATION_FAILED");
+  const name = input.name === undefined ? undefined : normalizeName(input.name);
+  const code = input.code === undefined ? undefined : normalizeCode(input.code);
   return runTenantCommand({ ...params, permission: "settings.manage" }, async (tx, m) => {
     const cur = await loadActive(tx, m, locationId);
-    if (cur.name === name) return { changed: false };
-    await tx.execute(sql`UPDATE public.locations SET name = ${name} WHERE tenant_id = ${m.tenantId}::uuid AND id = ${locationId}::uuid`);
-    await appendAudit(tx, {
-      action: "location.updated",
-      actorUserId: m.userId,
-      entityType: "location",
-      entityId: locationId,
-      requestId: input.requestId ?? null,
-      changeSummary: { from_name: cur.name, to_name: name },
-    });
+    const newName = name ?? cur.name;
+    const newCode = code ?? cur.code;
+    const nameChanged = newName !== cur.name;
+    const codeChanged = newCode !== cur.code;
+    if (!nameChanged && !codeChanged) return { changed: false };
+    try {
+      await tx.execute(
+        sql`UPDATE public.locations SET name = ${newName}, code = ${newCode} WHERE tenant_id = ${m.tenantId}::uuid AND id = ${locationId}::uuid`,
+      );
+    } catch (e) {
+      throw codeChanged ? mapCodeConflict(e) : e;
+    }
+    if (nameChanged) {
+      await appendAudit(tx, {
+        action: "location.updated",
+        actorUserId: m.userId,
+        entityType: "location",
+        entityId: locationId,
+        requestId: input.requestId ?? null,
+        changeSummary: { from_name: cur.name, to_name: newName },
+      });
+    }
+    if (codeChanged) {
+      await insertCodeHistory(tx, m, "location", locationId, cur.code, newCode);
+      await appendAudit(tx, {
+        action: "location.code_changed",
+        actorUserId: m.userId,
+        entityType: "location",
+        entityId: locationId,
+        requestId: input.requestId ?? null,
+        changeSummary: { from_code: cur.code, to_code: newCode },
+      });
+    }
     return { changed: true };
   });
 }
@@ -321,8 +369,11 @@ export async function getLocationTree(params: WarehouseCallParams, input: GetLoc
   });
 }
 
-/** Depo içinde koda göre tam eşleşme (kod normalleştirilir). Yoksa `null`. */
-export async function findLocationByCode(params: WarehouseCallParams, input: { readonly warehouseId: string; readonly code: string }): Promise<LocationRow | null> {
+/** Depo içinde koda göre tam eşleşme (kod normalleştirilir). Yoksa `null`; eski kod birden çok karta aitse `CODE_AMBIGUOUS`. */
+export async function findLocationByCode(
+  params: WarehouseCallParams,
+  input: { readonly warehouseId: string; readonly code: string },
+): Promise<(LocationRow & { readonly renamedFrom?: string }) | null> {
   const warehouseId = parseUuid(input.warehouseId);
   const code = normalizeCode(input.code);
   return runTenantQuery({ ...params, permission: "stock.view" }, async (tx, m) => {
@@ -332,7 +383,20 @@ export async function findLocationByCode(params: WarehouseCallParams, input: { r
       sql`SELECT ${COLS} FROM public.locations
            WHERE tenant_id = ${m.tenantId}::uuid AND warehouse_id = ${warehouseId}::uuid AND code = ${code}`,
     );
-    return rows[0] === undefined ? null : toRow(rows[0]);
+    if (rows[0] !== undefined) return toRow(rows[0]);
+    // T-251: güncel eşleşme yoksa eski kod geçmişi. T-257: aynı eski kod birden çok kartın geçmişinde varsa (A-69, barkod
+    // belirsizliği deseni) sessizce en yenisi seçilmez: `VALIDATION_FAILED`/`CODE_AMBIGUOUS`; kullanıcı güncel kodla arar.
+    const old = await tx.execute<LocationDbRow>(
+      sql`SELECT ${sql.raw(COLS_L)} FROM public.code_history h
+            JOIN public.locations l ON l.tenant_id = h.tenant_id AND l.id = h.entity_id
+           WHERE h.tenant_id = ${m.tenantId}::uuid AND h.entity_type = 'location' AND h.old_code = ${code}
+             AND l.warehouse_id = ${warehouseId}::uuid
+           GROUP BY l.tenant_id, l.id
+           ORDER BY max(h.changed_at) DESC, l.id
+           LIMIT 2`,
+    );
+    if (old.length > 1) throw new AppError("VALIDATION_FAILED", { detail: "CODE_AMBIGUOUS" });
+    return old[0] === undefined ? null : { ...toRow(old[0]), renamedFrom: code };
   });
 }
 

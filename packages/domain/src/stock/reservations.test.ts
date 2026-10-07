@@ -1,4 +1,7 @@
 // T-221: rezervasyon saf kuralları (bölüştürme, kalan hesap, tüketim/taşıma etkisi, süre aşımı bayrağı). 16 §Temel kurallar 2/5/7, Senaryo A adım 5-7.
+import { readdirSync, readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { LockedReservation, LockedState, StockDimensionKey } from "@wms/db";
 import { AppError } from "@wms/shared/errors";
@@ -11,6 +14,8 @@ import {
   type LedgerEntry,
 } from "./plan.ts";
 import { isReservationExpiryEnabled, planReservationEffects } from "./reservations.ts";
+import { readCancellationLockSet, readReservationPlanRows, stagedAmong } from "./reservation-reads.ts";
+import type { AccessTx } from "../identity/access.ts";
 
 const U = (n: number): string => `00000000-0000-4000-8000-${n.toString(16).padStart(12, "0")}`;
 const ITEM = U(1);
@@ -181,5 +186,84 @@ describe("süre aşımı bayrağı (A-76)", () => {
     expect(isReservationExpiryEnabled({ RESERVATION_EXPIRY_ENABLED: "yes" })).toBe(false);
     expect(isReservationExpiryEnabled({ RESERVATION_EXPIRY_ENABLED: "TRUE" })).toBe(true);
     expect(isReservationExpiryEnabled({ RESERVATION_EXPIRY_ENABLED: "1" })).toBe(true);
+  });
+});
+
+// T-253 (2): documents.ts ↔ reservations.ts döngüsü ortak modülle kırıldı; import grafiği (yalnızca ./ göreli, tür importları dahil) döngüsüzdür.
+describe("stock import grafiği (T-253)", () => {
+  const dir = path.dirname(fileURLToPath(import.meta.url));
+  const files = readdirSync(dir).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"));
+  const graph = new Map<string, string[]>();
+  for (const f of files) {
+    const src = readFileSync(path.join(dir, f), "utf8");
+    const deps = [...src.matchAll(/^\s*(?:import|export)\b[^;]*?\bfrom\s+"\.\/([^"]+\.ts)"/gms)].map((x) => x[1] as string);
+    graph.set(f, [...new Set(deps)]);
+  }
+  /** İlk bulunan döngüyü (a → b → a) döndürür; yoksa null. */
+  const findCycle = (): string[] | null => {
+    const state = new Map<string, 1 | 2>();
+    const stack: string[] = [];
+    const visit = (n: string): string[] | null => {
+      if (state.get(n) === 2) return null;
+      if (state.get(n) === 1) return [...stack.slice(stack.indexOf(n)), n];
+      state.set(n, 1);
+      stack.push(n);
+      for (const d of graph.get(n) ?? []) {
+        const c = visit(d);
+        if (c !== null) return c;
+      }
+      stack.pop();
+      state.set(n, 2);
+      return null;
+    };
+    for (const n of graph.keys()) {
+      const c = visit(n);
+      if (c !== null) return c;
+    }
+    return null;
+  };
+  it("kaynak dosyalar bulundu ve ayrıştırma boş değil (bekçinin kendisi kör değil)", () => {
+    expect(graph.get("documents.ts")).toContain("reservation-reads.ts");
+    expect(graph.get("documents.ts")).toContain("reservations.ts");
+    expect(graph.get("reservations.ts")).toContain("reservation-reads.ts");
+    expect(graph.get("posting.ts")).toContain("reservations.ts");
+  });
+  it("döngü yok", () => {
+    expect(findCycle()).toBeNull();
+  });
+  it("ortak okuma modülü documents.ts / reservations.ts / posting.ts'e bağımlı değildir; reservations.ts documents.ts'i içe aktarmaz (eski döngü kenarı)", () => {
+    const reads = graph.get("reservation-reads.ts") ?? [];
+    for (const forbidden of ["documents.ts", "reservations.ts", "posting.ts"]) expect(reads).not.toContain(forbidden);
+    expect(graph.get("reservations.ts")).not.toContain("documents.ts");
+  });
+});
+
+// T-253 (3): kimlik girdileri sorgudan ÖNCE doğrulanır (geçersiz → VALIDATION_FAILED; DB 22P02 değil). Sahte tx çağrılırsa test kırılır.
+describe("rezervasyon okuma kimlik doğrulaması (T-253)", () => {
+  const neverTx = { execute: () => Promise.reject(new Error("DB'ye gidilmemeliydi")) } as unknown as AccessTx;
+  const TENANT = U(900);
+  const bad = ["", "not-a-uuid", "00000000-0000-4000-8000-00000000000g", `${U(1)}x`, "' OR 1=1 --"];
+  const rejects = async (p: Promise<unknown>): Promise<string> => {
+    try {
+      await p;
+    } catch (e) {
+      return e instanceof AppError ? e.code : `other:${String(e)}`;
+    }
+    return "no-throw";
+  };
+  it("readReservationPlanRows: ids / lineId / documentId / tenantId geçersizse VALIDATION_FAILED", async () => {
+    for (const b of bad) {
+      expect(await rejects(readReservationPlanRows(neverTx, TENANT, { ids: [U(1), b] }))).toBe("VALIDATION_FAILED");
+      expect(await rejects(readReservationPlanRows(neverTx, TENANT, { lineId: b }))).toBe("VALIDATION_FAILED");
+      expect(await rejects(readReservationPlanRows(neverTx, TENANT, { documentId: b }))).toBe("VALIDATION_FAILED");
+      expect(await rejects(readReservationPlanRows(neverTx, b, { ids: [U(1)] }))).toBe("VALIDATION_FAILED");
+    }
+  });
+  it("readCancellationLockSet ve stagedAmong geçersiz kimlikte VALIDATION_FAILED", async () => {
+    for (const b of bad) {
+      expect(await rejects(readCancellationLockSet(neverTx, TENANT, b))).toBe("VALIDATION_FAILED");
+      expect(await rejects(stagedAmong(neverTx, TENANT, [b]))).toBe("VALIDATION_FAILED");
+      expect(await rejects(stagedAmong(neverTx, b, [U(1)]))).toBe("VALIDATION_FAILED");
+    }
   });
 });
