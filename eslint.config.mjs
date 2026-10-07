@@ -139,7 +139,18 @@ const ALL_FORBIDDEN_MODULES = [
 const MSG_WEB_DB =
   "apps/web `@wms/db` sistem/oturumsuz bağlam yollarını (createDbClient, withSystemTenant, withNewTenant, recordSecurityEvent, appendAudit) kullanamaz; DB'ye yalnızca domain komutlarıyla erişilir (T-127a).";
 const WEB_DB_RESTRICTED_NAMES = ["createDbClient", "withSystemTenant", "withNewTenant", "recordSecurityEvent", "appendAudit"];
-const WEB_DB_PATHS = [{ name: "@wms/db", importNames: WEB_DB_RESTRICTED_NAMES, message: MSG_WEB_DB }];
+/**
+ * T-305 (güvenlik incelemesi MAJOR): posting çekirdeği yalnızca saha komutlarının (`packages/domain/src/operations`) transaction'ı içinden çağrılır;
+ * apps/web `@wms/domain/stock` kökünden bu iki adı import edemez (ad alanı importu da yakalanır). Çekirdek ayrıca belge kilidini/tx'te-yaratılmayı
+ * çalışma zamanında doğrular (posting.ts).
+ */
+const MSG_WEB_STOCK_CORE =
+  "apps/web posting çekirdeğini (postApprovedDocumentInTx, registerTxCreatedDocument) import edemez; stok yalnızca domain komutlarıyla değişir (G-01, T-305).";
+const WEB_STOCK_CORE_NAMES = ["postApprovedDocumentInTx", "registerTxCreatedDocument"];
+const WEB_DB_PATHS = [
+  { name: "@wms/db", importNames: WEB_DB_RESTRICTED_NAMES, message: MSG_WEB_DB },
+  { name: "@wms/domain/stock", importNames: WEB_STOCK_CORE_NAMES, message: MSG_WEB_STOCK_CORE },
+];
 /**
  * Web'de `@wms/db` kökünün KENDİSİ statik import için serbesttir (yalnızca adlar yasak, `paths`); ama dinamik/yükleyici
  * biçimlerinde (`import()`, `require`, `createRequire` ve takma adları, şablon dizgisi, `import x = require()`) hiçbir ad
