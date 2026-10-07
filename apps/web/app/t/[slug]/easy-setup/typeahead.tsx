@@ -176,7 +176,7 @@ export function Typeahead<T>({
                   className="flex min-h-12 min-w-0 cursor-pointer flex-col justify-center rounded-control px-3 py-1 text-ink aria-selected:bg-accent-soft aria-selected:text-accent-ink"
                 >
                   <span className="min-w-0 break-words text-base font-semibold">{s.primary}</span>
-                  {s.secondary ? <span className="min-w-0 break-all text-sm text-ink-muted">{s.secondary}</span> : null}
+                  {s.secondary ? <span className="min-w-0 [overflow-wrap:anywhere] text-sm text-ink-muted">{s.secondary}</span> : null}
                 </li>
               );
             })}

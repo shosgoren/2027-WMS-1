@@ -174,6 +174,25 @@ test("kod değiştir: depo, lokasyon, ürün; eski kodla arama yeni karta yönle
     await expect(option).toContainText(itemName);
     await expect(option).toContainText(`Bu kod ${itemNew} olarak değişti`);
     await touchTarget(option, "arama önerisi");
+    // Normal kelimeler ortadan bölünmez; yalnızca sığmayan uzun kod kayabilir (overflow-wrap:anywhere, break-all değil).
+    // Tarayıcıda çalışan işlev; kök tsconfig'de DOM tipleri yok, bu yüzden yapısal tipler ve globalThis kullanılır.
+    interface Dom {
+      getComputedStyle: (el: unknown) => { wordBreak: string; overflowWrap: string };
+      document: { createRange: () => { setStart: (n: unknown, o: number) => void; setEnd: (n: unknown, o: number) => void; getClientRects: () => { length: number } } };
+    }
+    const wrap = await option.locator("span").nth(1).evaluate((el: { firstChild: { textContent: string | null } }) => {
+      const g = globalThis as unknown as Dom;
+      const cs = g.getComputedStyle(el);
+      const node = el.firstChild;
+      const at = (node.textContent ?? "").indexOf("eski");
+      const r = g.document.createRange();
+      r.setStart(node, at);
+      r.setEnd(node, at + 4);
+      return { wordBreak: cs.wordBreak, overflowWrap: cs.overflowWrap, eskiRects: r.getClientRects().length };
+    });
+    expect(wrap.wordBreak, "öneri metni break-all değil").not.toBe("break-all");
+    expect(wrap.overflowWrap).toBe("anywhere");
+    expect(wrap.eskiRects, '"eski" kelimesi tek satırda').toBe(1);
     await noHorizontalOverflow(page, "eski kodla arama");
     await page.screenshot({ path: `${OUT}/${tag}-375-old-code-search.png` });
     await option.click();
