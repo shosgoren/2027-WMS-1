@@ -1080,10 +1080,10 @@
     }
   },
   "codeEdit": {
-    "title": "{name}: change code",
+    "title": "Change code",
     "current": "Current code: {code}",
     "newCode": "New code",
-    "newCodeHint": "A code used by another record cannot be entered; the server tells you if so.",
+    "newCodeHint": "If this code is already used by another record, we will tell you right away.",
     "preview": "{from} → {to}",
     "previewSame": "Type a new code; the change shows here.",
     "history": "Past movements are not affected: old records stay linked to this record. Anyone who scans or searches the old code is sent to the new one.",

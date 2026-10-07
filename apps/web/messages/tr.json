@@ -1080,10 +1080,10 @@
     }
   },
   "codeEdit": {
-    "title": "{name}: kodu değiştir",
+    "title": "Kodu değiştir",
     "current": "Şimdiki kod: {code}",
     "newCode": "Yeni kod",
-    "newCodeHint": "Başka kartta kullanılan bir kod girilemez; böyle olursa sunucu söyler.",
+    "newCodeHint": "Bu kod başka bir kartta kullanılıyorsa sana hemen söyleriz.",
     "preview": "{from} → {to}",
     "previewSame": "Yeni bir kod yaz; değişiklik burada görünür.",
     "history": "Geçmiş hareketler etkilenmez: eski kayıtlar bu karta bağlı kalır. Eski kodu okutan ya da arayan, yeni koda yönlendirilir.",

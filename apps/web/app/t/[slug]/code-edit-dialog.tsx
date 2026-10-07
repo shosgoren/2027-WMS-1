@@ -73,7 +73,7 @@ export function CodeEditDialog({
   return (
     <Sheet
       open={open}
-      title={t("title", { name: subject })}
+      title={t("title")}
       titleId={titleId}
       onClose={onClose}
       onSubmit={(e) => void onSubmit(e)}
@@ -88,6 +88,7 @@ export function CodeEditDialog({
         </>
       }
     >
+      <p className="min-w-0 break-words text-sm font-semibold text-ink-muted">{subject}</p>
       <p className="min-w-0 break-all text-base text-ink-muted">{t("current", { code: current })}</p>
       <TextField
         label={t("newCode")}
