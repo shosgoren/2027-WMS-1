@@ -6,6 +6,9 @@
 //   * `wms_meta.schema_migrations` listesi (sürüm, ad, sağlama),
 //   * uygulama tablolarının tam satır sayısı (sistem şemaları ve Neon'un `neon` şeması hariç),
 //   * `audit_logs` ve `security_events`: `created_xid, id` sıralı satır özetlerinin SHA-256'sı (değerler değil özet),
+//   * stok içerik özetleri (T-284, `CONTENT_TABLES`): satır sayısı + satır başına sha256'ların anahtar sıralı SHA-256'sı
+//     (satır sayısı aynı kalıp bir miktar değişse bile fark verir; değerler değil özet). Bellek: satırlar anahtar
+//     metninin sha256 ilk baytına göre 256 kovaya bölünür, kova içi anahtar sıralı özetlenir (tek `string_agg` değil),
 //   * şema özeti: `information_schema.columns` + tablo RLS bayrakları + politikalar (SHA-256),
 //   * rol nitelikleri (wms_app / wms_auth / wms_worker / wms_ops / wms_identity_probe; parola/URL yok).
 // Çıktıda kişisel veri, URL, host, parola YOKTUR; yalnızca tablo adları, sayılar ve özetler.
@@ -25,6 +28,46 @@ export const OPS_ROLE_NAME = "wms_ops";
 export const EXCLUDED_SCHEMAS = Object.freeze(["pg_catalog", "information_schema", "neon"]);
 /** Çıktı satırı öneki (psql çıktısındaki başka satırlardan ayırmak için). */
 export const FP_PREFIX = "FP:";
+
+/**
+ * İçerik özeti alınan stok tabloları ve anahtar sütunları (G-05: migrations 0011/0012/0013/0016'dan doğrulandı).
+ * Anahtarlar tekildir (PK) → sıra deterministik.
+ */
+export const CONTENT_TABLES = Object.freeze({
+  stock_dimensions: ["id"],
+  stock_balances: ["tenant_id", "stock_dimension_id"],
+  stock_ledger: ["id"],
+  reservations: ["id"],
+  documents: ["id"],
+  document_lines: ["id"],
+  document_status_history: ["id"],
+  inbound_receipts: ["id"],
+  inbound_receipt_lines: ["id"],
+  lots: ["id"],
+  serials: ["id"],
+});
+
+const IDENT = /^[a-z_][a-z0-9_]*$/;
+
+/** @param {string} table @param {readonly string[]} keys */
+function contentSql(table, keys) {
+  // Tanımlayıcılar SQL metnine gömülür: yalnız sabit, güvenli adlar kabul edilir (enjeksiyon/yazım hatası savunması).
+  for (const id of [table, ...keys]) if (!IDENT.test(id)) throw new Error(`CONTENT_TABLES geçersiz tanımlayıcı: ${id}`);
+  const keyText = keys.map((k) => `t.${k}::text`).join(" || '|' || ");
+  const order = keys.map((k) => `x.${k}`).join(", ");
+  const cols = keys.map((k) => `t.${k} AS ${k}`).join(", ");
+  return `(SELECT json_build_object('count', coalesce(sum(g.n), 0)::bigint,
+                   'digest', encode(sha256(convert_to(coalesce(string_agg(g.d, ',' ORDER BY g.b), ''), 'UTF8')), 'hex'))
+              FROM (SELECT x.b, count(*) AS n, encode(sha256(convert_to(string_agg(x.h, ',' ORDER BY ${order}), 'UTF8')), 'hex') AS d
+                      FROM (SELECT get_byte(sha256(convert_to(${keyText}, 'UTF8')), 0) AS b, ${cols},
+                                   encode(sha256(convert_to(t::text, 'UTF8')), 'hex') AS h
+                              FROM public.${table} t) x
+                     GROUP BY x.b) g)`;
+}
+
+const CONTENT_SQL = Object.entries(CONTENT_TABLES)
+  .map(([t, k]) => `'${t}', ${contentSql(t, k)}`)
+  .join(",\n    ");
 
 const TS_FMT = `'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'`;
 const EXCLUDED_SQL = EXCLUDED_SCHEMAS.map((s) => `'${s}'`).join(", ");
@@ -51,6 +94,8 @@ SELECT '${FP_PREFIX}' || json_build_object(
                    'latest_at', to_char(max(s.occurred_at) AT TIME ZONE 'UTC', ${TS_FMT}),
                    'digest', encode(sha256(convert_to(coalesce(string_agg(encode(sha256(convert_to(s::text, 'UTF8')), 'hex'), ',' ORDER BY s.created_xid, s.id), ''), 'UTF8')), 'hex'))
                  FROM public.security_events s),
+  'content', json_build_object(
+    ${CONTENT_SQL}),
   'schema', (SELECT json_build_object('columns', count(*),
                    'digest', encode(sha256(convert_to(coalesce(string_agg(concat_ws('|', c.table_schema, c.table_name, c.column_name, c.ordinal_position, c.data_type, c.is_nullable, coalesce(c.column_default, '')), E'\\n' ORDER BY c.table_schema, c.table_name, c.ordinal_position), ''), 'UTF8')), 'hex'))
                  FROM information_schema.columns c WHERE c.table_schema NOT IN (${EXCLUDED_SQL}) AND c.table_schema NOT LIKE 'pg\\_%'),
@@ -78,6 +123,7 @@ const HEX64 = /^[0-9a-f]{64}$/;
  *   migrations: { version: string, name: string, checksum_sha256: string }[],
  *   tables: Record<string, number>,
  *   audit_logs: EventDigest, security_events: EventDigest,
+ *   content: Record<string, { count: number, digest: string }>,
  *   schema: { columns: number, digest: string }, rls: { tables: number, digest: string },
  *   policies: { count: number, digest: string },
  *   roles: { name: string, login: boolean, superuser: boolean, bypassrls: boolean, createdb: boolean, createrole: boolean, replication: boolean, memberships: number }[],
@@ -114,6 +160,13 @@ export function parseFingerprintOutput(stdout) {
     const e = fp[key];
     if (typeof e?.count !== "number" || typeof e?.digest !== "string" || !HEX64.test(e.digest)) throw bad(key);
     if (e.latest_at !== null && (typeof e.latest_at !== "string" || Number.isNaN(Date.parse(e.latest_at)))) throw bad(`${key}.latest_at`);
+  }
+  if (fp.content === null || typeof fp.content !== "object" || Array.isArray(fp.content)) throw bad("content");
+  for (const name of Object.keys(CONTENT_TABLES)) {
+    const c = fp.content[name];
+    if (typeof c?.count !== "number" || !Number.isInteger(c.count) || c.count < 0 || typeof c.digest !== "string" || !HEX64.test(c.digest)) {
+      throw bad(`content.${name}`);
+    }
   }
   for (const key of ["schema", "rls", "policies"]) {
     if (typeof fp[key]?.digest !== "string" || !HEX64.test(fp[key].digest)) throw bad(key);
@@ -167,6 +220,9 @@ export function compareFingerprints(a, b) {
   for (const key of /** @type {const} */ (["audit_logs", "security_events"])) {
     mark(`${key}_count`, a[key].count === b[key].count);
     mark(`${key}_digest`, a[key].digest === b[key].digest);
+  }
+  for (const name of Object.keys(CONTENT_TABLES)) {
+    mark(`content_${name}`, a.content[name]?.count === b.content[name]?.count && a.content[name]?.digest === b.content[name]?.digest);
   }
   mark("schema", a.schema.digest === b.schema.digest && a.schema.columns === b.schema.columns);
   mark("rls", a.rls.digest === b.rls.digest && a.rls.tables === b.rls.tables);

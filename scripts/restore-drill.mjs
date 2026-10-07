@@ -20,7 +20,7 @@
 // Gizlilik (G-09): her URI/parola/host/dal kimliği elde edildiği anda `::add-mask::` + kendi maskeleyicimiz; özet
 // yalnızca tarih, T, RPO/RTO, eşitlik bayrakları, sayılar ve sonuç içerir; yazıldıktan sonra sızıntı için taranır.
 // Çıkış kodu: 0 yeşil · 1 kırmızı.
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -40,6 +40,18 @@ export const MAIN_WRITES_NOTE = "ölçülmedi (tasarım gereği; ana dala yazım
 export const POINT_GAP_MS = 3000;
 export const READY_TIMEOUT_MS = 10 * 60_000;
 export const READY_INTERVAL_MS = 5000;
+
+/** Restore sonrası stok tutarlılık sorgusu (T-284; salt okunur, yalnızca sayı döner). */
+export const CONSISTENCY_PREFIX = "SC:";
+export const STOCK_CONSISTENCY_SQL = `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;\n${readFileSync(path.join(ROOT, "scripts", "lib", "stock-consistency.sql"), "utf8")}\nCOMMIT;\n`;
+/** Sıfır olması gereken sayaçlar (ad → kırmızı iletisi; değer/kimlik içermez). */
+export const CONSISTENCY_ZERO_COUNTERS = Object.freeze([
+  "ledger_ne_balance",
+  "reservations_ne_reserved",
+  "reserved_gt_quantity",
+  "negative_quantity",
+  "negative_reserved",
+]);
 
 export class DrillError extends Error {
   name = "DrillError";
@@ -102,6 +114,53 @@ export function latestCommitAt(fp) {
 }
 
 /**
+ * Tutarlılık sorgusu çıktısını ayrıştırır ve biçimini doğrular (değer içermeyen hata iletileri).
+ * @param {string} stdout
+ * @returns {Record<string, any>}
+ */
+export function parseConsistencyOutput(stdout) {
+  const line = stdout.split(/\r?\n/).find((l) => l.startsWith(CONSISTENCY_PREFIX));
+  if (line === undefined) throw new DrillError("tutarlılık çıktısı bulunamadı");
+  let sc;
+  try {
+    sc = JSON.parse(line.slice(CONSISTENCY_PREFIX.length));
+  } catch {
+    throw new DrillError("tutarlılık çıktısı JSON değil");
+  }
+  if (typeof sc?.rls_bypass !== "boolean") throw new DrillError("tutarlılık çıktısı geçersiz: rls_bypass");
+  for (const k of ["dimensions", "balances", "ledger_rows", ...CONSISTENCY_ZERO_COUNTERS]) {
+    if (typeof sc[k] !== "number" || !Number.isInteger(sc[k]) || sc[k] < 0) throw new DrillError(`tutarlılık çıktısı geçersiz: ${k}`);
+  }
+  return sc;
+}
+
+/**
+ * Tutarlılık sonucundaki ihlal adları (boş = tutarlı). RLS'yi atlamayan rol → sonuç güvenilmez → ihlal sayılır.
+ * @param {Record<string, any>} sc
+ * @returns {string[]}
+ */
+export function consistencyProblems(sc) {
+  /** @type {string[]} */
+  const problems = [];
+  if (sc.rls_bypass !== true) problems.push("rls_bypass_yok");
+  for (const k of CONSISTENCY_ZERO_COUNTERS) if (sc[k] !== 0) problems.push(`${k}=${sc[k]}`);
+  return problems;
+}
+
+/**
+ * Restore edilen dalda salt-okunur stok tutarlılık sorgusu.
+ * @param {PsqlTarget} target
+ * @param {import("./neon-spike.mjs").Redactor} redactor
+ * @param {{ psql?: typeof runPsql, timeoutMs?: number }} [opts]
+ */
+export function takeConsistency(target, redactor, opts = {}) {
+  const psql = opts.psql ?? runPsql;
+  const r = psql(target, STOCK_CONSISTENCY_SQL, redactor, opts.timeoutMs ?? 300_000);
+  if (!r.ok) throw new DrillError(`tutarlılık sorgusu başarısız${r.sqlstate ? ` (SQLSTATE ${r.sqlstate})` : ""}`);
+  return parseConsistencyOutput(r.stdout);
+}
+
+/**
  * Özetteki serbest metni (hata iletisi) maskeler ve kısaltır.
  * @param {import("./neon-spike.mjs").Redactor} redactor
  * @param {unknown} e
@@ -130,6 +189,7 @@ export function safeMessage(redactor, e) {
  * }} NeonFacade
  * @typedef {{
  *   fingerprint: (t: PsqlTarget) => Fingerprint,
+ *   consistency: (t: PsqlTarget) => Record<string, any>,
  * }} DbFacade
  * @typedef {{ neon: NeonFacade, db: DbFacade, redactor: import("./neon-spike.mjs").Redactor,
  *   now?: () => number, sleep?: (ms: number) => Promise<unknown>, today?: () => string }} DrillDeps
@@ -193,6 +253,9 @@ export async function runDrill(deps, cfg) {
     main_writes: MAIN_WRITES_NOTE,
     roles_ok: null,
     role_problems: null,
+    content_equal: null,
+    stock_consistency: null,
+    stock_consistency_ok: null,
     restored_branch_deleted: null,
     error: null,
     result: "fail",
@@ -236,6 +299,9 @@ export async function runDrill(deps, cfg) {
     }
     const verifiedAtMs = now();
 
+    // Restore sonrası bağımsız stok tutarlılığı (T-284): hata/ihlal = kırmızı (fail-closed; catch'e düşer).
+    const sc = db.consistency(target);
+    const scProblems = consistencyProblems(sc);
     const cmp = compareFingerprints(fpMain, fpRestored);
     const roleProblems = checkRoleAttributes(fpRestored);
     const restoredLast = latestCommitAt(fpRestored);
@@ -250,13 +316,17 @@ export async function runDrill(deps, cfg) {
     s.tables_compared = Object.keys(fpRestored.tables).length;
     s.digests_equal =
       cmp.sections.audit_logs_digest === true && cmp.sections.security_events_digest === true && cmp.sections.schema === true;
+    s.content_equal = Object.entries(cmp.sections).filter(([k]) => k.startsWith("content_")).every(([, v]) => v === true);
+    s.stock_consistency = Object.fromEntries(Object.entries(sc).filter(([k]) => k !== "rls_bypass"));
+    s.stock_consistency_ok = scProblems.length === 0;
     s.fingerprints_equal = cmp.equal;
     s.fingerprint_sha256 = fingerprintHash(fpRestored);
     s.sections = cmp.sections;
     s.roles_ok = roleProblems.length === 0;
     s.role_problems = roleProblems;
-    ok = cmp.equal && s.restored_not_after_t && s.roles_ok;
+    ok = cmp.equal && s.restored_not_after_t && s.roles_ok && s.stock_consistency_ok;
     if (!cmp.equal) s.error = `parmak izi farkı: ${cmp.diffs.join("; ")}`.slice(0, 300);
+    else if (scProblems.length > 0) s.error = `stok tutarlılık ihlali: ${scProblems.join("; ")}`.slice(0, 300);
   } catch (e) {
     s.error = safeMessage(redactor, e);
     ok = false;
@@ -289,6 +359,8 @@ export function renderSummaryMd(s) {
     `- Ölçülen RTO: ${s.rto_seconds ?? "-"} sn (hedef ≤ ${s.targets.rto_seconds} sn; hedef içinde: ${yn(s.rto_within_target)})`,
     `- Tablo sayıları eşit: ${yn(s.table_counts_equal)} (${s.tables_compared ?? "-"} tablo)`,
     `- Özetler eşit (audit_logs, security_events, şema): ${yn(s.digests_equal)}`,
+    `- Stok içerik özetleri eşit: ${yn(s.content_equal)}`,
+    `- Restore sonrası stok tutarlılığı (defter=bakiye, rezervasyon=reserved, reserved≤miktar, negatif yok): ${yn(s.stock_consistency_ok)}${s.stock_consistency ? ` (${JSON.stringify(s.stock_consistency)})` : ""}`,
     `- Parmak izleri eşit: ${yn(s.fingerprints_equal)} (sağlama: ${s.fingerprint_sha256 ?? "-"})`,
     `- Geri yüklenen en yeni commit T'den sonra değil: ${yn(s.restored_not_after_t)} · ana dala yazma: ${s.main_writes}`,
     `- Uygulama rolü nitelikleri tamam: ${yn(s.roles_ok)}${s.role_problems && s.role_problems.length > 0 ? ` (${s.role_problems.join("; ")})` : ""}`,
@@ -390,6 +462,7 @@ export function createNeonFacade(env, redactor) {
 export function createDbFacade(redactor, psql = runPsql) {
   return {
     fingerprint: (t) => takeFingerprint(t, redactor, { psql }),
+    consistency: (t) => takeConsistency(t, redactor, { psql }),
   };
 }
 
