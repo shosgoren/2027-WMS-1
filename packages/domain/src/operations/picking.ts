@@ -15,15 +15,18 @@
 // yabancı anahtar eklemeleri (`FOR KEY SHARE`) engellenmez.
 //
 // Yeniden tahsisin ayrı transaction olması (gerekçe): ilk komutun kilit planı (boyutlar) önceden bildirilmiştir ve komut içinde genişletilemez (I-15); yeniden
-// tahsis başka lokasyonların boyutlarını kilitlemek zorundadır. Bu yüzden "bulunamadı kesinleşti, yeniden tahsis başarısız" ara durumu mümkündür: satır rezervesiz
-// açık kalır (kural 9 ile uyumlu) ve yanıtta `reallocation.status = "FAILED"` açıkça görünür (yutulmaz). Yeniden tahsis anahtarı `clientKey`'den TÜRETİLMEZ (rastgele,
-// ayrı idempotency kaydı): aynı `clientKey` ile tekrar gelen istek yalnızca saklı sonucu döndürür, yeniden tahsisi TEKRARLAMAZ (`replayed: true`, `reallocation` yok).
+// tahsis başka lokasyonların boyutlarını kilitlemek zorundadır. Bu yüzden "bulunamadı kesinleşti, yeniden tahsis başarısız/hiç çalışmadı" ara durumu mümkündür
+// (hata ya da işlem commit'ten hemen sonra ölürse): satır rezervesiz açık kalır (kural 9 ile uyumlu) ve yanıtta `reallocation` açıkça görünür (yutulmaz).
+// Yeniden tahsis anahtarı `clientKey`'den TÜRETİLMEZ; GÖREV kimliğinden deterministik türetilir (`reallocationKey`): bir görevin tek yeniden tahsis kaydı olur.
+// Sonuç (ya da kalıcı ret) bu kayıtta saklanır → aynı `clientKey` ile tekrar gelen istek (yeniden oynatma) yeniden tahsisi şöyle ele alır: kayıt varsa saklı sonucu
+// döndürür (`replay: "DONE"`, ya da saklı ret → `"FAILED"`); kayıt yoksa (komut hiç çalışmadı / geçici hatayla düştü) AYNI deterministik anahtarla yeniden dener
+// (`"RETRIED"`). Yeniden deneme çifte tahsis üretemez: sipariş başlığı kilidi altında kapasite = açık − Σ ACTIVE ile sınırlıdır ve anahtar tekildir.
 //
 // A-xx (rapor, docs/OPEN_QUESTIONS.md): A-307-1 hedef STAGING = görevin deposundaki ACTIVE STAGING lokasyonlarından kodu en küçük olan (görev tablosunda hedef sütunu
 // yoktur); A-307-2 `foundQuantity` OKUTULAN BARKODUN biriminde ve okutma başına miktarıyla çarpılır (koli barkodu → temel birim, A-20), tam 6 ondalığa inmeli;
 // A-307-3 beklenen = min(görev miktarı, o satırın o lokasyondaki ACTIVE rezervasyon toplamı); beklenenden fazla toplama reddedilir; A-307-4 yalnız takipsiz (lot/seri
 // yok) AVAILABLE boyut görevlenir; A-307-5 aynı satır+lokasyon için açık PICK görevi varsa yalnız artan miktar için yeni görev açılır.
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { appendAudit, type LockedState, type StockDimensionKey } from "@wms/db";
 import { AppError } from "@wms/shared/errors";
@@ -385,6 +388,8 @@ export interface ConfirmPickInput {
 export interface PickReallocation {
   /** `ALLOCATED`: yeni rezervasyon eklendi · `NONE`: uygun stok yok (satır rezervesiz açık kalır) · `FAILED`: komut başarısız (ara durum; `code`). */
   readonly status: "ALLOCATED" | "NONE" | "FAILED";
+  /** Yalnızca YENİDEN OYNATMADA: `DONE` saklı sonuç döndü · `RETRIED` yeniden tahsis şimdi çalıştı · `FAILED` saklı ret ya da şimdiki hata. */
+  readonly replay?: "DONE" | "RETRIED" | "FAILED";
   /** Bu çağrıda tahsis edilen temel birim miktarı (ondalık dizgi). */
   readonly quantity?: string;
   readonly reservationIds?: readonly string[];
@@ -393,8 +398,8 @@ export interface PickReallocation {
 export interface PickNotFound {
   readonly shortQuantity: string;
   readonly locationId: string;
-  /** Açık sayım görevi (aynı lokasyonda mevcut olan ya da bu komutun açtığı). */
-  readonly countTaskId: string | null;
+  /** Açık sayım görevi (aynı lokasyonda mevcut olan ya da bu komutun açtığı); SAKLI sonuçtan okunur. */
+  readonly countTaskId: string;
 }
 export type ConfirmPickResult = Done & {
   readonly taskId: string;
@@ -650,9 +655,11 @@ export async function confirmPick(params: StockDocCallParams, input: ConfirmPick
           if (applied !== undefined) await appendAudit(tx, { ...notFoundAudit, actorUserId: ctx.userId });
         }
         await completeTask(tx, task.id, task.version, ctx.membership, requestId);
+        // Saklı sonuç: lines[0] = görev (quantity = bulunan, baseQuantity = beklenen); "bulunamadı"da lines[1] = sayım görevi (lineId = görev kimliği, quantity = eksik).
         const line = { lineId: task.id, lineNo: 1, quantity: microToDecimal(found), baseQuantity: microToDecimal(expected) };
-        if (applied !== undefined) return { ...applied, result: { ...applied.result, lines: [line] } };
-        return { result: { lines: [line] }, audit: notFoundAudit };
+        const resultLines = countTaskId === null ? [line] : [line, { lineId: countTaskId, lineNo: 2, quantity: microToDecimal(short) }];
+        if (applied !== undefined) return { ...applied, result: { ...applied.result, lines: resultLines } };
+        return { result: { lines: resultLines }, audit: notFoundAudit };
       },
     }),
   );
@@ -663,28 +670,34 @@ export async function confirmPick(params: StockDocCallParams, input: ConfirmPick
   const shortMicro = toMicro(entry.baseQuantity) - toMicro(entry.quantity);
   const base: ConfirmPickResult = { ...result, taskId, foundQuantity: entry.quantity };
   if (shortMicro <= 0n) return base;
-  const info = await runTenantQuery({ ...params, permission: "stock.post" }, async (tx, m) => {
-    const t = pickFields(await readTask(tx, m.tenantId, taskId, false));
-    const c = await tx.execute<{ id: string }>(
-      sql`SELECT id FROM public.warehouse_tasks WHERE tenant_id = ${m.tenantId}::uuid AND kind = 'COUNT' AND location_id = ${t.locationId}::uuid
-           ORDER BY (status IN ('OPEN', 'ASSIGNED')) DESC, created_at DESC, id LIMIT 1`,
-    );
-    return { fields: t, countTaskId: c[0]?.id ?? null };
-  });
-  const notFound: PickNotFound = { shortQuantity: microToDecimal(shortMicro), locationId: info.fields.locationId, countTaskId: info.countTaskId };
-  if (result.replayed) return { ...base, notFound };
-  return { ...base, notFound, reallocation: await tryReallocate(params, info.fields, requestId) };
+  const countEntry = result.lines?.[1];
+  if (countEntry === undefined) throw new AppError("INTERNAL"); // eksik varsa sayım görevi saklı sonuçta olmalı
+  const fields = await runTenantQuery({ ...params, permission: "stock.post" }, async (tx, m) => pickFields(await readTask(tx, m.tenantId, taskId, false))); // değişmez alanlar
+  const notFound: PickNotFound = { shortQuantity: microToDecimal(shortMicro), locationId: fields.locationId, countTaskId: countEntry.lineId };
+  return { ...base, notFound, reallocation: await tryReallocate(params, fields, taskId, requestId, result.replayed) };
 }
 
-/** Yeniden tahsis: AYRI komut, rastgele anahtar (bkz. dosya başı). Hata yutulmaz: `FAILED` + kod yanıtta ve günlükte. */
-async function tryReallocate(params: StockDocCallParams, f: PickTaskFields, requestId: string | null): Promise<PickReallocation> {
+/** Görevden deterministik UUID (SHA-256; sürüm/varyant bitleri ayarlı): görev başına tek yeniden tahsis idempotency kaydı. `clientKey`'den türetilmez. */
+export function reallocationKey(taskId: string): string {
+  const h = createHash("sha256").update(`pick-reallocation:${taskId.toLowerCase()}`).digest("hex");
+  const variant = ((parseInt(h.slice(16, 18), 16) & 0x3f) | 0x80).toString(16).padStart(2, "0");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-5${h.slice(13, 16)}-${variant}${h.slice(18, 20)}-${h.slice(20, 32)}`;
+}
+
+/** Yeniden tahsis: AYRI komut, görevden türetilen deterministik anahtar (bkz. dosya başı). Hata yutulmaz: `FAILED` + kod yanıtta ve günlükte. */
+async function tryReallocate(params: StockDocCallParams, f: PickTaskFields, taskId: string, requestId: string | null, pickReplayed: boolean): Promise<PickReallocation> {
   try {
-    const r = await reallocateOrderLine({ ...params, clientKey: randomUUID() }, { orderId: f.orderId, lineId: f.lineId, requestId });
+    const r = await reallocateOrderLine({ ...params, clientKey: reallocationKey(taskId) }, { orderId: f.orderId, lineId: f.lineId, requestId });
     const ids = r.reservationIds ?? [];
-    return { status: ids.length > 0 ? "ALLOCATED" : "NONE", quantity: r.lines?.[0]?.quantity ?? "0.000000", reservationIds: ids };
+    return {
+      status: ids.length > 0 ? "ALLOCATED" : "NONE",
+      quantity: r.lines?.[0]?.quantity ?? "0.000000",
+      reservationIds: ids,
+      ...(pickReplayed ? { replay: r.replayed ? ("DONE" as const) : ("RETRIED" as const) } : {}),
+    };
   } catch (e) {
     const code = e instanceof AppError ? e.code : "INTERNAL";
     params.logger?.error("pick.reallocation_failed", { code, orderId: f.orderId, lineId: f.lineId });
-    return { status: "FAILED", code };
+    return { status: "FAILED", code, ...(pickReplayed ? { replay: "FAILED" as const } : {}) };
   }
 }

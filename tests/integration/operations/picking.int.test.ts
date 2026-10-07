@@ -535,7 +535,7 @@ describe("okutma doğrulaması ve durum denetimleri", () => {
 });
 
 describe("ürün bulunamadı: yeniden tahsis, tekrar, eşzamanlılık", () => {
-  it("yeniden tahsis: başka lokasyonda stok varsa eksik kısım oraya tahsis edilir (pick_blocked hariç); aynı anahtarla tekrar yeniden tahsisi TEKRARLAMAZ; hiç bulunamadı (0)", async () => {
+  it("yeniden tahsis: başka lokasyonda stok varsa eksik kısım oraya tahsis edilir (pick_blocked hariç); aynı anahtarla tekrar saklı yeniden tahsis sonucunu döndürür (DONE); hiç bulunamadı (0)", async () => {
     const X = await mkItem();
     const R1 = await mkLoc("STORAGE", `B1-${hex(6)}`);
     const R2 = await mkLoc("STORAGE", `B2-${hex(6)}`);
@@ -559,8 +559,8 @@ describe("ürün bulunamadı: yeniden tahsis, tekrar, eşzamanlılık", () => {
     const before = await idemRows("sales_order.reallocate_line");
     const rep = await confirmPick(pickerP(key), { taskId: a.taskIds[0] as string, foundQuantity: "3", scannedLocationCode: await codeOfLoc(R1), scannedItemBarcode: await bcOf(X) });
     expect(rep.replayed).toBe(true);
-    expect(rep.reallocation).toBeUndefined();
-    expect(rep.notFound).toMatchObject({ shortQuantity: n(1) });
+    expect(rep.reallocation).toMatchObject({ status: "ALLOCATED", quantity: n(1), replay: "DONE", reservationIds: r.reallocation?.reservationIds }); // saklı sonuç, yeniden çalışmadı
+    expect(rep.notFound).toEqual(r.notFound); // countTaskId dahil saklı sonuçtan
     expect(await idemRows("sales_order.reallocate_line")).toBe(before);
     expect(await activeSum(L)).toBe(n(4));
     // Yeni görev: R2'deki 1 için; hiç bulunamaz (0): hareket yok, rezervasyon serbest, lokasyon bloklu
@@ -579,6 +579,52 @@ describe("ürün bulunamadı: yeniden tahsis, tekrar, eşzamanlılık", () => {
     await reservedMatches(X);
     expect(await audits("pick.not_found", R2)).toBe(1);
   }, 180_000);
+
+  it("commit ile yeniden tahsis arasında çökme (enjekte hata): pick kesinleşir, satır rezervesiz; aynı anahtarla tekrar → RETRIED (bir kez tahsis), tekrar → DONE (çifte tahsis yok)", async () => {
+    const X = await mkItem();
+    const R1 = await mkLoc("STORAGE", `C1-${hex(6)}`);
+    const R2 = await mkLoc("STORAGE", `C2-${hex(6)}`);
+    const SEVK = await mkSevk();
+    await stockIn(X, R1, "4");
+    const o = await mkOrder([{ item: X, qty: "4" }]);
+    const L = o.lineIds[0] as string;
+    await reserveOrder(ownerP(), { orderId: o.id });
+    await stockIn(X, R2, "5");
+    const dim2 = (await q<{ id: string }>("SELECT id FROM public.stock_dimensions WHERE tenant_id=$1 AND item_id=$2 AND location_id=$3", [A.tenantId, X, R2]))[0]?.id as string;
+    const a = await assign([o.id]);
+    const taskId = a.taskIds[0] as string;
+    const fn = `t307_inject_${hex(6)}`;
+    await q(`CREATE FUNCTION public.${fn}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 't307 enjekte hata'; END $$`);
+    await q(`CREATE TRIGGER ${fn} BEFORE INSERT ON public.reservations FOR EACH ROW WHEN (NEW.stock_dimension_id = '${dim2}') EXECUTE FUNCTION public.${fn}()`);
+    const key = uuid();
+    let first;
+    try {
+      first = await doPick(taskId, "3", R1, X, pickerP(key));
+    } finally {
+      await q(`DROP TRIGGER ${fn} ON public.reservations`);
+      await q(`DROP FUNCTION public.${fn}()`);
+    }
+    // Pick kesinleşti; yeniden tahsis düştü (çökme eşdeğeri): satır 3 tahsisli + 1 rezervesiz, hata yanıtta görünür
+    expect(first.foundQuantity).toBe(n(3));
+    expect(first.notFound).toMatchObject({ shortQuantity: n(1), locationId: R1 });
+    expect(first.reallocation).toMatchObject({ status: "FAILED" });
+    expect(await taskR(taskId)).toMatchObject({ status: "DONE" });
+    expect(await activeSum(L)).toBe(n(3));
+    expect((await reservationsOf(L)).filter((r) => r.status === "ACTIVE").map((r) => [r.location_id, r.quantity])).toEqual([[SEVK, n(3)]]);
+    // Aynı anahtarla tekrar: yeniden tahsis KAYBOLMAZ — şimdi çalışır
+    const again = await confirmPick(pickerP(key), { taskId, foundQuantity: "3", scannedLocationCode: await codeOfLoc(R1), scannedItemBarcode: await bcOf(X) });
+    expect(again.replayed).toBe(true);
+    expect(again.notFound).toEqual(first.notFound);
+    expect(again.reallocation).toMatchObject({ status: "ALLOCATED", quantity: n(1), replay: "RETRIED" });
+    expect(await activeSum(L)).toBe(n(4));
+    expect((await reservationsOf(L)).filter((r) => r.status === "ACTIVE" && r.location_id === R2).map((r) => r.quantity)).toEqual([n(1)]);
+    // Üçüncü tekrar: saklı sonuç (DONE), çifte tahsis yok
+    const third = await confirmPick(pickerP(key), { taskId, foundQuantity: "3", scannedLocationCode: await codeOfLoc(R1), scannedItemBarcode: await bcOf(X) });
+    expect(third.reallocation).toMatchObject({ status: "ALLOCATED", quantity: n(1), replay: "DONE", reservationIds: again.reallocation?.reservationIds });
+    expect(await activeSum(L)).toBe(n(4));
+    await reservedMatches(X);
+    expect(await ledgerSum(X)).toBe(await physical(X));
+  }, 120_000);
 
   it("eşzamanlı iki 'bulunamadı' aynı lokasyonda (farklı ürün): bariyerle ikisi de lokasyon kilidinde bekler; 40P01 sızmaz; ikisi de tutarlı; tek açık COUNT görevi", async () => {
     const I1 = await mkItem();
@@ -706,6 +752,11 @@ describe("belge yolu rezervasyon taşıma kuralı (T-307: reservations.ts:452 re
     const ledger = await ledgerCount(X);
     const e = await failure(postDocument(ownerP(), { documentId: docId, expectedVersion: ver, reservationMoves: [{ lineId, reservationIds: rv.reservationIds as string[] }] }));
     expect(codeOf(e)).toBe("VALIDATION_FAILED");
+    // MINOR-1 regresyonu: istemci `allowOrderReservations: true` göndermeyi denese de genel yol alanı indirger → yine ret.
+    const forged = await failure(
+      postDocument(ownerP(), { documentId: docId, expectedVersion: ver, reservationMoves: [{ lineId, reservationIds: rv.reservationIds as string[], allowOrderReservations: true }] } as never),
+    );
+    expect(codeOf(forged)).toBe("VALIDATION_FAILED");
     expect(await ledgerCount(X)).toBe(ledger);
     expect(await bal(X, R, "AVAILABLE")).toBe(n(5));
     expect(await bal(X, SEVK, "AVAILABLE")).toBe(n(0));
