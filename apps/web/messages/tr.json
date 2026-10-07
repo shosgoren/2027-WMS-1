@@ -432,13 +432,16 @@
     "intro": "Yapmak istediğin işe dokun. Seni adım adım götüreceğim; yanlış bir şey yapmana izin vermem.",
     "tasksLabel": "İşler",
     "lockedReason": "Bu iş için yetkin yok. Sorumluna sorabilirsin.",
+    "soonListNote": "Bu işler depo kurulumundan sonra açılacak.",
+    "lockedListNote": "Bu işler için yetkin yok. Sorumluna sorabilirsin.",
     "soonLabel": "Yakında",
     "soonWarehouse": "Bu iş depo kurulumundan sonra açılacak.",
     "soonScreen": "Bu ekran yakında açılacak.",
     "myTasks": {
       "title": "Görevlerim",
       "assigned": "Sana atanmış {count} iş",
-      "empty": "Şu an sana atanmış iş yok."
+      "empty": "Şu an sana atanmış iş yok.",
+      "start": "Tara ile başla"
     },
     "lockedList": {
       "toggle": "Yetkin olmayan işler ({count})"
@@ -670,7 +673,7 @@
   },
   "items": {
     "title": "Ürünler",
-    "intro": "Ürün kartlarını, birimlerini ve barkodlarını buradan yönet.",
+    "intro": "Ürün bul ya da yeni ürün ekle.",
     "lockedReason": "Bu iş için yetkin yok. Sorumluna sorabilirsin.",
     "listLabel": "Ürün listesi",
     "create": "Yeni ürün",
@@ -678,7 +681,15 @@
     "emptyAction": "“Yeni ürün” ile ilk ürününü ekle.",
     "emptyReadOnly": "Ürün eklemesi için sorumluna sor.",
     "emptyFiltered": "Aramana uyan ürün yok.",
-    "emptyFilteredAction": "Kodun ilk harflerini, adı ya da barkodu tam yaz; ya da aramayı temizle.",
+    "emptyFilteredAction": "Adı ya da kodu değiştirip yeniden dene; barkodu tam yaz. Ya da aramayı temizle.",
+    "emptyStatus": "Bu filtreye uyan ürün yok.",
+    "emptyStatusAction": "Başka bir durum seç ya da aramayı temizle.",
+    "setup": {
+      "warehouse": "Önce depo ekle · 1. adım / 3",
+      "locations": "Sıradaki: rafları oluştur · 2. adım / 3",
+      "item": "Sıradaki: ilk ürünü ekle",
+      "teach": "Ürün eklemeden önce üç kısa adım var."
+    },
     "codeLabel": "Kod: {code}",
     "baseUnitLabel": "Temel birim: {unit}",
     "status": {
@@ -692,10 +703,11 @@
     "firstPage": "Başa dön",
     "search": {
       "label": "Ürün ara",
-      "hint": "Kodun ya da adın ilk harfleri; barkod için tamamını yaz veya okut.",
+      "hint": "Adı ya da kodu yaz; barkodu okutabilirsin.",
+      "placeholder": "Örn. URN-0001 ya da Koli 40x30",
+      "advanced": "Gelişmiş",
       "status": "Durum",
       "all": "Hepsi",
-      "submit": "Ara",
       "clear": "Aramayı temizle"
     },
     "tracking": {
@@ -1068,7 +1080,6 @@
     },
     "items": {
       "searchSuggestLabel": "Ürün önerileri",
-      "scanLabel": "Barkodla ürün bul",
       "unitAuto": "Henüz birim yok; ilk ürününle “ADET” birimi kendiliğinden oluşturulur.",
       "unitDefaultOption": "ADET · Adet (otomatik)"
     },
