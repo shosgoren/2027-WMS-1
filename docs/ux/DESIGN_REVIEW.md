@@ -14,7 +14,7 @@
 
 ## 2. Ölçütler (T-270 ana ekran, telefon)
 
-Ölçüm alanı: üst çubuğun altı ile alt sekme çubuğunun üstü arası ("içerik alanı"). "Döşeme" = etkin + kilitli iş döşemesi (Yakında satırı ve selam alanı döşeme değildir).
+Ölçüm alanı: üst çubuğun altı ile alt sekme çubuğunun üstü arası ("içerik alanı"). "Döşeme" = yalnız ETKİN iş döşemesi (kilitli ve Yakında liste satırları, açıklama panelleri ve selam alanı döşeme değildir; T-274). Eşikler değişmedi.
 
 | No | Ölçüt | Ölçüm | Geçer (2) | Kısmen (1) | Geçmez (0) |
 |---|---|---|---|---|---|
@@ -76,3 +76,23 @@ Giderilen maddeler: (P1.1) döşeme biçemi tek ve beyaz, renk yalnız ikon dair
 - **PICKER:** döşemeler en çok 140 px, altta; boşalan alan gerçek içerikle dolu: "Görevlerim" özet kartı (`listMyTasks` = mevcut domain sorgusu, `stock.view`, tenant bağlamı domain'de; sayım yalnız bana atanmış ASSIGNED işler, tek sayfaya sığmazsa "n+") — n>0 ise tek dokunuşla `/t/<slug>/field/tasks`, n=0 ise sakin boş durum satırı, sorgu hatasında sunucu mesajı + kod. Kart yalnız yönetim yetkisi (`users.manage`) olmayan rollerde çizilir. Alt sekme "Görevlerim" gerçek ekrana bağlandı, "Yakında" noktası kalktı.
 - **Açık listeler:** yetkisiz ve Yakında listeleri alttan yukarı: tek açıklama paneli (boşluğu doldurur, `emptyRatio` ≤ %15 üç boyutta ölçülür) + kompakt (56-64 px), gölgesiz, nötr renkli, oksuz satırlar; "İşlere dön" düğmesinde kilit ikonu yok.
 - **Ton ayrımı (ΔE):** Ekip indigo → violet-indigo (`cat-indigo` bg #ebe5fc / ink #47299c; Sayım purple bg #f0e5fb / ink #6a1fb0). Seçili sekme `accent-soft` #e3ecfa / `accent-ink` #0f4699'a göre: indigo daire zemini önce ΔE2000 5,1 (kontrast oranı 1,037) idi, şimdi ΔE2000 8,5 (1,029); indigo ikon rengi önce ΔE2000 6,8, şimdi 13,1 (kontrast oranı 1,141). Pastel zeminler doğası gereği birbirine yakındır; ayrımı ikon rengi + ikon şekli + metin taşır. `theme-contrast.test.ts` artık tüm tonlar için CIE76 ΔE zemin ≥ 5 ve ikon ≥ 20 (seçili sekme mavisine göre) denetler.
+
+
+## 7. T-274 ölçütleri (Ürünler ekranı + ana ekran P3) — uygulamadan ÖNCE yazıldı, ekran görüntüsünden sonra değişmez
+
+Ölçüm: telefon (Playwright `mobile` projesi), 360×740, 390×844, 430×932; ölçümler `mobile-shell.spec.ts` içindedir, görüntüler `.artifacts/t-274/final-*.png`. Puan 2/1/0; birleştirme eşiği: hiçbir ölçütte 0 yok ve toplam ≥ %90 (H-01 kaldırıldı: 11 ölçüt × 2 = 22 → ≥ 20). Bağımsız puanlayıcı uygulayıcının puanını geçersiz kılabilir.
+
+| No | Ölçüt | Geçer (2) | Kısmen (1) | Geçmez (0) |
+|---|---|---|---|---|
+| I-01 | Tek arama alanı: Gelişmiş kapalıyken görünür metin girişi / seçim / "Ara" düğmesi sayısı | 1 giriş, 0 ek denetim | 2 giriş ya da 1 ek denetim | ≥ 3 |
+| I-02 | Kaydırmasız ilk görünüm: arama alanı ve "Yeni ürün" üst çubuk–alt sekme arasında tam görünür; yatay taşma | İkisi görünür, taşma 0 | — | biri görünmez ya da taşma |
+| I-03 | Başparmak bölgesi: "Yeni ürün" alt kenarı ile alt sekme üstü arası | ≤ 16 px | 17–32 px | > 32 px |
+| I-04 | Açıklama paragrafı satır sayısı (telefon) | 1 | 2 | ≥ 3 |
+| I-05 | Dokunma hedefi (görünür tüm etkileşimli öğeler) | Hepsi ≥ 48×48 | 44–47 | < 44 |
+| I-06 | Tek alanla kod, ad ve barkod yazılarak bulunur (e2e) | Üçü de | İkisi | ≤ 1 |
+| I-07 | Eski kodla arama sonucunda (GET sayfası ve öneri) "kod değişti" bilgisi | İkisinde de | Birinde | Hiçbirinde |
+| I-08 | Dil ve hata: sabit metin yok, TR/EN eşit, sunucu hatası kod + sonraki eylem | Sağlanır | 1 sabit metin | ≥ 2 ya da hata yutuluyor |
+| H-01 | ~~Gerekçe kartı yüksekliği ≤ 160 px~~ **KALDIRILDI (Supervisor kararı, a67bd63 sonrası):** D-03 `emptyRatio ≤ %15` önceliklidir, kart boşluğu doldurur. Boşluk ayrıca açık listelerdeki satırların gerçek tek satırlık açıklamasıyla (`tasks.*.description`) ve ≤ 72 px satırla azaltıldı. | — | — | — |
+| H-02 | Boş durum kartı (`my-tasks-empty`) yüksekliği ve "Tara ile başla" gerçek bağlantı (`/t/<slug>/field`) | ≤ 120 px + bağlantı | 121–140 px | > 140 px ya da bağlantı yok |
+| H-03 | Saat ikonu boyutu 360/390/430'da tutarlı | Fark ≤ 1 px | 2–4 px | > 4 px |
+| H-04 | Gerekçe kartı alttan bitişik: kart alt kenarı ile ilk liste satırı üstü arası; D-03 boş alan eşiği (≤ %15) bozulmaz | ≤ 16 px ve D-03 geçer | 17–32 px | > 32 px ya da D-03 kırılır |

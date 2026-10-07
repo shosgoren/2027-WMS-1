@@ -121,6 +121,7 @@ const HUE: Record<CatHue, { circle: string; icon: string }> = {
 
 const TILE_BASE = "task-tile relative flex min-h-12 min-w-0 w-full flex-col gap-3 rounded-card border-2 border-border bg-surface p-4 text-left text-ink shadow-card";
 const FOCUS = "focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus";
+const LINK_CLS = `${FOCUS} inline-flex items-center justify-center text-base font-bold`;
 const ROW = `${FOCUS} flex min-h-12 cursor-pointer list-none items-center gap-2 rounded-2xl border border-border bg-surface px-3 text-sm font-bold text-ink`;
 
 export interface TaskTileProps {
@@ -128,6 +129,8 @@ export interface TaskTileProps {
   readonly hue: CatHue;
   readonly title: string;
   readonly description?: string;
+  /** Telefonda kilitli/Yakında satırında görünen tek satırlık gerçek açıklama (işin ne yaptığı; sahte içerik yok, G-07). */
+  readonly what?: string;
   /** Yalnızca uygulama içi yol (sabit önekten üretilir). */
   readonly href?: `/${string}`;
   /** Yetki yok: bağlantı değil, `aria-disabled`; gerekçe metni çağırandan (i18n). */
@@ -137,7 +140,7 @@ export interface TaskTileProps {
 }
 
 /** İş döşemesi. Durum `data-state`te (active | locked | soon); renk yalnız ikon dairesinde, ikon + metin her zaman var. */
-export function TaskTile({ name, hue, title, description, href, locked, soon }: TaskTileProps): ReactNode {
+export function TaskTile({ name, hue, title, description, what, href, locked, soon }: TaskTileProps): ReactNode {
   const h = HUE[hue];
   const head = (extra: ReactNode, circle: string) => (
     <span className="tile-head flex items-start justify-between gap-2">
@@ -147,17 +150,18 @@ export function TaskTile({ name, hue, title, description, href, locked, soon }: 
       {extra}
     </span>
   );
-  const body = (text: string | undefined) => (
+  const body = (text: string | undefined, extra?: string) => (
     <span className="tile-body flex min-w-0 flex-col gap-1">
       <span className="tile-title break-words text-xl font-bold">{title}</span>
       {text ? <span className="tile-desc break-words text-base">{text}</span> : null}
+      {extra ? <span className="tile-what hidden break-words text-base">{extra}</span> : null}
     </span>
   );
   if (soon) {
     return (
       <div role="group" aria-disabled="true" aria-label={title} data-state="soon" tabIndex={0} className={`${TILE_BASE} ${FOCUS}`}>
         {head(<span className="tile-soon inline-flex min-h-6 items-center rounded-control bg-locked-bg px-2 text-xs font-semibold text-ink-muted">{soon.label}</span>, h.circle)}
-        {body(description)}
+        {body(description, what)}
       </div>
     );
   }
@@ -165,7 +169,7 @@ export function TaskTile({ name, hue, title, description, href, locked, soon }: 
     return (
       <div role="group" aria-disabled="true" aria-label={title} data-state="locked" tabIndex={0} className={`${TILE_BASE} ${FOCUS} bg-locked-bg text-locked-ink`}>
         {head(<Lock aria-hidden="true" className="tile-lock size-6 shrink-0 text-locked-ink" />, "bg-surface text-locked-ink")}
-        {body(locked.reason)}
+        {body(locked.reason, what)}
       </div>
     );
   }
@@ -253,10 +257,15 @@ export async function TaskMenu({ slug, allowed, myTasks }: TaskMenuProps) {
             <ChevronRight aria-hidden="true" className="size-6 shrink-0" />
           </a>
         ) : (
-          <p data-testid="my-tasks-empty" className="my-tasks my-tasks-empty m-0 flex min-h-16 flex-col items-center justify-center gap-3 rounded-2xl border border-border bg-surface px-4 text-center text-base font-semibold text-ink-muted">
-            <ListChecks aria-hidden="true" className="size-10" />
-            {t("myTasks.empty")}
-          </p>
+          <div data-testid="my-tasks-empty" className="my-tasks my-tasks-empty m-0 flex max-h-30! w-full flex-none! flex-col items-center justify-center gap-1 self-end rounded-2xl border border-border bg-surface px-4 py-2 text-center">
+            <p className="m-0 flex items-center gap-2 text-base font-semibold text-ink-muted">
+              <ListChecks aria-hidden="true" className="size-6 shrink-0" />
+              {t("myTasks.empty")}
+            </p>
+            <a href={`${base}/field`} className={`${LINK_CLS} min-h-12 w-full rounded-control bg-accent px-4 text-on-accent no-underline`}>
+              {t("myTasks.start")}
+            </a>
+          </div>
         )}
       </li>,
     );
@@ -274,7 +283,7 @@ export async function TaskMenu({ slug, allowed, myTasks }: TaskMenuProps) {
   if (locked.length > 0) {
     items.push(
       <li key="locked-note" className="locked-note min-w-0 text-base font-semibold text-ink">
-        <Lock aria-hidden="true" className="size-10 text-ink-muted" />
+        <Lock aria-hidden="true" className="size-10 shrink-0 text-ink-muted" />
         <span className="break-words">{t("lockedReason")}</span>
       </li>,
     );
@@ -282,14 +291,14 @@ export async function TaskMenu({ slug, allowed, myTasks }: TaskMenuProps) {
   for (const d of locked) {
     items.push(
       <li key={d.key} className="locked-item flex min-w-0">
-        <TaskTile name={d.key} hue={d.hue} title={t(`tasks.${d.key}.title`)} locked={{ reason: t("lockedReason") }} />
+        <TaskTile name={d.key} hue={d.hue} title={t(`tasks.${d.key}.title`)} what={t(`tasks.${d.key}.description`)} locked={{ reason: t("lockedReason") }} />
       </li>,
     );
   }
   if (soon.length > 0) {
     items.push(
       <li key="soon-note" className="soon-note min-w-0 text-base font-semibold text-ink">
-        <Clock aria-hidden="true" className="size-10 text-ink-muted" />
+        <Clock aria-hidden="true" className="size-10 shrink-0 text-ink-muted" />
         <span className="break-words">{t("soonWarehouse")}</span>
       </li>,
     );
@@ -297,7 +306,7 @@ export async function TaskMenu({ slug, allowed, myTasks }: TaskMenuProps) {
   for (const d of soon) {
     items.push(
       <li key={d.key} className="soon-item flex min-w-0">
-        <TaskTile name={d.key} hue={d.hue} title={t(`tasks.${d.key}.title`)} description={t("soonWarehouse")} soon={{ label: t("soonLabel") }} />
+        <TaskTile name={d.key} hue={d.hue} title={t(`tasks.${d.key}.title`)} description={t("soonWarehouse")} what={t(`tasks.${d.key}.description`)} soon={{ label: t("soonLabel") }} />
       </li>,
     );
   }

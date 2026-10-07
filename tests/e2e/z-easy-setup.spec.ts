@@ -198,11 +198,21 @@ test("kolay kurulum: rehberle depo + raf + ürün, öneri, önizleme, arama (mob
   await expect(page).toHaveURL(/\/items\/[0-9a-f-]{36}$/);
 
   await page.goto("/t/demo/items");
-  await page.getByRole("button", { name: "Elle yaz" }).click();
-  await page.getByLabel("Barkodla ürün bul").fill(BARCODE);
-  await page.getByRole("button", { name: "Bul" }).click();
+  // T-274: barkod ayrı alana değil, tek arama alanına yazılır/okutulur; yazdıkça gelen tek sonuç ürünü seçer.
+  await expect(page.getByLabel("Barkodla ürün bul")).toHaveCount(0);
+  await page.getByRole("searchbox", { name: "Ürün ara" }).fill(BARCODE);
+  const byBarcode = page.getByRole("option").first();
+  await expect(byBarcode).toContainText(ITEM_NAME);
+  await byBarcode.click();
   await expect(page).toHaveURL(/\/items\/[0-9a-f-]{36}$/); // barkod doğrudan ürünü seçer
   await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+
+  // Barkod okuyucu (klavye modu) değerin sonuna Enter gönderir: tek eşleşme doğrudan ürünü açar.
+  await page.goto("/t/demo/items");
+  const wedge = page.getByRole("searchbox", { name: "Ürün ara" });
+  await wedge.fill(BARCODE);
+  await wedge.press("Enter");
+  await expect(page).toHaveURL(/\/items\/[0-9a-f-]{36}$/);
 
   // --- Çakışma: aynı aralık yeniden önizlenir, çakışanlar listelenir, oluşturma kapalı ---
   await page.goto("/t/demo/warehouses");

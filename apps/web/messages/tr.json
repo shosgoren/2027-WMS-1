@@ -438,7 +438,8 @@
     "myTasks": {
       "title": "Görevlerim",
       "assigned": "Sana atanmış {count} iş",
-      "empty": "Şu an sana atanmış iş yok."
+      "empty": "Şu an sana atanmış iş yok.",
+      "start": "Tara ile başla"
     },
     "lockedList": {
       "toggle": "Yetkin olmayan işler ({count})"
@@ -664,7 +665,7 @@
   },
   "items": {
     "title": "Ürünler",
-    "intro": "Ürün kartlarını, birimlerini ve barkodlarını buradan yönet.",
+    "intro": "Ürün bul ya da yeni ürün ekle.",
     "lockedReason": "Bu iş için yetkin yok. Sorumluna sorabilirsin.",
     "listLabel": "Ürün listesi",
     "create": "Yeni ürün",
@@ -686,10 +687,10 @@
     "firstPage": "Başa dön",
     "search": {
       "label": "Ürün ara",
-      "hint": "Kodun ya da adın ilk harfleri; barkod için tamamını yaz veya okut.",
+      "hint": "Kod, ad ya da barkod yaz; barkodu okutabilirsin.",
+      "advanced": "Gelişmiş",
       "status": "Durum",
       "all": "Hepsi",
-      "submit": "Ara",
       "clear": "Aramayı temizle"
     },
     "tracking": {
@@ -1062,7 +1063,6 @@
     },
     "items": {
       "searchSuggestLabel": "Ürün önerileri",
-      "scanLabel": "Barkodla ürün bul",
       "unitAuto": "Henüz birim yok; ilk ürününle “ADET” birimi kendiliğinden oluşturulur.",
       "unitDefaultOption": "ADET · Adet (otomatik)"
     },

@@ -199,6 +199,13 @@ test("kod değiştir: depo, lokasyon, ürün; eski kodla arama yeni karta yönle
     await expect(page).toHaveURL(new RegExp(`${itemUrl}$`));
     await expect(page.getByRole("heading", { level: 1, name: itemName })).toBeVisible();
     await expect(page.getByText(`Kod: ${itemNew}`)).toBeVisible();
+
+    // T-274 (T-257 bulgusu): GET sonuç sayfasında da (Enter ile gönderilen arama) eski kod bilgisi görünür.
+    await page.goto(`/t/demo/items?q=${encodeURIComponent(itemCode)}`);
+    const hit = page.getByTestId("item-card").filter({ hasText: itemName });
+    await expect(hit).toHaveCount(1);
+    await expect(hit).toContainText(`Bu kod ${itemNew} olarak değişti (eski kod: ${itemCode})`);
+    await noHorizontalOverflow(page, "eski kodla arama sonucu (GET)");
   } finally {
     // Temizlik: kayıtlar arşivlenir (rehber ve öneri sayaçları değişmez). Hata yutulmaz ama asıl hatayı gölgelemez.
     if (itemUrl !== null) {

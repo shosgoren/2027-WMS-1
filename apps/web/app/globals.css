@@ -283,7 +283,7 @@ html {
   .task-grid:has(.locked-toggle[open]) > .locked-item {
     display: flex;
     flex: none;
-    height: 3.75rem;
+    height: 4.5rem;
   }
 
   .task-grid:has(.locked-toggle[open]) > .locked-note,
@@ -409,5 +409,17 @@ html {
   .task-grid .task-tile[data-state="locked"] .tile-desc,
   .task-grid .task-tile[data-state="soon"] .tile-chevron {
     display: none;
+  }
+
+  /* Açık listelerde her satır işin ne yaptığını tek satırda söyler (gerçek `tasks.*.description`; T-274). */
+  .task-grid .task-tile[data-state="soon"] .tile-what,
+  .task-grid .task-tile[data-state="locked"] .tile-what {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 1;
+    overflow: hidden;
+    color: var(--color-ink-muted);
+    font-size: 0.8125rem;
+    line-height: 1.25;
   }
 }

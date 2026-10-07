@@ -195,6 +195,7 @@ test("telefon kabuğu: ana ekran tek ekran, menü, alt sekme; masaüstü korunur
 // boş alan oranı, role göre sıra ve "Yakında" listesi. Rol başına ayrı demo girişi (yönetici + toplayıcı). Ekran görüntüleri
 // `.artifacts/t-270/final-*.png` (git'e girmez).
 const OUT_T270 = process.env.T270_OUT ?? path.resolve(import.meta.dirname, "../../.artifacts/t-270");
+const OUT_T274 = process.env.T274_OUT ?? path.resolve(import.meta.dirname, "../../.artifacts/t-274");
 const T270_SIZES = [
   { width: 360, height: 740 },
   { width: 390, height: 844 },
@@ -235,9 +236,23 @@ async function homeLayout(page: Page, itemSelector: string): Promise<HomeLayout>
   })()`);
 }
 
+/** T-274 H-03/H-04: gerekçe kartı listeye alttan bitişik; saat ikonu boyutu kaydedilir. */
+async function expectNoteCard(page: Page, note: string, rowSel: string, where: string, clockSizes: number[] | null): Promise<void> {
+  const m = await page.evaluate<{ h: number; b: number; firstTop: number; icon: number }>(`(() => {
+    const n = document.querySelector(${JSON.stringify(note)}).getBoundingClientRect();
+    const rows = [...document.querySelectorAll(${JSON.stringify(`.task-grid > ${rowSel}`)})].map((e) => e.getBoundingClientRect()).filter((r) => r.height > 0);
+    const svg = document.querySelector(${JSON.stringify(`${note} svg`)}).getBoundingClientRect();
+    return { h: n.height, b: n.bottom, firstTop: Math.min(...rows.map((r) => r.top)), icon: svg.width };
+  })()`);
+  // H-01 (≤ 160 px) Supervisor kararıyla kaldırıldı: T-270 `emptyRatio ≤ 0,15` önceliklidir; gerekçe kartı boşluğu doldurur (DESIGN_REVIEW §7).
+  expect(m.firstTop - m.b, `${where}: gerekçe kartı listeye bitişik (H-04)`).toBeLessThanOrEqual(16);
+  if (clockSizes !== null) clockSizes.push(m.icon);
+}
+
 test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş alan, saha işi önce, Yakında ve yetkisiz işler listeleri", async ({ page }) => {
   mkdirSync(OUT_T270, { recursive: true });
   const tag = test.info().project.name;
+  const clockSizes: number[] = [];
   for (const role of T270_ROLES) {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto("/");
@@ -299,7 +314,11 @@ test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş al
           await expect(card).toHaveAttribute("href", "/t/demo/field/tasks");
           await expect(card).toContainText(/Sana atanmış \d+\+? iş/);
         } else {
-          await expect(page.getByTestId("my-tasks-empty")).toHaveText("Şu an sana atanmış iş yok.");
+          // T-274: boş durum kartı artık sonraki adımı da taşır; ileti metni aynı güçte (tam eşitlik) doğrulanır, kart ≤ 120 px ve bağlantı gerçek.
+          const empty = page.getByTestId("my-tasks-empty");
+          await expect(empty.locator("p")).toHaveText("Şu an sana atanmış iş yok.");
+          await expect(empty.getByRole("link", { name: "Tara ile başla" })).toHaveAttribute("href", "/t/demo/field");
+          expect((await empty.boundingBox())?.height ?? 999, `${where}: boş durum kartı yüksekliği (H-02)`).toBeLessThanOrEqual(120);
         }
         expect(await smallTargets(page, ".my-tasks-row"), `${where}: Görevlerim özeti dokunma hedefi`).toEqual([]);
       }
@@ -338,11 +357,12 @@ test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş al
       expect(closeBox?.height ?? 0, `${where}: kapatma düğmesi dokunma yüksekliği`).toBeGreaterThanOrEqual(48);
       for (const t of O.tiles) {
         expect(t.h, `${where}: açık liste satır yüksekliği`).toBeGreaterThanOrEqual(56);
-        expect(t.h, `${where}: açık liste satır yüksekliği (kompakt)`).toBeLessThanOrEqual(64);
+        expect(t.h, `${where}: açık liste satır yüksekliği (kompakt)`).toBeLessThanOrEqual(72);
       }
       const rowFlat = await page.evaluate<string[]>(`[...document.querySelectorAll('.soon-item > [data-state]')].map((e) => getComputedStyle(e).boxShadow)`);
       for (const sh of rowFlat) expect(sh, `${where}: Yakında satırı gölgesiz`).toBe("none");
       await expect(page.locator(".soon-note")).toContainText("Bu iş depo kurulumundan sonra açılacak.");
+      await expectNoteCard(page, ".soon-note", ".soon-item", where, clockSizes);
       const titles = await page.evaluate<number[]>(`[...document.querySelectorAll('.soon-item .tile-title')].map((e) => Math.round(e.getBoundingClientRect().height / parseFloat(getComputedStyle(e).lineHeight)))`);
       for (const lines of titles) expect(lines, `${where}: Yakında başlığı en çok 2 satır`).toBeLessThanOrEqual(2);
       expect(await smallTargets(page, "body"), `${where}: Yakında listesi 48 px altı hedef`).toEqual([]);
@@ -354,6 +374,7 @@ test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş al
       if (!isAdmin) {
         await lockedRow.click();
         await expect(page.locator(".locked-note")).toHaveText("Bu iş için yetkin yok. Sorumluna sorabilirsin.");
+        await expectNoteCard(page, ".locked-note", ".locked-item", where, null);
         const lockedCards = tasks.locator('[data-state="locked"]');
         await expect(lockedCards).toHaveCount(3);
         for (const name of ["Ekibimi yönet", "Ayarlar", "Kim ne yaptı?"]) await expect(lockedCards.filter({ hasText: name })).toBeVisible();
@@ -363,7 +384,7 @@ test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş al
         expect(LO.emptyRatio, `${where}: yetkisiz liste açıkken boş alan oranı`).toBeLessThanOrEqual(0.15);
         for (const t of LO.tiles) {
           expect(t.h, `${where}: yetkisiz satır yüksekliği`).toBeGreaterThanOrEqual(56);
-          expect(t.h, `${where}: yetkisiz satır yüksekliği (kompakt)`).toBeLessThanOrEqual(64);
+          expect(t.h, `${where}: yetkisiz satır yüksekliği (kompakt)`).toBeLessThanOrEqual(72);
         }
         const lockedFlat = await page.evaluate<string[]>(`[...document.querySelectorAll('.locked-item > [data-state]')].map((e) => getComputedStyle(e).boxShadow)`);
         for (const sh of lockedFlat) expect(sh, `${where}: yetkisiz satır gölgesiz`).toBe("none");
@@ -373,8 +394,61 @@ test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş al
       }
     }
 
+    if (isAdmin) await itemsScreenChecks(page);
+
     await page.getByTestId("app-bar-menu").click();
     await page.getByRole("button", { name: "Çıkış yap" }).click();
     await expect(page).toHaveURL(/\/login$/);
   }
+  // H-03: saat ikonu 360/390/430'da tutarlı (rol başına 3 ölçüm; hepsi birbirine ≤ 1 px).
+  expect(clockSizes.length, "saat ikonu ölçümleri").toBe(T270_ROLES.length * T270_SIZES.length);
+  expect(Math.max(...clockSizes) - Math.min(...clockSizes), `saat ikonu boyutu tutarlı (${clockSizes.join("/")})`).toBeLessThanOrEqual(1);
 });
+
+// T-274: Ürünler ekranı telefonda sade: TEK arama alanı (kod/ad/barkod), "Durum" ve "Ara" yok (Gelişmiş altında), açıklama tek satır,
+// "Yeni ürün" altta sabit, ilk görünüm kaydırmasız, yatay taşma yok. Ürün bulma akışları z-easy-setup / zz-code-edit'te.
+async function itemsScreenChecks(page: Page): Promise<void> {
+  mkdirSync(OUT_T274, { recursive: true });
+  const tag = test.info().project.name;
+  for (const size of T270_SIZES) {
+    await page.setViewportSize({ width: size.width, height: size.height });
+    await page.goto("/t/demo/items");
+    await expect(page.getByRole("heading", { level: 1, name: "Ürünler" })).toBeVisible();
+    const where = `ürünler ${size.width}x${size.height}`;
+    const form = page.getByRole("search", { name: "Ürün ara" });
+    // I-01: görünür giriş/seçim/gönder denetimi (Gelişmiş kapalı).
+    const controls = await form.evaluate<number>((el: { querySelectorAll: (s: string) => ArrayLike<{ checkVisibility: () => boolean }> }) =>
+      Array.from(el.querySelectorAll("input, select, textarea, button[type=submit]")).filter((e) => e.checkVisibility()).length,
+    );
+    expect(controls, `${where}: görünür arama denetimi (I-01)`).toBe(1);
+    await expect(page.getByRole("button", { name: "Ara", exact: true })).toHaveCount(0);
+    await expect(page.getByLabel("Barkodla ürün bul")).toHaveCount(0);
+    await expect(page.getByLabel("Durum")).toBeHidden();
+    const geo = await page.evaluate<{ barB: number; navT: number; sB: number; sT: number; cB: number; cT: number; introLines: number }>(`(() => {
+      const r = (el) => el.getBoundingClientRect();
+      const bar = r(document.querySelector('[data-testid="app-bar"]')), nav = r(document.querySelector('[data-testid="bottom-nav"]'));
+      const s = r(document.querySelector('input[type="search"]'));
+      const c = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Yeni ürün');
+      const cb = r(c);
+      const intro = document.querySelector('h1').nextElementSibling;
+      return { barB: bar.bottom, navT: nav.top, sB: s.bottom, sT: s.top, cB: cb.bottom, cT: cb.top, introLines: Math.round(r(intro).height / parseFloat(getComputedStyle(intro).lineHeight)) };
+    })()`);
+    expect(geo.sT, `${where}: arama alanı üst çubuğun altında`).toBeGreaterThanOrEqual(geo.barB);
+    expect(geo.sB, `${where}: arama alanı görünür alanda (I-02)`).toBeLessThanOrEqual(geo.navT);
+    expect(geo.cB, `${where}: Yeni ürün görünür alanda (I-02)`).toBeLessThanOrEqual(geo.navT);
+    expect(geo.navT - geo.cB, `${where}: Yeni ürün alt sekmeye yakın (I-03)`).toBeLessThanOrEqual(16);
+    expect(geo.cB - geo.cT, `${where}: Yeni ürün yüksekliği`).toBeGreaterThanOrEqual(48);
+    expect(geo.introLines, `${where}: açıklama tek satır (I-04)`).toBe(1);
+    expect(await smallTargets(page, "body"), `${where}: 48 px altı hedef (I-05)`).toEqual([]);
+    const m = await metrics(page);
+    expect(m.scrollWidth, `${where}: yatay taşma`).toBeLessThanOrEqual(m.clientWidth);
+    expect(m.scrollHeight, `${where}: sayfa gövdesi kaymaz`).toBeLessThanOrEqual(m.innerHeight);
+    await page.screenshot({ path: path.join(OUT_T274, `final-${tag}-items-${size.width}.png`) });
+    // Gelişmiş: Durum seçimi burada, değişince sonuç adresi güncellenir (ayrı "Ara" düğmesi yok).
+    await page.getByText("Gelişmiş", { exact: true }).click();
+    await page.getByLabel("Durum").selectOption("ARCHIVED");
+    await expect(page).toHaveURL(/status=ARCHIVED/);
+    await expect(page.getByLabel("Durum")).toHaveValue("ARCHIVED");
+    await page.screenshot({ path: path.join(OUT_T274, `final-${tag}-items-${size.width}-gelismis.png`) });
+  }
+}

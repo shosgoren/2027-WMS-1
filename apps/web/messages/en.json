@@ -438,7 +438,8 @@
     "myTasks": {
       "title": "My tasks",
       "assigned": "{count} tasks assigned to you",
-      "empty": "No tasks are assigned to you right now."
+      "empty": "No tasks are assigned to you right now.",
+      "start": "Start with Scan"
     },
     "lockedList": {
       "toggle": "Tasks you cannot use ({count})"
@@ -664,7 +665,7 @@
   },
   "items": {
     "title": "Products",
-    "intro": "Manage product cards, their units and barcodes here.",
+    "intro": "Find a product or add a new one.",
     "lockedReason": "You do not have permission for this. Ask your manager.",
     "listLabel": "Product list",
     "create": "New product",
@@ -686,10 +687,10 @@
     "firstPage": "Back to start",
     "search": {
       "label": "Search products",
-      "hint": "First letters of the code or name; for a barcode type or scan the whole value.",
+      "hint": "Type a code, name or barcode; you can scan the barcode.",
+      "advanced": "More options",
       "status": "Status",
       "all": "All",
-      "submit": "Search",
       "clear": "Clear search"
     },
     "tracking": {
@@ -1062,7 +1063,6 @@
     },
     "items": {
       "searchSuggestLabel": "Product suggestions",
-      "scanLabel": "Find a product by barcode",
       "unitAuto": "There is no unit yet; the “ADET” unit is created automatically with your first product.",
       "unitDefaultOption": "ADET · Piece (automatic)"
     },
