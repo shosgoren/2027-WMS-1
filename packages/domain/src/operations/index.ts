@@ -47,3 +47,20 @@ export {
   type ReceiveLineInput,
 } from "./receiving.ts";
 export { putaway, type PutawayInput } from "./putaway.ts";
+// Mal kabul okuma sorguları (T-313; stock.view, keyset, depo kapsamı).
+export {
+  RECEIPT_LIST_LIMIT_DEFAULT,
+  RECEIPT_LIST_LIMIT_MAX,
+  RECEIPT_STATUSES,
+  getAvailableAtLocation,
+  getInboundReceipt,
+  listInboundReceipts,
+  type ListInboundReceiptsInput,
+  type ReceiptCursor,
+  type ReceiptDetail,
+  type ReceiptLineView,
+  type ReceiptPage,
+  type ReceiptStatus,
+  type ReceiptView,
+  type ReceivingLocationView,
+} from "./receiving-queries.ts";
