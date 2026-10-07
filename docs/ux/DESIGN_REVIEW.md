@@ -121,6 +121,7 @@ Gerekçe: "metrik doldurma kutusu üretiyordu; kullanıcı görsel kalitesi önc
 | T-313 R-11 (§8.1) "TanStack Virtual" → "sayfalı liste ≤50 satır; sanallaştırma 200+ satırlık tek sayfa gerekince takip kartı" | e762fb4 (rubrik-yalnız commit; T-313 görüntüsünden ÖNCE) | `@tanstack/react-virtual` kurulu değil, yeni bağımlılık eklenmeyecek; teslim listesi keyset ile ≤50 satır/sayfa gelir (T-274 aynı sonuca vardı). Diğer R-ölçütleri değişmedi |
 | Ana ekran ölçeklenmesi (§7.4): ≤5 izinli iş tek sütun satır (mevcut), ≥6 eşit 2 sütunlu ızgara; 2 sütunda D-04 88–140 px | Supervisor kararı 2026-10-07 (T-313); rubrik-yalnız commit, T-313 ana ekran görüntüsünden ÖNCE | "6 etkin işte tek sütun D-04'ü ihlal ediyor": 6 döşemeyle 360×740'ta 77 px (<88), 390×664'te son döşeme alt sekmenin 38 px altına taşıyor. Eşikler gevşetilmedi; yerleşim biçimi değişti |
 | 2 sütun D-04 tavanı 140 px → "en çok kare (yükseklik ≤ genişlik), en az 88 px" (§7.4.1) | Supervisor kararı 2026-10-07 (T-313); rubrik-yalnız commit, yeni görüntüden ÖNCE | "2 sütunda 140 px tavan büyük telefonda 178–266 px boş bant bırakıyor"; dolgu içeriği reddedildi. B-02 ve `emptyRatio` değişmedi |
+| e57c69a GERİ ÇEKİLDİ: "2 sütun döşeme en çok kare" kuralı kaldırıldı; yerine §7.4.1 (140 px'i yalnız gerçek içerik/açıklama aşar, ≤ kare; D-04b içi boşluk ≤ 24 px) | Supervisor kararı 2026-10-07 (bağımsız inceleme T-313, 28/32); rubrik-yalnız commit, görüntülerden ÖNCE | e57c69a geri çekildi: ölçüm sonrası tavan kaldırma = eşik bükme (bağımsız inceleme T-313). Büyüyen döşemenin içi boş kalıyordu (60–75 px) |
 
 ### 7.3 Yeni ölçütler (bağımsız inceleme "geçmez" sonrası) — ekran görüntüsü ve kod değişikliğinden ÖNCE sabitlendi
 
@@ -147,13 +148,19 @@ Gerekçe: "6 etkin işte tek sütun D-04'ü ihlal ediyor" (ölçüm: 6 döşeme,
 Kural (telefon ana ekranı, `.task-grid`):
 - **≤5 izinli (etkin) iş:** tek sütun yatay satırlar (mevcut §5 B biçimi, D-04 88–140 px; kısa ekranda 72 px).
 - **≥6 izinli iş:** eşit 2 sütunlu ızgara, aynı döşeme biçimi (ikon dairesi + başlık; açıklama 2 sütunda gizlenebilir), eşit satırlar. Tek sayıda iş varsa son döşeme tam genişlik kaplar (yetim döşeme yok; eşitlik yükseklik ve satır genişliğiyle ölçülür, bkz. D-01 notu).
-- **D-04 (2 sütun) — 2026-10-07 revizyonu (aşağıdaki §7.4.1):** döşeme **en çok kare** (yükseklik ≤ genişlik) ve **en az 88 px** (görünür yüksekliği < 700 px olan ekranda 72 px alt sınırı, mevcut D-04 notu); ikon dairesi ve başlık döşemeye göre ölçeklenir. Önceki "88–140 px" tavanı kaldırıldı. **B-02 (en büyük boş dikey bant ≤ 120 px) ve kapalı ana ekranda `emptyRatio ≤ %15` aynen geçerlidir.** Tek sütun kipi D-04 88–140 px olarak kalır.
+- **D-04 (2 sütun):** döşeme yüksekliği 88–140 px (görünür yüksekliği < 700 px olan ekranda 72 px alt sınırı, mevcut D-04 notu); 140 px'i yalnızca döşeme GERÇEK içerik taşıyorsa aşabilir (§7.4.1) ve her durumda ≤ kare (yükseklik ≤ genişlik). **D-04b (§7.4.1):** döşeme içi dikey boşluk ≤ 24 px. **B-02 ve `emptyRatio` aynen geçerlidir.**
 - Her iki modda aynı güçte ölçülür: eşit boyut (±2 px), yetim yok, ızgara alt kenarı alt sekmenin ≤ 16 px üstünde (alttan yukarı), dokunma hedefi ≥ 48×48 px ve aralık ≥ 8 px, sayfa kayması yok; 360×740, 390×664, 390×844, 430×932. Başlık ≤ 2 satır (D-09).
-- Eşikler değişmedi; yalnızca 6+ iş için yerleşim biçimi eklendi.
+- Eşikler değişmedi; yalnızca 6+ iş için yerleşim biçimi eklendi. (DÜZELTME 2026-10-07: e57c69a'daki "en çok kare" tavan kaldırma kuralı geri çekildi; geçerli kural §7.4.1'dedir.)
 
-#### 7.4.1 2 sütun D-04 revizyonu (2026-10-07, Supervisor kararı; görüntüden ÖNCE)
+#### 7.4.1 2 sütun D-04 (2026-10-07, Supervisor kararı; görüntülerden ÖNCE) — e57c69a GERİ ÇEKİLDİ
 
-Gerekçe: "2 sütunda 140 px tavan büyük telefonda 178–266 px boş bant bırakıyor" (ölçüm, yönetici, 6 döşeme: 360×740 → boş bant 74 px ve oran %17,6; 390×844 → 178 px; 430×932 → 266 px; döşeme her yerde 140 px). Dolgu içeriği eklenmez; döşeme alanı kullanılır. Kural: 2 sütunda döşeme ≤ kare ve ≥ 88 px; geometri 6 döşemede 360×740 → ≤164 px, 390×844 → ≤179 px, 430×932 → ≤199 px (3 satır, tavan boş bandı B-02'nin içinde kalır). Tek sütun kipi (≤5 iş) değişmedi. B-02 ve `emptyRatio` eşikleri değişmedi; yalnızca 2 sütun D-04 tavanı kareye bağlandı.
+Geri çekme: e57c69a ("2 sütunda döşeme en çok kare, ≥ 88 px") 140 px tavanını ölçüm BAŞARISIZ OLDUKTAN sonra kaldırdığı için eşik bükme sayıldı (bağımsız inceleme T-313, 28/32). Boş alan, döşemeyi büyütüp içini boş bırakarak kapatılamaz.
+
+Geçerli kural (2 sütun, ≥ 6 izinli iş):
+- **D-04:** döşeme yüksekliği 88–140 px (görünür yüksekliği < 700 px olan ekranda 72 px alt sınırı). 140 px'i **yalnızca döşeme GERÇEK içerik taşıyorsa** aşabilir: ikonun altında başlık + tek satırlık sade dilde açıklama (örn. "Depoya mal geldi — gelen ürünü say, kaydet"; acemi kullanıcıya ne işe yaradığını söyler, N-08/N-09). Üst sınır kare (yükseklik ≤ genişlik). Açıklaması olmayan döşeme 140 px'i aşamaz.
+- **D-04b (yeni):** döşeme İÇİNDE ikon, başlık ve açıklama blokları arasındaki toplam dikey boşluk ≤ 24 px (içi boş döşeme yok; incelemede 60–75 px bulundu). Ölçü: döşeme iç yüksekliği − (ikon + başlık + açıklama kutu yükseklikleri toplamı); iç yükseklik = kenarlık ve iç dolgu çıkarılmış yükseklik, dolgu 2 × 12 px'e kadar sayılmaz.
+- **B-02** (en büyük boş dikey bant ≤ 120 px) ve kapalı ana ekranda **`emptyRatio ≤ %15`** DEĞİŞMEZ. Dolgu/süs içeriği eklenmez.
+- Tek sütun kipi (≤ 5 iş) değişmedi: 88–140 px.
 
 ## 8. T-313 mal kabul ve yerleştirme ekranları — tasarım ölçütleri (görüntüden ÖNCE yazıldı)
 
