@@ -25,7 +25,7 @@
 | daily_order_lines | Günlük ortalama sipariş satırı | 60 | A-26 |
 | daily_shipment_lines | Günlük ortalama sevk satırı | 60 | A-27 |
 | users_by_role | Kullanıcı sayısı ve rolleri | 1 yönetici, 1 depo şefi, 3 toplayıcı | A-28 |
-| devices | Cihazlar | Saha: personelin kendi Android/iPhone telefonu, kamera ile okutma (mobil web/PWA), ek donanım zorunlu değil; yönetici: bilgisayar veya telefon; el terminali/USB okuyucu isteğe bağlı | A-29 |
+| devices | Cihazlar | Saha: personelin kendi Android veya iPhone telefonu, kamera ile okutma (mobil web veya PWA), ek donanım zorunlu değil; yönetici: bilgisayar veya telefon; el terminali veya USB okuyucu isteğe bağlı | A-29 |
 | label_printer | Etiket yazıcısı | ZPL, 203 dpi, ağ yazıcısı | A-30 |
 | offline_required | Offline gerekli mi | NO | A-31 |
 | erp_integration | ERP bağlantısı (pilotta Excel import ve export) | NONE | SABİT |
@@ -37,7 +37,7 @@
 ## Kullanıcı yönü (2026-10-07; T-285)
 Gerçek pilot müşteri ve ölçülmüş işlem hacmi YOK; aşağıdakiler ürün yönüdür, kesin değer değildir. Gerçek personel sayısı, raf düzeni, hacim ve takip ihtiyacı müşteri seçildiğinde doğrulanır (Q-12).
 - **Sektör:** ambalaj, hırdavat ve benzeri ürünleri yöneten küçük/orta ölçekli depolar.
-- **Hacim:** günlük kabul/sipariş/sevk satırı bilinmiyor; A-25…A-28 yalnız geliştirme ve test varsayımıdır.
+- **Hacim:** günlük kabul/sipariş/sevk satırı bilinmiyor; A-25, A-26, A-27 ve A-28 yalnız geliştirme ve test varsayımıdır.
 - **Cihaz:** saha personeli kendi Android/iPhone telefonu; raf ve ürün barkodu telefon kamerasıyla mobil web/PWA üzerinden okunur; başlangıçta ek donanım zorunlu değil (A-29; T-286). iPhone'da tüm tarayıcılar WebKit kullandığından tarayıcının yerleşik barkod API'sine güvenilmez; çözme uygulama içinde yapılır.
 - **Koli/adet:** koli içi adet ürün bazında tanımlanır; gerektiğinde koli açılıp adetle işlem yapılır; gerçek dönüşüm değerleri müşteriyle belirlenir (A-20, A-21; T-287).
 - **Lot/seri/SKT:** ilk pilot için zorunlu değil; mimari destekler (A-16, A-17).
@@ -54,7 +54,7 @@ Gerçek pilot müşteri ve ölçülmüş işlem hacmi YOK; aşağıdakiler ürü
 ## Modele ve faz kapılarına etkisi
 - **Faz 2:** Lot ve seri tabloları ile boyut alanları takip modu kararı gereği yine kurulur; `handling_unit_id` boyutu ADR-011 varsayılanıyla kurulur. Koli, birim dönüşümü ve paket barkodu ile modellenir (PHASES seçenek a).
 - **Faz 3A:** Lot ve seri ekranı yok; koli barkodu okutulunca adet otomatik gelir. Koşullu **AC-34 (lot), AC-38 (izlenen koli ve palet), AC-41 (SKT ve FEFO), AC-42 (seri)** koşulları bu profilde sağlanmaz; Faz 3A kapısına girmez, 3B'ye kalır. Gerçek pilot doğrulaması (Q-12) takip modunu, SKT'yi veya koli modunu değiştirirse bu AC'ler 3A kapısına geri girer.
-- **Faz 5:** Pilot öncesine alınmaz.
+- **Faz 5:** Şu an pilot öncesine alınmaz; Q-102 ölçümünde kesinti çıkarsa alınır (yukarıdaki `offline_required` notu).
 
 ## Pilot başarı ölçütleri
 `PHASES.md §Pilot başarı ölçütleri` geçerlidir; müşteriyle belirlenecek iki boşluk yukarıdaki `success.*` satırlarıdır (A-34, A-35). "Sistemde işlenen hareket satırı" hedefindeki günlük hacmin hangi satır türlerinden oluştuğu açık sorudur (Q-13); bu dosya bir toplam hesaplamaz.
