@@ -1,7 +1,7 @@
 // T-250: kolay kurulum — boş tenant'ta rehberle depo + raf + ürün (3 adım), kod önerisi, toplu raf önizleme/çakışma, yazdıkça arama,
 // ScanField ile ürün seçimi. 375x812 (ana akış) ve form açıkken 390x844 / 360x740'ta sayfa gövdesi kaymaz (el terminali kuralı).
 // T-279: demo tenant T-223'ten beri dolu açılır (depo + ürün + stok); bu akış bu yüzden global-setup'ın kurduğu BOŞ fikstür tenant'ta koşar
-// (support/empty-tenant.ts; normal e-posta/parola girişi + TOTP: TENANT_ADMIN MFA ister). Uzak koşuda fikstür yoktur: dosya playwright.config.ts testIgnore ile dışlanır.
+// (support/empty-tenant.ts; normal e-posta/parola girişi + TOTP: TENANT_ADMIN MFA ister; hesap demo olmayan, çalışma alanını kendisi açar). Uzak koşuda fikstür yoktur: dosya playwright.config.ts testIgnore ile dışlanır.
 // Fikstür tenant'ta ilk proje koşusu tam rehber akışını yürütür; aynı veritabanında sonraki koşu (diğer proje) rehberin
 // tamamlandığını doğrular ve arama/ölçüm adımlarını yineler. Ekran görüntüleri `.artifacts/t-250/` altına yazılır (git'e girmez).
 // Bu test yalnızca KENDİ fikstür tenant'ına yazar (demo tenant'a dokunmaz); dosya adındaki `z-` eski sıralama kuralından kalmadır. Her koşuda yeni
@@ -10,8 +10,8 @@ import { expect, test } from "@playwright/test";
 import type { Locator, Page } from "@playwright/test";
 import { localClient, loginEmptyTenant } from "./support/empty-tenant.ts";
 
-// Parola/TOTP kodu yazılan testler iz bırakmaz (G-09: Playwright izi eylem parametrelerini saklar); ekran görüntüsü yalnızca hatada (alanlar maskeli).
-test.use({ ...localClient("198.51.100.12"), trace: "off" });
+// Parola/TOTP kodu hiçbir Playwright çağrısına parametre olmaz (support/empty-tenant.ts: exposeFunction; G-09), bu yüzden rapor/trace sır içermez.
+test.use(localClient("198.51.100.12"));
 
 const OUT = ".artifacts/t-250";
 const BARCODE = "8690000000019";

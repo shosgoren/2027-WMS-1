@@ -5,8 +5,8 @@ import { test } from "@playwright/test";
 import { itemsScreenChecks } from "./support/items-screen.ts";
 import { loginEmptyTenant, localClient } from "./support/empty-tenant.ts";
 
-// Parola/TOTP kodu yazılan testler iz bırakmaz (G-09: Playwright izi eylem parametrelerini saklar); ekran görüntüsü yalnızca hatada (alanlar maskeli).
-test.use({ ...localClient("198.51.100.11"), trace: "off" });
+// Parola/TOTP kodu hiçbir Playwright çağrısına parametre olmaz (support/empty-tenant.ts: exposeFunction; G-09), bu yüzden rapor/trace sır içermez.
+test.use(localClient("198.51.100.11"));
 
 test("boş kiracı: ürünler ekranı boş durumu (S-01, B-03, B-02, I-01..I-05, B-04, B-05)", async ({ page }) => {
   const t = await loginEmptyTenant(page);
