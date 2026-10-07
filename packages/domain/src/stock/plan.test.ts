@@ -1,6 +1,7 @@
 // T-217: işleme planı (saf). Satır sırasından bağımsız, sıralı ve tekrarlı boyutları birleştiren plan; 16 kural 1/3.
 import { describe, expect, it } from "vitest";
 import { AppError } from "@wms/shared/errors";
+import { assertLineRules } from "./rules.ts";
 import { buildPostingPlan, dimensionIdentity, fromMicro, toMicro, type PostingLine } from "./plan.ts";
 
 const ITEM = "00000000-0000-4000-8000-0000000000a1";
@@ -101,5 +102,23 @@ describe("decimal yardımcıları (I-09)", () => {
     expect(fromMicro(toMicro("0.000001"))).toBe("0.000001");
     expect(() => toMicro("1e3")).toThrow(AppError);
     expect(() => toMicro("1.1234567")).toThrow(AppError);
+  });
+});
+
+describe("assertLineRules — I-09 kesin çarpım (T-290)", () => {
+  const items = new Map([[ITEM, { id: ITEM, trackingMode: "NONE" as const, quantityScale: 6 }]]);
+  const run = (over: Partial<PostingLine>): string | undefined => {
+    try {
+      assertLineRules([line(1, { targetLocationId: L1, ...over })], items, new Map());
+      return undefined;
+    } catch (e) {
+      return e instanceof AppError ? `${e.code}${e.detail === undefined ? "" : "/" + String(e.detail)}` : "?";
+    }
+  };
+  it("0.000001 × 0.5 (yuvarlanmış 0.000001) reddedilir; tam çarpım geçer", () => {
+    expect(run({ quantity: "0.000001", conversionFactor: "0.5", baseQuantity: "0.000001" })).toBe("VALIDATION_FAILED/QUANTITY_SCALE");
+    expect(run({ quantity: "0.000001", conversionFactor: "0.5", baseQuantity: "0.000000" })).toBe("VALIDATION_FAILED/QUANTITY_SCALE");
+    expect(run({ quantity: "0.000002", conversionFactor: "0.5", baseQuantity: "0.000001" })).toBeUndefined();
+    expect(run({ quantity: "2", conversionFactor: "12", baseQuantity: "23" })).toBe("VALIDATION_FAILED");
   });
 });

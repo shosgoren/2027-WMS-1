@@ -512,6 +512,16 @@ describe("yeterlilik, ölçek, takip modu, belge durumu", () => {
     expect(await bal({ item: x, loc: store })).toBe("3.000000");
   });
 
+  it("T-290 I-09: ölçeği 6 üründe 0.000001 × 0.5 yuvarlanmış base reddedilir (kesin toBase); tam değer geçer", async () => {
+    const x = await mkItem("NONE", 6);
+    const store = await mkLoc();
+    const bad = ln(x, { targetLocationId: store, quantity: "0.000001", conversionFactor: "0.5", baseQuantity: "0.000001" });
+    expect(codeOf(await failure(createStockDocument(ownerP(), { kind: "STOCK_IN", warehouseId: A.warehouseId, lines: [bad] })))).toBe("VALIDATION_FAILED/QUANTITY_SCALE");
+    const exact = await mkApproved("STOCK_IN", [ln(x, { targetLocationId: store, quantity: "0.000002", conversionFactor: "0.5", baseQuantity: "0.000001" })]);
+    await post(exact);
+    expect(await bal({ item: x, loc: store })).toBe("0.000001");
+  });
+
   it("miktar ölçeği aşımı VALIDATION_FAILED/QUANTITY_SCALE; takip ihlalleri TRACKING_VIOLATION (NONE+lot, LOT lotsuz)", async () => {
     const x = await mkItem("NONE", 0);
     const store = await mkLoc();
