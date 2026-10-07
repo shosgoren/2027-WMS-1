@@ -7,7 +7,7 @@ import { useTranslations } from "next-intl";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { Banner, ChevronRight, CircleAlert, CircleCheck, TriangleAlert } from "@wms/ui";
+import { Banner, ChevronRight, CircleAlert, CircleCheck, Info, TriangleAlert } from "@wms/ui";
 import { applyImportChunkAction, previewImportAction } from "./actions.ts";
 
 export interface ImportViewProps {
@@ -32,6 +32,8 @@ type Stage = "idle" | "previewing" | "ready" | "applying" | "done";
 
 /** İlk görünümde gösterilen hata kartı (satır) sayısı; "Tümünü göster" ile hepsi (domain en çok 100 hata döner). */
 const FIRST_CARDS = 10;
+/** Sonuçta listelenen en çok başarısız satır; fazlası "ve N satır daha" ile söylenir (sessiz kesme yok). */
+const FAILED_SHOWN = 20;
 const FOCUS = "focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus";
 const SECONDARY = `${FOCUS} inline-flex min-h-12 min-w-12 items-center justify-center gap-2 rounded-control border-2 border-border-strong bg-surface px-5 text-base font-bold text-ink`;
 const KNOWN_ERRORS = ["forbidden", "unauthenticated", "validation_failed", "rate_limited", "not_found", "tenant_suspended", "tenant_closing", "internal"];
@@ -107,7 +109,7 @@ export function ImportView({ slug, templates, columns, limits }: ImportViewProps
   // Başlık açılışta görünür olsun: uygulama kabuğunun içerik alanı kendi içinde kayar ve sayfa geçişinde kaydırma konumunu korur (ayarlar sayfasındaki
   // bağlantı sayfanın altındadır); bu yüzden açılışta başlık görünür alana alınır.
   useEffect(() => {
-    headingRef.current?.scrollIntoView({ block: "start" });
+    headingRef.current?.scrollIntoView({ block: "nearest" }); // görünürse kaydırmaz (masaüstünde üst çubuğu kesmez); üstte kalmışsa üste getirir
   }, []);
   // Önizleme hazır olunca özet görünür alana gelir (telefonda adım 1-2 uzundur).
   useEffect(() => {
@@ -135,7 +137,7 @@ export function ImportView({ slug, templates, columns, limits }: ImportViewProps
     setFatal(null);
     setProgress({ done: 0, total: 0 });
     if (inputRef.current !== null) inputRef.current.value = "";
-    headingRef.current?.scrollIntoView({ block: "start" });
+    headingRef.current?.scrollIntoView({ block: "nearest" });
   }
 
   async function onFile(file: File | undefined): Promise<void> {
@@ -199,10 +201,13 @@ export function ImportView({ slug, templates, columns, limits }: ImportViewProps
   }
 
   const blocked = preview !== null && preview.issueTotal > 0;
+  // Boş şablon: hata değil, yönlendirici uyarı ("şablona en az bir satır ekle").
+  const onlyNoRows = blocked && preview.issues.length === 1 && preview.issues[0]?.code === "NO_ROWS";
   const applied = reports.flatMap((r) => r.rows);
   const failedRows = applied.filter((r) => r.status === "FAILED");
   const count = (s: string): number => applied.filter((r) => r.status === s).length;
-  const doneCount = count("CREATED") + count("UPDATED") + count("UNCHANGED") + count("APPLIED") + count("REPLAYED");
+  const existingCount = count("UNCHANGED") + count("REPLAYED"); // "zaten vardı": yeni yazılmadı
+  const addedCount = count("CREATED") + count("UPDATED") + count("APPLIED");
   // Denenmeyen = rapor edilen NOT_ATTEMPTED satırları + hiç rapor edilmeyen satırlar (durdurulan/erişilemeyen parçalar).
   const notTried = preview === null ? 0 : count("NOT_ATTEMPTED") + Math.max(0, preview.rowCount - applied.length);
   const failedCount = failedRows.length + (fatal === null ? 0 : 1);
@@ -321,10 +326,17 @@ export function ImportView({ slug, templates, columns, limits }: ImportViewProps
                     ) : null}
                   </>
                 ) : null}
-                {blocked ? (
+                {onlyNoRows ? (
+                  <Banner kind="warning">
+                    <p>{t("noRows")}</p>
+                    <button type="button" className={`${SECONDARY} mt-2 w-full`} onClick={pickFixed} disabled={busy}>
+                      {t("issues.pickFixed")}
+                    </button>
+                  </Banner>
+                ) : blocked ? (
                   <Banner kind="error">
                     <p>{t("blocked", { n: preview.issueTotal })}</p>
-                    <button type="button" className={`${SECONDARY} mt-2`} onClick={pickFixed} disabled={busy}>
+                    <button type="button" className={`${SECONDARY} mt-2 w-full`} onClick={pickFixed} disabled={busy}>
                       {t("issues.pickFixed")}
                     </button>
                   </Banner>
@@ -334,7 +346,7 @@ export function ImportView({ slug, templates, columns, limits }: ImportViewProps
                   </Banner>
                 )}
               </div>
-              {blocked ? <IssueList issues={preview.issues} total={preview.issueTotal} /> : null}
+              {blocked && !onlyNoRows ? <IssueList issues={preview.issues} total={preview.issueTotal} /> : null}
             </Step>
 
             <Step n={4} title={t("step4.title")} current={stage === "ready" && !blocked}>
@@ -357,7 +369,7 @@ export function ImportView({ slug, templates, columns, limits }: ImportViewProps
                     {t("step4.apply")}
                   </button>
                   <p id="import-apply-note" className="break-words text-sm text-ink-muted">
-                    {blocked ? t("step4.blocked", { n: preview.issueTotal }) : t("step4.note")}
+                    {onlyNoRows ? t("step4.noRows") : blocked ? t("step4.blocked", { n: preview.issueTotal }) : t("step4.note")}
                   </p>
                   {stage === "applying" ? (
                     <div aria-live="polite" role="status" className="flex min-w-0 flex-col gap-1">
@@ -373,14 +385,16 @@ export function ImportView({ slug, templates, columns, limits }: ImportViewProps
               <Step n={5} title={t("step5.title")} current>
                 <div ref={resultRef} data-testid="import-result" className="flex scroll-mt-2 min-w-0 flex-col gap-2">
                   <Banner kind={incomplete ? "error" : "success"}>
-                    <p>{incomplete ? t("result.partial") : resultSummary(t, preview.kind, count)}</p>
+                    <p>{incomplete ? t("result.partial", { n: addedCount }) : resultSummary(t, preview.kind, count)}</p>
                     {incomplete ? <p className="mt-1">{t(isStock ? "result.retryStock" : "result.retryProducts")}</p> : null}
                   </Banner>
                   <ul className="m-0 flex min-w-0 list-none flex-col gap-1 p-0" data-testid="import-counts">
-                    <li className="flex items-start gap-2 text-base font-semibold text-success-ink">
-                      <CircleCheck aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-success" />
-                      <span className="min-w-0">{t("result.stat.done", { n: doneCount })}</span>
-                    </li>
+                    {existingCount > 0 ? (
+                      <li className="flex items-start gap-2 text-base font-semibold text-info-ink">
+                        <Info aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-info" />
+                        <span className="min-w-0">{t("result.stat.existing", { n: existingCount })}</span>
+                      </li>
+                    ) : null}
                     {incomplete || failedCount > 0 ? (
                       <li className="flex items-start gap-2 text-base font-semibold text-danger-ink">
                         <CircleAlert aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-danger" />
@@ -403,15 +417,21 @@ export function ImportView({ slug, templates, columns, limits }: ImportViewProps
                     </p>
                   )}
                   {failedRows.length === 0 ? null : (
-                    <ul className="m-0 flex min-w-0 list-none flex-col gap-1 p-0">
-                      {failedRows.slice(0, 20).map((r) => (
+                    <ul className="m-0 flex min-w-0 list-none flex-col gap-1 p-0" data-testid="import-failed-rows">
+                      {failedRows.slice(0, FAILED_SHOWN).map((r) => (
                         <li key={r.row} className="flex min-w-0 items-start gap-2 break-words text-base text-ink">
                           <TriangleAlert aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-warning" />
                           <span className="min-w-0">
-                            {t("result.failedRow", { row: r.row, code: r.code })} {te(errorKey(r.errorCode ?? "unknown"))} {te(`${errorKey(r.errorCode ?? "unknown")}Action`)}
+                            {t("result.failedRow", { row: r.row, code: r.code })}{" "}
+                            {r.reason !== undefined ? t(`result.reason.${r.reason}`) : rowErrorText(te, t, r.errorCode ?? "unknown")}
                           </span>
                         </li>
                       ))}
+                      {failedRows.length > FAILED_SHOWN ? (
+                        <li className="text-base font-semibold text-ink-muted" data-testid="import-failed-more">
+                          {t("result.moreFailed", { n: failedRows.length - FAILED_SHOWN })}
+                        </li>
+                      ) : null}
                     </ul>
                   )}
                   {!incomplete && preview.kind === "PRODUCTS" ? <p className="text-base text-ink-muted">{t("result.nextStock")}</p> : null}
@@ -438,17 +458,22 @@ export function ImportView({ slug, templates, columns, limits }: ImportViewProps
 
 type Translate = ReturnType<typeof useTranslations>;
 
-/** Başarılı sonuç özeti: yalnız sıfırdan büyük sayılar yazılır ("0 ürün güncellendi" gösterilmez). */
+/** Satır hatası metni: yetki/oturum/hız gibi kullanıcının bildiği nedenler sunucu hata sözlüğünden, diğerleri tek sade cümle (satır başına uzun metin yok). */
+function rowErrorText(te: Translate, t: Translate, code: string): string {
+  const k = errorKey(code);
+  return ["forbidden", "unauthenticated", "rate_limited", "tenant_suspended", "tenant_closing"].includes(k) ? `${te(k)} ${te(`${k}Action`)}` : t("result.failedGeneric");
+}
+
+/** Başarılı sonuç özeti: yalnız sıfırdan büyük sayılar yazılır; "zaten vardı" sayısı ayrı satırda (ikon + renk) gösterilir, burada tekrarlanmaz. */
 function resultSummary(t: Translate, kind: "PRODUCTS" | "STOCK", count: (s: string) => number): string {
   const parts = [t("result.okLead")];
   if (kind === "STOCK") {
     if (count("APPLIED") > 0) parts.push(t("result.stockApplied", { n: count("APPLIED") }));
-    if (count("REPLAYED") > 0) parts.push(t("result.stockSkipped", { n: count("REPLAYED") }));
   } else {
     if (count("CREATED") > 0) parts.push(t("result.created", { n: count("CREATED") }));
     if (count("UPDATED") > 0) parts.push(t("result.updated", { n: count("UPDATED") }));
-    if (count("UNCHANGED") > 0) parts.push(t("result.unchanged", { n: count("UNCHANGED") }));
   }
+  if (parts.length === 1) parts.push(t("result.none"));
   return parts.join(" ");
 }
 

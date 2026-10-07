@@ -1248,7 +1248,7 @@
       "products": "Ürünler şablonu",
       "stock": "Açılış stoku şablonu",
       "columnsProducts": "Ürünler: {cols}. Zorunlu: kod ve ad. Koli içi adet: bir kolide kaç adet var (12 gibi).",
-      "columnsStock": "Açılış stoku: {cols}. Raf kodu, depo ekranındakiyle aynı olmalı."
+      "columnsStock": "Açılış stoku: {cols}. Miktar adet cinsindendir. Raf kodu, depo ekranındakiyle aynı olmalı."
     },
     "step2": {
       "title": "Dosyayı seç",
@@ -1284,13 +1284,13 @@
     "clean": "Hata yok. İçe aktarabilirsin.",
     "issues": {
       "all": "Hataların hepsi ({total}):",
-      "truncated": "{shown} hata gösteriliyor, toplam {total} hata var. Bunları düzeltince kalanlar görünür.",
+      "truncated": "İlk {shown} hata gösteriliyor, toplam {total} hata var. Bunları düzeltince kalanlar görünür.",
       "file": "Dosya",
       "row": "Satır {row}",
       "fixPrefix": "Nasıl düzeltilir:",
       "more": "Tümünü göster ({n} satır)",
       "less": "Daha az göster",
-      "pickFixed": "Düzeltilmiş dosyayı seç"
+      "pickFixed": "Yeni dosya seç"
     },
     "step4": {
       "title": "İçe aktar",
@@ -1299,13 +1299,14 @@
       "blocked": "Önce {n} hatayı düzelt. Hata varken içe aktarılamaz.",
       "progress": "{done} / {total} satır",
       "done": "Tamamlandı",
-      "partial": "Yarım kaldı"
+      "partial": "Yarım kaldı",
+      "noRows": "Önce şablona en az bir satır ekle."
     },
     "step5": {
       "title": "Sonuç"
     },
     "result": {
-      "partial": "İşlem yarım kaldı.",
+      "partial": "İşlem yarım kaldı. {n} satır eklendi.",
       "failedRow": "Satır {row} ({code}):",
       "nextStock": "Şimdi açılış stoku dosyasını yükleyebilirsin.",
       "again": "Dosyayı yeniden seç",
@@ -1314,17 +1315,22 @@
       "okLead": "Tamam.",
       "created": "{n} ürün eklendi.",
       "updated": "{n} ürünün koli ya da barkod bilgisi tamamlandı.",
-      "unchanged": "{n} ürün zaten vardı.",
       "stockApplied": "{n} stok satırı eklendi.",
-      "stockSkipped": "{n} satır daha önce işlenmişti, atlandı.",
       "retryProducts": "Sorunu giderip aynı dosyayı tekrar yükle. Tamamlanan ürünler ikinci kez eklenmez, kalanlar tamamlanır.",
       "retryStock": "Tamamlanan satırların miktarını değiştirme. Yalnız hatalı satırı düzeltip dosyayı tekrar yükle; tamamlanan satırlar “daha önce işlenmiş” diye atlanır, kalanlar yazılır.",
       "stat": {
-        "done": "{n} satır tamam",
         "failed": "{n} satır hatalı",
-        "skipped": "{n} satır denenmedi"
+        "skipped": "{n} satır denenmedi",
+        "existing": "{n} satır zaten vardı"
       },
-      "toStock": "Ürünlerde stoğu gör"
+      "toStock": "Ürünlerde stoğu gör",
+      "none": "Yeni kayıt yok.",
+      "moreFailed": "ve {n} satır daha hatalı.",
+      "reason": {
+        "PAIR_HAS_STOCK": "Bu ürün bu rafta başka bir işlemle stoğa girdi. Açılış stoku yalnız boş raflar içindir; düzeltme için stok belgesi kullan.",
+        "PAIR_PENDING": "Bu ürün ve raf için tamamlanmamış bir açılış belgesi var. Aynı dosyayı yeniden yükleyerek sürdür."
+      },
+      "failedGeneric": "Kaydedilemedi. Biraz sonra aynı dosyayı yeniden yükle."
     },
     "column": {
       "code": "Kod",
@@ -1526,7 +1532,12 @@
       "TOO_MANY_COLUMNS": {
         "reason": "Satırda çok fazla sütun var.",
         "fix": "En çok {max} sütun olabilir. Fazla sütunları sil."
+      },
+      "PAIR_PENDING": {
+        "reason": "{code} ürünü {shelf} rafı için tamamlanmamış bir açılış belgesi var (başka miktarla).",
+        "fix": "Yarım kalan işlemi sürdürmek için önceki dosyayla AYNI miktarı yaz ya da satırı sil."
       }
-    }
+    },
+    "noRows": "Dosyada henüz veri satırı yok. Şablona en az bir satır ekle, sonra dosyayı yeniden seç."
   }
 }

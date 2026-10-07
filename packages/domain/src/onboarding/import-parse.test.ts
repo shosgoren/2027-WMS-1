@@ -245,27 +245,28 @@ describe("classify sınırları", () => {
 });
 
 describe("hücre/sütun sınırları ve doğrusal çalışma (ReDoS, B-1)", () => {
-  /** Süre assert edilir (gevşetilmez): en kötü girdilerde 512 KiB'lik dosya bile < 200 ms. */
+  /** Süre VE sonuç assert edilir. Girdiler `IMPORT_MAX_BYTES` (384 KiB) ALTINDADIR: aksi halde dosya ayrıştırılmadan FILE_TOO_LARGE ile reddedilir ve test boş kalırdı. */
   const timed = <T,>(fn: () => T): { out: T; ms: number } => {
     const t0 = performance.now();
     const out = fn();
     return { out, ms: performance.now() - t0 };
   };
-  const SIZE = 512 * 1024;
-  const cases: Array<[string, () => string]> = [
-    ["kapanmayan parantez başlığı", () => `${"(".repeat(SIZE - 10)}\nA;B`],
-    ["kapanmayan parantez + kapanışlar", () => `kod;${"( ".repeat(SIZE / 4)}\nA;B`],
-    ["tırnaklı çöp (çift tırnak kaçışları)", () => `kod;ad\n"${'""'.repeat(SIZE / 4)}";x`],
-    ["tırnak karışık uzun alan", () => `kod;ad\n${'a"'.repeat(SIZE / 4)};x`],
-    ["tek satırda yüz binlerce sütun", () => `kod${";x".repeat(SIZE / 2 - 4)}`],
-    ["yüz binlerce boş satır", () => `kod;ad${"\n".repeat(SIZE - 10)}`],
-    ["boşluk dolu alan + tırnak", () => `kod;ad\n${" ".repeat(SIZE / 2)}"${'x'.repeat(10)}`],
+  const SIZE = IMPORT_MAX_BYTES - 16;
+  const cases: Array<[string, () => string, string]> = [
+    ["kapanmayan parantez başlığı", () => `${"(".repeat(SIZE - 10)}\nA;B`, "CELL_TOO_LONG"],
+    ["kapanmayan parantez + kapanışlar", () => `kod;${"( ".repeat(SIZE / 4)}\nA;B`, "CELL_TOO_LONG"],
+    ["tırnaklı çöp (çift tırnak kaçışları)", () => `kod;ad\n"${'""'.repeat(SIZE / 4)}";x`, "CELL_TOO_LONG"],
+    ["tırnak karışık uzun alan", () => `kod;ad\n${'a"'.repeat(SIZE / 4)};x`, "CELL_TOO_LONG"],
+    ["tek satırda yüz binlerce sütun", () => `kod${";x".repeat(SIZE / 2 - 4)}`, "TOO_MANY_COLUMNS"],
+    ["yüz binlerce boş satır", () => `kod;ad${"\n".repeat(SIZE - 10)}`, "OK"],
+    ["boşluk dolu alan + tırnak", () => `kod;ad\n${" ".repeat(SIZE / 2)}"${"x".repeat(10)}`, "CSV_UNTERMINATED_QUOTE"],
   ];
-  for (const [name, make] of cases) {
-    it(`${name}: 200 ms altında biter`, () => {
+  for (const [name, make, expected] of cases) {
+    it(`${name}: 200 ms altında biter, sonuç ${expected}`, () => {
       const text = make();
-      expect(text.length).toBeLessThanOrEqual(SIZE);
-      const { ms } = timed(() => classify(text));
+      expect(Buffer.byteLength(text)).toBeLessThan(IMPORT_MAX_BYTES);
+      const { out, ms } = timed(() => classify(text));
+      expect(out.ok ? "OK" : out.issues[0]?.code, name).toBe(expected);
       expect(ms, `${name} ${ms.toFixed(0)} ms`).toBeLessThan(200);
     });
   }
@@ -302,8 +303,8 @@ describe("açılış stoku: stoğu olan (ürün, raf) çifti", () => {
   };
   it("stok varsa hata; aynı miktar önceki içe aktarmadan geliyorsa 'zaten uygulanmış' (hata değil)", () => {
     const pairs = new Map([
-      ["i-A1|l-A-01-w1", { hasStock: true, applied: new Set(["10"]) }],
-      ["i-A2|l-A-01-w1", { hasStock: true, applied: new Set<string>() }],
+      ["i-A1|l-A-01-w1", { hasStock: true, applied: new Set(["10"]), pending: new Set<string>() }],
+      ["i-A2|l-A-01-w1", { hasStock: true, applied: new Set<string>(), pending: new Set<string>() }],
     ]);
     const r = run(["A1;A-01;10", "A1;A-01;12", "A2;A-01;3"], pairs);
     expect(r.issues.map((i) => `${i.row}:${i.code}`)).toEqual(["3:PAIR_DUPLICATE_FILE", "4:PAIR_HAS_STOCK"]);
@@ -312,13 +313,67 @@ describe("açılış stoku: stoğu olan (ürün, raf) çifti", () => {
     const r = run(["A1;A-01;10", "A1;A-01;12"], new Map());
     expect(r.issues.map((i) => i.code)).toEqual(["PAIR_DUPLICATE_FILE"]);
   });
+  it("bitmemiş (pending) belge: aynı miktar sürdürülür, farklı miktar PAIR_PENDING", () => {
+    const pairs = new Map([["i-A1|l-A-01-w1", { hasStock: false, applied: new Set<string>(), pending: new Set(["10"]) }]]);
+    expect(run(["A1;A-01;10"], pairs).issues).toEqual([]);
+    expect(run(["A1;A-01;12"], pairs).issues.map((i) => i.code)).toEqual(["PAIR_PENDING"]);
+  });
   it("uygulanmış satır planda alreadyApplied işaretli; satır sırası sonucu değiştirmez", () => {
-    const pairs = new Map([["i-A1|l-A-01-w1", { hasStock: true, applied: new Set(["10"]) }]]);
+    const pairs = new Map([["i-A1|l-A-01-w1", { hasStock: true, applied: new Set(["10"]), pending: new Set<string>() }]]);
     const a = run(["A1;A-01;10", "A2;A-01;4"], pairs);
     const b = run(["A2;A-01;4", "A1;A-01;10"], pairs);
     expect(a.issues).toEqual([]);
     expect(b.issues).toEqual([]);
     expect(a.plans.filter((p) => p.alreadyApplied).map((p) => p.itemCode)).toEqual(["A1"]);
     expect(b.plans.filter((p) => p.alreadyApplied).map((p) => p.itemCode)).toEqual(["A1"]);
+  });
+});
+
+describe("doğrulayıcılar 384 KiB altında en kötü girdide doğrusal (m-3)", () => {
+  const timed = <T,>(fn: () => T): { out: T; ms: number } => {
+    const t0 = performance.now();
+    const out = fn();
+    return { out, ms: performance.now() - t0 };
+  };
+  const LONG_DECIMALS = `0,${"0".repeat(DATA_CELL_MAX - 3)}1`; // 1000 karakter: 0,000…001
+  const ZEROS = "0".repeat(DATA_CELL_MAX);
+  const DOTTED = `1${".000".repeat(Math.floor((DATA_CELL_MAX - 1) / 4))}`;
+  it("parseTrDecimal: uzun sıfır/ondalık/noktalı girdiler hemen reddedilir", () => {
+    for (const v of [LONG_DECIMALS, ZEROS, DOTTED, `${"1".repeat(500)},${"0".repeat(499)}`, `${" ".repeat(900)}1`]) {
+      const { out, ms } = timed(() => {
+        for (let i = 0; i < 1000; i++) parseTrDecimal(v);
+        return parseTrDecimal(v);
+      });
+      expect(out.ok, `${v.slice(0, 12)}…`).toBe(false);
+      expect(ms, `${v.slice(0, 12)}… 1000 çağrı ${ms.toFixed(1)} ms`).toBeLessThan(200);
+    }
+    expect(parseTrDecimal("0,500000")).toMatchObject({ ok: true, text: "0.5" });
+    expect(parseTrDecimal("000012,5000")).toMatchObject({ ok: true, text: "12.5" });
+    expect(parseTrDecimal("0000")).toMatchObject({ ok: true, text: "0" });
+  });
+  it("validateStock: her hücresi ~1000 karakterlik 300 satır (< 384 KiB) 200 ms altında, sonuç doğru", () => {
+    const text = ["ürün kodu;raf kodu;miktar", ...Array.from({ length: 300 }, () => `A1;A-01;${LONG_DECIMALS}`)].join("\n");
+    expect(Buffer.byteLength(text)).toBeLessThan(IMPORT_MAX_BYTES);
+    const { out, ms } = timed(() => {
+      const c = classify(text);
+      if (!c.ok) throw new Error(c.issues[0]?.code);
+      return validateStock(c.records, stockCtx());
+    });
+    expect(out.issues).toHaveLength(300);
+    expect(new Set(out.issues.map((i) => i.code))).toEqual(new Set(["QTY_TOO_LARGE"]));
+    expect(ms, `${ms.toFixed(1)} ms`).toBeLessThan(200);
+  });
+  it("validateProducts: 1000 karakterlik koli adedi ve barkod hücreleri (180 satır) 200 ms altında, sonuç doğru", () => {
+    const text = [PH, ...Array.from({ length: 180 }, (_, i) => `K${i};Ad;ADET;${LONG_DECIMALS};${"9".repeat(DATA_CELL_MAX)};`)].join("\n");
+    expect(Buffer.byteLength(text)).toBeLessThan(IMPORT_MAX_BYTES);
+    const { out, ms } = timed(() => {
+      const c = classify(text);
+      if (!c.ok) throw new Error(c.issues[0]?.code);
+      return validateProducts(c.records, productCtx());
+    });
+    const codes = new Set(out.issues.map((i) => i.code));
+    expect(codes).toEqual(new Set(["PACK_QTY_INVALID", "BARCODE_INVALID"]));
+    expect(out.issues).toHaveLength(360);
+    expect(ms, `${ms.toFixed(1)} ms`).toBeLessThan(200);
   });
 });

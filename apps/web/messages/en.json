@@ -1248,7 +1248,7 @@
       "products": "Products template",
       "stock": "Opening stock template",
       "columnsProducts": "Products: {cols}. Required: kod and ad. Koli içi adet: how many pieces are in one carton (like 12).",
-      "columnsStock": "Opening stock: {cols}. The shelf code must match the warehouse screen."
+      "columnsStock": "Opening stock: {cols}. Quantity is in pieces. The shelf code must match the warehouse screen."
     },
     "step2": {
       "title": "Choose the file",
@@ -1284,13 +1284,13 @@
     "clean": "No errors. You can import.",
     "issues": {
       "all": "All errors ({total}):",
-      "truncated": "Showing {shown} errors of {total}. Fix these and the rest will appear.",
+      "truncated": "Showing the first {shown} errors of {total}. Fix these and the rest will appear.",
       "file": "File",
       "row": "Row {row}",
       "fixPrefix": "How to fix:",
       "more": "Show all ({n} rows)",
       "less": "Show less",
-      "pickFixed": "Choose the fixed file"
+      "pickFixed": "Choose new file"
     },
     "step4": {
       "title": "Import",
@@ -1299,13 +1299,14 @@
       "blocked": "Fix the {n} errors first. Nothing can be imported while there are errors.",
       "progress": "{done} / {total} rows",
       "done": "Finished",
-      "partial": "Stopped halfway"
+      "partial": "Stopped halfway",
+      "noRows": "First add at least one row to the template."
     },
     "step5": {
       "title": "Result"
     },
     "result": {
-      "partial": "The import stopped halfway.",
+      "partial": "The import stopped halfway. {n} rows were added.",
       "failedRow": "Row {row} ({code}):",
       "nextStock": "Now you can upload the opening stock file.",
       "again": "Choose the file again",
@@ -1314,17 +1315,22 @@
       "okLead": "Done.",
       "created": "{n} products added.",
       "updated": "Carton or barcode details completed for {n} products.",
-      "unchanged": "{n} products already existed.",
       "stockApplied": "{n} stock lines added.",
-      "stockSkipped": "{n} lines were processed before and skipped.",
       "retryProducts": "Fix the problem and upload the same file again. Finished products are not added twice; the rest are completed.",
       "retryStock": "Do not change the quantities of finished lines. Fix only the failed line and upload the file again; finished lines are skipped as “processed before” and the rest are written.",
       "stat": {
-        "done": "{n} rows done",
         "failed": "{n} rows failed",
-        "skipped": "{n} rows not tried"
+        "skipped": "{n} rows not tried",
+        "existing": "{n} rows already existed"
       },
-      "toStock": "See stock in products"
+      "toStock": "See stock in products",
+      "none": "No new records.",
+      "moreFailed": "and {n} more failed rows.",
+      "reason": {
+        "PAIR_HAS_STOCK": "This product got stock on this shelf from another action. Opening stock is only for empty shelves; use a stock document to correct it.",
+        "PAIR_PENDING": "There is an unfinished opening document for this product and shelf. Upload the same file again to continue it."
+      },
+      "failedGeneric": "Could not be saved. Upload the same file again in a moment."
     },
     "column": {
       "code": "Code",
@@ -1526,7 +1532,12 @@
       "TOO_MANY_COLUMNS": {
         "reason": "The row has too many columns.",
         "fix": "At most {max} columns are allowed. Delete the extra columns."
+      },
+      "PAIR_PENDING": {
+        "reason": "Product {code} has an unfinished opening document for shelf {shelf} (with another quantity).",
+        "fix": "To continue the unfinished import write the SAME quantity as the earlier file, or delete the row."
       }
-    }
+    },
+    "noRows": "The file has no data rows yet. Add at least one row to the template, then choose the file again."
   }
 }

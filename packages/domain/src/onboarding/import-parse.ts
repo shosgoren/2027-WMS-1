@@ -29,7 +29,7 @@ export const STOCK_HEADERS = ["ürün kodu", "raf kodu", "miktar"] as const;
 /** İndirilebilir şablon (BOM + başlık; örnek satır YOK: unutulan örnek satır içe aktarılırdı). `;` Türkçe Excel'in varsayılan ayırıcısıdır. */
 export function templateCsv(kind: ImportKind): string {
   const headers = kind === "PRODUCTS" ? PRODUCT_HEADERS : STOCK_HEADERS;
-  return `﻿${headers.map((h) => (kind === "STOCK" && h === "miktar" ? "miktar (adet)" : h)).join(";")}\r\n`;
+  return `﻿${headers.join(";")}\r\n`;
 }
 
 // --- sorunlar ---------------------------------------------------------------------------------------------------------
@@ -80,6 +80,7 @@ export type IssueCode =
   | "QTY_TOO_LARGE"
   | "PAIR_DUPLICATE_FILE"
   | "PAIR_HAS_STOCK"
+  | "PAIR_PENDING"
   | "CELL_TOO_LONG"
   | "TOO_MANY_COLUMNS";
 
@@ -131,6 +132,7 @@ function detectDelimiter(text: string): ";" | "," {
   return comma > semi ? "," : ";";
 }
 
+const BLANK_RECORD: string[] = Object.freeze([""]) as unknown as string[];
 const isBlankChar = (c: string): boolean => c === " " || c === "\t" || c === "\u00a0" || c === "\ufeff";
 
 /**
@@ -193,8 +195,12 @@ export function parseCsv(input: string): CsvResult {
     } else if (c === delimiter) endField();
     else if (c === "\n" || c === "\r") {
       if (c === "\r" && text[i + 1] === "\n") i++;
-      endField();
-      endRecord();
+      if (row.length === 0 && fieldLen === 0 && !fieldWasQuoted && rowFlag === null) {
+        records.push(BLANK_RECORD); // tamamen boş kayıt: paylaşılan değişmez dizi (yüz binlerce boş satırda ayrı dizi üretilmez)
+      } else {
+        endField();
+        endRecord();
+      }
       atRecordStart = true;
     } else {
       if (blank && !isBlankChar(c)) blank = false;
@@ -291,6 +297,9 @@ function mapColumns<K extends string>(header: readonly string[], aliases: Readon
   return map;
 }
 
+/** Geçerli sayı metninin üst uzunluğu (boşluklar dahil); aşan metin ayrıştırılmadan `TOO_LARGE` döner. */
+const MAX_NUMBER_TEXT = 64;
+
 // --- Türkçe ondalık ---------------------------------------------------------------------------------------------------
 
 export type DecimalResult =
@@ -302,6 +311,8 @@ export type DecimalResult =
  * Üstel gösterim (`1E+03`), işaret, boşluk içi rakam, `1,250.5` (İngilizce biçim) `INVALID`. En çok 14 tam + 6 ondalık hane (numeric(20,6)).
  */
 export function parseTrDecimal(raw: string): DecimalResult {
+  // Uzunluk denetimi EN BAŞTA (doğrusal iş): geçerli bir sayı en çok 14 + 6 hane + ayraçlar + boşluklardır; daha uzun metin işlenmeden reddedilir.
+  if (raw.length > MAX_NUMBER_TEXT) return { ok: false, reason: "TOO_LARGE" };
   const v = raw.replace(/[\s  ]/g, "");
   if (v === "") return { ok: false, reason: "EMPTY" };
   if (v.startsWith("-")) return { ok: false, reason: "NEGATIVE" };
@@ -333,8 +344,13 @@ export function parseTrDecimal(raw: string): DecimalResult {
     if (!/^\d+$/.test(v)) return { ok: false, reason: "INVALID" };
     int = v;
   }
-  int = int.replace(/^0+(?=\d)/, "");
-  frac = frac.replace(/0+$/, "");
+  // Baştaki sıfırlar ve ondalıktaki sondaki sıfırlar tek geçişli döngüyle atılır (regex `0+$` uzun sıfır dizisinde karesel çalışırdı).
+  let lead = 0;
+  while (lead < int.length - 1 && int[lead] === "0") lead++;
+  int = int.slice(lead);
+  let end = frac.length;
+  while (end > 0 && frac[end - 1] === "0") end--;
+  frac = frac.slice(0, end);
   if (int.length > 14 || frac.length > 6) return { ok: false, reason: "TOO_LARGE" };
   return { ok: true, int, frac, text: frac === "" ? int : `${int}.${frac}` };
 }
@@ -381,6 +397,8 @@ export interface ProductContext {
 export interface PairState {
   readonly hasStock: boolean;
   readonly applied: ReadonlySet<string>;
+  /** Aynı çifte yazılmak üzere olan, BİTMEMİŞ (DRAFT/APPROVED/PROCESSING) içe aktarma belgelerinin miktarları. */
+  readonly pending: ReadonlySet<string>;
 }
 export interface StockContext {
   /** Anahtar `${itemId}|${locationId}`; verilmezse çiftlerde stok yok sayılır (yalnız saf birim testleri). */
@@ -414,8 +432,6 @@ export interface PreviewResult<P> {
   readonly issues: readonly ImportIssue[];
   /** Başlık sonrası dosyadaki dolu satır sayısı. */
   readonly rowCount: number;
-  /** Yalnız açılış stoku: tek tek geçerli satırlar (başka satırlarda hata olsa da); çift durumu sorgusu için. */
-  readonly candidates?: readonly P[];
   /** Dosyadaki farklı ürün kodu sayısı (hatalı satırlar dahil; yalnız özet için). */
   readonly distinctItems: number;
 }
@@ -561,6 +577,19 @@ export interface StockPlan {
   readonly alreadyApplied: boolean;
 }
 
+/** Dosyadaki ürün kodları (başlık eşlemesiyle; doğrulamadan önce çift durumunu tek sorguyla okumak için). */
+export function stockItemCodes(records: Records): string[] {
+  const cols = mapColumns(records[0] ?? [], STOCK_ALIASES, STOCK_HEADERS, []);
+  const i = cols.get("ürün kodu");
+  if (i === undefined) return [];
+  const out = new Set<string>();
+  for (const r of records.slice(1)) {
+    const v = r[i] ?? "";
+    if (v !== "") out.add(v);
+  }
+  return [...out];
+}
+
 export function validateStock(records: Records, ctx: StockContext): PreviewResult<StockPlan> {
   const issues: ImportIssue[] = [];
   const header = records[0] ?? [];
@@ -632,13 +661,16 @@ export function validateStock(records: Records, ctx: StockContext): PreviewResul
       if (st !== undefined && st.hasStock) {
         if (st.applied.has(quantity)) alreadyApplied = true;
         else issues.push(issue(row, "raf kodu", "PAIR_HAS_STOCK", { code: clip(itemCode), shelf: clip(shelfCode) }));
+      } else if (st !== undefined && st.pending.size > 0 && !st.pending.has(quantity)) {
+        // Bitmemiş açılış belgesi var ve miktarı farklı: çift "dolu" sayılır (yarım kalan işlemi sürdürmek için AYNI miktar gerekir).
+        issues.push(issue(row, "raf kodu", "PAIR_PENDING", { code: clip(itemCode), shelf: clip(shelfCode) }));
       }
     }
     if (issues.length === before && item !== undefined && shelf !== undefined && quantity !== null) {
       plans.push({ row, itemCode, itemId: item.id, shelfCode, locationId: shelf.id, warehouseId: shelf.warehouseId, quantity, alreadyApplied });
     }
   });
-  return { kind: "STOCK", plans: issues.length === 0 ? plans : [], candidates: plans, issues, rowCount, distinctItems: distinctCodes.size };
+  return { kind: "STOCK", plans: issues.length === 0 ? plans : [], issues, rowCount, distinctItems: distinctCodes.size };
 }
 
 /** Başlık satırından dosya türü; ayrıştırma hatası ya da bilinmeyen biçim `issue` ile döner. */

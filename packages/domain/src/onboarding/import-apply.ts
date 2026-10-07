@@ -1,15 +1,18 @@
 // Açılış verisi içe aktarma: önizleme ve parça parça uygulama (T-289). Yalnız MEVCUT domain komutları çağrılır (G-01):
 // `createUnit` (koli birimi), `createItem`, `setUnitConversion`, `addBarcode` (T-208) ve açılış stoku için
 // `createStockDocument` → `approveDocument` → `postDocument` (`STOCK_IN`, A-79; bakiyeye doğrudan yazılmaz).
-// Bu dosya stok kilidi almaz/`FOR UPDATE` yazmaz; kilitler stok komutlarının içindedir (`acquireStockLocks`).
+// Stok kilitleri stok komutlarının içindedir (`acquireStockLocks`); bu dosya `FOR UPDATE` yazmaz. Tek ek kilit: açılış stoku yazan her (tenant, depo)
+// için bir `pg_try_advisory_xact_lock` (aşağıda `withPairLock`): çiftin hâlâ boş olduğu kilit ALTINDA yeniden denetlenir, sonra komutlar çalışır (eşzamanlı iki
+// içe aktarma aynı çifte çift STOCK_IN yazamaz).
 //
 // - Önizleme (`previewImport`) hiçbir şey yazmaz; tüm sorunlar tek seferde döner. Uygulama (`applyImportChunk`) aynı dosyayı SUNUCUDA yeniden
 //   ayrıştırır (istemciye güvenilmez); sorun varsa HİÇBİR şey yazılmaz (`VALIDATION_FAILED`).
 // - Parça: bir çağrı `IMPORT_CHUNK_SIZE` (200) satırı işler; istemci parçaları sırayla çağırır. Her parça kendi komutlarında kalıcıdır; ilk
 //   başarısız satırda DURULUR ve hangi satırların uygulandığı / denenmediği açıkça raporlanır (sahte başarı yok, G-07). Aynı dosyayı yeniden
 //   yüklemek kalan parçaları tamamlar.
-// - İdempotans: ürünler kodla (`CODE_TAKEN`/mevcut kayıt = zaten var, ek audit yok); stok belgeleri dosya özeti + parça + depo + adımdan türeyen
-//   istemci anahtarlarıyla (A-73): aynı dosya ikinci kez yüklenirse komutlar önceki sonucu döndürür, ek defter satırı oluşmaz.
+// - İdempotans: ürünler kodla (`CODE_TAKEN`/mevcut kayıt = zaten var, ek audit yok). Açılış stoku yalnız stoğu OLMAYAN (ürün, raf) çifti için yazılır;
+//   aynı (ürün, raf, miktar) önceki içe aktarma belgesinden geliyorsa satır "zaten uygulanmış" sayılır ve atlanır. Belge istemci anahtarları satır
+//   İÇERİĞİNDEN türer (depo + sıralı ürün/raf/miktar özeti + adım; A-73): yarım kalan belge aynı içerikle sürdürülür, sıra değişimi çift yazmaz.
 // - Dosya içeriği diske/loga yazılmaz; yalnız bellek (G-09). Audit: her komut kendi audit'ini yazar; `requestId` hepsini bağlar.
 import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
@@ -17,7 +20,7 @@ import { AppError } from "@wms/shared/errors";
 import { addBarcode } from "../catalog/barcodes.ts";
 import { createItem } from "../catalog/items.ts";
 import { createUnit, setUnitConversion } from "../catalog/units.ts";
-import { runTenantQuery, type AccessTx, type TenantAccessParams } from "../identity/access.ts";
+import { runTenantCommand, runTenantQuery, type AccessTx, type TenantAccessParams } from "../identity/access.ts";
 import { resolveWarehouseScope } from "../warehouse/scope.ts";
 import { approveDocument, createStockDocument, postDocument, type DocumentLineInput } from "../stock/index.ts";
 import {
@@ -33,6 +36,7 @@ import {
   type ImportKind,
   type ItemInfoCtx,
   type PairState,
+  stockItemCodes,
   type PreviewResult,
   type ProductContext,
   type ProductPlan,
@@ -44,8 +48,8 @@ import {
 
 export type ImportCallParams = Omit<TenantAccessParams, "permission" | "recentAuth"> & { readonly requestId?: string };
 
-/** Önizlemede dönen en çok sorun sayısı (toplam ayrıca verilir; UI ilk 50'yi gösterir). */
-export const PREVIEW_ISSUE_LIMIT = 100;
+/** Önizlemede dönen en çok sorun sayısı: ilk 50 (toplam `issueTotal` ayrıca verilir; UI "İlk 50 hata gösteriliyor" yazar). */
+export const PREVIEW_ISSUE_LIMIT = 50;
 export const STOCK_REASON = "import.opening_stock";
 
 export interface ImportPreview {
@@ -123,7 +127,7 @@ async function loadProductContext(params: ImportCallParams): Promise<ProductCont
 async function loadStockContext(params: ImportCallParams): Promise<{ readonly ctx: StockContext; readonly tenantHasStock: boolean }> {
   return runTenantQuery({ ...params, permission: "stock.view" }, async (tx, m) => {
     const items = await loadItems(tx, m.tenantId);
-    // Depo kapsamı (T-2xx): kapsam dışı depoların rafları "bilinmeyen raf" gibi görünür (varlık sızmaz) ve stok yazılamaz.
+    // Depo kapsamı (`resolveWarehouseScope`): kapsam dışı depoların rafları "bilinmeyen raf" gibi görünür (varlık sızmaz) ve stok yazılamaz.
     const scope = await resolveWarehouseScope(tx, m);
     const allowed = scope === null ? null : new Set(scope);
     const rows = await tx.execute<{ id: string; warehouse_id: string; wcode: string; code: string; kind: string; status: "ACTIVE" | "ARCHIVED"; wstatus: string }>(
@@ -141,7 +145,16 @@ async function loadStockContext(params: ImportCallParams): Promise<{ readonly ct
         { id: r.id, warehouseId: r.warehouse_id, warehouseCode: r.wcode, code: r.code, kind: r.kind, status: r.wstatus === "ACTIVE" ? r.status : "ARCHIVED" },
       ]);
     }
-    const any = await tx.execute<{ x: number }>(sql`SELECT 1 AS x FROM public.stock_balances WHERE tenant_id = ${m.tenantId}::uuid AND quantity > 0 LIMIT 1`);
+    // Genel uyarı için "stok var mı": yalnız çağıranın depo kapsamındaki bakiyeler (kapsam dışı stokun varlığı sızmaz).
+    const scopeList = scope === null ? null : sql.join(scope.map((id) => sql`${id}::uuid`), sql`, `);
+    const any = await tx.execute<{ x: number }>(
+      scope !== null && scope.length === 0
+        ? sql`SELECT 1 AS x WHERE false`
+        : sql`SELECT 1 AS x FROM public.stock_balances b
+                JOIN public.stock_dimensions d ON d.tenant_id = b.tenant_id AND d.id = b.stock_dimension_id
+                JOIN public.locations l ON l.tenant_id = d.tenant_id AND l.id = d.location_id
+               WHERE b.tenant_id = ${m.tenantId}::uuid AND b.quantity > 0 ${scopeList === null ? sql`` : sql`AND l.warehouse_id IN (${scopeList})`} LIMIT 1`,
+    );
     return { ctx: { items, shelves }, tenantHasStock: any[0] !== undefined };
   });
 }
@@ -207,10 +220,12 @@ async function evaluate(params: ImportCallParams, text: string): Promise<Evaluat
     return { kind: c.kind, result: validateProducts(c.records, productCtx), productCtx, tenantHasStock: false };
   }
   const { ctx, tenantHasStock } = await loadStockContext(params);
-  // İki geçiş: önce satırlar tek tek doğrulanır, sonra geçerli satırların (ürün, raf) çiftlerinin stok durumu okunur ve çift kuralı uygulanır.
-  const first = validateStock(c.records, ctx);
-  const candidates = first.candidates ?? [];
-  const pairs = await loadPairStates(params, candidates);
+  // Tek doğrulama geçişi: çiftlerin stok durumu dosyadaki ürün kodlarından önceden okunur (satır başına sorgu yok).
+  const itemIds = stockItemCodes(c.records).flatMap((code) => {
+    const it = ctx.items.get(code);
+    return it === undefined ? [] : [it.id];
+  });
+  const pairs = await loadPairStates(params, itemIds);
   const withPairs: StockContext = { ...ctx, pairs };
   return { kind: c.kind, result: validateStock(c.records, withPairs), stockCtx: withPairs, tenantHasStock };
 }
@@ -221,9 +236,9 @@ const dec = (v: string): string => (v.includes(".") ? v.replace(/0+$/, "").repla
  * (ürün, raf) çiftlerinin durumu: defterde herhangi bir hareket (`hasStock`) ve bu çifte önceki içe aktarmayla (POSTED `import.opening_stock` STOCK_IN)
  * yazılmış miktarlar (`applied`). Yalnız dosyadaki ürünler sorgulanır.
  */
-async function loadPairStates(params: ImportCallParams, candidates: readonly StockPlan[]): Promise<ReadonlyMap<string, PairState>> {
-  const out = new Map<string, { hasStock: boolean; applied: Set<string> }>();
-  const itemIds = [...new Set(candidates.map((c) => c.itemId))];
+async function loadPairStates(params: ImportCallParams, itemIdsIn: readonly string[]): Promise<ReadonlyMap<string, PairState>> {
+  const out = new Map<string, { hasStock: boolean; applied: Set<string>; pending: Set<string> }>();
+  const itemIds = [...new Set(itemIdsIn)];
   if (itemIds.length === 0) return out;
   const list = sql.join(itemIds.map((id) => sql`${id}::uuid`), sql`, `);
   await runTenantQuery({ ...params, permission: "stock.view" }, async (tx, m) => {
@@ -233,15 +248,22 @@ async function loadPairStates(params: ImportCallParams, candidates: readonly Sto
              AND (EXISTS (SELECT 1 FROM public.stock_ledger l WHERE l.tenant_id = d.tenant_id AND l.stock_dimension_id = d.id)
                   OR EXISTS (SELECT 1 FROM public.stock_balances b WHERE b.tenant_id = d.tenant_id AND b.stock_dimension_id = d.id AND b.quantity > 0))`,
     );
-    for (const r of moved) out.set(`${r.item_id}|${r.location_id}`, { hasStock: true, applied: new Set() });
-    const lines = await tx.execute<{ item_id: string; location_id: string; q: string }>(
-      sql`SELECT dl.item_id, dl.target_location_id AS location_id, dl.base_quantity::text AS q
+    for (const r of moved) out.set(`${r.item_id}|${r.location_id}`, { hasStock: true, applied: new Set(), pending: new Set() });
+    // İçe aktarma belgelerinin satırları: POSTED = uygulanmış; DRAFT/APPROVED/PROCESSING = bitmemiş (çifti "dolu" sayar, m-1: eski taslak iptal EDİLMEZ,
+    // çünkü iptal kullanıcının sürdürebileceği işi siler ve işleyen bir worker ile yarışabilir; aynı miktar sürdürülür, farklı miktar hata).
+    const lines = await tx.execute<{ item_id: string; location_id: string; q: string; st: string }>(
+      sql`SELECT dl.item_id, dl.target_location_id AS location_id, dl.base_quantity::text AS q, d.status AS st
             FROM public.document_lines dl
             JOIN public.documents d ON d.tenant_id = dl.tenant_id AND d.id = dl.document_id
-           WHERE dl.tenant_id = ${m.tenantId}::uuid AND d.kind = 'STOCK_IN' AND d.reason = ${STOCK_REASON} AND d.status = 'POSTED'
+           WHERE dl.tenant_id = ${m.tenantId}::uuid AND d.kind = 'STOCK_IN' AND d.reason = ${STOCK_REASON} AND d.status IN ('DRAFT', 'APPROVED', 'PROCESSING', 'POSTED')
              AND dl.item_id IN (${list}) AND dl.target_location_id IS NOT NULL`,
     );
-    for (const r of lines) out.get(`${r.item_id}|${r.location_id}`)?.applied.add(dec(r.q));
+    for (const r of lines) {
+      const key = `${r.item_id}|${r.location_id}`;
+      const cur = out.get(key) ?? { hasStock: false, applied: new Set<string>(), pending: new Set<string>() };
+      (r.st === "POSTED" ? cur.applied : cur.pending).add(dec(r.q));
+      out.set(key, cur);
+    }
   });
   return out;
 }
@@ -303,6 +325,8 @@ export interface RowReport {
   /** Yalnız `FAILED`: hata kodu (`ERROR_CODES`) ve varsa ayrıntı. */
   readonly errorCode?: string;
   readonly errorDetail?: string;
+  /** Yalnız `FAILED`: kilit altında yeniden denetimde çift dolu/bekleyen çıktı (sade metin için; hata kodu değildir). */
+  readonly reason?: "PAIR_HAS_STOCK" | "PAIR_PENDING";
 }
 
 export interface ChunkReport {
@@ -427,11 +451,33 @@ async function applyProducts(params: ImportCallParams, plans: readonly ProductPl
   return rows;
 }
 
+/**
+ * (tenant, depo) başına tek içe aktarma: `pg_try_advisory_xact_lock` ayrı bir transaction'da (`runTenantCommand`) tutulur ve `fn` bu transaction AÇIKKEN
+ * çalışır. `fn` içindeki stok komutları kendi bağlantı/transaction'larında çalışır ve commit eder (G-01: stok yalnız domain komutlarıyla değişir); kilit
+ * yalnız eşzamanlı içe aktarmaları sıraya koyar: "çift boş mu?" denetimi ile belge yazımı arasına başka bir içe aktarma giremez.
+ * Beklemek bağlantı TUTMAZ: kilit alınamazsa transaction hemen kapanır ve kısa beklemeyle yeniden denenir (transaction-mode havuzda bekleyenler havuzu
+ * tüketip kilidi tutanı açlığa mahkûm etmesin). Toplam bekleme 30 sn; aşılırsa `VERSION_CONFLICT` (yeniden denenebilir) ve satırlar FAILED raporlanır.
+ */
+const LOCK_WAIT_MS = 30_000;
+async function withPairLock<T>(params: ImportCallParams, warehouseId: string, fn: () => Promise<T>): Promise<T> {
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  for (;;) {
+    const r = await runTenantCommand({ ...params, permission: "document.create" }, async (tx, m) => {
+      const got = await tx.execute<{ ok: boolean }>(sql`SELECT pg_try_advisory_xact_lock(hashtextextended(${`wms-t289-import|${m.tenantId}|${warehouseId}`}, 0)) AS ok`);
+      if (got[0]?.ok !== true) return { locked: false as const };
+      return { locked: true as const, value: await fn() };
+    });
+    if (r.locked) return r.value;
+    if (Date.now() > deadline) throw new AppError("VERSION_CONFLICT", { retryable: true });
+    await new Promise((resolve) => setTimeout(resolve, 40 + Math.floor(Math.random() * 40)));
+  }
+}
+
 async function applyStock(params: ImportCallParams, allPlans: readonly StockPlan[], ctx: StockContext): Promise<RowReport[]> {
   const itemById = new Map([...ctx.items.values()].map((i) => [i.id, i] as const));
   const byWarehouse = new Map<string, StockPlan[]>();
   const reports = new Map<number, RowReport>();
-  // Önceki içe aktarmayla zaten yazılmış satırlar atlanır ve raporda "daha önce işlenmiş" görünür.
+  // Önceki içe aktarmayla zaten yazılmış satırlar atlanır ve raporda "zaten vardı" görünür.
   const plans = allPlans;
   for (const pl of plans) if (pl.alreadyApplied) reports.set(pl.row, { row: pl.row, code: pl.itemCode, status: "REPLAYED" });
   for (const pl of plans) if (!pl.alreadyApplied) byWarehouse.set(pl.warehouseId, [...(byWarehouse.get(pl.warehouseId) ?? []), pl]);
@@ -442,25 +488,50 @@ async function applyStock(params: ImportCallParams, allPlans: readonly StockPlan
       continue;
     }
     try {
-      const lines: DocumentLineInput[] = group.map((pl) => {
-        const item = itemById.get(pl.itemId);
-        if (item === undefined) throw new AppError("INTERNAL");
-        return { itemId: pl.itemId, unitId: item.baseUnitId, quantity: pl.quantity, conversionFactor: "1", baseQuantity: pl.quantity, targetLocationId: pl.locationId };
+      await withPairLock(params, warehouseId, async () => {
+        // Kilit ALTINDA yeniden denetim: önizlemeden sonra başka bir içe aktarma/belge çifti doldurmuş olabilir.
+        const states = await loadPairStates(params, group.map((g) => g.itemId));
+        const todo: StockPlan[] = [];
+        const conflicts = new Map<number, "PAIR_HAS_STOCK" | "PAIR_PENDING">();
+        for (const pl of group) {
+          const st = states.get(`${pl.itemId}|${pl.locationId}`);
+          if (st !== undefined && st.hasStock) {
+            if (st.applied.has(pl.quantity)) reports.set(pl.row, { row: pl.row, code: pl.itemCode, status: "REPLAYED" });
+            else conflicts.set(pl.row, "PAIR_HAS_STOCK");
+          } else if (st !== undefined && st.pending.size > 0 && !st.pending.has(pl.quantity)) conflicts.set(pl.row, "PAIR_PENDING");
+          else todo.push(pl);
+        }
+        if (conflicts.size > 0) {
+          failed = true;
+          for (const pl of group) {
+            const why = conflicts.get(pl.row);
+            if (why !== undefined) reports.set(pl.row, { row: pl.row, code: pl.itemCode, status: "FAILED", errorCode: "VALIDATION_FAILED", reason: why });
+            else if (!reports.has(pl.row)) reports.set(pl.row, { row: pl.row, code: pl.itemCode, status: "NOT_ATTEMPTED" });
+          }
+          return;
+        }
+        if (todo.length === 0) return;
+        const lines: DocumentLineInput[] = todo.map((pl) => {
+          const item = itemById.get(pl.itemId);
+          if (item === undefined) throw new AppError("INTERNAL");
+          return { itemId: pl.itemId, unitId: item.baseUnitId, quantity: pl.quantity, conversionFactor: "1", baseQuantity: pl.quantity, targetLocationId: pl.locationId };
+        });
+        const digest = linesDigestOf(todo);
+        const call = (phase: "create" | "approve" | "post") => ({ db: params.db, principal: params.principal, tenantSlug: params.tenantSlug, clientKey: stockClientKey(digest, warehouseId, phase) });
+        const rid = params.requestId === undefined ? {} : { requestId: params.requestId };
+        const doc = await createStockDocument(call("create"), { kind: "STOCK_IN", warehouseId, reason: STOCK_REASON, lines, ...rid });
+        const documentId = doc.documentId;
+        if (documentId === undefined) throw new AppError("INTERNAL");
+        await approveDocument(call("approve"), { documentId, expectedVersion: 1, ...rid });
+        const posted = await postDocument(call("post"), { documentId, expectedVersion: 2, ...rid });
+        // Eşik üstü belge kuyruğa gider (`PROCESSING`): bu akışta belge ≤ 200 satırdır; yine de sahte başarı yazılmaz.
+        if (posted.status !== "POSTED") throw new AppError("INTERNAL");
+        for (const pl of todo) reports.set(pl.row, { row: pl.row, code: pl.itemCode, status: posted.replayed ? "REPLAYED" : "APPLIED" });
       });
-      const call = (phase: "create" | "approve" | "post") => ({ db: params.db, principal: params.principal, tenantSlug: params.tenantSlug, clientKey: stockClientKey(linesDigestOf(group), warehouseId, phase) });
-      const rid = params.requestId === undefined ? {} : { requestId: params.requestId };
-      const doc = await createStockDocument(call("create"), { kind: "STOCK_IN", warehouseId, reason: STOCK_REASON, lines, ...rid });
-      const documentId = doc.documentId;
-      if (documentId === undefined) throw new AppError("INTERNAL");
-      await approveDocument(call("approve"), { documentId, expectedVersion: 1, ...rid });
-      const posted = await postDocument(call("post"), { documentId, expectedVersion: 2, ...rid });
-      // Eşik üstü belge kuyruğa gider (`PROCESSING`): bu akışta belge ≤ 200 satırdır; yine de sahte başarı yazılmaz.
-      if (posted.status !== "POSTED") throw new AppError("INTERNAL");
-      for (const pl of group) reports.set(pl.row, { row: pl.row, code: pl.itemCode, status: posted.replayed ? "REPLAYED" : "APPLIED" });
     } catch (e) {
       failed = true;
       const err = errorOf(e);
-      for (const pl of group) reports.set(pl.row, { row: pl.row, code: pl.itemCode, status: "FAILED", ...err });
+      for (const pl of group) if (!reports.has(pl.row)) reports.set(pl.row, { row: pl.row, code: pl.itemCode, status: "FAILED", ...err });
     }
   }
   return plans.map((pl) => reports.get(pl.row) as RowReport);

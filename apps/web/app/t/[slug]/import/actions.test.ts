@@ -72,10 +72,10 @@ describe("domain çağrısı", () => {
   });
 
   it("uygula: parça numarası ve metin iletilir", async () => {
-    applyImportChunk.mockResolvedValue({ chunk: 2, complete: false, rows: [{ row: 5, code: "A1", status: "FAILED", errorCode: "INTERNAL", errorDetail: "SECRET_DETAIL" }] });
+    applyImportChunk.mockResolvedValue({ chunk: 2, complete: false, rows: [{ row: 5, code: "A1", status: "FAILED", errorCode: "INTERNAL", errorDetail: "SECRET_DETAIL", reason: "PAIR_HAS_STOCK" }] });
     const res = await applyImportChunkAction({ slug: "acme", text: CSV, chunk: 2, digest: DIGEST });
     // errorDetail istemciye gitmez (MINOR-6); diğer alanlar aynen döner.
-    expect(res).toEqual({ ok: true, data: { chunk: 2, complete: false, rows: [{ row: 5, code: "A1", status: "FAILED", errorCode: "INTERNAL" }] } });
+    expect(res).toEqual({ ok: true, data: { chunk: 2, complete: false, rows: [{ row: 5, code: "A1", status: "FAILED", errorCode: "INTERNAL", reason: "PAIR_HAS_STOCK" }] } });
     expect(applyImportChunk.mock.calls[0]?.[1]).toEqual({ text: CSV, chunk: 2, digest: DIGEST });
   });
 });

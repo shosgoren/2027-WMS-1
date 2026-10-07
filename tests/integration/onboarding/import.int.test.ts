@@ -250,6 +250,41 @@ describe("açılış stoku", () => {
     expect(bal.rows.map((r) => [r.code, Number(r.q)])).toEqual([[`${p}-1`, 10], [`${p}-2`, 20], [`${p}-3`, 30]]);
   });
 
+  it("EŞZAMANLI iki içe aktarma (aynı ürün+raf, farklı miktar): biri yazar, diğeri PAIR_HAS_STOCK ile durur; defterde TEK STOCK_IN (kilit altında yeniden denetim)", async () => {
+    const p = pfx();
+    await applyAll(() => asAdmin(A), `kod;ad\n${p}-1;Bir`);
+    const shelf = `${p}-R`;
+    await newShelf(A, shelf);
+    const head = "ürün kodu;raf kodu;miktar";
+    const a = `${head}\n${p}-1;${shelf};5`;
+    const b = `${head}\n${p}-1;${shelf};9`;
+    // İkisi de çift BOŞKEN önizlenir (temiz); sonra aynı anda uygulanır.
+    const [pa, pb] = [await previewImport(asAdmin(A), a), await previewImport(asAdmin(A), b)];
+    expect([pa.issueTotal, pb.issueTotal]).toEqual([0, 0]);
+    const [ra, rb] = await Promise.all([
+      applyImportChunk(asAdmin(A), { text: a, chunk: 0, digest: pa.digest }),
+      applyImportChunk(asAdmin(A), { text: b, chunk: 0, digest: pb.digest }),
+    ]);
+    const statuses = [ra.rows[0]?.status, rb.rows[0]?.status].sort();
+    expect(statuses).toEqual(["APPLIED", "FAILED"]);
+    const loser = ra.rows[0]?.status === "FAILED" ? ra : rb;
+    expect(loser.rows[0]).toMatchObject({ status: "FAILED", reason: "PAIR_HAS_STOCK" });
+    expect(loser.complete).toBe(false);
+    expect(await countLedger(A, p)).toBe(1);
+    const q = await adm.query<{ q: string }>("SELECT sum(b.quantity)::text AS q FROM public.stock_balances b JOIN public.stock_dimensions d ON d.tenant_id = b.tenant_id AND d.id = b.stock_dimension_id JOIN public.items i ON i.tenant_id = d.tenant_id AND i.id = d.item_id WHERE i.tenant_id = $1 AND i.code = $2", [A.tenantId, `${p}-1`]);
+    expect([5, 9]).toContain(Number(q.rows[0]?.q));
+    expect(await num("SELECT count(*) AS n FROM public.documents d JOIN public.document_lines dl ON dl.tenant_id = d.tenant_id AND dl.document_id = d.id JOIN public.items i ON i.tenant_id = dl.tenant_id AND i.id = dl.item_id WHERE d.tenant_id = $1 AND d.reason = 'import.opening_stock' AND d.kind = 'STOCK_IN' AND i.code = $2", [A.tenantId, `${p}-1`])).toBe(1);
+  });
+
+  it("önizleme en çok 50 hata döner, toplamı ayrıca bildirir (İ-06)", async () => {
+    const p = pfx();
+    const csv = ["kod;ad", ...Array.from({ length: 60 }, (_, i) => `${p}-${i};`)].join("\n");
+    const pv = await previewImport(asAdmin(A), csv);
+    expect(pv.issues).toHaveLength(50);
+    expect(pv.issueTotal).toBe(60);
+    expect(pv.summary).toMatchObject({ errorRows: 60 });
+  });
+
   it("apply önizleme özetini ister: içerik önizlemeden sonra değiştiyse reddedilir ve hiçbir şey yazılmaz (MINOR-1)", async () => {
     const p = pfx();
     await applyAll(() => asAdmin(A), `kod;ad\n${p}-1;Bir`);
@@ -348,6 +383,11 @@ describe("kısmi başarısızlık ve yeniden deneme (M-3)", () => {
     expect(r.counts).toMatchObject({ FAILED: 2, NOT_ATTEMPTED: 1, APPLIED: 0 });
     expect(await countLedger(A, p)).toBe(0); // sahte başarı yok: hiçbir stok yazılmadı
     expect(await importDocs(A, p)).toBe(1); // yalnız ilk grubun taslağı
+
+    // m-1: bitmemiş (taslak) açılış belgesi çifti "dolu" sayar: FARKLI miktarlı dosya reddedilir, AYNI içerik sürdürülebilir.
+    const changed = csv.replace(`${p}-1;${s1};5`, `${p}-1;${s1};50`);
+    expect((await previewImport(asAdmin(A), changed)).issues.map((i) => `${i.row}:${i.code}`)).toEqual(["2:PAIR_PENDING"]);
+    expect((await previewImport(asAdmin(A), csv)).issueTotal).toBe(0);
 
     await clear(A);
     const again = await applyImportChunk(asAdmin(A), { text: csv, chunk: 0, digest: pv.digest });

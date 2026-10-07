@@ -5,6 +5,7 @@
 // Dosya içeriği sentetiktir (G-09); sayfa DOM sorguları dize ifadesidir (kök tsconfig'de DOM tipleri yok).
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
@@ -72,7 +73,7 @@ async function loginAdmin(page: Page): Promise<void> {
 
 const csv = (rows: string[]): { name: string; mimeType: string; buffer: Buffer } => ({ name: "dosya.csv", mimeType: "text/csv", buffer: Buffer.from(`﻿${rows.join("\r\n")}\r\n`, "utf8") });
 const PRODUCT_HEADER = "kod;ad;temel birim;koli içi adet;adet barkodu;koli barkodu";
-const STOCK_HEADER = "ürün kodu;raf kodu;miktar (adet)";
+const STOCK_HEADER = "ürün kodu;raf kodu;miktar";
 
 /** Mobilde uygulama kabuğunun içerik alanı (`.tenant-body`) kendi içinde kayar: tam sayfa kanıt için pencere kaydırıcı taşmasının boyu kadar uzatılır (kabuk içeriği tümüyle görünür); masaüstünde sayfa gövdesi kayar (fullPage). */
 async function shootFull(page: Page, size: { width: number; height: number }, file: string): Promise<void> {
@@ -89,6 +90,64 @@ async function shootFull(page: Page, size: { width: number; height: number }, fi
   await page.setViewportSize(size);
 }
 
+
+/** Her boyutta ölçüm + iki görüntü: kullanıcının gördüğü görünüm ve tam sayfa (kabuk içeriği tümüyle). */
+async function captureState(page: Page, project: string, sizes: readonly { width: number; height: number }[], metrics: Record<string, Metrics>, state: string, scrollTo?: string): Promise<void> {
+  for (const size of sizes) {
+    await page.setViewportSize(size);
+    if (scrollTo !== undefined) await page.getByTestId(scrollTo).scrollIntoViewIfNeeded();
+    const key = `${state}-${size.width}`;
+    const m = await measure(page);
+    metrics[key] = m;
+    expect(m.overflowX, `${key}: yatay taşma`).toBe(false);
+    expect(m.smallTargets, `${key}: küçük dokunma hedefi`).toEqual([]);
+    expect(m.tightPairs, `${key}: sıkışık komşu hedefler`).toEqual([]);
+    expect(m.filledButtons, `${key}: dolu birincil düğme`).toBeLessThanOrEqual(1);
+    expect(m.rawCodeText, `${key}: ham teknik metin`).toEqual([]);
+    expect(m.clippedText, `${key}: kesilen metin`).toEqual([]);
+    await page.screenshot({ path: path.join(OUT, `${project}-${state}-${size.width}-view.png`) });
+    await shootFull(page, size, path.join(OUT, `${project}-${state}-${size.width}-full.png`));
+  }
+  await page.setViewportSize(sizes[0] as { width: number; height: number });
+}
+
+/** Yerel veritabanında SQL çalıştırır (`psql`; bağlantı dizgisi argv'de değil ortam değişkeninden okunur). Lint: `pg` sürücüsü e2e'de yasak. */
+function runSql(script: string): void {
+  if (!process.env.DATABASE_URL_DIRECT) throw new Error("e2e: DATABASE_URL_DIRECT yok (kısmi başarısızlık senaryosu yerel yığın ister)");
+  execFileSync("sh", ["-c", 'psql "$DATABASE_URL_DIRECT" -X -q -v ON_ERROR_STOP=1'], { input: script, env: process.env, stdio: ["pipe", "ignore", "pipe"] });
+}
+
+/** TEST-YALNIZ hata enjeksiyonu (üretim kodunda kanca yok): yerel veritabanında demo tenant için belge ONAYI ya da belirli kodlu ürün EKLEMESİ başarısız olur; iş bitince tetikleyici ve tablo kaldırılır. */
+async function withInjection<T>(what: string, fn: () => Promise<T>): Promise<T> {
+  if (!/^[A-Za-z0-9:_-]+$/.test(what)) throw new Error("e2e: enjeksiyon anahtarı geçersiz");
+  const cleanup = `DROP TRIGGER IF EXISTS t289_inject_docs ON public.documents; DROP TRIGGER IF EXISTS t289_inject_items ON public.items;
+    DROP FUNCTION IF EXISTS public.t289_inject_fn(); DROP TABLE IF EXISTS public.t289_inject;`;
+  runSql(`${cleanup}
+    CREATE TABLE public.t289_inject (tenant_id uuid NOT NULL, what text NOT NULL, PRIMARY KEY (tenant_id, what));
+    CREATE FUNCTION public.t289_inject_fn() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        IF TG_TABLE_NAME = 'documents' THEN
+          IF OLD.status = 'DRAFT' AND NEW.status = 'APPROVED' AND NEW.reason = 'import.opening_stock'
+             AND EXISTS (SELECT 1 FROM public.t289_inject WHERE tenant_id = NEW.tenant_id AND what = 'approve') THEN
+            RAISE EXCEPTION 't289 injected approve failure' USING ERRCODE = 'XX000';
+          END IF;
+        ELSIF TG_TABLE_NAME = 'items' THEN
+          IF EXISTS (SELECT 1 FROM public.t289_inject WHERE tenant_id = NEW.tenant_id AND what = 'item:' || NEW.code) THEN
+            RAISE EXCEPTION 't289 injected item failure' USING ERRCODE = 'XX000';
+          END IF;
+        END IF;
+        RETURN NEW;
+      END $$;
+    CREATE TRIGGER t289_inject_docs BEFORE UPDATE ON public.documents FOR EACH ROW EXECUTE FUNCTION public.t289_inject_fn();
+    CREATE TRIGGER t289_inject_items BEFORE INSERT ON public.items FOR EACH ROW EXECUTE FUNCTION public.t289_inject_fn();
+    INSERT INTO public.t289_inject (tenant_id, what) SELECT id, '${what}' FROM public.tenants WHERE slug = 'demo';`);
+  try {
+    return await fn();
+  } finally {
+    runSql(cleanup);
+  }
+}
+
 test.describe("açılış verisi içe aktarma (T-289)", () => {
   test("şablon, hatalı önizleme, içe aktarma, tekrar yükleme, klavye yolu", async ({ page }, testInfo) => {
     test.setTimeout(300_000);
@@ -98,25 +157,7 @@ test.describe("açılış verisi içe aktarma (T-289)", () => {
     const p = `T289-${Date.now()}${project === "desktop" ? "D" : "M"}`;
     const metrics: Record<string, Metrics> = {};
 
-    /** Her boyutta ölçüm + iki görüntü: kullanıcının gördüğü görünüm ve tam sayfa (kabuk içeriği tümüyle). */
-    async function capture(state: string, scrollTo?: string): Promise<void> {
-      for (const size of sizes) {
-        await page.setViewportSize(size);
-        if (scrollTo !== undefined) await page.getByTestId(scrollTo).scrollIntoViewIfNeeded();
-        const key = `${state}-${size.width}`;
-        const m = await measure(page);
-        metrics[key] = m;
-        expect(m.overflowX, `${key}: yatay taşma`).toBe(false);
-        expect(m.smallTargets, `${key}: küçük dokunma hedefi`).toEqual([]);
-        expect(m.tightPairs, `${key}: sıkışık komşu hedefler`).toEqual([]);
-        expect(m.filledButtons, `${key}: dolu birincil düğme`).toBeLessThanOrEqual(1);
-        expect(m.rawCodeText, `${key}: ham teknik metin`).toEqual([]);
-        expect(m.clippedText, `${key}: kesilen metin`).toEqual([]);
-        await page.screenshot({ path: path.join(OUT, `${project}-${state}-${size.width}-view.png`) });
-        await shootFull(page, size, path.join(OUT, `${project}-${state}-${size.width}-full.png`));
-      }
-      await page.setViewportSize(sizes[0]);
-    }
+    const capture = (state: string, scrollTo?: string): Promise<void> => captureState(page, project, sizes, metrics, state, scrollTo);
 
     await loginAdmin(page);
     // Ayarlar sayfasının ALTINDAKİ bağlantıyla gel (kabuk kaydırması korunur): başlık yine de görünür olmalı (İ-16).
@@ -133,6 +174,7 @@ test.describe("açılış verisi içe aktarma (T-289)", () => {
         return r.top >= 0 && r.bottom <= window.innerHeight && top !== null && (top === el || el.contains(top));
       })()`);
       expect(ok, `${size.width}x${size.height}: h1 görünür alanda ve üst çubuğun altında kalmadı`).toBe(true);
+      if (project === "desktop") expect(await page.evaluate<number>("document.scrollingElement.scrollTop"), "masaüstünde başlığa kaydırma sayfayı/üst çubuğu kesmedi").toBe(0);
     }
     await page.setViewportSize(sizes[0]);
 
@@ -161,8 +203,10 @@ test.describe("açılış verisi içe aktarma (T-289)", () => {
       expect([...bytes.subarray(0, 3)], `${name}: BOM`).toEqual([0xef, 0xbb, 0xbf]);
       expect(bytes.subarray(3).toString("utf8")).toBe(`${header}\r\n`);
       await page.locator("#import-file").setInputFiles({ name, mimeType: "text/csv", buffer: bytes });
-      await expect(page.getByTestId("import-issue")).toHaveCount(1);
-      await expect(page.getByTestId("issue-reason")).toContainText("Dosyada veri satırı yok");
+      // Boş şablon: kırmızı hata kartı değil, yönlendirici uyarı.
+      await expect(page.getByTestId("import-issue")).toHaveCount(0);
+      await expect(page.getByText("Şablona en az bir satır ekle, sonra dosyayı yeniden seç.")).toBeVisible();
+      await expect(page.locator('[data-kind="warning"]').first()).toBeVisible();
       await expect(page.getByText(`Seçilen: ${name}`)).toBeVisible();
     }
 
@@ -197,11 +241,19 @@ test.describe("açılış verisi içe aktarma (T-289)", () => {
     const apply = page.getByRole("button", { name: "İçe aktar" });
     await expect(apply).toBeDisabled();
     await expect(page.getByText("Önce 4 hatayı düzelt", { exact: false })).toBeVisible();
-    await expect(summary.getByRole("button", { name: "Düzeltilmiş dosyayı seç" })).toBeVisible();
+    await expect(summary.getByRole("button", { name: "Yeni dosya seç" })).toBeVisible();
     const disabledBg = await page.evaluate<string>(`getComputedStyle([...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'İçe aktar')).backgroundColor`);
     const accentBg = await page.evaluate<string>(`(() => { const d = document.createElement('div'); d.className = 'bg-accent'; document.body.appendChild(d); const c = getComputedStyle(d).backgroundColor; d.remove(); return c; })()`);
     expect(disabledBg, "kapalı düğme dolu mavi değil").not.toBe(accentBg);
     await capture("b-hatali", "import-summary");
+
+    // "Yeni dosya seç" tek satır (≤ 50 px) 3 telefon boyutunda ve masaüstünde.
+    for (const size of sizes) {
+      await page.setViewportSize(size);
+      const bb = await summary.getByRole("button", { name: "Yeni dosya seç" }).boundingBox();
+      expect(bb?.height ?? 0, `${size.width}: düğme tek satır`).toBeLessThanOrEqual(50);
+    }
+    await page.setViewportSize(sizes[0]);
 
     // Önizleme özeti, görünür alana kaydırılınca tam görünür (İ-05).
     for (const size of sizes) {
@@ -212,10 +264,14 @@ test.describe("açılış verisi içe aktarma (T-289)", () => {
     }
     await page.setViewportSize(sizes[0]);
 
-    // "Düzeltilmiş dosyayı seç" düğmesi dosya seçiciyi açar.
-    const [chooser] = await Promise.all([page.waitForEvent("filechooser"), summary.getByRole("button", { name: "Düzeltilmiş dosyayı seç" }).click()]);
+    // "Yeni dosya seç" düğmesi dosya seçiciyi açar.
+    const [chooser] = await Promise.all([page.waitForEvent("filechooser"), summary.getByRole("button", { name: "Yeni dosya seç" }).click()]);
     await chooser.setFiles(csv([PRODUCT_HEADER, `${p}-9;Geçici;;;;`]));
     await expect(page.getByText("Seçilen: dosya.csv")).toBeVisible();
+
+    // 60 hatalı satır: yalnız ilk 50 hata gösterilir ve bu açıkça yazılır (sessiz kesme yok).
+    await page.locator("#import-file").setInputFiles(csv([PRODUCT_HEADER, ...Array.from({ length: 60 }, (_, i) => `${p}-x${i};;;;;`)]));
+    await expect(page.getByText("İlk 50 hata gösteriliyor, toplam 60 hata var.")).toBeVisible();
 
     // Uzun hata listesi: aynı satırın hataları tek kartta; ilk 10 kart + "Tümünü göster".
     const many = [PRODUCT_HEADER, ...Array.from({ length: 12 }, (_, i) => `${p}-${i + 1};;PALET;;;`)];
@@ -225,6 +281,7 @@ test.describe("açılış verisi içe aktarma (T-289)", () => {
     const toggle = page.getByTestId("issues-toggle");
     await expect(toggle).toHaveText("Tümünü göster (12 satır)");
     await expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await capture("b2a-uzun-kapali", "issues-toggle");
     await toggle.click();
     await expect(issues).toHaveCount(12);
     await expect(toggle).toHaveAttribute("aria-expanded", "true");
@@ -258,7 +315,8 @@ test.describe("açılış verisi içe aktarma (T-289)", () => {
     await expect(result).not.toContainText("güncellendi"); // 0 olan sayı yazılmaz
     await expect(summary).not.toContainText("Hata yok. İçe aktarabilirsin.");
     await expect(page.getByTestId("import-step4-status")).toHaveText("Tamamlandı");
-    await expect(page.getByTestId("import-counts")).toContainText("3 satır tamam");
+    await expect(page.getByTestId("import-counts")).toHaveCount(1); // "zaten vardı" yok: yalnız boş liste (ikinci "tamam" sayısı yok)
+    await expect(page.getByTestId("import-counts").locator("li")).toHaveCount(0);
     await expect(result).toContainText("Şimdi açılış stoku dosyasını yükleyebilirsin.");
     await expect(page.getByRole("link", { name: "Ürünlere git" })).toBeVisible();
     await capture("d-sonuc-urun", "import-result");
@@ -268,7 +326,9 @@ test.describe("açılış verisi içe aktarma (T-289)", () => {
     await page.locator("#import-file").setInputFiles(products);
     await expect(summary).toContainText("0 yeni ürün eklenecek, 3 ürün zaten var.");
     await page.getByRole("button", { name: "İçe aktar" }).click();
-    await expect(page.getByTestId("import-result")).toContainText("Tamam. 3 ürün zaten vardı.");
+    await expect(page.getByTestId("import-result")).toContainText("Tamam. Yeni kayıt yok.");
+    await expect(page.getByTestId("import-counts")).toContainText("3 satır zaten vardı");
+    await capture("d2-sonuc-zaten", "import-result");
 
     // Açılış stoku: bilinmeyen raf ve kesirli adet önizlemede yakalanır.
     await page.getByTestId("import-result").getByRole("button", { name: "Başka dosya yükle" }).click();
@@ -296,7 +356,8 @@ test.describe("açılış verisi içe aktarma (T-289)", () => {
     await page.locator("#import-file").setInputFiles(stock);
     await expect(summary).toContainText("Yazılacak yeni satır yok. 3 satır daha önce işlenmiş, atlanacak.");
     await page.getByRole("button", { name: "İçe aktar" }).click();
-    await expect(page.getByTestId("import-result")).toContainText("3 satır daha önce işlenmişti, atlandı.");
+    await expect(page.getByTestId("import-result")).toContainText("Tamam. Yeni kayıt yok.");
+    await expect(page.getByTestId("import-counts")).toContainText("3 satır zaten vardı");
     await expect(page.getByTestId("import-result")).not.toContainText("stok satırı eklendi");
 
     // Aynı rafta farklı miktar (düzeltme girişimi): açılış stoku yalnız boş raflar içindir → satır hatası.
@@ -310,6 +371,69 @@ test.describe("açılış verisi içe aktarma (T-289)", () => {
     await expect(page.getByText(`${p}-1`).first()).toBeVisible();
 
     writeFileSync(path.join(OUT, `metrics-${project}.json`), JSON.stringify({ project, sizes, metrics }, null, 2));
+  });
+
+  test("yarım kalan içe aktarma: hatalı/denenmedi sayıları, 20'den sonra 've N satır daha', yeniden yükleyince tamamlanır", async ({ page }, testInfo) => {
+    test.setTimeout(300_000);
+    mkdirSync(OUT, { recursive: true });
+    const project = testInfo.project.name;
+    const sizes = project === "desktop" ? DESKTOP_SIZES : PHONE_SIZES;
+    const p = `T289-${Date.now()}${project === "desktop" ? "D" : "M"}P`;
+    const metrics: Record<string, Metrics> = {};
+    const capture = (state: string, scrollTo?: string): Promise<void> => captureState(page, project, sizes, metrics, state, scrollTo);
+    await loginAdmin(page);
+    await page.goto("/t/demo/import");
+    const upload = async (rows: string[]): Promise<void> => {
+      await page.locator("#import-file").setInputFiles(csv(rows));
+      await expect(page.getByTestId("import-summary")).toBeVisible();
+    };
+
+    // 1) Ürün: ikinci satırda ürün kaydı başarısız (test-yalnız tetikleyici) → 1 eklendi, 1 hatalı, 1 denenmedi.
+    const products = [PRODUCT_HEADER, `${p}-1;Bir;;;;`, `${p}-2;İki;;;;`, `${p}-3;Üç;;;;`];
+    await withInjection(`item:${p}-2`, async () => {
+      await upload(products);
+      await page.getByRole("button", { name: "İçe aktar" }).click();
+      const result = page.getByTestId("import-result");
+      await expect(result).toContainText("İşlem yarım kaldı. 1 satır eklendi.");
+      await expect(page.getByTestId("import-step4-status")).toHaveText("Yarım kaldı");
+      await expect(page.getByTestId("import-counts")).toContainText("1 satır hatalı");
+      await expect(page.getByTestId("import-counts")).toContainText("1 satır denenmedi");
+      await expect(page.getByTestId("import-failed-rows")).toContainText(`Satır 3 (${p}-2)`);
+      await expect(page.getByTestId("import-result")).not.toContainText("INTERNAL");
+      await capture("g-yarim-urun", "import-result");
+    });
+    // Sorun giderildi: aynı dosya yeniden yüklenir, kalanlar tamamlanır; tamamlanan satır "zaten vardı".
+    await page.getByTestId("import-result").getByRole("button", { name: "Dosyayı yeniden seç" }).click();
+    await upload(products);
+    await page.getByRole("button", { name: "İçe aktar" }).click();
+    await expect(page.getByTestId("import-result")).toContainText("Tamam. 2 ürün eklendi.");
+    await expect(page.getByTestId("import-counts")).toContainText("1 satır zaten vardı");
+    await capture("h-devam-urun", "import-result");
+
+    // 2) Stok: 25 satırlık belge onayda başarısız → 25 hatalı satır, 20'si listelenir ve "ve 5 satır daha hatalı" yazar.
+    await page.getByTestId("import-result").getByRole("button", { name: "Başka dosya yükle" }).click();
+    const many = Array.from({ length: 25 }, (_, i) => `${p}-m${i}`);
+    await upload([PRODUCT_HEADER, ...many.map((c) => `${c};Ürün;;;;`)]);
+    await page.getByRole("button", { name: "İçe aktar" }).click();
+    await expect(page.getByTestId("import-result")).toContainText("Tamam. 25 ürün eklendi.");
+    await page.getByTestId("import-result").getByRole("button", { name: "Başka dosya yükle" }).click();
+    const stockRows = [STOCK_HEADER, ...many.map((c) => `${c};A3-G04;5`)];
+    await withInjection("approve", async () => {
+      await upload(stockRows);
+      await page.getByRole("button", { name: "İçe aktar" }).click();
+      const result = page.getByTestId("import-result");
+      await expect(result).toContainText("İşlem yarım kaldı.");
+      await expect(page.getByTestId("import-counts")).toContainText("25 satır hatalı");
+      await expect(page.getByTestId("import-failed-rows").locator("li")).toHaveCount(21); // 20 satır + "ve 5 satır daha hatalı."
+      await expect(page.getByTestId("import-failed-more")).toHaveText("ve 5 satır daha hatalı.");
+      await capture("i-yarim-stok", "import-result");
+    });
+    // Aynı dosya: yarım kalan belge sürdürülür, 25 satır eklenir.
+    await page.getByTestId("import-result").getByRole("button", { name: "Dosyayı yeniden seç" }).click();
+    await upload(stockRows);
+    await page.getByRole("button", { name: "İçe aktar" }).click();
+    await expect(page.getByTestId("import-result")).toContainText("Tamam. 25 stok satırı eklendi.");
+    writeFileSync(path.join(OUT, `metrics-${project}-yarim.json`), JSON.stringify({ project, sizes, metrics }, null, 2));
   });
 
   test("yetkisiz kullanıcı (salt okunur): neden + sonraki eylem, form yok", async ({ page }, testInfo) => {

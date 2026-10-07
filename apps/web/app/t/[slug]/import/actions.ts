@@ -39,6 +39,6 @@ export async function applyImportChunkAction(raw: unknown) {
     const params = await writeContext(input.slug, ctx);
     const report = await applyImportChunk({ ...params, requestId: ctx.requestId }, { text: input.text, chunk: input.chunk, digest: input.digest });
     // Ayrıntı kodu (errorDetail) istemciye gönderilmez: ekranda yalnız sade metin gösterilir.
-    return { ...report, rows: report.rows.map((r) => ({ row: r.row, code: r.code, status: r.status, ...(r.errorCode === undefined ? {} : { errorCode: r.errorCode }) })) };
+    return { ...report, rows: report.rows.map((r) => ({ row: r.row, code: r.code, status: r.status, ...(r.errorCode === undefined ? {} : { errorCode: r.errorCode }), ...(r.reason === undefined ? {} : { reason: r.reason }) })) };
   })(raw);
 }
