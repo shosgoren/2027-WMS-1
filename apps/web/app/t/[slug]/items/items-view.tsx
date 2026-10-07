@@ -98,6 +98,8 @@ export interface ItemListView {
   readonly baseUnitCode: string;
 }
 
+/** Kod önerisi yanıt süresi sınırı; aşılırsa kod alanı açılır (T-259). */
+const SUGGEST_TIMEOUT_MS = 5000;
 const TRACKING = ["NONE", "LOT", "SERIAL", "LOT_AND_SERIAL"] as const;
 const PICK = ["FIFO", "FEFO"] as const;
 const SCALES = [0, 1, 2, 3, 4, 5, 6] as const;
@@ -151,8 +153,18 @@ function CreateItemDialog({ open, slug, units, returnTo, onClose, onDone }: { op
     setScale("0");
     setTracking("NONE");
     setPick("FIFO");
+    // Öneri hiç dönmezse alan sonsuza dek salt okunur kalmasın: süre dolunca "failed" (kullanıcı kodu kendisi yazar).
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (live && !settled) {
+        settled = true;
+        setCodeState("failed");
+      }
+    }, SUGGEST_TIMEOUT_MS);
     void suggestItemCodeAction({ slug }).then((r) => {
-      if (!live) return;
+      if (!live || settled) return;
+      settled = true;
+      clearTimeout(timer);
       if (r.ok) {
         // Kullanıcı kodu değiştirdiyse (`touched`; silip boş bırakmak dahil) öneri uygulanmaz (N-14: sessiz değişiklik yok).
         if (!touchedRef.current) setCode(r.data.code);
@@ -161,6 +173,7 @@ function CreateItemDialog({ open, slug, units, returnTo, onClose, onDone }: { op
     });
     return () => {
       live = false;
+      clearTimeout(timer);
     };
     // units yalnızca açılışta okunur.
   }, [open, slug]);
@@ -228,9 +241,10 @@ function CreateItemDialog({ open, slug, units, returnTo, onClose, onDone }: { op
           {t("baseUnit")}
         </label>
         <span className="text-sm text-ink-muted">{t("baseUnitHint")}</span>
+        {units.length > 0 && !units.some((u) => u.code.toUpperCase() === "ADET") ? <span className="text-sm font-semibold text-ink">{t("baseUnitChoose")}</span> : null}
         <select id="create-base-unit" name="baseUnitId" required={units.length > 0} disabled={units.length === 0} value={unitId} onChange={(e) => setUnitId(e.target.value)} className={SELECT_CLS}>
           {units.length === 0 ? <option value="">{te("items.unitDefaultOption")}</option> : null}
-          {units.length > 0 && unitId === "" ? <option value="">{t("baseUnitChoose")}</option> : null}
+          {units.length > 0 && unitId === "" ? <option value="">{t("baseUnitPlaceholder")}</option> : null}
           {units.map((u) => (
             <option key={u.id} value={u.id}>
               {u.code} · {u.name}

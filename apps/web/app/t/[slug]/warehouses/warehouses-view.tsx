@@ -51,6 +51,8 @@ export function errorKey(error: Pick<ServerError, "code" | "detail">, scope: "wa
   return key;
 }
 
+/** Kod önerisi yanıt süresi sınırı; aşılırsa kod alanı açılır (T-259). */
+const SUGGEST_TIMEOUT_MS = 5000;
 const LINK_CLS =
   "inline-flex min-h-12 min-w-12 items-center justify-center rounded-control px-2 text-base font-semibold text-accent-ink underline focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus";
 const BADGE = "inline-flex items-center rounded-full px-2 text-xs font-bold";
@@ -146,8 +148,18 @@ export function CreateDialog({
     touchedRef.current = false;
     setCode("");
     setCodeState("loading");
+    // Öneri hiç dönmezse alan sonsuza dek salt okunur kalmasın: süre dolunca "failed" (kullanıcı kodu kendisi yazar).
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (live && !settled) {
+        settled = true;
+        setCodeState("failed");
+      }
+    }, SUGGEST_TIMEOUT_MS);
     void suggest().then((c) => {
-      if (!live) return;
+      if (!live || settled) return;
+      settled = true;
+      clearTimeout(timer);
       if (c === null) setCodeState("failed");
       else {
         // Kullanıcı kodu değiştirdiyse (`touched`; silip boş bırakmak dahil) öneri uygulanmaz (N-14: sessiz değişiklik yok).
@@ -157,6 +169,7 @@ export function CreateDialog({
     });
     return () => {
       live = false;
+      clearTimeout(timer);
     };
     // `suggest`/`defaultName` her açılışta okunur; kimlikleri değişse de form yeniden başlamaz.
   }, [open]);

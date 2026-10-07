@@ -598,4 +598,42 @@ describe("T-259 MINOR-5/6/7: indeksler ve depo başına lokasyon sınırı", () 
       if (!released) await adm.query("SELECT pg_advisory_unlock(hashtextextended($1, 0))", [lockKey]);
     }
   });
+
+  it("MINOR-6 (güvenlik incelemesi): tekli createLocation da sınırı denetler: dolu depoda VALIDATION_FAILED, yazım yok", async () => {
+    const e = await failure(createLocation(admin(big), { warehouseId: bigWh, code: "TEKLI-1", name: "Sınır üstü", kind: "STORAGE" }));
+    expect(e).toMatchObject({ code: "VALIDATION_FAILED", detail: "DOCUMENT_TOO_LARGE" });
+    expect(await countLocations(big.tenantId, bigWh, "TEKLI-%")).toBe(0);
+  });
+
+  it("MINOR-6 (güvenlik incelemesi): sınırda 49.999 iken tekli + toplu yarışı: kilit bariyeriyle ikisi birlikte aşamaz (toplam ≤ 50.000)", async () => {
+    const wh = await newWarehouse(A);
+    await adm.query(
+      `INSERT INTO public.locations (tenant_id, id, warehouse_id, parent_id, code, name, depth, kind)
+       SELECT $1::uuid, gen_random_uuid(), $2::uuid, NULL, 'Q-' || lpad(n::text, 6, '0'), 'Q-' || lpad(n::text, 6, '0'), 0, 'STORAGE'
+         FROM generate_series(1, $3::int) AS n`,
+      [A.tenantId, wh, WAREHOUSE_LOCATIONS_MAX - 1],
+    );
+    const total = async () => Number((await adm.query<{ n: string }>("SELECT count(*) AS n FROM public.locations WHERE tenant_id = $1 AND warehouse_id = $2", [A.tenantId, wh])).rows[0]?.n);
+    const lockKey = `${A.tenantId}:warehouse-locations-cap:${wh}`;
+    // Bariyer: kilit adm oturumunda tutulur; iki komut da sayımdan ÖNCE aynı kilitte bekler (kilitsiz tekli komut burada geçip yazardı).
+    await adm.query("SELECT pg_advisory_lock(hashtextextended($1, 0))", [lockKey]);
+    let released = false;
+    try {
+      const single = createLocation(admin(A), { warehouseId: wh, code: "RACE-S", name: "tekli", kind: "STORAGE" });
+      const bulk = createBulkLocations(admin(A), { warehouseId: wh, zone: "RB", rackFrom: 1, rackTo: 1, levelFrom: 1, levelTo: 1, idempotencyKey: key() });
+      const settled = Promise.allSettled([single, bulk]);
+      const state = await Promise.race([settled.then(() => "done"), new Promise<string>((r) => setTimeout(() => r("blocked"), 1500))]);
+      expect(state).toBe("blocked");
+      expect(await total()).toBe(WAREHOUSE_LOCATIONS_MAX - 1);
+      await adm.query("SELECT pg_advisory_unlock(hashtextextended($1, 0))", [lockKey]);
+      released = true;
+      const [rs, rb] = await settled;
+      expect([rs, rb].filter((r) => r.status === "fulfilled")).toHaveLength(1);
+      const rej = [rs, rb].find((r) => r.status === "rejected") as PromiseRejectedResult;
+      expect(rej.reason).toMatchObject({ code: "VALIDATION_FAILED", detail: "DOCUMENT_TOO_LARGE" });
+      expect(await total()).toBe(WAREHOUSE_LOCATIONS_MAX);
+    } finally {
+      if (!released) await adm.query("SELECT pg_advisory_unlock(hashtextextended($1, 0))", [lockKey]);
+    }
+  }, 120_000);
 });

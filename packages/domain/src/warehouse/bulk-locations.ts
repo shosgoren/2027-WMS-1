@@ -17,14 +17,14 @@ import { appendAudit } from "@wms/db";
 import { AppError } from "@wms/shared/errors";
 import { runTenantCommand, runTenantQuery, type AccessTx } from "../identity/access.ts";
 import { parseUuid, codeTaken, type WarehouseCallParams } from "./warehouses.ts";
-import { childDepth, parseKind, type LocationKindValue } from "./locations.ts";
+import { WAREHOUSE_LOCATIONS_MAX, assertWarehouseCapacity, childDepth, parseKind, type LocationKindValue } from "./locations.ts";
+
+export { WAREHOUSE_LOCATIONS_MAX };
 import { assertWarehouseVisible } from "./scope.ts";
 import { countLockRowsExisting } from "./stock-usage.ts";
 
 /** A-250-2: tek komutta en çok lokasyon. */
 export const BULK_LOCATIONS_MAX = 2000;
-/** A-259-1: depo başına toplam lokasyon üst sınırı (arşivliler dahil: satır arşivde de durur). Aşım `DOCUMENT_TOO_LARGE` (A-259-2). */
-export const WAREHOUSE_LOCATIONS_MAX = 50_000;
 /** A-250-4: idempotency anahtarının aranacağı pencere. */
 export const IDEMPOTENCY_WINDOW_DAYS = 7;
 const RANGE_MAX = 999;
@@ -131,19 +131,6 @@ async function findConflicts(tx: AccessTx, tenantId: string, warehouseId: string
          ORDER BY code COLLATE "C"`,
   );
   return { list: rows.slice(0, CONFLICT_LIST_MAX).map((r) => r.code), count: rows.length };
-}
-
-/**
- * Depo başına toplam lokasyon sınırı (T-259 MINOR-6): mevcut + planlanan > {@link WAREHOUSE_LOCATIONS_MAX} ise `DOCUMENT_TOO_LARGE`.
- * Eşzamanlı iki toplu komutun ikisi de sınırın altında görüp aşmasın diye (yalnız yazımda) depo başına transaction-düzeyi advisory
- * kilit alınır; sayım `(tenant_id, warehouse_id, code)` benzersiz indeksinden yapılır.
- */
-async function assertWarehouseCapacity(tx: AccessTx, tenantId: string, warehouseId: string, adding: number, serialize: boolean): Promise<void> {
-  if (serialize) await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`${tenantId}:warehouse-locations-cap:${warehouseId}`}, 0))`);
-  const r = await tx.execute<{ n: string | number }>(
-    sql`SELECT count(*) AS n FROM public.locations WHERE tenant_id = ${tenantId}::uuid AND warehouse_id = ${warehouseId}::uuid`,
-  );
-  if (Number(r[0]?.n ?? 0) + adding > WAREHOUSE_LOCATIONS_MAX) throw new AppError("VALIDATION_FAILED", { detail: "DOCUMENT_TOO_LARGE" });
 }
 
 /**
