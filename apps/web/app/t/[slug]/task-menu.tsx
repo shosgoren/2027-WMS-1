@@ -34,11 +34,31 @@ export type MyTasksSummary =
   | { readonly kind: "count"; readonly count: number; readonly more: boolean }
   | { readonly kind: "error"; readonly message: string; readonly code: string };
 
+/**
+ * "Şimdi" kartı (T-280, DESIGN_REVIEW §7.4.2): kullanıcının yetkili olduğu işlerde GERÇEK bekleyen iş sayıları (açık teslim, yerleştirilecek görev).
+ * Satır yalnızca sayı > 0 ise vardır; hiç yoksa "Bekleyen iş yok". Hata: sunucu mesajı + kod (yutulmaz). Sabit/uydurma veri yok (G-07).
+ */
+export type NowSummary =
+  | {
+      readonly kind: "rows";
+      readonly rows: ReadonlyArray<{
+        readonly key: "receive" | "putaway";
+        readonly count: number;
+        readonly more: boolean;
+        /** Sıradaki en çok 2 GERÇEK iş (doğrudan bağlantı + KISA etiket: teslim numarası / adet); ilki satırın kendisidir (tıklayınca ona gider), ikincisi yüksek ekranda ayrı satırdır. */
+        readonly next: ReadonlyArray<{ readonly href: `/${string}`; readonly label: string }>;
+      }>;
+    }
+  | { readonly kind: "empty" }
+  | { readonly kind: "error"; readonly message: string; readonly code: string };
+
 export interface TaskMenuProps {
   readonly slug: string;
-  readonly allowed: { readonly usersManage: boolean; readonly settingsManage: boolean; readonly auditView: boolean; readonly stockView: boolean };
+  readonly allowed: { readonly usersManage: boolean; readonly settingsManage: boolean; readonly auditView: boolean; readonly stockView: boolean; readonly stockPost?: boolean };
   /** Verilirse (yalnız saha rolleri) ızgaranın üstünde telefon özet kartı çizilir. */
   readonly myTasks?: MyTasksSummary;
+  /** `stock.post` sahibi için gerçek bekleyen işler; 2 sütun kipinde (≥ 6 izinli iş) ızgara üstünde, saha rolünde (tek sütun) atanmış iş yoksa Görevlerim özetinin yerinde çizilir. */
+  readonly now?: NowSummary;
 }
 
 export type TaskKey = "members" | "settings" | "audit" | "items" | "warehouses" | "receive" | "issue" | "transfer" | "count" | "lookup" | "undo";
@@ -180,7 +200,11 @@ export function TaskTile({ name, hue, title, description, what, href, locked, so
   );
 }
 
-export async function TaskMenu({ slug, allowed, myTasks }: TaskMenuProps) {
+/** Telefonda tek sütundan 2 sütuna geçiş eşiği (izinli iş sayısı) ve 2 sütunda alttan doldurmanın üst sınırı (DESIGN_REVIEW §7.4). */
+const TWO_COL_FROM = 6;
+const TWO_COL_MAX = 10;
+
+export async function TaskMenu({ slug, allowed, myTasks, now }: TaskMenuProps) {
   const t = await getTranslations("home");
   const base = `/t/${encodeURIComponent(slug)}` as const;
   const hrefs: Partial<Record<TaskKey, { allowed: boolean; href: `/${string}` }>> = {
@@ -191,17 +215,22 @@ export async function TaskMenu({ slug, allowed, myTasks }: TaskMenuProps) {
     items: { allowed: allowed.stockView, href: `${base}/items` },
     // Okuma `stock.view` (her rol); yazma kilidi hedef sayfada gösterilir, asıl yetki sunucudadır (T-205).
     warehouses: { allowed: true, href: `${base}/warehouses` },
+    // Saha kabulü (T-313): yazma `stock.post`; yetkisiz kullanıcıya bağlantı verilmez (kilit + gerekçe), FORBIDDEN ekranına götürmez.
+    receive: { allowed: allowed.stockPost === true, href: `${base}/field/receive` },
   };
   const ordered = orderTasks(TASKS);
   const real = ordered.filter((d) => hrefs[d.key] !== undefined);
   const active = real.filter((d) => hrefs[d.key]?.allowed === true);
   const locked = real.filter((d) => hrefs[d.key]?.allowed !== true);
   const soon = ordered.filter((d) => hrefs[d.key] === undefined);
-  // Telefonda tek sütun, eşit yükseklikli yatay satırlar; en çok 6 izinli iş için alttan yukarı doldurma (CSS değişkenleri `--rows`,
-  // `--row`). Daha çok iş olursa doldurma kapanır ve içerik alanı kayar (takip: 2 sütun).
-  const reverse = active.length >= 1 && active.length <= 6;
+  // Telefon yerleşimi izinli iş sayısına göre (DESIGN_REVIEW §7.4): ≤5 iş tek sütun eşit yükseklikli yatay satırlar; ≥6 iş eşit 2 sütunlu ızgara
+  // (aynı döşeme biçemi, açıklama gizli; tek sayıda iş varsa en üstteki son döşeme tam genişlik). Her iki kipte ızgara alttan yukarı dolar
+  // (CSS değişkenleri `--rows`, `--row`, `--col`); sınırı aşan iş sayısında doldurma kapanır ve içerik alanı kayar.
+  const twoCol = active.length >= TWO_COL_FROM;
+  const reverse = active.length >= 1 && active.length <= (twoCol ? TWO_COL_MAX : TWO_COL_FROM - 1);
+  const rowCount = twoCol ? Math.ceil(active.length / 2) : active.length;
   const hasCard = reverse && myTasks !== undefined;
-  const gridStyle = reverse ? ({ "--rows": active.length } as CSSProperties) : undefined;
+  const gridStyle = reverse ? ({ "--rows": rowCount } as CSSProperties) : undefined;
   const items: ReactNode[] = [];
   let moreNode: ReactNode = null;
 
@@ -244,6 +273,68 @@ export async function TaskMenu({ slug, allowed, myTasks }: TaskMenuProps) {
       );
     }
   }
+  const nowSection =
+    now !== undefined ? (
+      <section aria-labelledby="now-title" data-testid="now-card" data-state={now.kind} className="now-card flex min-w-0 flex-col gap-2 rounded-card border-2 border-border bg-surface p-3">
+        <h2 id="now-title" className="now-title text-base font-extrabold text-ink">
+          {t("now.title")}
+        </h2>
+        {now.kind === "error" ? (
+          <Banner kind="warning">
+            <p>{now.message}</p>
+            <p className="mt-1 text-sm">{now.code}</p>
+          </Banner>
+        ) : now.kind === "empty" ? (
+          <p data-testid="now-empty" className="m-0 text-base text-ink-muted">
+            {t("now.empty")}
+          </p>
+        ) : (
+          <ul className="now-list m-0 flex list-none flex-col gap-2 p-0">
+            {now.rows.map((r) => {
+              const shown = r.more ? `${r.count}+` : String(r.count);
+              const first = r.next[0];
+              return (
+                <li key={r.key} className="flex min-w-0 flex-col gap-2">
+                  <a
+                    href={first?.href ?? (r.key === "receive" ? `${base}/field/receive` : `${base}/field/tasks`)}
+                    data-testid={`now-${r.key}`}
+                    data-count={r.count}
+                    className={`${FOCUS} flex min-h-16 w-full min-w-0 items-center gap-3 rounded-control border-2 border-border bg-surface px-3 py-1 text-ink`}
+                  >
+                    <span aria-hidden="true" className={`flex size-10 shrink-0 items-center justify-center rounded-full text-lg font-extrabold ${r.key === "receive" ? HUE.green.circle : HUE.teal.circle}`}>
+                      {shown}
+                    </span>
+                    <span className="flex min-w-0 flex-1 flex-col">
+                      <span className="now-label break-words text-base font-bold">{t(`now.${r.key}`, { count: shown })}</span>
+                      {first === undefined ? null : (
+                        <span data-testid={`now-${r.key}-next`} className="now-next whitespace-nowrap text-sm text-ink-muted">
+                          {t("now.next", { label: first.label })}
+                        </span>
+                      )}
+                    </span>
+                    <ChevronRight aria-hidden="true" className="size-6 shrink-0" />
+                  </a>
+                  {r.next[1] === undefined ? null : (
+                    <a
+                      href={r.next[1].href}
+                      data-testid={`now-${r.key}-extra`}
+                      className={`${FOCUS} now-extra min-h-14 w-full min-w-0 items-center gap-3 rounded-control border-2 border-border bg-surface px-3 py-1 text-ink`}
+                    >
+                      <span className="min-w-0 flex-1 whitespace-nowrap text-base font-bold">{t("now.then", { label: r.next[1].label })}</span>
+                      <ChevronRight aria-hidden="true" className="size-6 shrink-0" />
+                    </a>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </section>
+    ) : null;
+  const nowCard = twoCol ? nowSection : null;
+  // Saha rolü (tek sütun): atanmış iş yoksa ve yetkili olunan açık iş (ya da okuma hatası) varsa "Şimdi" satırları boş durum kartının yerini alır (§7.4.2, K-2).
+  const nowInPlace = !twoCol && hasCard && myTasks?.kind === "count" && myTasks.count === 0 && now !== undefined && now.kind !== "empty";
+
   if (hasCard && myTasks !== undefined) {
     const mt = myTasks;
     items.push(
@@ -266,6 +357,8 @@ export async function TaskMenu({ slug, allowed, myTasks }: TaskMenuProps) {
             </span>
             <ChevronRight aria-hidden="true" className="size-6 shrink-0" />
           </a>
+        ) : nowInPlace ? (
+          nowSection
         ) : (
           <div data-testid="my-tasks-empty" className="my-tasks my-tasks-empty m-0 flex max-h-30! w-full flex-none! flex-col items-center justify-center gap-1 rounded-2xl border border-border bg-surface px-4 py-2 text-center">
             <p className="m-0 flex items-center gap-2 text-base font-semibold text-ink-muted">
@@ -284,10 +377,13 @@ export async function TaskMenu({ slug, allowed, myTasks }: TaskMenuProps) {
   active.forEach((d, i) => {
     const h = hrefs[d.key];
     if (h === undefined) return;
-    const row = reverse ? ({ "--row": active.length + 1 - i } as CSSProperties) : undefined;
+    const lastOdd = twoCol && active.length % 2 === 1 && i === active.length - 1;
+    const row = reverse
+      ? ({ "--row": rowCount + 1 - (twoCol ? Math.floor(i / 2) : i), ...(twoCol ? { "--col": lastOdd ? "1 / -1" : (i % 2) + 1 } : {}) } as CSSProperties)
+      : undefined;
     items.push(
       <li key={d.key} className="task-item flex min-w-0" style={row}>
-        <TaskTile name={d.key} hue={d.hue} title={t(`tasks.${d.key}.title`)} description={t(`tasks.${d.key}.description`)} href={h.href} />
+        <TaskTile name={d.key} hue={d.hue} title={twoCol && t.has(`tasks.${d.key}.tile`) ? t(`tasks.${d.key}.tile`) : t(`tasks.${d.key}.title`)} description={t(twoCol ? `tasks.${d.key}.short` : `tasks.${d.key}.description`)} href={h.href} />
       </li>,
     );
   });
@@ -306,13 +402,20 @@ export async function TaskMenu({ slug, allowed, myTasks }: TaskMenuProps) {
     );
   }
 
-  return (
+  const grid = (
     <ul
       aria-label={t("tasksLabel")}
       style={gridStyle}
-      className={`task-grid m-0 grid min-w-0 list-none grid-cols-1 gap-4 p-0 md:grid-cols-2 lg:grid-cols-3 phone:grid-cols-1 phone:gap-2 ${reverse ? "task-grid-fill" : ""} ${hasCard ? "task-grid-card" : ""}`}
+      className={`task-grid m-0 grid min-w-0 list-none grid-cols-1 gap-4 p-0 md:grid-cols-2 lg:grid-cols-3 ${twoCol ? "phone:grid-cols-2" : "phone:grid-cols-1"} phone:gap-2 ${reverse ? "task-grid-fill" : ""} ${reverse && twoCol ? "task-grid-2col" : ""} ${hasCard ? "task-grid-card" : ""} ${nowInPlace ? "task-grid-now" : ""}`}
     >
       {items}
     </ul>
+  );
+  if (!twoCol) return grid;
+  return (
+    <div className="task-menu task-menu-2col flex min-w-0 flex-col gap-2">
+      {nowCard}
+      {grid}
+    </div>
   );
 }

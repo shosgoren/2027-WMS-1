@@ -125,6 +125,14 @@ async function snapshot(t: Fx): Promise<unknown> {
     roles: await q("SELECT membership_id, role_key FROM public.membership_roles WHERE tenant_id = $1 ORDER BY membership_id, role_key"),
     invitations: await q("SELECT id, revoked_at, accepted_at FROM public.invitations WHERE tenant_id = $1 ORDER BY id"),
     audit: await q("SELECT count(*)::int AS n FROM public.audit_logs WHERE tenant_id = $1"),
+    // T-313: kabul/yerleştirme eylemleri B'de belge, satır, görev, idempotency kaydı, defter ve bakiye bırakmamalı.
+    receipts: await q("SELECT id, status, version FROM public.inbound_receipts WHERE tenant_id = $1 ORDER BY id"),
+    receiptLines: await q("SELECT id, received_quantity::text AS r, damaged_quantity::text AS d FROM public.inbound_receipt_lines WHERE tenant_id = $1 ORDER BY id"),
+    documents: await q("SELECT count(*)::int AS n FROM public.documents WHERE tenant_id = $1"),
+    tasks: await q("SELECT count(*)::int AS n, count(*) FILTER (WHERE status = 'OPEN')::int AS open FROM public.warehouse_tasks WHERE tenant_id = $1"),
+    idempotency: await q("SELECT count(*)::int AS n FROM public.idempotency_records WHERE tenant_id = $1"),
+    ledger: await q("SELECT count(*)::int AS n, COALESCE(sum(quantity), 0)::text AS q FROM public.stock_ledger WHERE tenant_id = $1"),
+    balances: await q("SELECT count(*)::int AS n, COALESCE(sum(quantity), 0)::text AS q, COALESCE(sum(reserved_quantity), 0)::text AS r FROM public.stock_balances WHERE tenant_id = $1"),
   };
 }
 
@@ -152,6 +160,9 @@ let settings: { saveSettingsAction: (f: FormData) => Promise<void> };
 let inviteAccept: Actions;
 let itemActions: Actions;
 let taskActions: Actions;
+let receiptActions: Actions;
+/** T-313: B tenant'ının GERÇEK kabul belgesi/satırı ve lokasyonları (yazma eylemleri bu kimliklerle çağrılır; rastgele kimlik "yok" olduğundan tek başına yalıtımı kanıtlamaz). */
+let bRcpt: { receipt: string; line: string; kabul: string; raf: string };
 /** T-304: B tenant'ının sentetik görevi (eylem tablosu bu kimlikle çağırır). */
 let bTask: string;
 /** T-216: her tenant için sentetik birim/ürün/barkod kimlikleri (eylem tablosu B'nin kimlikleriyle çağırır). */
@@ -200,6 +211,7 @@ beforeAll(async () => {
   inviteAccept = (await load("app/invite/[token]/actions.ts")) as Actions;
   itemActions = (await load("app/t/[slug]/items/actions.ts")) as Actions;
   taskActions = (await load("app/t/[slug]/tasks/actions.ts")) as Actions;
+  receiptActions = (await load("app/t/[slug]/receipts/actions.ts")) as Actions;
   bTask = (await adm.query<{ id: string }>("INSERT INTO public.warehouse_tasks (tenant_id, warehouse_id, kind) VALUES ($1, $2, 'PICK') RETURNING id", [B.tenant, B.warehouse])).rows[0]!.id;
   const mkFx = async (t: Fx): Promise<ItemFx> => {
     const unit = (await adm.query<{ id: string }>("INSERT INTO public.units (tenant_id, id, code, name) VALUES ($1, gen_random_uuid(), $2, 'Birim') RETURNING id", [t.tenant, `U${rnd()}`])).rows[0]!.id;
@@ -208,6 +220,21 @@ beforeAll(async () => {
     return { unit, item, barcode };
   };
   fx = { A: await mkFx(A), B: await mkFx(B) };
+  {
+    const mkLoc = async (code: string, kind: string): Promise<string> =>
+      (await adm.query<{ id: string }>("INSERT INTO public.locations (tenant_id, id, warehouse_id, parent_id, code, name, depth, kind) VALUES ($1, gen_random_uuid(), $2, NULL, $3, 'B lok', 0, $4) RETURNING id", [B.tenant, B.warehouse, `${code}${rnd()}`.toUpperCase(), kind])).rows[0]!.id;
+    const kabul = await mkLoc("BK", "RECEIVING");
+    const raf = await mkLoc("BR", "STORAGE");
+    const receipt = (await adm.query<{ id: string }>(
+      "INSERT INTO public.inbound_receipts (tenant_id, id, warehouse_id, number, created_by, status) VALUES ($1, gen_random_uuid(), $2, $3, (SELECT user_id FROM public.tenant_memberships WHERE id = $4), 'OPEN') RETURNING id",
+      [B.tenant, B.warehouse, `KBL-B-${rnd()}`, B.adminMembership],
+    )).rows[0]!.id;
+    const line = (await adm.query<{ id: string }>(
+      "INSERT INTO public.inbound_receipt_lines (tenant_id, id, receipt_id, line_no, item_id, unit_id, conversion_factor, expected_quantity) VALUES ($1, gen_random_uuid(), $2, 1, $3, $4, 1, 10) RETURNING id",
+      [B.tenant, receipt, fx.B.item, fx.B.unit],
+    )).rows[0]!.id;
+    bRcpt = { receipt, line, kabul, raf };
+  }
 
   // B yöneticisi (meşru) bir davet üretir: hem olumlu kontrol hem de çapraz tenant kabul denemesi için belirteç.
   as(B.admin);
@@ -253,6 +280,10 @@ const LOADERS = [
   // T-304: görev ekranları; üyelik/izin `listTasks`/`listMyTasks`/üyelik özeti ile sayfanın kendisinde çözülür.
   "tasks/page.tsx",
   "field/tasks/page.tsx",
+  // T-313: kabul ve yerleştirme ekranları; üyelik özeti + `listInboundReceipts`/`getInboundReceipt`/`listMyTasks` ile sayfanın kendisinde çözülür.
+  "receipts/page.tsx",
+  "field/receive/page.tsx",
+  "field/putaway/page.tsx",
 ] as const;
 /**
  * T-304: tenant verisi çizmeyen saha kabuğu sayfaları. Üyelik kararı üst `layout.tsx`'tedir (yukarıdaki LOADERS satırı çapraz tenant
@@ -528,16 +559,35 @@ const TASK_ACTIONS: Record<string, Call> = {
   cancelTaskAction: (slug) => taskActions.cancelTaskAction!({ slug, taskId: bTask, expectedVersion: 1, reason: "Ele geçirme" }),
 };
 
+/**
+ * T-313: kabul/yerleştirme eylemleri; hepsi B'nin ürün/depo kimlikleri (ve B'ye ait olmayan rastgele kimlikler) ile çağrılır. Yazma eylemleri
+ * `limitVerifiedTenant` ile üyelik çözümünde, okuma eylemleri domain sorgusunda `NOT_FOUND` verir; A slug'ında B kimlikleri etkisizdir.
+ */
+const RECEIPT_ACTIONS: Record<string, Call> = {
+  createReceiptAction: (slug) =>
+    receiptActions.createReceiptAction!({ slug, clientKey: randomUUID(), warehouseId: B.warehouse, supplierRef: "Ele geçirme", lines: [{ itemId: fx.B.item, unitId: fx.B.unit, expectedQuantity: "5" }] }),
+  receiveGoodsAction: (slug) =>
+    receiptActions.receiveGoodsAction!({ slug, clientKey: randomUUID(), receiptId: bRcpt.receipt, lines: [{ lineId: bRcpt.line, received: "5", locationId: bRcpt.kabul }] }),
+  approveQualityAction: (slug) => receiptActions.approveQualityAction!({ slug, clientKey: randomUUID(), receiptId: bRcpt.receipt }),
+  putawayAction: (slug) =>
+    receiptActions.putawayAction!({ slug, clientKey: randomUUID(), sourceLocationId: bRcpt.kabul, targetLocationId: bRcpt.raf, itemId: fx.B.item, quantity: "5" }),
+  resolveItemScanAction: (slug) => receiptActions.resolveItemScanAction!({ slug, code: "8000000000000" }),
+  resolveLocationScanAction: (slug) => receiptActions.resolveLocationScanAction!({ slug, warehouseId: B.warehouse, code: "A-01" }),
+  availableAtLocationAction: (slug) => receiptActions.availableAtLocationAction!({ slug, locationId: bRcpt.kabul, itemId: fx.B.item }),
+  itemUnitsAction: (slug) => receiptActions.itemUnitsAction!({ slug, itemId: fx.B.item }),
+};
+
 describe("Server Action'lar", () => {
   it("@AC-04 kapsam: members/actions.ts dışa aktarımlarının tamamı tabloda; ayarlar eylemi ayrıca sınanır", () => {
     expect(Object.keys(members).sort()).toEqual(Object.keys(ACTIONS).sort());
     expect(Object.keys(itemActions).sort()).toEqual(Object.keys(ITEM_ACTIONS).sort());
     expect(Object.keys(taskActions).sort()).toEqual(Object.keys(TASK_ACTIONS).sort());
+    expect(Object.keys(receiptActions).sort()).toEqual(Object.keys(RECEIPT_ACTIONS).sort());
     expect(Object.keys(settings)).toEqual(["saveSettingsAction"]);
     expect(Object.keys(inviteAccept)).toEqual(["acceptInvitationAction"]);
   });
 
-  for (const [name, call] of Object.entries({ ...ACTIONS, ...ITEM_ACTIONS, ...TASK_ACTIONS })) {
+  for (const [name, call] of Object.entries({ ...ACTIONS, ...ITEM_ACTIONS, ...TASK_ACTIONS, ...RECEIPT_ACTIONS })) {
     it(`@AC-04 ${name}: A yöneticisi B'nin slug'ıyla -> NOT_FOUND (var olmayan slug ile aynı yanıt); B'de hiçbir değişiklik yok`, async () => {
       const victim = { membership: B.managerMembership, invitation: bInvite.invitationId };
       const beforeB = await snapshot(B);
@@ -565,6 +615,22 @@ describe("Server Action'lar", () => {
         expect(r.ok, `${name} ${user}`).toBe(false);
         if (!r.ok) expect(["NOT_FOUND", "FORBIDDEN"]).toContain(r.error.code);
       }
+      expect(await snapshot(A)).toEqual(beforeA);
+      expect(await snapshot(B)).toEqual(beforeB);
+    });
+  }
+
+  for (const [name, call] of Object.entries(RECEIPT_ACTIONS)) {
+    it(`@AC-04 ${name}: A yöneticisi KENDİ slug'ında B'nin GERÇEK kimlikleriyle -> NOT_FOUND (var olmayan kimlikle aynı yanıt); A ve B'de etki yok`, async () => {
+      const victim = { membership: B.managerMembership, invitation: bInvite.invitationId };
+      const beforeA = await snapshot(A);
+      const beforeB = await snapshot(B);
+      as(A.admin);
+      const own = await call(A.slug, victim);
+      expect(own.ok, `${name}: ${JSON.stringify(own)}`).toBe(false);
+      if (!own.ok) expect(own.error.code).toBe("NOT_FOUND");
+      expect(JSON.stringify(own)).not.toContain(B.slug);
+      expect(JSON.stringify(own)).not.toContain(bRcpt.receipt);
       expect(await snapshot(A)).toEqual(beforeA);
       expect(await snapshot(B)).toEqual(beforeB);
     });

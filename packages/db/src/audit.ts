@@ -73,6 +73,10 @@ export const AUDIT_ACTIONS = [
   "sales_order.updated",
   "sales_order.cancelled",
   "sales_order.line_cancelled",
+  // T-307: toplama görevlendirmesi (stok etkisi yok; görevler ayrıca `warehouse_task.created`) ve "ürün bulunamadı" bildirimi
+  // (lokasyon `pick_blocked` olur, sayım görevi açılır; stok etkisi varsa ayrıca `stock_document.posted`).
+  "pick_assignment.created",
+  "pick.not_found",
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];

@@ -637,3 +637,204 @@ describe("kurallar", () => {
     expect(await ledgerCount(X)).toBe(1);
   });
 });
+
+// --- T-275 (T-305 MINOR-2/3/5; T-222 MINOR-4 wms_app yolu) ---------------------------------------------------------------
+describe("T-275: birim yuvarlama, numara kilit sırası, özet normalizasyonu, damga bekçisi", () => {
+  /** Ölçeği 6 olan ürün + koli birimi katsayısı 0,5 (1 koli = 0,5 temel); kabul satırı KOLİ biriminde. */
+  async function mkHalfReceipt(expected: string, factor = "0.5"): Promise<{ id: string; lineId: string; item: string }> {
+    const item = uuid();
+    await q("INSERT INTO public.items (tenant_id, id, code, name, base_unit_id, tracking_mode, quantity_scale) VALUES ($1,$2,$3,'T275 urun',$4,'NONE',6)", [A.tenantId, item, `I-${hex(10)}`, A.unitId]);
+    await q("INSERT INTO public.unit_conversions (tenant_id, item_id, unit_id, to_base_factor) VALUES ($1,$2,$3,$4)", [A.tenantId, item, A.boxUnitId, factor]);
+    const c = await createInboundReceipt(ownerP(), { warehouseId: A.warehouseId, lines: [{ itemId: item, unitId: A.boxUnitId, expectedQuantity: expected }] });
+    const id = c.documentId as string;
+    await openInboundReceipt(ownerP(), { receiptId: id, expectedVersion: 1 });
+    return { id, lineId: ((await q<{ id: string }>("SELECT id FROM public.inbound_receipt_lines WHERE receipt_id = $1", [id]))[0] as { id: string }).id, item };
+  }
+
+  it("MINOR-2: kabul 0,000004 (hasarlı 0,000001) × 0,5 → iyi + hasarlı temel miktarı toplamın temel miktarına eşit (0,000002); onay kalanın tamamını alır", async () => {
+    await setQc(true);
+    const KABUL = await mkLoc("RECEIVING");
+    const g = await mkHalfReceipt("0.000010");
+    await receiveGoods(pickerP(), { receiptId: g.id, lines: [{ lineId: g.lineId, received: "0.000004", damaged: "0.000001", locationId: KABUL }] });
+    // Toplam = round(0,000004 × 0,5) = 0,000002; hasarlı = round(0,0000005) = 0,000001; iyi = 0,000001 (eski: iyi round(0,0000015) = 0,000002 → toplam 0,000003).
+    expect(await bal(g.item, KABUL, "DAMAGED")).toBe(n("0.000001"));
+    expect(await bal(g.item, KABUL, "QUARANTINE")).toBe(n("0.000001"));
+    expect(n(await ledgerSum(g.item))).toBe(n("0.000002"));
+    // Onay: iyi miktar kabul biriminde 0,000003 → round(0,0000015) = 0,000002 > bekleyen 0,000001 yalnız yuvarlama kadar → kalan (0,000001) onaylanır (eski: VALIDATION_FAILED).
+    await approveQuality(ownerP(), { receiptId: g.id, lines: [{ lineId: g.lineId, locationId: KABUL, quantity: "0.000003" }] });
+    expect(await bal(g.item, KABUL, "AVAILABLE")).toBe(n("0.000001"));
+    expect(await bal(g.item, KABUL, "QUARANTINE")).toBe(n(0));
+    expect(await bal(g.item, KABUL, "DAMAGED")).toBe(n("0.000001"));
+    expect(n(await ledgerSum(g.item))).toBe(n("0.000002"));
+    // Bekleyenin ikinci katı aşılmaz: kalan yokken yeni onay reddedilir.
+    expect(codeOf(await failure(approveQuality(ownerP(), { receiptId: g.id, lines: [{ lineId: g.lineId, locationId: KABUL, quantity: "0.000003" }] })))).toBe("VALIDATION_FAILED");
+  });
+
+  it("MINOR-2: 0,000001 × 0,5 üçlü: toplam, hasarlı ve onay AYNI tek dönüşümden; tamamı hasarlı kabulde iyi satır oluşmaz, kalite onayı karantina bulmaz", async () => {
+    await setQc(true);
+    const KABUL = await mkLoc("RECEIVING");
+    const g = await mkHalfReceipt("0.000010");
+    // 0,000002 kabul, 0,000001 hasarlı: toplam round(0,000001) = 0,000001; hasarlı round(0,0000005) = 0,000001 → iyi 0 (eski: 0,000001 + 0,000001 = 0,000002).
+    await receiveGoods(pickerP(), { receiptId: g.id, lines: [{ lineId: g.lineId, received: "0.000002", damaged: "0.000001", locationId: KABUL }] });
+    expect(await bal(g.item, KABUL, "DAMAGED")).toBe(n("0.000001"));
+    expect(await bal(g.item, KABUL, "QUARANTINE")).toBe(n(0));
+    expect(n(await ledgerSum(g.item))).toBe(n("0.000001"));
+    expect(codeOf(await failure(approveQuality(ownerP(), { receiptId: g.id })))).toBe("VALIDATION_FAILED"); // onaylanacak karantina yok
+    expect(await lineRow(g.lineId)).toMatchObject({ received: n("0.000002"), damaged: n("0.000001") }); // birim sayaçları kabul biriminde tam
+  });
+
+  it("MINOR-2 (hasarlı yuvarlama): hasarlı > 0 ama temel birimde 0'a yuvarlanıyorsa kabul VALIDATION_FAILED; hasarlı mal iyi stok olmaz, hiçbir şey yazılmaz", async () => {
+    await setQc(false); // kalite kapalı: iyi stok doğrudan AVAILABLE olurdu
+    const KABUL = await mkLoc("RECEIVING");
+    const g = await mkHalfReceipt("0.000010", "0.3");
+    // hasarlı 0,000001 × 0,3 = 0,0000003 → 0 temel; toplam 0,000010 × 0,3 = 3 temel. Eski: hasarlı satır atlanır, 3 birimin tamamı AVAILABLE olurdu.
+    const e = await failure(receiveGoods(pickerP(), { receiptId: g.id, lines: [{ lineId: g.lineId, received: "0.000010", damaged: "0.000001", locationId: KABUL }] }));
+    expect(e.code).toBe("VALIDATION_FAILED");
+    expect(await ledgerCount(g.item)).toBe(0);
+    expect(await bal(g.item, KABUL, "AVAILABLE")).toBe(n(0));
+    expect(await lineRow(g.lineId)).toMatchObject({ received: n(0), damaged: n(0) });
+    await setQc(true);
+  });
+
+  it("MINOR-3 (tolerans): katsayı 12'de bekleyeni bir mikro-birim (12 temel mikro) aşan onay isteği KIRPILMAZ, reddedilir; bekleyenin kendisi onaylanır", async () => {
+    await setQc(true);
+    const KABUL = await mkLoc("RECEIVING");
+    const g = await mkHalfReceipt("0.000010", "12");
+    await receiveGoods(pickerP(), { receiptId: g.id, lines: [{ lineId: g.lineId, received: "0.000001", locationId: KABUL }] }); // 0,000012 temel bekleyen
+    expect(await bal(g.item, KABUL, "QUARANTINE")).toBe(n("0.000012"));
+    expect(codeOf(await failure(approveQuality(ownerP(), { receiptId: g.id, lines: [{ lineId: g.lineId, locationId: KABUL, quantity: "0.000002" }] })))).toBe("VALIDATION_FAILED");
+    expect(await bal(g.item, KABUL, "QUARANTINE")).toBe(n("0.000012"));
+    await approveQuality(ownerP(), { receiptId: g.id, lines: [{ lineId: g.lineId, locationId: KABUL, quantity: "0.000001" }] });
+    expect(await bal(g.item, KABUL, "AVAILABLE")).toBe(n("0.000012"));
+  });
+
+  it("MINOR-3: createInboundReceipt numara satırını beklerken birim satırlarını ZATEN paylaşımlı kilitlemiştir (number_sequences son kilit)", async () => {
+    // Sayaç satırı yoksa oluşsun: bir kabul.
+    await createInboundReceipt(ownerP(), { warehouseId: A.warehouseId, lines: [{ itemId: await mkItem(), unitId: A.unitId, expectedQuantity: "1" }] });
+    const year = (await q<{ y: string }>("SELECT period AS y FROM public.number_sequences WHERE tenant_id=$1 AND document_kind='INBOUND_RECEIPT' LIMIT 1", [A.tenantId]))[0]?.y;
+    expect(year).toBeDefined();
+    const item = await mkItem();
+    const holder = new pg.Client({ connectionString: env.databaseUrlDirect });
+    const probe = new pg.Client({ connectionString: env.databaseUrlDirect });
+    holder.on("error", () => undefined);
+    probe.on("error", () => undefined);
+    await holder.connect();
+    await probe.connect();
+    let pending: Promise<unknown> | undefined;
+    try {
+      await holder.query("BEGIN");
+      await holder.query("SELECT 1 FROM public.number_sequences WHERE tenant_id=$1 AND document_kind='INBOUND_RECEIPT' AND period=$2 FOR UPDATE", [A.tenantId, year]);
+      pending = createInboundReceipt(ownerP(), { warehouseId: A.warehouseId, lines: [{ itemId: item, unitId: A.unitId, expectedQuantity: "1" }] });
+      pending.catch(() => undefined);
+      // Komut sıra satırında bloklanana dek bekle.
+      let blocked = false;
+      for (let i = 0; i < 100 && !blocked; i++) {
+        blocked = (await probe.query("SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query ILIKE '%number_sequences%' AND pid <> pg_backend_pid()")).rows.length > 0;
+        if (!blocked) await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(blocked, "komut number_sequences satırında bloklanmalı").toBe(true);
+      // Bu anda komut birim, ürün ve depo satırlarını tutuyor olmalı: NOWAIT kilit denemesi başarısız (55P03).
+      for (const [tbl, id] of [["units", A.unitId], ["items", item], ["warehouses", A.warehouseId]] as const) {
+        await probe.query("BEGIN");
+        await expect(probe.query(`SELECT 1 FROM public.${tbl} WHERE tenant_id=$1 AND id=$2 FOR UPDATE NOWAIT`, [A.tenantId, id]), `${tbl} kilitli olmalı`).rejects.toMatchObject({ code: "55P03" });
+        await probe.query("ROLLBACK");
+      }
+    } finally {
+      await holder.query("COMMIT").catch(() => undefined);
+      if (pending !== undefined) await pending.catch(() => undefined);
+      await holder.end();
+      await probe.end();
+    }
+    expect((await pending) as { documentNumber: string }).toMatchObject({ documentNumber: expect.stringMatching(/^KBL-\d{4}-\d{6}$/) });
+  });
+
+  it("MINOR-5: '10' ve '10.000000' aynı idempotency özeti (kabul, oluşturma, onay); farklı miktar IDEMPOTENCY_MISMATCH", async () => {
+    await setQc(true);
+    const X = await mkItem();
+    const KABUL = await mkLoc("RECEIVING");
+    const ckey = uuid();
+    const c1 = await createInboundReceipt(ownerP(ckey), { warehouseId: A.warehouseId, lines: [{ itemId: X, unitId: A.unitId, expectedQuantity: "10" }] });
+    const c2 = await createInboundReceipt(ownerP(ckey), { warehouseId: A.warehouseId, lines: [{ itemId: X, unitId: A.unitId, expectedQuantity: "10.000000" }] });
+    expect(c2.replayed).toBe(true);
+    expect(c2.documentId).toBe(c1.documentId);
+    const id = c1.documentId as string;
+    await openInboundReceipt(ownerP(), { receiptId: id, expectedVersion: 1 });
+    const lineId = ((await q<{ id: string }>("SELECT id FROM public.inbound_receipt_lines WHERE receipt_id = $1", [id]))[0] as { id: string }).id;
+    const rkey = uuid();
+    const r1 = await receiveGoods(pickerP(rkey), { receiptId: id, lines: [{ lineId, received: "10", locationId: KABUL }] });
+    const r2 = await receiveGoods(pickerP(rkey), { receiptId: id, lines: [{ lineId, received: "10.000000", damaged: "0.0", locationId: KABUL }] });
+    expect(r2.replayed).toBe(true);
+    expect(r2.documentId).toBe(r1.documentId);
+    expect(n(await physical(X))).toBe(n(10)); // tek etki
+    expect(codeOf(await failure(receiveGoods(pickerP(rkey), { receiptId: id, lines: [{ lineId, received: "10.000001", locationId: KABUL }] })))).toBe("IDEMPOTENCY_MISMATCH");
+    const akey = uuid();
+    const a1 = await approveQuality(ownerP(akey), { receiptId: id, lines: [{ lineId, locationId: KABUL, quantity: "4" }] });
+    const a2 = await approveQuality(ownerP(akey), { receiptId: id, lines: [{ lineId, locationId: KABUL, quantity: "4.000000" }] });
+    expect(a2.replayed).toBe(true);
+    expect(a2.documentId).toBe(a1.documentId);
+    expect(await bal(X, KABUL, "AVAILABLE")).toBe(n(4));
+  });
+
+  it("T-222 MINOR-4 (wms_app): damga yalnızca posting_job_id NULL→dolu geçişinde yazılır; sonradan yazma/değiştirme reddedilir; temizleme serbest", async () => {
+    const X = await mkItem();
+    const KABUL = await mkLoc("RECEIVING");
+    const created = await createStockDocument(ownerP(), {
+      kind: "STOCK_IN",
+      warehouseId: A.warehouseId,
+      lines: [{ itemId: X, unitId: A.unitId, quantity: "1", conversionFactor: "1", baseQuantity: "1", targetLocationId: KABUL, stockStatus: "AVAILABLE" }],
+    });
+    const id = created.documentId as string;
+    await approveDocument(ownerP(), { documentId: id, expectedVersion: 1 });
+    const web = new pg.Client({ connectionString: env.databaseUrl }); // wms_app (pooler)
+    web.on("error", () => undefined);
+    await web.connect();
+    const tryUpdate = async (text: string, params: unknown[]): Promise<"ok" | string> => {
+      await web.query("BEGIN");
+      try {
+        await web.query("SELECT set_config('app.current_tenant_id', $1, true)", [A.tenantId]);
+        await web.query(text, params);
+        await web.query("COMMIT");
+        return "ok";
+      } catch (e) {
+        await web.query("ROLLBACK");
+        return /POSTING_STAMP_GUARD/.test((e as Error).message) ? "guard" : `other:${(e as Error).message}`;
+      }
+    };
+    const stamp = async () =>
+      (await q<{ job: string | null; mfa: Date | null; rec: string | null }>("SELECT posting_job_id AS job, posting_mfa_verified_at AS mfa, posting_idempotency_record_id AS rec FROM public.documents WHERE id=$1", [id]))[0] as {
+        job: string | null; mfa: Date | null; rec: string | null;
+      };
+    try {
+      const job = uuid();
+      const rec = uuid();
+      // Gelecek damga (yalnızca now() kabul): kilitle birlikte bile reddedilir.
+      expect(
+        await tryUpdate("UPDATE public.documents SET posting_job_id=$3, posting_requested_by=$4, posting_mfa_verified_at=now() + interval '1 hour', posting_idempotency_record_id=$5 WHERE tenant_id=$1 AND id=$2", [A.tenantId, id, job, A.ownerUserId, rec]),
+      ).toBe("guard");
+      // Kilit yokken tek başına damga: reddedilir.
+      expect(await tryUpdate("UPDATE public.documents SET posting_mfa_verified_at = now() WHERE tenant_id=$1 AND id=$2", [A.tenantId, id])).toBe("guard");
+      // deferToWorker biçimi: kilit + damga aynı ifadede.
+      expect(
+        await tryUpdate("UPDATE public.documents SET posting_job_id=$3, posting_requested_by=$4, posting_mfa_verified_at=now(), posting_idempotency_record_id=$5 WHERE tenant_id=$1 AND id=$2", [A.tenantId, id, job, A.ownerUserId, rec]),
+      ).toBe("ok");
+      const s1 = await stamp();
+      expect(s1.job).toBe(job);
+      expect(s1.mfa).not.toBeNull();
+      // Kilit doluyken damgayı değiştirme / yeniden yazma: reddedilir, değer değişmez.
+      expect(await tryUpdate("UPDATE public.documents SET posting_mfa_verified_at = now() + interval '5 seconds' WHERE tenant_id=$1 AND id=$2", [A.tenantId, id])).toBe("guard");
+      expect(await tryUpdate("UPDATE public.documents SET posting_idempotency_record_id=$3 WHERE tenant_id=$1 AND id=$2", [A.tenantId, id, uuid()])).toBe("guard");
+      expect(await stamp()).toEqual(s1);
+      // MINOR-1: damga işine/istek sahibine bağlıdır: kilit doluyken istek sahibi ya da iş damga temizlenmeden değiştirilemez.
+      expect(await tryUpdate("UPDATE public.documents SET posting_requested_by=$3 WHERE tenant_id=$1 AND id=$2", [A.tenantId, id, A.memberUserId])).toBe("guard");
+      expect(await tryUpdate("UPDATE public.documents SET posting_job_id=$3 WHERE tenant_id=$1 AND id=$2", [A.tenantId, id, uuid()])).toBe("guard");
+      expect(await stamp()).toEqual(s1);
+      // Temizleme (failPostingInTx / assignNumber biçimi): serbest.
+      expect(
+        await tryUpdate("UPDATE public.documents SET posting_job_id=NULL, posting_requested_by=NULL, posting_mfa_verified_at=NULL, posting_idempotency_record_id=NULL WHERE tenant_id=$1 AND id=$2", [A.tenantId, id]),
+      ).toBe("ok");
+      expect(await stamp()).toEqual({ job: null, mfa: null, rec: null });
+    } finally {
+      await web.end();
+    }
+  });
+});

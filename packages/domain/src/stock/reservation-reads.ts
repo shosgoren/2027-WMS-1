@@ -37,6 +37,8 @@ export function uuidOrNull(raw: unknown): string | null {
 export interface ReservationPlanRow {
   readonly id: string;
   readonly status: string;
+  /** Rezervasyon miktarı (numeric metni; kilitsiz okuma). T-307: taşımadan SONRA kalan payı kilitli görüntü yerine taze okumayla serbest bırakmak için. */
+  readonly quantity: string;
   /** Talep kaynağı (belge satırı | sipariş satırı; T-306). */
   readonly source: ReservationSource;
   readonly key: StockDimensionKey;
@@ -53,7 +55,7 @@ export type PlanSelector =
 
 export async function readReservationPlanRows(tx: AccessTx, tenantId: string, sel: PlanSelector): Promise<ReservationPlanRow[]> {
   type R = {
-    id: string; status: string; document_line_id: string | null; order_line_id: string | null; item_id: string; location_id: string; lot_id: string | null; serial_id: string | null;
+    id: string; status: string; quantity: string; document_line_id: string | null; order_line_id: string | null; item_id: string; location_id: string; lot_id: string | null; serial_id: string | null;
     stock_status: StockDimensionKey["stockStatus"]; inventory_owner_id: string | null; handling_unit_id: string | null; warehouse_id: string; location_kind: string;
   };
   const tenant = uuid(tenantId);
@@ -62,7 +64,7 @@ export async function readReservationPlanRows(tx: AccessTx, tenantId: string, se
   const lineId = "lineId" in sel ? uuid(sel.lineId) : "";
   const documentId = "documentId" in sel ? uuid(sel.documentId) : "";
   const orderLineId = "orderLineId" in sel ? uuid(sel.orderLineId) : "";
-  const cols = sql`r.id, r.status, r.document_line_id, r.order_line_id, d.item_id, d.location_id, d.lot_id, d.serial_id, d.stock_status, d.inventory_owner_id, d.handling_unit_id, loc.warehouse_id, loc.kind AS location_kind`;
+  const cols = sql`r.id, r.status, r.quantity::text AS quantity, r.document_line_id, r.order_line_id, d.item_id, d.location_id, d.lot_id, d.serial_id, d.stock_status, d.inventory_owner_id, d.handling_unit_id, loc.warehouse_id, loc.kind AS location_kind`;
   const from = sql`public.reservations r
           JOIN public.stock_dimensions d ON d.tenant_id = r.tenant_id AND d.id = r.stock_dimension_id
           JOIN public.locations loc ON loc.tenant_id = d.tenant_id AND loc.id = d.location_id
@@ -86,6 +88,7 @@ export async function readReservationPlanRows(tx: AccessTx, tenantId: string, se
   return rows.map((r) => ({
     id: r.id,
     status: r.status,
+    quantity: r.quantity,
     source: sourceOfRow(r),
     warehouseId: r.warehouse_id,
     locationKind: r.location_kind,
@@ -173,6 +176,31 @@ export async function readAllocationBalances(
     counting: r.counting,
     available: r.available,
   }));
+}
+
+/**
+ * Boyutların serbest miktarı (`quantity − reserved_quantity`, numeric metni), kimlik → miktar. Kilitsiz okuma: çağıran boyutları `acquireStockLocks` ile
+ * kilitlemişse değer kararlıdır (T-307: STAGING stoğu yeniden tahsis edildikten sonra açık `REPUTAWAY` görevlerini uzlaştırmak için).
+ */
+export async function readFreeAtDimensions(tx: AccessTx, tenantId: string, keys: readonly StockDimensionKey[]): Promise<Map<string, string>> {
+  const tenant = uuid(tenantId);
+  const out = new Map<string, string>();
+  if (keys.length === 0) return out;
+  const json = JSON.stringify(keys.map((k) => ({ item_id: uuid(k.itemId), location_id: uuid(k.locationId), stock_status: k.stockStatus, lot_id: k.lotId, serial_id: k.serialId, owner: k.inventoryOwnerId, hu: k.handlingUnitId })));
+  const rows = await tx.execute<{ item_id: string; location_id: string; lot_id: string | null; serial_id: string | null; stock_status: StockDimensionKey["stockStatus"]; inventory_owner_id: string | null; handling_unit_id: string | null; free: string }>(
+    sql`SELECT d.item_id, d.location_id, d.lot_id, d.serial_id, d.stock_status, d.inventory_owner_id, d.handling_unit_id, (b.quantity - b.reserved_quantity)::text AS free
+          FROM public.stock_balances b
+          JOIN public.stock_dimensions d ON d.tenant_id = b.tenant_id AND d.id = b.stock_dimension_id
+          JOIN jsonb_to_recordset(${json}::jsonb) AS w(item_id uuid, location_id uuid, stock_status text, lot_id uuid, serial_id uuid, owner uuid, hu uuid)
+            ON d.item_id = w.item_id AND d.location_id = w.location_id AND d.stock_status = w.stock_status
+           AND d.lot_id IS NOT DISTINCT FROM w.lot_id AND d.serial_id IS NOT DISTINCT FROM w.serial_id
+           AND d.inventory_owner_id IS NOT DISTINCT FROM w.owner AND d.handling_unit_id IS NOT DISTINCT FROM w.hu
+         WHERE b.tenant_id = ${tenant}::uuid`,
+  );
+  for (const r of rows) {
+    out.set(dimensionIdentity({ itemId: r.item_id.toLowerCase(), locationId: r.location_id.toLowerCase(), lotId: r.lot_id, serialId: r.serial_id, stockStatus: r.stock_status, inventoryOwnerId: r.inventory_owner_id, handlingUnitId: r.handling_unit_id }), r.free);
+  }
+  return out;
 }
 
 /** Satırın kaynağı: DB XOR CHECK'i garanti eder; ikisi de dolu/boşsa bütünlük ihlali (`INTERNAL`, sessiz seçim yok). */

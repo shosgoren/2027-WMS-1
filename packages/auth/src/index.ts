@@ -19,7 +19,7 @@ import { sql } from "drizzle-orm";
 import { DB_CLIENT_SETTINGS, createDbClient, rawDb } from "@wms/db/internal";
 import type { DbClient } from "@wms/db/internal";
 import * as schema from "@wms/db/internal/schema";
-import { recordSecurityEvent } from "@wms/db";
+import { maskChangeSummary, recordSecurityEvent } from "@wms/db";
 import { hashPassword, verifyPassword } from "./password.ts";
 import {
   DEMO_FORBIDDEN_PATHS,
@@ -869,15 +869,15 @@ export function createAuth(params: CreateAuthParams): AuthService {
   }
 
   // ---------------------------------------------------------------------------------------------
-  // /reset-password kancaları (T-117b; ADR-016 §9, 3.-5. tur ekleri; ADR-014 4. tur MINOR-5, A-55)
+  // /reset-password kancaları (T-117b; ADR-016 §9, 3.-5. tur ekleri; ADR-014 4. tur MINOR-5, A-55; T-283)
   // Kurulu Better Auth 1.7.7 `/reset-password` işleyicisi (api/routes/password.mjs:148-171) `before` kancasıyla parola
-  // güncellemesini ORTAK transaction'da çalıştırmaz → kalan pencere: ADR-016 bilinen risk (1.7.7). Kanca grant'i kendi
-  // `wms_auth` transaction'ında tüketir ve commit eder; hedefin `users` satırına FOR UPDATE uygulanmaz.
+  // güncellemesini ORTAK transaction'da çalıştırmaz. Bu yüzden YÖNETİCİ belirteçleri (`adm_…`) Better Auth işleyicisine
+  // hiç ulaşmaz: `before` kancası işi `adminResetPassword` ile TEK `wms_auth` transaction'ında bitirip yanıtı kendisi döner
+  // (dispatch.mjs: before kancası `context` içermeyen nesne dönerse işleyici ve `after` kancaları atlanır). Self-servis
+  // belirteçler Better Auth yolunda kalır.
   // ---------------------------------------------------------------------------------------------
   interface PendingReset {
     readonly userId: string;
-    readonly marked: boolean;
-    readonly issuingTenant: string | null;
     readonly at: number;
   }
   const pendingResets = new Map<string, PendingReset>();
@@ -905,15 +905,16 @@ export function createAuth(params: CreateAuthParams): AuthService {
   const resetRejected = (): APIError =>
     new APIError("FORBIDDEN", { message: "RESET_LINK_REJECTED", code: "RESET_LINK_REJECTED" });
 
-  async function guardResetPassword(ctx: Parameters<typeof getSessionFromCtx>[0]): Promise<void> {
+  /** `true`: yönetici sıfırlaması bu kancada tamamlandı (Better Auth işleyicisi atlanır); `false`: Better Auth sürer. */
+  async function guardResetPassword(ctx: Parameters<typeof getSessionFromCtx>[0]): Promise<boolean> {
     const token = resetTokenOf(ctx as { body?: unknown; query?: unknown });
-    if (token === undefined) return; // Better Auth INVALID_TOKEN ile reddeder
+    if (token === undefined) return false; // Better Auth INVALID_TOKEN ile reddeder
     const source = ctx.request ?? ctx.headers;
     const options = ctx.context.options;
     // Parola uzunluğu Better Auth'tan ÖNCE aynı sınırlarla denetlenir: işleyici bu durumda belirteci tüketmeden reddeder
     // (password.mjs assertPasswordNotTooShort/Long, consume'dan önce) → kısa parola grant'i yakmasın.
     const pw = (ctx.body as { newPassword?: unknown } | undefined)?.newPassword;
-    if (typeof pw !== "string" || pw.length < PASSWORD_MIN_LENGTH || pw.length > PASSWORD_MAX_LENGTH) return;
+    if (typeof pw !== "string" || pw.length < PASSWORD_MIN_LENGTH || pw.length > PASSWORD_MAX_LENGTH) return false;
     const marked = ADMIN_TOKEN_RE.test(token);
     // B1: tanınmayan biçim (saklanan kimlik/özet dahil) hiçbir arama/tüketim yapılmadan ve self-servis yola düşmeden RED.
     if (!marked && !SELF_SERVICE_TOKEN_RE.test(token)) {
@@ -921,6 +922,10 @@ export function createAuth(params: CreateAuthParams): AuthService {
       throw resetRejected();
     }
     const issuingTenant = marked ? tenantOfAdminToken(token) : null;
+    if (marked) {
+      await adminResetPassword(ctx.context.internalAdapter, token, pw, issuingTenant ?? "", source, options);
+      return true;
+    }
     let record: { id: string; value: string } | null;
     let verdict: string;
     try {
@@ -941,32 +946,121 @@ export function createAuth(params: CreateAuthParams): AuthService {
       throw resetRejected();
     }
     const userId = record !== null && UUID_RE.test(record.value) ? record.value : null;
-    if (marked) {
-      if (verdict === "consumed" && record !== null && userId !== null) {
-        pruneAndRemember(token, { userId, marked: true, issuingTenant, at: Date.now() });
-        return;
-      }
-      // işaretli + 'invalid' / 'absent' (veya tanınmayan dönüş) → nötr RED
-      await emit(
-        "password_reset_link.rejected",
-        userId,
-        source,
-        options,
-        // Yalnızca belirteçteki (doğrulanmamış) iddia; doğrulanmış tenant yalnızca 'consumed' olayında yazılır.
-        { verdict: verdict === "invalid" ? "invalid" : "absent", claimed_tenant_id: issuingTenant, tenant_verified: false },
-        true,
-      );
-      throw resetRejected();
-    }
     if (verdict === "absent") {
-      if (record !== null && userId !== null) pruneAndRemember(token, { userId, marked: false, issuingTenant: null, at: Date.now() });
-      return; // self-servis akışı
+      if (record !== null && userId !== null) pruneAndRemember(token, { userId, at: Date.now() });
+      return false; // self-servis akışı
     }
     if (verdict === "consumed" || verdict === "invalid") {
       await emit("password_reset_link.inconsistent", userId, source, options, { verdict }, true);
     } else {
       logMasked("error", "password link check returned an unrecognised verdict; rejecting");
     }
+    throw resetRejected();
+  }
+
+  /**
+   * Yönetici kaynaklı sıfırlama (T-283; ADR-016 §9 kapanış notu): hedefin `users` satırı kilitlenir, grant denetlenip
+   * tüketilir, parola yazılır, oturumlar iptal edilir ve güvenlik olayı yazılır — hepsi TEK `wms_auth` transaction'ında.
+   * Kilit sırası (consume_admin_reset_grant ve üyelik tetikleyicisiyle aynı): ÖNCE users, SONRA admin_reset_grants.
+   * Karar: `consumed` → hepsi commit; `absent`/`invalid` → parola yazılmaz (grant `invalid`'de işlev tarafından yakılır,
+   * fail-closed; commit) ve RED; beklenmeyen hata → transaction geri alınır (grant diri kalır), RED.
+   * Parola politikası: uzunluk sınırları kancada (Better Auth ile aynı sabitler) ve özet `hashPassword` (Better Auth'un
+   * `password.hash` yapılandırması ile aynı işlev). Hız sınırı Better Auth yönlendiricisinde, aynı yol kovasında önce uygulanır.
+   */
+  async function adminResetPassword(
+    adapter: Pick<Parameters<typeof getSessionFromCtx>[0]["context"]["internalAdapter"], "findVerificationValue">,
+    token: string,
+    newPassword: string,
+    issuingTenant: string,
+    source: Headerish,
+    options: Parameters<typeof getIP>[1],
+  ): Promise<void> {
+    let recordId: string | null = null;
+    let userId: string | null = null;
+    try {
+      const found = await adapter.findVerificationValue(`reset-password:${token}`);
+      if (found !== null && found !== undefined && UUID_RE.test(found.value)) {
+        recordId = found.id;
+        userId = found.value;
+      }
+    } catch (error) {
+      logMasked("error", "admin password link lookup failed; rejecting", error);
+      throw resetRejected();
+    }
+    if (recordId === null || userId === null) {
+      await emit("password_reset_link.rejected", null, source, options, { verdict: "absent", claimed_tenant_id: issuingTenant, tenant_verified: false }, true);
+      throw resetRejected();
+    }
+    const target = userId;
+    const verificationId = recordId;
+    let verdict: string;
+    try {
+      // Yavaş Argon2 kilit tutulmadan önce hesaplanır.
+      const hashed = await hashPassword(newPassword);
+      const headers = headersOf(source);
+      const ip = headers === undefined ? null : getIP(headers, options);
+      const uaRaw = headers?.get("user-agent") ?? null;
+      const suppress = await shouldSuppressNetworkMeta(env.demoEmailDomain, {
+        explicit: false,
+        userId: target,
+        requestEmail: null,
+        onLookupError: (error) => logMasked("error", "network meta suppressed: subject lookup failed (admin reset)", error),
+        lookupEmail: async (id) => {
+          const rows = await authDb.execute<{ email: string }>(sql`SELECT email FROM public.users WHERE id = ${id}::uuid`);
+          return rows[0]?.email ?? null;
+        },
+      });
+      const evIp = suppress ? null : ip;
+      const evUa = suppress || uaRaw === null || uaRaw === "" ? null : uaRaw.slice(0, EVENT_UA_MAX);
+      verdict = await rawDb(client).transaction(async (tx) => {
+        // 1) Hedefin users satırı FOR UPDATE: üyelik değişiklikleri (tetikleyici FOR KEY SHARE) commit'e kadar bekler.
+        const locked = await tx.execute<{ id: string }>(sql`SELECT id FROM public.users WHERE id = ${target}::uuid FOR UPDATE`);
+        if (locked.length === 0) return "absent";
+        // 2) Denetim + tüketim (kilit altında güncel durum): grant geçerli, ihraç eden yetkili, hedef hâlâ yalnız o tenant'ta.
+        const rows = await tx.execute<{ r: string }>(sql`SELECT wms_probe.consume_admin_reset_grant(${verificationId}::uuid) AS r`);
+        const r = String(rows[0]?.r);
+        if (r !== "consumed") return r;
+        // 3) Doğrulama kaydı + parola özeti (credential hesabı yoksa oluşturulur; Better Auth ile aynı davranış).
+        await tx.execute(sql`DELETE FROM public.verifications WHERE id = ${verificationId}::uuid`);
+        const updated = await tx.execute<{ id: string }>(
+          sql`UPDATE public.accounts SET password = ${hashed}, updated_at = now()
+               WHERE user_id = ${target}::uuid AND provider_id = 'credential' RETURNING id`,
+        );
+        if (updated.length === 0) {
+          await tx.execute(
+            sql`INSERT INTO public.accounts (account_id, provider_id, user_id, password)
+                VALUES (${target}, 'credential', ${target}::uuid, ${hashed})`,
+          );
+        }
+        // 4) Hedefin tüm oturumları iptal (revokeSessionsOnPasswordReset ile aynı).
+        await tx.execute(sql`DELETE FROM public.sessions WHERE user_id = ${target}::uuid`);
+        // 5) Güvenlik olayı (aynı transaction'da; yazılamazsa hiçbir şey commit edilmez).
+        const { json } = maskChangeSummary({ issuing_tenant_id: issuingTenant, tenant_verified: true });
+        await tx.execute(
+          sql`INSERT INTO public.security_events (user_id, event_type, ip, user_agent, detail)
+              VALUES (${target}::uuid, 'password_reset_link.consumed', ${evIp}, ${evUa}, ${json}::jsonb)`,
+        );
+        // Better Auth yolundaki `onPasswordReset` olayıyla aynı tür (self-servis ile tutarlı denetim izi).
+        await tx.execute(
+          sql`INSERT INTO public.security_events (user_id, event_type, ip, user_agent, detail)
+              VALUES (${target}::uuid, ${SECURITY_EVENT.passwordReset}, ${evIp}, ${evUa}, '{}'::jsonb)`,
+        );
+        return "consumed";
+      });
+    } catch (error) {
+      // Deadlock/serileştirme/zaman aşımı dahil her hata: hiçbir şey commit edilmedi → RED (fail-closed, yutulmaz).
+      logMasked("error", "admin password reset failed; rolled back", error);
+      throw resetRejected();
+    }
+    if (verdict === "consumed") return;
+    await emit(
+      "password_reset_link.rejected",
+      target,
+      source,
+      options,
+      { verdict: verdict === "invalid" ? "invalid" : "absent", claimed_tenant_id: issuingTenant, tenant_verified: false },
+      true,
+    );
     throw resetRejected();
   }
 
@@ -992,10 +1086,6 @@ export function createAuth(params: CreateAuthParams): AuthService {
     // Başarı göstergesi: işleyici `ctx.json({ status: true })` döndürür (password.mjs:170); hata `APIError` olarak gelir.
     const returned = returnedValue as { status?: unknown } | undefined;
     if (returned === undefined || returned === null || typeof returned !== "object" || returned.status !== true) return;
-    if (pending.marked) {
-      await emit("password_reset_link.consumed", pending.userId, source, options, { issuing_tenant_id: pending.issuingTenant, tenant_verified: true }, true);
-      return;
-    }
     if (!env.emailRecoveryEnabled) return; // A-55: bayrak kapalıyken kurtarma etkisi yok
     try {
       await recoverAccountViaEmail(pending.userId, source, options);
@@ -1205,7 +1295,10 @@ export function createAuth(params: CreateAuthParams): AuthService {
             });
           }
         }
-        if (ctx.path === "/reset-password") await guardResetPassword(ctx);
+        if (ctx.path === "/reset-password" && (await guardResetPassword(ctx))) {
+          // T-283: yönetici sıfırlaması tek transaction'da tamamlandı; Better Auth işleyicisi ve after kancaları atlanır.
+          return ctx.json({ status: true });
+        }
         if (ctx.path === "/reset-password/:token") {
           // GET geri çağırması (password.mjs requestPasswordResetCallback) da aynı biçim denetiminden geçer: biçim dışı
           // belirteç (saklanan `h.<özet>` dahil) için kayıt araması ve başarı yönlendirmesi yok → hata.

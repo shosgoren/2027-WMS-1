@@ -1,6 +1,5 @@
 // DataWedge/okuyucu profili değerleri — TEK YER (A-143, Q-12: pilot cihazında doğrulanana dek varsayım).
 // Profil: önek STX, sonek Enter, tuşlar arası eşik 30 ms, GS1 ayracı yer tutucusu `~`.
-import { GS } from "@wms/domain/catalog/gs1";
 
 export const SCANNER_CONFIG = {
   /** `KeyboardEvent.key` olarak görülen sabit önek (STX). */
@@ -11,7 +10,8 @@ export const SCANNER_CONFIG = {
   interKeyThresholdMs: 30,
   /** Profildeki görünür GS1 ayracı yer tutucusu; ayrıştırıcıya GS (U+001D) olarak verilir. */
   gs1Placeholder: "~",
-  gs1Separator: GS,
+  // GS1 grup ayracı (U+001D). `@wms/domain/catalog/gs1` `GS` ile aynı değer; domain içe aktarılmaz (istemci grafı, T-313).
+  gs1Separator: "\u001d",
   /** Beklenmedik uzun tampon (bozuk profil) atılır. */
   maxLength: 256,
 } as const;
