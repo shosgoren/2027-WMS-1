@@ -14,6 +14,7 @@
     "./audit/today": "./src/audit/today.ts",
     "./audit/audit-query": "./src/audit/audit-query.ts",
     "./onboarding/templates": "./src/onboarding/templates.ts",
+    "./onboarding/import": "./src/onboarding/index.ts",
     "./demo/seed": "./src/demo/seed.ts",
     "./catalog": "./src/catalog/index.ts",
     "./catalog/units": "./src/catalog/units.ts",

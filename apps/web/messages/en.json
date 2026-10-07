@@ -675,7 +675,8 @@
     "addressNote": "The workspace address (slug) does not change when the name changes: {slug}",
     "locked": "You are not allowed to change these settings.",
     "lockedAction": "If a change is needed, ask your workspace administrator.",
-    "back": "Back to home"
+    "back": "Back to home",
+    "importLink": "Import products and stock from Excel"
   },
   "items": {
     "title": "Products",
@@ -1229,6 +1230,269 @@
       "tenant_closingAction": "Contact your manager.",
       "internal": "Something went wrong.",
       "internalAction": "Try again shortly; if it continues, send the error code to support."
+    }
+  },
+  "import": {
+    "title": "Import products and stock",
+    "intro": "Bring the products and opening stock from your Excel file. It is checked first; nothing is saved until you confirm.",
+    "back": "Go back",
+    "locked": "You need the products and settings permission to use this screen.",
+    "lockedAction": "Ask your workspace admin.",
+    "kind": {
+      "products": "Products file",
+      "stock": "Opening stock file"
+    },
+    "step1": {
+      "title": "Download the template",
+      "hint": "Fill it in Excel, then save as “CSV UTF-8”. Import products first, then stock.",
+      "products": "Products template",
+      "stock": "Opening stock template",
+      "columnsProducts": "Products: {cols}. Required: kod and ad. Koli içi adet: how many pieces are in one carton (like 12).",
+      "columnsStock": "Opening stock: {cols}. The shelf code must match the warehouse screen."
+    },
+    "step2": {
+      "title": "Choose the file",
+      "label": "Your filled-in CSV file",
+      "hint": "Up to {kb} KB and {rows} rows. The file is checked before anything is saved."
+    },
+    "clientErrors": {
+      "tooBig": "The file is too large. It can be at most {kb} KB. Split it in two and choose it again.",
+      "readFailed": "The file could not be read. Save it again from Excel and choose it again."
+    },
+    "step3": {
+      "title": "Preview",
+      "checking": "Checking the file…"
+    },
+    "summary": {
+      "items": "Products",
+      "stockLines": "Stock lines",
+      "errorRows": "Rows with errors"
+    },
+    "detail": {
+      "products": "{create} new products will be added, {existing} products already exist. {packs} carton definitions, {barcodes} barcodes.",
+      "packUnit": "The carton unit will be created too.",
+      "stock": "A total of {total} pieces will be added to {warehouses} warehouses.",
+      "stockExists": "There is already stock in the system. These quantities are added on top of it. If you imported this same file before, it is not added twice."
+    },
+    "blocked": "There are {n} errors. Fix the file and choose it again.",
+    "clean": "No errors. You can import.",
+    "issues": {
+      "all": "All errors ({total}):",
+      "truncated": "Showing the first {shown} errors of {total}. Fix these and the rest will appear.",
+      "file": "File",
+      "row": "Row {row}",
+      "fixPrefix": "How to fix:"
+    },
+    "step4": {
+      "title": "Import",
+      "apply": "Import",
+      "note": "If you upload the same file again, it is not added twice.",
+      "blocked": "Fix the {n} errors first. Nothing can be imported while there are errors.",
+      "progress": "{done} / {total} rows"
+    },
+    "step5": {
+      "title": "Result"
+    },
+    "result": {
+      "okProducts": "Done. {created} products added, {updated} updated, {unchanged} already existed.",
+      "okStock": "Done. {applied} stock lines added, {replayed} lines were added before.",
+      "partial": "The import stopped halfway. {done} rows are done, {failed} rows failed, {notTried} rows were not started.",
+      "retry": "Fix the problem and upload the same file again. Finished rows are not added twice; the rest are completed.",
+      "failedRow": "Row {row} ({code}):",
+      "nextStock": "Now you can upload the opening stock file.",
+      "again": "Choose the file again",
+      "another": "Upload another file",
+      "toItems": "Go to products"
+    },
+    "column": {
+      "code": "Code",
+      "name": "Name",
+      "baseUnit": "Base unit",
+      "packQty": "Pieces per carton",
+      "unitBarcode": "Piece barcode",
+      "packBarcode": "Carton barcode",
+      "itemCode": "Product code",
+      "shelfCode": "Shelf code",
+      "quantity": "Quantity",
+      "file": "File"
+    },
+    "issue": {
+      "FILE_EMPTY": {
+        "reason": "The file is empty.",
+        "fix": "Download the template, fill it in, then choose it again."
+      },
+      "FILE_TOO_LARGE": {
+        "reason": "The file is too large.",
+        "fix": "It can be at most {maxKb} KB. Split the file in two."
+      },
+      "FILE_ENCODING": {
+        "reason": "The letters in the file could not be read.",
+        "fix": "Save it in Excel as “CSV UTF-8” and choose it again."
+      },
+      "TOO_MANY_ROWS": {
+        "reason": "The file has {count} rows; the limit is {max}.",
+        "fix": "Split the file into parts and upload them one by one."
+      },
+      "CSV_UNTERMINATED_QUOTE": {
+        "reason": "A quotation mark is not closed.",
+        "fix": "Check the quotes or save the file again from Excel."
+      },
+      "FORMAT_UNKNOWN": {
+        "reason": "The column names in the first row were not recognised.",
+        "fix": "Use the template you downloaded; do not change the first row."
+      },
+      "COLUMN_MISSING": {
+        "reason": "This column is missing from the file.",
+        "fix": "Add the column name from the template to the first row."
+      },
+      "COLUMN_DUPLICATE": {
+        "reason": "This column is written twice.",
+        "fix": "Delete one of them."
+      },
+      "NO_ROWS": {
+        "reason": "There are no data rows.",
+        "fix": "Add at least one row after the header row."
+      },
+      "ROW_TOO_MANY_CELLS": {
+        "reason": "The row has more cells than the header.",
+        "fix": "Delete the extra cells. If the text contains a semicolon, put the text in quotes."
+      },
+      "CODE_MISSING": {
+        "reason": "The code is empty.",
+        "fix": "Write a code on this row."
+      },
+      "CODE_INVALID": {
+        "reason": "The code is not valid.",
+        "fix": "Use at most {max} characters and no special characters."
+      },
+      "CODE_DUPLICATE_FILE": {
+        "reason": "Code {code} is also on row {firstRow}.",
+        "fix": "Each code must appear once. Change or delete one."
+      },
+      "NAME_MISSING": {
+        "reason": "The name is empty.",
+        "fix": "Write the product name."
+      },
+      "NAME_INVALID": {
+        "reason": "The name is not valid.",
+        "fix": "Use at most {max} characters."
+      },
+      "UNIT_UNKNOWN": {
+        "reason": "There is no unit called {unit}.",
+        "fix": "Write the unit code like ADET, or leave it empty."
+      },
+      "ITEM_UNIT_MISMATCH": {
+        "reason": "{code} is saved with unit {unit}.",
+        "fix": "Write the same unit. A saved product keeps its unit."
+      },
+      "ITEM_ARCHIVED": {
+        "reason": "{code} is archived.",
+        "fix": "Use another code or delete the row."
+      },
+      "ITEM_UNKNOWN": {
+        "reason": "There is no product {code}.",
+        "fix": "Import the products file first or fix the code."
+      },
+      "ITEM_TRACKED": {
+        "reason": "{code} is tracked by lot or serial.",
+        "fix": "Opening stock for tracked products cannot be imported here. Delete the row."
+      },
+      "PACK_QTY_INVALID": {
+        "reason": "{value} is not a number.",
+        "fix": "Write pieces per carton as a whole number like 12."
+      },
+      "PACK_QTY_FRACTIONAL": {
+        "reason": "Pieces per carton cannot be a fraction ({value}).",
+        "fix": "Write a whole number like 12. Half cartons are not defined."
+      },
+      "PACK_QTY_TOO_SMALL": {
+        "reason": "Pieces per carton must be at least 2.",
+        "fix": "If there is no carton, leave this cell empty."
+      },
+      "PACK_QTY_TOO_LARGE": {
+        "reason": "Pieces per carton is too large.",
+        "fix": "Write {max} or less."
+      },
+      "PACK_QTY_CONFLICT": {
+        "reason": "The system has {system} pieces per carton for this product; the file says {file}.",
+        "fix": "Write the same number or leave the cell empty."
+      },
+      "PACK_BASE_UNIT": {
+        "reason": "A product whose base unit is the carton cannot have pieces per carton.",
+        "fix": "Make the base unit ADET or leave the cell empty."
+      },
+      "PACK_BARCODE_NEEDS_QTY": {
+        "reason": "There is a carton barcode but no pieces per carton.",
+        "fix": "Write pieces per carton. The quantity comes from it when the carton is scanned."
+      },
+      "BARCODE_INVALID": {
+        "reason": "This barcode cannot be used ({value}).",
+        "fix": "Write only the barcode; no long QR text or special characters."
+      },
+      "BARCODE_SAME_ROW": {
+        "reason": "The piece and carton barcodes are the same.",
+        "fix": "They must be different."
+      },
+      "BARCODE_DUPLICATE_FILE": {
+        "reason": "Barcode {value} is also on row {firstRow}.",
+        "fix": "Each barcode must belong to one product. Fix one."
+      },
+      "BARCODE_TAKEN": {
+        "reason": "Barcode {value} is already saved on product {item}.",
+        "fix": "Fix the barcode or leave the cell empty."
+      },
+      "SHELF_MISSING": {
+        "reason": "The shelf code is empty.",
+        "fix": "Write the code of the shelf where the stock is."
+      },
+      "SHELF_UNKNOWN": {
+        "reason": "There is no shelf {code}.",
+        "fix": "Write the code exactly as on the warehouse screen, or add the shelf first."
+      },
+      "SHELF_ARCHIVED": {
+        "reason": "Shelf {code} is archived.",
+        "fix": "Write another shelf."
+      },
+      "SHELF_AMBIGUOUS": {
+        "reason": "Code {code} exists in more than one warehouse ({warehouses}).",
+        "fix": "Make shelf codes different between warehouses."
+      },
+      "SHELF_KIND": {
+        "reason": "{code} is a transit shelf.",
+        "fix": "Choose a storage shelf to put stock on."
+      },
+      "QTY_MISSING": {
+        "reason": "The quantity is empty.",
+        "fix": "Write the number of pieces."
+      },
+      "QTY_INVALID": {
+        "reason": "{value} is not a number.",
+        "fix": "Write digits only (like 24)."
+      },
+      "QTY_NEGATIVE": {
+        "reason": "The quantity cannot be negative ({value}).",
+        "fix": "Write a positive number."
+      },
+      "QTY_ZERO": {
+        "reason": "The quantity is zero.",
+        "fix": "If there is no stock, delete the row."
+      },
+      "QTY_AMBIGUOUS": {
+        "reason": "It is unclear whether {value} uses a thousands or decimal separator.",
+        "fix": "Write it without a dot (like 1250)."
+      },
+      "QTY_FRACTIONAL": {
+        "reason": "{decimals, plural, =0 {Pieces cannot be a fraction ({value}).} other {This product allows at most {decimals} decimal places ({value}).}}",
+        "fix": "{decimals, plural, =0 {Write a whole number (like 24).} other {Use fewer decimal places.}}"
+      },
+      "QTY_TOO_LARGE": {
+        "reason": "The quantity is too large or has too many digits ({value}).",
+        "fix": "Use at most 14 whole and 6 decimal digits."
+      },
+      "PAIR_DUPLICATE_FILE": {
+        "reason": "This product and shelf are also on row {firstRow}.",
+        "fix": "Merge the two rows into one with the total quantity."
+      }
     }
   }
 }
