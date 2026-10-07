@@ -7,7 +7,8 @@ import { createSealer } from "@wms/shared/seal";
 import { JOB_TYPES, PLATFORM_NO_USER_ID, type JobHandler, type JobType } from "@wms/shared/queue";
 import { createDeliverInvitationHandler } from "./jobs/deliver-invitation.js";
 import { DEMO_RESEED_SINGLETON_KEY, registerDemoReseed } from "./jobs/demo-reseed.js";
-import { createPostStockDocumentHandler, startPostingJobRecovery } from "./jobs/post-stock-document.js";
+import { createPostStockDocumentHandler } from "./jobs/post-stock-document.js";
+import { startQueueMaintenance } from "./jobs/queue-maintenance.js";
 import { createMailer, createSendEmailHandler } from "./jobs/send-email.js";
 import { createJsonLogger, createLifecycle, EXIT_FAILURE, parseShutdownTimeoutMs } from "./lifecycle.js";
 
@@ -135,10 +136,10 @@ logger.info("queue started", {
   deferred: DEFERRED_JOB_TYPES.filter((t) => HANDLERS[t] === undefined),
 });
 
-// pg-boss bakım eşdeğeri (T-222 ZORUNLU notu): adaptör `supervise: false`; süresi dolan `active` `stock.document.post` işini `retry`'a çeviren
-// tarayıcı `wms_worker` bağlantısında çalışır (çöken worker'ın işi yeniden teslim edilir; AC-16).
+// pg-boss bakım eşdeğeri (T-281; T-222 taramasını genelleştirir): adaptör `supervise: false`; süresi dolan `active` iş (her tür) `wms_worker`
+// bağlantısında `retry`/`failed` yapılır ve `failed` belge işlerinin belgeleri serbest bırakılır (çöken worker'ın işi yeniden teslim edilir; AC-16).
 const workerDb = createDbClient({ url: workerDatabaseUrl, poolMax: 1, prepare: false });
-const postingRecovery = startPostingJobRecovery({ workerDb, db, logger });
+const queueMaintenance = startQueueMaintenance({ workerDb, db, logger });
 
 // Demo yeniden tohumlama zamanlaması: açılışta bir kez + günlük 03:00 UTC; `singletonKey` ile tek iş.
 const demoSchedule = demo.startSchedule(() =>
@@ -150,7 +151,7 @@ const demoSchedule = demo.startSchedule(() =>
 
 // Kapanış sırası: önce zamanlayıcı, sonra kuyruk (çalışan işler biter), sonra DB havuzu.
 lifecycle.register({ name: "demo-schedule", run: () => demoSchedule?.stop() });
-lifecycle.register({ name: "posting-recovery", run: () => postingRecovery.stop() });
+lifecycle.register({ name: "queue-maintenance", run: () => queueMaintenance.stop() });
 lifecycle.register({ name: "job-queue", run: () => queue.stop() });
 lifecycle.register({ name: "db", run: () => db.close() });
 lifecycle.register({ name: "worker-db", run: () => workerDb.close() });

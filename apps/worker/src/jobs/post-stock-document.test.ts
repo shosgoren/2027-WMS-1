@@ -1,4 +1,4 @@
-// `stock.document.post` handler birimi (T-222): hata sınıflandırması (kalıcı/geçici), aktör doğrulaması, kalıcı hata işareti, bakım zamanlayıcısı.
+// `stock.document.post` handler birimi (T-222): hata sınıflandırması (kalıcı/geçici), aktör doğrulaması, kalıcı hata işareti (bakım zamanlayıcısı: queue-maintenance.test.ts).
 // DB'siz: işlem akışı tests/integration/stock/async-posting.int.test.ts'tedir.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
@@ -11,7 +11,7 @@ import {
   postingMfaWindowSeconds,
 } from "@wms/domain/stock/jobs";
 import { AppError, ERROR_CODES } from "@wms/shared/errors";
-import { createPostStockDocumentHandler, startPostingJobRecovery } from "./post-stock-document.js";
+import { createPostStockDocumentHandler } from "./post-stock-document.js";
 
 const logger = { info: vi.fn(), error: vi.fn() };
 const deps = { db: {} as never, consumeOnce: vi.fn() as never, logger };
@@ -70,30 +70,6 @@ describe("handler: aktör ve kalıcı hata işareti", () => {
   it("PermanentPostingError adaptörde kalıcı, düz Error geçici sayılır", () => {
     expect(isPermanentFailure(new PermanentPostingError("FORBIDDEN"))).toBe(true);
     expect(isPermanentFailure(new Error("x"))).toBe(false);
-  });
-});
-
-describe("bakım zamanlayıcısı (pg-boss supervise eşdeğeri)", () => {
-  it("açılışta bir tarama yapar, aralıkla yineler ve durdurulunca temizler", () => {
-    const calls: number[] = [];
-    let tick: (() => void) | undefined;
-    const clear = vi.fn();
-    const rec = startPostingJobRecovery({
-      workerDb: {} as never,
-      db: {} as never,
-      logger,
-      intervalMs: 1234,
-      setTimer: (fn, ms) => {
-        calls.push(ms);
-        tick = fn;
-        return "h";
-      },
-      clearTimer: clear,
-    });
-    expect(calls).toEqual([1234]);
-    expect(typeof tick).toBe("function");
-    rec.stop();
-    expect(clear).toHaveBeenCalledWith("h");
   });
 });
 

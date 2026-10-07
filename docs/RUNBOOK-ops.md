@@ -105,3 +105,25 @@ açıksa kilidi temizler (kiracı askıda/kapanıştaysa ertelenir, A-222-4).
 Geçiş notu (T-275, özet normalizasyonu): kabul komutlarının (`createInboundReceipt`, `receiveGoods`, `approveQuality`) idempotency özeti artık ondalık dizgileri normalleştirir
 ("10" = "10.000000"). Dağıtımdan ÖNCE oluşmuş `IN_PROGRESS`/`COMPLETED` kayıtlar ham dizgiyle hesaplanmış özet taşır; aynı istemci anahtarı dağıtımdan sonra aynı HAM dizgiyle
 yeniden denenirse özet değişeceği için `IDEMPOTENCY_MISMATCH` döner (yinelenen etki oluşmaz, güvenli taraf). Beklenen ve zararsızdır; istemci yeni anahtarla yeniden dener.
+
+## Kuyruk bakımı: çöken worker'ın `active` işleri (T-281)
+Adaptör `supervise: false` çalışır (wms_app/wms_worker pgboss yönetim tablolarına yazamaz); bu yüzden worker `SIGKILL`/OOM ile ölürse işi `active`
+kalır ve kendiliğinden geri dönmez. Worker içindeki **kuyruk bakımı** (`apps/worker/src/jobs/queue-maintenance.ts`, her `QUEUE_MAINTENANCE_INTERVAL_MS` = 60 sn
+ve açılışta bir kez) TÜM iş türleri için tek mekanizmadır; `wms_worker` bağlantısında tek bir dar `UPDATE` çalıştırır
+(`requeueExpiredJobs`; yalnız `state/start_after/completed_on/heartbeat_on/output` yazılır, SECURITY DEFINER işlevi gerekmedi: `wms_worker` zaten `pgboss.job` UPDATE yetkilidir):
+- `started_on + expire_seconds` geçmiş `active` iş: `retry_count < retry_limit` ise hemen `retry` (sonraki alımda `retry_count` artar), değilse kalıcı `failed`.
+- `failed` kalan `stock.document.post` işinin belgesi serbest bırakılır (belge APPROVED + kayıt FAILED/INTERNAL; T-222).
+- Süre (`expireInSeconds`, `QUEUE_EXPIRE_SECONDS`, `packages/queue-adapter/src/index.ts`): `email.send` 300, `invitation.deliver` 300, `stock.document.post` 900, `demo.reseed` 1800,
+  `stock.consistency.check` 1800 sn. Süre bir denemenin en uzun meşru çalışmasından uzun olmalıdır; kısaltmak canlı işi ikinci kez teslim ettirir. `pnpm db:migrate` (queue install) kuyruk satırlarını
+  bu tabloya hizalar; yalnızca YENİ işleri etkiler (kuyruktaki işler eski süreyi taşır).
+- Beklenen gecikme: çökme + `expireInSeconds` + en çok ~1 dk. Birden çok worker güvenlidir (tek ifade atomik; ikinci worker aynı satırı dönüştüremez).
+
+**Loglar** (worker JSON günlüğü): `queue.maintenance.started` (aralık), `queue.maintenance.requeued_expired` (info; `count`, `byType`, `jobIds`),
+`queue.maintenance.expired_exhausted` (**error = ALARM**; deneme hakkı bitti, iş etkisi GERÇEKLEŞMEDİ), `queue.maintenance.totals` (tur/toplam sayıları),
+`queue.maintenance.failed` (bakım turu hata verdi; sonraki turda yeniden denenir). Alarm geldiğinde: `SELECT id, name, data->>'tenantId', retry_count, output FROM pgboss.job WHERE state = 'failed' AND id = '<jobId>'`
+(migration/ops rolüyle); nedeni gider, gerekirse işi kullanıcı eylemiyle yeniden başlatın (e-posta için yeni istek; belge işleme için belge APPROVED'a döner, istemci yeniden ister).
+
+**Etki tam-bir-kez sınırı:** `stock.document.post` ve tüm tenant etkileri `consumeOnce` ile aynı transaction'dadır (çökmede rollback + yeniden teslimde tek etki). Harici
+çağrılarda (`email.send`, `invitation.deliver`) `deliverExternalOnce` yeniden teslimde ikinci çağrıyı engeller; ancak sağlayıcı yanıtı alınmadan ÖNCE çökme olursa çağrı sağlayıcıda gerçekleşmiş olabilir:
+`email.send` aynı `Idempotency-Key` (= iş kimliği) ile yeniden gönderir, sağlayıcı tekilleştirir (Resend); `invitation.deliver` yeniden denemede yeni belirteç üretir (eski bağlantı geçersiz; ADR-019 §4). `demo.reseed` doğası gereği tekrarlanabilirdir (singleton + onarım).
+**Test:** `tests/integration/queue/crash-recovery.int.test.ts` (gerçek `kill -9`, çocuk süreç; gerçek süre aşımı beklenir).

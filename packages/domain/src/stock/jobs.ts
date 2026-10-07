@@ -270,7 +270,7 @@ export async function runAsyncPosting(deps: AsyncPostingDeps, ctx: AsyncPostingC
         try {
           await recordFailure(deps, ctx, { documentId, recordId, err });
         } catch {
-          throw e; // yazılamadı (ör. kiracı askıda): asıl hata yayılır; bakım taraması (`sweepExpiredPostingJobs`) belgeyi serbest bırakır
+          throw e; // yazılamadı (ör. kiracı askıda): asıl hata yayılır; kuyruk bakımı (`runQueueMaintenance`, `finalizeFailedPostingJobs`) belgeyi serbest bırakır
         }
         logger.error("stock.async_post.failed", { jobId: ctx.jobId, code: err.code, final: true });
         throw new PermanentPostingError(err.code);
@@ -330,29 +330,6 @@ async function recordFailure(
     });
     // applied:false ⇒ önceki teslim zaten yazdı (aynı transaction'da birlikte)
   });
-}
-
-/**
- * pg-boss bakım eşdeğeri (T-222 ZORUNLU notu, ADR-019 §7): adaptör `supervise: false` çalışır; süresi dolan `active` iş kendiliğinden `retry`'a dönmez.
- * Bu işlev `wms_worker` bağlantısında (pgboss.job UPDATE yetkisi) periyodik çağrılır: `started_on + expire_seconds` geçmiş `stock.document.post` işini
- * deneme hakkı varsa hemen `retry`'a (sonraki alımda `retry_count` artar; eski sahibin geç tamamlaması `state='active'` koşuluyla etkisizdir),
- * yoksa `failed`'a çevirir. `failed` işlerin belgeleri `finalizeFailedPostingJobs` ile serbest bırakılır (MAJOR-2).
- */
-export async function requeueExpiredPostingJobs(tx: Pick<AccessTx, "execute">): Promise<{ readonly requeued: string[]; readonly exhausted: string[] }> {
-  const rows = await tx.execute<{ id: string; state: string }>(
-    sql`UPDATE pgboss.job
-           SET state = (CASE WHEN retry_count < retry_limit THEN 'retry' ELSE 'failed' END)::pgboss.job_state,
-               start_after = CASE WHEN retry_count < retry_limit THEN pgboss.job_now() ELSE start_after END,
-               completed_on = CASE WHEN retry_count < retry_limit THEN NULL ELSE pgboss.job_now() END,
-               heartbeat_on = NULL,
-               output = '{ "value": { "message": "job timed out" } }'::jsonb
-         WHERE name = ${JOB_TYPE} AND state = 'active' AND (started_on + expire_seconds * interval '1 second') < pgboss.job_now()
-        RETURNING id, state::text AS state`,
-  );
-  return {
-    requeued: rows.filter((r) => r.state === "retry").map((r) => r.id),
-    exhausted: rows.filter((r) => r.state === "failed").map((r) => r.id),
-  };
 }
 
 type FailedJobRow = { id: string; tenant_id: string | null; document_id: string | null; record_id: string | null; attempts: number | string | null };
@@ -459,20 +436,4 @@ export async function finalizeFailedPostingJobs(deps: PostingSweepDeps): Promise
     }
   }
   return { finalized, deferred };
-}
-
-/**
- * Tek bakım turu: süresi dolan işleri `retry`/`failed` yapar, sonra `failed` işlerin belgelerini serbest bırakır. Hata yutulmaz, loglanır
- * (sonraki turda yeniden denenir). Mesajlar domain'dedir (worker günlük süzgeci `deploy-smoke` ALLOWED_MSGS'a eklenene dek `HIDDEN` görünür).
- */
-export async function sweepExpiredPostingJobs(deps: PostingSweepDeps): Promise<void> {
-  try {
-    const r = await deps.runOnWorker((tx) => requeueExpiredPostingJobs(tx));
-    if (r.requeued.length > 0) deps.logger.info("stock.async_post.requeued_expired", { count: r.requeued.length });
-    if (r.exhausted.length > 0) deps.logger.error("stock.async_post.expired_exhausted", { count: r.exhausted.length });
-    const f = await finalizeFailedPostingJobs(deps);
-    if (f.finalized > 0) deps.logger.info("stock.async_post.finalized", { count: f.finalized });
-  } catch (err) {
-    deps.logger.error("stock.async_post.recovery_failed", { error: err instanceof Error ? err.name : "unknown" });
-  }
 }
