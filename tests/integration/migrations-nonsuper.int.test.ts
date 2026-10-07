@@ -1598,5 +1598,51 @@ describe("0013–0014 — süper kullanıcı olmayan migrator", () => {
         await seedReceiptSequence(u); // ileri durumda yeniden yazılabilir
       });
     });
+    // ---- 0023 (T-222 inceleme MAJOR-1/MINOR-1): işleme isteği bağlamı (MFA damgası, idempotency kaydı); süper kullanıcı olmayan migrator ----
+    describe("0023 posting_request_context", () => {
+      let thru23Dir: string | undefined;
+      const thru23 = (): string => (thru23Dir ??= copyMigrations("0023"));
+      const ALL23 = [...ALL16, "0017", "0018", "0019", "0020", "0021", "0022", "0023"];
+      const hasColumns = async (u: string): Promise<boolean> =>
+        withClient(u, async (c) => {
+          const r = await c.query<{ n: string }>(
+            "SELECT count(*)::text AS n FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'documents' AND column_name IN ('posting_mfa_verified_at', 'posting_idempotency_record_id')",
+          );
+          return r.rows[0]?.n === "2";
+        });
+      /** APPROVED belge + işleme bağlamı (migrator = tablo sahibi; tenant bağlamı transaction-local). `withJob=false`: bağlam var ama kilit yok (CHECK ihlali). */
+      async function seedContextDoc(u: string, withJob: boolean): Promise<void> {
+        await freshTenant(u, async (c, t) => {
+          await seedBase(c, t);
+          await c.query(
+            `INSERT INTO public.documents (id, tenant_id, kind, type_version_id, warehouse_id, business_date, created_by, status, posting_job_id, posting_requested_by, posting_mfa_verified_at, posting_idempotency_record_id)
+             SELECT $3, $1, 'STOCK_IN', v.id, w.id, '2026-02-01', $2, 'APPROVED', $4, $5, now(), $6
+               FROM public.document_type_versions v, public.warehouses w WHERE v.tenant_id IS NULL AND v.key = 'STOCK_IN' AND w.code = 'NS-W'`,
+            [t, randomUUID(), randomUUID(), withJob ? randomUUID() : null, withJob ? randomUUID() : null, randomUUID()],
+          );
+        });
+      }
+
+      it("ileri (0001–0023) → 0023 geri (to 0022) → ileri: parmak izi birebir; sütunlar down'da yok; bağlam yalnızca kilit varken yazılabilir (CHECK)", async () => {
+        await setProbeMemberships(STANDARD_GRANT);
+        const u = await freshDatabase();
+        expect((await migrateUp({ url: u, dir: thru23() })).applied).toEqual(ALL23);
+        const before = await digest16(u);
+        expect(await hasColumns(u)).toBe(true);
+        await expect(seedContextDoc(u, false)).rejects.toMatchObject({ code: "23514" }); // kilitsiz bağlam reddedilir
+        await seedContextDoc(u, true);
+
+        // Dolu bağlam varken staging geri alma reddedilir ve hiçbir şey değişmez.
+        await expect(migrateDown({ url: u, dir: thru23(), to: "0022", wmsEnv: "staging" })).rejects.toThrow(/0023_posting_request_context down:.*işleme bağlamı/);
+        expect(await hasColumns(u)).toBe(true);
+
+        expect((await migrateDown({ url: u, dir: thru23(), to: "0022", wmsEnv: "ci" })).reverted).toEqual(["0023"]);
+        expect(await hasColumns(u)).toBe(false);
+
+        expect((await migrateUp({ url: u, dir: thru23() })).applied).toEqual(["0023"]);
+        expect(await digest16(u)).toEqual(before);
+        expect(await hasColumns(u)).toBe(true);
+      });
+    });
   });
 });
