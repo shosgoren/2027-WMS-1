@@ -21,7 +21,7 @@ import {
   previewBulkLocations,
   searchLocations,
 } from "../../../packages/domain/src/warehouse/index.ts";
-import { WAREHOUSE_LOCATIONS_MAX, bulkRefLookupSql } from "../../../packages/domain/src/warehouse/bulk-locations.ts";
+import { IDEMPOTENCY_WINDOW_DAYS, WAREHOUSE_LOCATIONS_MAX, bulkRefLegacyLookupSql, bulkRefLookupSql } from "../../../packages/domain/src/warehouse/bulk-locations.ts";
 import { locationSearchSql } from "../../../packages/domain/src/warehouse/setup-queries.ts";
 import { mkMembership, mkUser, newRegistry, seedWorld, type TenantWorld } from "../fixtures/tenants.ts";
 import { readIntEnv } from "../harness/env.ts";
@@ -634,6 +634,96 @@ describe("T-259 MINOR-5/6/7: indeksler ve depo başına lokasyon sınırı", () 
       expect(await total()).toBe(WAREHOUSE_LOCATIONS_MAX);
     } finally {
       if (!released) await adm.query("SELECT pg_advisory_unlock(hashtextextended($1, 0))", [lockKey]);
+    }
+  }, 120_000);
+});
+
+describe("T-273: T-259 MINOR takipleri", () => {
+  const spec = (warehouseId: string) => ({ warehouseId, zone: "LG", rackFrom: 1, rackTo: 2, levelFrom: 1, levelTo: 2 });
+
+  async function legacyAudit(tenantId: string, bulkRef: string, from: Record<string, unknown>): Promise<void> {
+    // T-250 biçimi: entity_id anahtar DEĞİL (ilk lokasyonun kimliği gibi rastgele UUID), anahtar yalnızca change_summary.bulk_ref'te.
+    await adm.query(
+      `INSERT INTO public.audit_logs (tenant_id, action, entity_type, entity_id, change_summary)
+       VALUES ($1::uuid, 'location.created', 'location_batch', $2, $3::jsonb)`,
+      [tenantId, randomUUID(), JSON.stringify({ ...from, bulk_ref: bulkRef })],
+    );
+  }
+  async function fpOf(tenantId: string, k: string): Promise<{ spec_fp: string; created: number }> {
+    const r = await adm.query<{ s: Record<string, unknown> }>("SELECT change_summary AS s FROM public.audit_logs WHERE tenant_id = $1 AND entity_id = $2", [tenantId, k]);
+    return { spec_fp: r.rows[0]?.s.spec_fp as string, created: r.rows[0]?.s.created as number };
+  }
+
+  it("eski biçim (entity_id ≠ anahtar, yalnızca bulk_ref) 7 günlük pencerede replay; farklı girdi IDEMPOTENCY_MISMATCH; pencere dışı ve başka tenant görünmez", async () => {
+    const warehouseId = await newWarehouse(A);
+    const k1 = key();
+    await createBulkLocations(admin(A), { ...spec(warehouseId), idempotencyKey: k1 }); // 4 lokasyon yazar (yeni biçim)
+    const { spec_fp, created } = await fpOf(A.tenantId, k1);
+    const before = await countLocations(A.tenantId, warehouseId, "LG-%");
+    expect(before).toBe(4);
+
+    const k2 = key();
+    await legacyAudit(A.tenantId, k2, { spec_fp, created, first_loc: "LG-01-01", last_loc: "LG-02-02" });
+    expect(await createBulkLocations(admin(A), { ...spec(warehouseId), idempotencyKey: k2 })).toMatchObject({ replayed: true, created: 4 });
+    expect(await countLocations(A.tenantId, warehouseId, "LG-%")).toBe(before); // yeni yazım yok
+    const e = await failure(createBulkLocations(admin(A), { ...spec(warehouseId), rackTo: 3, idempotencyKey: k2 }));
+    expect(e.code).toBe("IDEMPOTENCY_MISMATCH");
+
+    // Pencere: audit `occurred_at` tetikleyiciyle now()'a zorlanır (ENABLE ALWAYS; geriye tarihlenemez) → sınır SQL düzeyinde sınanır: 7 gün içinde bulunur,
+    // pencere 0 gündeyken (satır artık "eski") bulunmaz; tenant süzgeci açıktır.
+    expect(IDEMPOTENCY_WINDOW_DAYS).toBe(7);
+    const run = async (tenantId: string, k: string, days?: number): Promise<number> => {
+      const q = new PgDialect().sqlToQuery(bulkRefLegacyLookupSql(tenantId, k, days));
+      return (await adm.query(q.sql, q.params as unknown[])).rows.length;
+    };
+    expect(await run(A.tenantId, k2)).toBe(1);
+    expect(await run(A.tenantId, k2, 0)).toBe(0);
+    expect(await run(B.tenantId, k2)).toBe(0);
+    // Başka tenant'ın eski satırı görünmez
+    const k4 = key();
+    await legacyAudit(B.tenantId, k4, { spec_fp, created });
+    expect((await failure(createBulkLocations(admin(A), { ...spec(warehouseId), idempotencyKey: k4 }))).detail).toBe("CODE_TAKEN");
+  });
+
+  it("typeahead: Kelvin işareti (U+212A) ve I+U+0307 girdisi yazımdaki NFC dönüşümüyle (A-98) eşleşir; ASCII yol indeksli kalır", async () => {
+    const wh = await newWarehouse(A);
+    await createLocation(admin(A), { warehouseId: wh, code: "kelvin-1", name: "Kelvin deneme", kind: "STORAGE" }); // saklanan: KELVIN-1
+    await createLocation(admin(A), { warehouseId: wh, code: "İZMIR-1", name: "Izmir raf", kind: "STORAGE" });
+    expect((await searchLocations(admin(A), { warehouseId: wh, q: "\u212Aelv" })).map((l) => l.code)).toEqual(["KELVIN-1"]); // NFC: K → ASCII yol
+    expect((await searchLocations(admin(A), { warehouseId: wh, q: "I\u0307ZM" })).map((l) => l.code)).toEqual(["İZMIR-1"]); // NFC: İ
+    expect((await searchLocations(admin(A), { warehouseId: wh, q: "İZM" })).map((l) => l.code)).toEqual(["İZMIR-1"]);
+  });
+
+  it("createItemWithDefaultUnit: ADET satırı FOR SHARE — arşivleyen işlem commit olunca ürün arşivli birimle OLUŞMAZ (VALIDATION_FAILED)", async () => {
+    const w = await newTenant("adetrace");
+    const { unitId } = await createUnit(admin(w), { code: "ADET", name: "Adet" });
+    const blocker = new pg.Client({ connectionString: env.databaseUrlDirect });
+    blocker.on("error", () => undefined);
+    await blocker.connect();
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("UPDATE public.units SET status = 'ARCHIVED', archived_at = now() WHERE tenant_id = $1 AND id = $2", [w.tenantId, unitId]);
+      const pid = (await blocker.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]?.pid as number;
+      // Komut düz okumada birimi ACTIVE görür (arşiv commit olmadı), sonra FOR SHARE'de blocker'ı BEKLER (zamanlamaya dayanmaz: yoklama).
+      const racing = createItemWithDefaultUnit(admin(w), { code: "R-1", name: "Yarış" }).then(
+        () => ({ ok: true as const }),
+        (e: unknown) => ({ ok: false as const, err: e as AppError }),
+      );
+      const deadline = Date.now() + 30_000;
+      for (;;) {
+        const r = await adm.query<{ c: string }>("SELECT count(*)::text AS c FROM pg_stat_activity WHERE $1::int = ANY(pg_blocking_pids(pid))", [pid]);
+        if (Number(r.rows[0]?.c) >= 1) break;
+        if (Date.now() > deadline) throw new Error("bariyer zaman aşımı: bekleyen yok");
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      await blocker.query("COMMIT");
+      const out = await racing;
+      expect(out.ok).toBe(false);
+      if (!out.ok) expect(out.err.code).toBe("VALIDATION_FAILED");
+      expect(await itemCount(w.tenantId)).toBe(0);
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => undefined);
+      await blocker.end();
     }
   }, 120_000);
 });

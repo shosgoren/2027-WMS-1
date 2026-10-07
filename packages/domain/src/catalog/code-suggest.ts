@@ -212,6 +212,13 @@ export async function createItemWithDefaultUnit(
       }
     }
     const unitId = found.id as string;
+    // T-273 (T-259 MINOR): ADET satırı `FOR SHARE` ile kilitlenip durum KİLİT ALTINDA yeniden doğrulanır. Düz okuma + items INSERT'inin FK kilidi
+    // (`FOR KEY SHARE`) birimin `status` güncellemesiyle çakışmaz; arşivleyen işlem araya girerse ürün arşivli birimle oluşurdu. `FOR SHARE`
+    // arşivleyenin satır kilidini bekler/bekletir; arşiv commit olmuşsa (READ COMMITTED) güncel durum görülür.
+    const locked = await tx.execute<{ status: string }>(
+      sql`SELECT status FROM public.units WHERE tenant_id = ${actor.tenantId}::uuid AND id = ${unitId}::uuid FOR SHARE`,
+    );
+    if (locked[0]?.status !== "ACTIVE") throw new AppError("VALIDATION_FAILED");
     const rows = await tx.execute<{ id: string }>(
       sql`INSERT INTO public.items (tenant_id, id, code, name, base_unit_id, tracking_mode, quantity_scale, pick_policy)
           VALUES (${actor.tenantId}::uuid, gen_random_uuid(), ${code}, ${name}, ${unitId}::uuid, ${trackingMode},

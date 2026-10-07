@@ -70,7 +70,12 @@ export function locationSearchSql(tenantId: string, warehouseId: string, q: stri
   const base = sql`SELECT id, code, name, depth FROM public.locations
            WHERE tenant_id = ${tenantId}::uuid AND warehouse_id = ${warehouseId}::uuid AND status = 'ACTIVE'`;
   if (q === "") return sql`${base} ORDER BY code COLLATE "C", id LIMIT ${limit}`;
-  const codeCond = isAscii(q) ? sql`starts_with(code, ${asciiUpper(q)}::text)` : sql`starts_with(lower(code), lower(${q}::text))`;
+  // T-273: kod kolu girdisi yazımdaki dönüşümle (`normalizeCode`, A-98: NFC + ASCII büyütme) AYNI biçime getirilir. NFC, kanonik tekil eşdeğerleri
+  // (Kelvin işareti U+212A → `K`, `I`+U+0307 → `İ`) yazımdaki koda indirger; böylece bunlar locale'e bağlı `lower()` davranışına değil, kodun gerçek
+  // saklanan biçimine göre eşleşir. NFC sonrası hâlâ ASCII dışıysa (Türkçe `ç`, `ğ` …) küçük harfle yazılan girdi büyük saklanan koda `lower()`
+  // eşleşmesiyle bulunur (bilinçli kabul: bu bacak indekssizdir, maliyet depo başına sınırla (A-259-1) sınırlı).
+  const qc = q.normalize("NFC");
+  const codeCond = isAscii(qc) ? sql`starts_with(code, ${asciiUpper(qc)}::text)` : sql`starts_with(lower(code), lower(${qc}::text))`;
   return sql`SELECT id, code, name, depth FROM (
            (${base} AND ${codeCond} ORDER BY code COLLATE "C", id LIMIT ${limit})
            UNION
