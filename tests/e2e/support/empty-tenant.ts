@@ -1,7 +1,7 @@
 // T-279: boş tenant fikstürü istemcisi. Fikstür `tests/e2e/global-setup.ts` içinde (yerel koşuda) kurulur: demo OLMAYAN bir hesap, uygulamanın
 // kendi yoluyla (kayıt ucu + kurulum sihirbazı, M9 koruması etkin) boş bir çalışma alanı açar ve MFA'yı gerçek ekrandan kurar; çalışma alanının sahibi
 // TENANT_ADMIN'dir. MFA kuralı (access.ts:92-96) aynen geçerlidir. Kimlik bilgileri YALNIZCA `process.env`'dedir (bellek; parola ve TOTP sırrı her
-// koşuda rastgele, diske/loga/rapora yazılmaz, G-09; bu modülü kullanan spec'lerde trace kapalıdır — aşağıya bkz.). Uzak koşuda (E2E_BASE_URL) fikstür YOKTUR: bu modülü kullanan spec dosyaları
+// koşuda rastgele, diske/loga/rapora yazılmaz, G-09; bu modülü kullanan spec'lerde trace kapalıdır ve `afterEach` gizli alanları boşaltır — aşağıya bkz.). Uzak koşuda (E2E_BASE_URL) fikstür YOKTUR: bu modülü kullanan spec dosyaları
 // `playwright.config.ts` `testIgnore` ile dışlanır.
 //
 // G-09 yöntemi: Playwright her API çağrısını (fill/type/press) değeriyle adım başlığına, rapora, çağrı günlüğüne ve trace'e yazar. Bu yüzden gizli
@@ -92,6 +92,21 @@ async function fillSecret(page: Page, selector: string, kind: "password" | "totp
     const value = await window.__e2eSecret(${JSON.stringify(kind)});
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(el, value);
     el.dispatchEvent(new Event("input", { bubbles: true }));
+  })()`);
+}
+
+/**
+ * Gizli değer taşıyabilen alanları boşaltır. Başarısız testte Playwright, bağlam kapanırken sayfanın erişilebilirlik ağacını
+ * `error-context.md`'ye (HTML rapor eki, CI artifact) yazar ve parola alanının değerini maskelemez (T-279 SR @87e6912). Anlık görüntü
+ * kullanıcı `afterEach` kancalarından SONRA alınır; bu yüzden giriş yapan spec'ler bunu `test.afterEach` içinde çağırır (zaman aşımı dahil).
+ */
+export async function scrubSecretInputs(page: Page): Promise<void> {
+  if (page.isClosed()) return;
+  await page.evaluate(`(() => {
+    const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+    for (const el of document.querySelectorAll('input[type="password"], input[name="password"], input[name="code"], input[autocomplete="one-time-code"]')) {
+      set.call(el, "");
+    }
   })()`);
 }
 

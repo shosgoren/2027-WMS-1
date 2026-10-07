@@ -204,6 +204,7 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | und
     const email = `bos-${suffix}@example.test`; // demo olmayan alan adı (DEMO_EMAIL_DOMAIN=example.invalid)
     const password = randomBytes(18).toString("hex");
     let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
+    let setupError: unknown;
     try {
       browser = await chromium.launch();
       const made = await provisionEmptyTenant({
@@ -219,16 +220,30 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | und
       process.env.E2E_EMPTY_EMAIL = email;
       process.env.E2E_EMPTY_PASSWORD = password;
       process.env.E2E_EMPTY_TOTP_SECRET = made.totpSecret;
-    } finally {
-      // Kayıt açık örnek her yolda kapanır ve testler başlamadan çıkışı beklenir (T-279 SR MINOR).
+    } catch (e) {
+      setupError = e;
+    }
+    // Kayıt açık örnek her yolda kapanır ve testler başlamadan çıkışı beklenir. Temizlik hatası kurulum hatasını EZMEZ: hepsi birlikte
+    // fırlatılır (T-279 SR MINOR; G-07).
+    const cleanupErrors: unknown[] = [];
+    const cleanupSteps: (() => Promise<void> | void)[] = [
+      async () => browser?.close(),
+      closeProxyB,
+      () => stop(webB),
+      async () => waitFor("kayıt açık web örneği kapanmadı", 15_000, () => webB.exitCode !== null || webB.signalCode !== null),
+    ];
+    for (const step of cleanupSteps) {
       try {
-        await browser?.close();
-      } finally {
-        closeProxyB();
-        stop(webB);
-        await waitFor("kayıt açık web örneği kapanmadı", 15_000, () => webB.exitCode !== null || webB.signalCode !== null);
+        await step();
+      } catch (e) {
+        cleanupErrors.push(e);
       }
     }
+    if (setupError !== undefined) {
+      if (cleanupErrors.length === 0) throw setupError;
+      throw new AggregateError([setupError, ...cleanupErrors], "e2e: boş tenant fikstürü kurulamadı (ve temizlik hatası)", { cause: setupError });
+    }
+    if (cleanupErrors.length > 0) throw new AggregateError(cleanupErrors, "e2e: kayıt açık web örneği temizliği başarısız");
   } catch (e) {
     await teardown();
     throw e;
