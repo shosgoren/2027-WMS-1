@@ -79,10 +79,11 @@ export interface FieldLine {
   readonly sourceLineId: string | null;
 }
 
-export type FieldSourceKind = "INBOUND_RECEIPT" | "TASK";
+export type FieldSourceKind = "INBOUND_RECEIPT" | "TASK" | "COUNT_SESSION";
 
 export interface FieldPostSpec {
-  readonly kind: Extract<PostingKind, "STOCK_IN" | "STOCK_MOVE">;
+  /** `COUNT_ADJUSTMENT` (T-309): satır başına tek uç (`−` kaynak, `+` hedef); plan `countSessionId` taşımalıdır (çağıran komutun planı). */
+  readonly kind: Extract<PostingKind, "STOCK_IN" | "STOCK_MOVE" | "COUNT_ADJUSTMENT">;
   readonly warehouseId: string;
   readonly sourceKind: FieldSourceKind | null;
   readonly sourceId: string | null;

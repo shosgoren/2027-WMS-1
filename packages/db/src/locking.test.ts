@@ -260,6 +260,45 @@ describe("sayım kilidi kararı", () => {
   });
 });
 
+describe("sayım başlatma (countStart; T-309, ADR-021 §5)", () => {
+  const S1 = id(0x51);
+  const S2 = id(0x52);
+  const rows = (list: [string, "IDLE" | "COUNTING", string | null][]) =>
+    list.map(([location_id, status, count_session_id]) => ({ location_id, status, count_session_id }));
+
+  it("tümü IDLE → geçer; adım 2 location_id artan FOR UPDATE alır (normal komutun FOR SHARE'i değil)", async () => {
+    const { tx, calls } = fakeTx({ locks: rows([[id(1), "IDLE", null], [id(2), "IDLE", null]]) });
+    const state = await acquireStockLocks(tx, TENANT, plan({ locationIds: [id(2), id(1)], countStart: { sessionId: S1 } }));
+    expect(calls[0]?.text).toContain("ORDER BY location_id FOR UPDATE");
+    expect(calls[0]?.text).not.toContain("FOR SHARE");
+    expect(state.locations.map((l) => l.locationId)).toEqual([id(1), id(2)]);
+  });
+  it("biri zaten COUNTING (aynı ya da başka oturum) → LOCATION_LOCKED, kısmi kilit yok", async () => {
+    for (const other of [S1, S2]) {
+      const { tx } = fakeTx({ locks: rows([[id(1), "IDLE", null], [id(2), "COUNTING", other]]) });
+      expect(await codeOf(acquireStockLocks(tx, TENANT, plan({ locationIds: [id(1), id(2)], countStart: { sessionId: S1 } })))).toBe("LOCATION_LOCKED");
+    }
+  });
+  it("countStart ile countSessionId birlikte → VALIDATION_FAILED, hiçbir sorgu çalışmaz", async () => {
+    const { tx, calls } = fakeTx();
+    expect(await codeOf(acquireStockLocks(tx, TENANT, plan({ locationIds: [id(1)], countStart: { sessionId: S1 }, countSessionId: S1 })))).toBe("VALIDATION_FAILED");
+    expect(calls).toHaveLength(0);
+  });
+  it("countStart ama lokasyon yok → VALIDATION_FAILED, sorgu yok; geçersiz oturum kimliği → VALIDATION_FAILED", async () => {
+    const a = fakeTx();
+    expect(await codeOf(acquireStockLocks(a.tx, TENANT, plan({ countStart: { sessionId: S1 } })))).toBe("VALIDATION_FAILED");
+    expect(a.calls).toHaveLength(0);
+    const b = fakeTx();
+    expect(await codeOf(acquireStockLocks(b.tx, TENANT, plan({ locationIds: [id(1)], countStart: { sessionId: "x" } })))).toBe("VALIDATION_FAILED");
+  });
+  it("kilit satırı yok, lokasyon görünür → COUNT_LOCK_ROW_MISSING; görünmüyor → NOT_FOUND", async () => {
+    const a = fakeTx({ locks: [], visibleLocations: [id(1)] });
+    expect(await codeOf(acquireStockLocks(a.tx, TENANT, plan({ locationIds: [id(1)], countStart: { sessionId: S1 } })))).toBe("COUNT_LOCK_ROW_MISSING");
+    const b = fakeTx({ locks: [], visibleLocations: [] });
+    expect(await codeOf(acquireStockLocks(b.tx, TENANT, plan({ locationIds: [id(1)], countStart: { sessionId: S1 } })))).toBe("NOT_FOUND");
+  });
+});
+
 describe("belge kilidi", () => {
   it("sürüm uyuşmazlığı → VERSION_CONFLICT; sonraki adımlar çalışmaz", async () => {
     const { tx, calls } = fakeTx({ document: { id: id(1), version: 5, status: "APPROVED", warehouse_id: id(2) } });

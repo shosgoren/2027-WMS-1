@@ -9,10 +9,10 @@
 import { AppError } from "@wms/shared/errors";
 import type { StockDimensionKey } from "@wms/db";
 
-export type PostingKind = "STOCK_IN" | "STOCK_OUT" | "STOCK_MOVE";
+export type PostingKind = "STOCK_IN" | "STOCK_OUT" | "STOCK_MOVE" | "COUNT_ADJUSTMENT";
 export type PostingStatus = StockDimensionKey["stockStatus"];
 /** 16 kural 4 + A-79: bu kartta yalnızca belge türünden türeyen nedenler. */
-export type LedgerReason = "RECEIPT" | "SHIPMENT" | "MOVE";
+export type LedgerReason = "RECEIPT" | "SHIPMENT" | "MOVE" | "COUNT_DIFF";
 
 /**
  * A-248-1 (Q-49; 16 kural 3 yalnız "durum değişimi = −/+ çifti" der, geçiş matrisi tanımsızdır): fail-closed beyaz liste — yalnızca kalite onayı
@@ -31,6 +31,8 @@ export const REASON_BY_KIND: Readonly<Record<PostingKind, LedgerReason>> = {
   STOCK_IN: "RECEIPT",
   STOCK_OUT: "SHIPMENT",
   STOCK_MOVE: "MOVE",
+  // T-309 (A-79, 16 kural 4): sayım farkı. `−` satır yalnız kaynak, `+` satır yalnız hedef lokasyonla (ADR-021 §3); durum değişimi yoktur.
+  COUNT_ADJUSTMENT: "COUNT_DIFF",
 };
 
 /** Belge satırının işleme görünümü. Miktar = `base_quantity` (I-09: dönüşüm satırdaki kopyadan). */
@@ -142,6 +144,14 @@ export function buildPostingPlan(kind: PostingKind, lines: readonly PostingLine[
     if (kind === "STOCK_IN") {
       if (dst === null || src !== null) throw invalid();
       entries.push({ lineId: line.lineId, lineNo: line.lineNo, key: key(line, dst, line.targetStatus), delta: qty, reason });
+    } else if (kind === "COUNT_ADJUSTMENT") {
+      // Satır başına tek uç: yalnız kaynak = eksik sayım (−), yalnız hedef = fazla sayım (+). İkisi de dolu ya da boş → biçim ihlali.
+      if ((src === null) === (dst === null)) throw invalid();
+      entries.push(
+        src !== null
+          ? { lineId: line.lineId, lineNo: line.lineNo, key: key(line, src, line.sourceStatus), delta: -qty, reason }
+          : { lineId: line.lineId, lineNo: line.lineNo, key: key(line, dst as string, line.targetStatus), delta: qty, reason },
+      );
     } else if (kind === "STOCK_OUT") {
       if (src === null || dst !== null) throw invalid();
       entries.push({ lineId: line.lineId, lineNo: line.lineNo, key: key(line, src, line.sourceStatus), delta: -qty, reason });

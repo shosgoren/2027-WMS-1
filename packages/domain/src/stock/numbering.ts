@@ -1,7 +1,7 @@
 // Fiş numaralama (T-213; 05 §Rezervasyon ve hareketler, A-70, A-05; ADR-018 §7).
 //
 // - Kapsam: tenant + belge türü + dönem. Dönem = iş tarihinin takvim yılı (A-70); biçim `<önek>-<YYYY>-<6 hane>`; önekler `GRS`
-//   (STOCK_IN), `CKS` (STOCK_OUT), `TSM` (STOCK_MOVE), `TRS` (REVERSAL), `KBL` (INBOUND_RECEIPT; A-305-1). Boşluk kabul (A-05; yalnızca geri alınan transaction'da yok).
+//   (STOCK_IN), `CKS` (STOCK_OUT), `TSM` (STOCK_MOVE), `TRS` (REVERSAL), `KBL` (INBOUND_RECEIPT; A-305-1), `SAY` (COUNT_ADJUSTMENT; A-309-1). Boşluk kabul (A-05; yalnızca geri alınan transaction'da yok).
 // - Atomik: `INSERT … ON CONFLICT DO UPDATE … RETURNING` tek ifadede satır kilidi alır; eşzamanlı iki komut sırayla numara alır.
 // - Kilit sırası (ADR-018 §7): `number_sequences` satırı komutun SON kilididir; çağıran bunu apply'dan sonra, idempotency
 //   tamamlanmadan hemen önce çağırır (`executeStockCommand` bunu yapar).
@@ -9,7 +9,7 @@ import { sql } from "drizzle-orm";
 import { AppError } from "@wms/shared/errors";
 import type { AccessTx } from "../identity/access.ts";
 
-export type NumberedDocumentKind = "STOCK_IN" | "STOCK_OUT" | "STOCK_MOVE" | "REVERSAL" | "INBOUND_RECEIPT";
+export type NumberedDocumentKind = "STOCK_IN" | "STOCK_OUT" | "STOCK_MOVE" | "REVERSAL" | "INBOUND_RECEIPT" | "COUNT_ADJUSTMENT";
 
 export const NUMBER_PREFIX: Readonly<Record<NumberedDocumentKind, string>> = {
   STOCK_IN: "GRS",
@@ -18,6 +18,8 @@ export const NUMBER_PREFIX: Readonly<Record<NumberedDocumentKind, string>> = {
   REVERSAL: "TRS",
   // A-305-1 (A-139/Q-79 varsayılanı; kartlarda önek tanımı yok): beklenen teslim (kabul belgesi) numarası `KBL-<YYYY>-<6 hane>`.
   INBOUND_RECEIPT: "KBL",
+  // A-309-1 (A-139/Q-79 varsayılanı; T-301/T-302 kartlarında önek tanımı yoktu): sayım fark fişi numarası `SAY-<YYYY>-<6 hane>`.
+  COUNT_ADJUSTMENT: "SAY",
 };
 
 const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;

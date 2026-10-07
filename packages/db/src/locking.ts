@@ -36,6 +36,12 @@ export interface StockLockPlan {
   readonly serialIds: readonly string[];
   /** YALNIZCA sayım farkı komutu doldurur; sayım kilidi istisnasının tek anahtarı. */
   readonly countSessionId?: string;
+  /**
+   * YALNIZCA sayım başlatma komutu doldurur (T-309; 06 §Sayım kilidi yaşam döngüsü, ADR-021 §5): adım 2 `locationIds` için `FOR UPDATE` alır
+   * (süren stok işlemlerinin `FOR SHARE`'i bitene dek bekler) ve tümü `IDLE` değilse `LOCATION_LOCKED` (kısmi kilit yok). `COUNTING` yazımı
+   * komutundur (posting çekirdeğindeki yardımcı); `countSessionId` ile BİRLİKTE verilemez (`VALIDATION_FAILED`).
+   */
+  readonly countStart?: { readonly sessionId: string };
 }
 
 export type StockLockErrorCode =
@@ -172,6 +178,7 @@ interface NormalizedPlan {
   readonly reservationIds: string[];
   readonly serialIds: string[];
   readonly countSessionId: string | undefined;
+  readonly countStartSessionId: string | undefined;
 }
 
 /** Plan normalizasyonu: doğrulama, küçük harf, tekilleştirme, sıralama. Boş adım boş dizidir (adım atlanır). */
@@ -181,6 +188,9 @@ const normalizePlan = (plan: StockLockPlan): NormalizedPlan => {
     const v = plan.document.expectedVersion;
     if (!Number.isSafeInteger(v) || v < 0) throw new StockLockErrorImpl("VALIDATION_FAILED", "document.expectedVersion must be a non-negative integer");
     document = { id: uuid(plan.document.id, "document.id"), expectedVersion: v };
+  }
+  if (plan.countStart !== undefined && plan.countSessionId !== undefined) {
+    throw new StockLockErrorImpl("VALIDATION_FAILED", "countStart and countSessionId are mutually exclusive");
   }
   const serialIds = sortedUniqueIds(plan.serialIds, "serialIds");
   if (serialIds.length > 0 && !serialLockEnabled()) {
@@ -198,6 +208,7 @@ const normalizePlan = (plan: StockLockPlan): NormalizedPlan => {
     reservationIds: sortedUniqueIds(plan.reservationIds, "reservationIds"),
     serialIds,
     countSessionId: plan.countSessionId === undefined ? undefined : uuid(plan.countSessionId, "countSessionId"),
+    countStartSessionId: plan.countStart === undefined ? undefined : uuid(plan.countStart.sessionId, "countStart.sessionId"),
   };
 };
 
@@ -233,9 +244,16 @@ async function lockDocument(tx: TenantTx, tenantId: string, doc: NonNullable<Nor
   return { id: str(r.id), version, status: str(r.status), warehouseId: str(r.warehouse_id) };
 }
 
-async function assertLocationsNotCounting(tx: TenantTx, tenantId: string, ids: readonly string[], countSessionId: string | undefined): Promise<LockedLocation[]> {
+async function assertLocationsNotCounting(
+  tx: TenantTx,
+  tenantId: string,
+  ids: readonly string[],
+  countSessionId: string | undefined,
+  countStart = false,
+): Promise<LockedLocation[]> {
   const ar = uuidArray(ids);
-  const lockMode = countSessionId === undefined ? sql`FOR SHARE` : sql`FOR UPDATE`;
+  // Sayım başlatma ve sayım farkı `FOR UPDATE`; normal stok komutu `FOR SHARE`. Başlatmada kural "tümü IDLE" (`countSessionId` verilmemiş kararıyla aynı).
+  const lockMode = countSessionId === undefined && !countStart ? sql`FOR SHARE` : sql`FOR UPDATE`;
   const rows = await tx.execute<Row>(
     sql`SELECT location_id, status, count_session_id FROM public.location_count_locks
          WHERE tenant_id = ${tenantId}::uuid AND location_id = ANY(${ar}) ORDER BY location_id ${lockMode}`,
@@ -376,6 +394,9 @@ export async function acquireStockLocks(tx: TenantTx, tenantId: string, plan: St
   if (p.countSessionId !== undefined && audited.length === 0) {
     throw new StockLockErrorImpl("VALIDATION_FAILED", "countSessionId requires at least one location in the plan");
   }
+  if (p.countStartSessionId !== undefined && audited.length === 0) {
+    throw new StockLockErrorImpl("VALIDATION_FAILED", "countStart requires at least one location in the plan");
+  }
   // Çağıranın tenantId'si transaction'daki tenant bağlamıyla aynı olmalı (RLS başka tenant'ı süzer; yanlış kimlik sessiz boş sonuç olmasın).
   const contextTenant = await currentTenantId(tx);
   if (contextTenant === undefined || contextTenant.toLowerCase() !== tenant) {
@@ -383,7 +404,7 @@ export async function acquireStockLocks(tx: TenantTx, tenantId: string, plan: St
   }
 
   const document = p.document === undefined ? undefined : await lockDocument(tx, tenant, p.document);
-  const locations = audited.length === 0 ? [] : await assertLocationsNotCounting(tx, tenant, audited, p.countSessionId);
+  const locations = audited.length === 0 ? [] : await assertLocationsNotCounting(tx, tenant, audited, p.countSessionId, p.countStartSessionId !== undefined);
 
   let dimensions: LockedDimension[] = [];
   let balances: LockedBalance[] = [];

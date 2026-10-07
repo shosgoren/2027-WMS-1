@@ -557,15 +557,16 @@ describe(`documents işleme bağlamı bekçisi (0024, T-275; target=${env.target
 });
 
 describe(`number_sequences tür CHECK'i ile numbering.ts eşitliği (0022, T-305; target=${env.target})`, () => {
-  it("CHECK'teki türler = NUMBER_PREFIX anahtarları + COUNT_ADJUSTMENT (0017; T-309 numaralamayı ekleyene dek TS'te yok)", async () => {
+  it("CHECK'teki türler = NUMBER_PREFIX anahtarları (0017 COUNT_ADJUSTMENT dahil; T-309 numaralamayı ekledi)", async () => {
     const client = new pg.Client({ connectionString: env.databaseUrlDirect });
     try {
       await client.connect();
       const r = await client.query<{ def: string }>("SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = 'number_sequences_kind_chk'");
       expect(r.rows).toHaveLength(1);
       const kinds = [...((r.rows[0] as { def: string }).def.matchAll(/'([A-Z_]+)'::text/g))].map((m) => m[1] as string).sort();
-      expect(kinds).toEqual([...Object.keys(NUMBER_PREFIX), "COUNT_ADJUSTMENT"].sort());
+      expect(kinds).toEqual(Object.keys(NUMBER_PREFIX).sort());
       expect(NUMBER_PREFIX.INBOUND_RECEIPT).toBe("KBL");
+      expect(NUMBER_PREFIX.COUNT_ADJUSTMENT).toBe("SAY");
     } catch (e) {
       throw new Error(redactErrorChain(e, secretUrls(env)));
     } finally {

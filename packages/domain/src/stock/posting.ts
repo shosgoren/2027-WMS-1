@@ -77,7 +77,10 @@ import type { TrackingMode } from "./tracking.ts";
 
 /** A-07: senkron işleme üst sınırı. */
 export const SYNC_POST_MAX_LINES = 200;
+/** Genel `postDocument` türleri (belge yaşam döngüsü). `COUNT_ADJUSTMENT` yalnızca sayım komutunun transaction'ında doğar ve işlenir (T-309). */
 const KINDS: ReadonlySet<string> = new Set(["STOCK_IN", "STOCK_OUT", "STOCK_MOVE"]);
+/** Posting çekirdeğinin işleyebildiği türler: genel türler + sayım farkı (`postApprovedDocumentInTx` yolu). */
+const CORE_KINDS: ReadonlySet<string> = new Set([...KINDS, "COUNT_ADJUSTMENT"]);
 
 export interface PostDocumentInput {
   readonly documentId: string;
@@ -415,8 +418,13 @@ async function postCore(
   const header = await readDocumentHeader(tx, ctx.tenantId, documentId); // belge kilitli
   if (opts.worker !== true) assertNotProcessing(header); // M-6 (worker'da kilit beklenen durumdur; jobs.ts işi doğrular)
   if (header.status !== "APPROVED") throw documentState();
-  if (!KINDS.has(header.kind)) throw new AppError("VALIDATION_FAILED");
+  if (!CORE_KINDS.has(header.kind)) throw new AppError("VALIDATION_FAILED");
   const kind = header.kind as PostingKind;
+  // T-309 (06 §Kontrollü istisna): sayım farkı YALNIZCA sayım oturumuna kilitli lokasyonlara yazar. `acquireStockLocks` `countSessionId` planıyla bu
+  // kilidi zaten zorlar; plan o alanı unutursa IDLE lokasyona sayım farkı yazılmasın diye kilitli görüntüde de denetlenir (üretim kodu hatası → INTERNAL).
+  if (kind === "COUNT_ADJUSTMENT" && (locked.locations.length === 0 || locked.locations.some((l) => l.status !== "COUNTING" || l.countSessionId === null))) {
+    throw new AppError("INTERNAL");
+  }
   const lines = await loadLines(tx, ctx.tenantId, documentId);
   if (lines.length < 1) throw new AppError("VALIDATION_FAILED");
   if (lines.length > MAX_DOCUMENT_LINES) throw tooLarge(); // sert sınır; işleme anında yeniden denetlenir
@@ -439,7 +447,8 @@ async function postCore(
   const dimIdByIdentity = new Map(locked.dimensions.map((d) => [dimensionIdentity(d.key), d.id]));
   const balanceByDim = new Map(locked.balances.map((b) => [b.stockDimensionId, b]));
   // Rezervasyon etkisi (T-221): kilitli görüntüden; yeterlilikte işlenen satırın KENDİ rezervasyonu rezerveden düşülür.
-  const fx = planReservationEffects({ kind, entries: built.entries, locked, dimIdByIdentity, moves });
+  // Sayım farkı rezervasyon tüketmez/taşımaz (giriş gibi etkisiz): rezerve kısım yeterlilikte korunur (assertSufficient).
+  const fx = planReservationEffects({ kind: kind === "COUNT_ADJUSTMENT" ? "STOCK_IN" : kind, entries: built.entries, locked, dimIdByIdentity, moves });
   const balances = new Map<string, BalanceView>();
   for (const [identity, dimId] of dimIdByIdentity) {
     const b = balanceByDim.get(dimId);
@@ -559,4 +568,45 @@ async function writeBalances(
     );
     if (updated.length !== group.length) throw new AppError("INTERNAL");
   }
+}
+
+// --- sayım kilidi durum yazımı (T-309; 06 §Sayım kilidi yaşam döngüsü) --------------------------------------------------------------
+// `location_count_locks` yazımı yalnızca bu dosyada (T-210 lint STOCK_WRITE_FILES) olabilir. Bu yardımcılar `stock/index.ts`'ten DIŞA AÇILMAZ:
+// yalnızca `operations/counting.ts` doğrudan içe aktarır ve her ikisi de `acquireStockLocks` (countStart / countSessionId) kilidi ALTINDA çağrılır.
+
+/**
+ * IDLE → COUNTING (`startCount`; kilit `countStart` planıyla `FOR UPDATE` alınmıştır). Tümü güncellenmezse (yarışan ya da yok satır) `INTERNAL`:
+ * kısmi kilit yoktur, çağıran transaction'ı geri alır. `lockedBy` üyelik kimliğidir (FK).
+ */
+export async function setLocationsCounting(
+  tx: AccessTx,
+  tenantId: string,
+  sessionId: string,
+  lockedBy: string,
+  locationIds: readonly string[],
+): Promise<void> {
+  if (locationIds.length === 0) throw new AppError("INTERNAL");
+  const rows = await tx.execute<{ location_id: string }>(
+    sql`UPDATE public.location_count_locks
+           SET status = 'COUNTING', count_session_id = ${sessionId}::uuid, locked_at = now(), locked_by = ${lockedBy}::uuid
+         WHERE tenant_id = ${tenantId}::uuid AND location_id = ANY(${pgUuidArray(locationIds)}::uuid[]) AND status = 'IDLE'
+        RETURNING location_id`,
+  );
+  if (rows.length !== new Set(locationIds.map((i) => i.toLowerCase())).size) throw new AppError("INTERNAL");
+}
+
+/**
+ * COUNTING → IDLE (`postCountAdjustment` ve `cancelCount`; kilit `countSessionId` planıyla `FOR UPDATE` alınmıştır). Yalnızca VERİLEN oturumun kilitleri
+ * açılır (başka oturum ya da zaten IDLE satır güncellenmez → sayı eşleşmezse `INTERNAL`, transaction geri alınır).
+ */
+export async function releaseCountLocks(tx: AccessTx, tenantId: string, sessionId: string, locationIds: readonly string[]): Promise<void> {
+  if (locationIds.length === 0) throw new AppError("INTERNAL");
+  const rows = await tx.execute<{ location_id: string }>(
+    sql`UPDATE public.location_count_locks
+           SET status = 'IDLE', count_session_id = NULL, locked_at = NULL, locked_by = NULL
+         WHERE tenant_id = ${tenantId}::uuid AND location_id = ANY(${pgUuidArray(locationIds)}::uuid[])
+           AND status = 'COUNTING' AND count_session_id = ${sessionId}::uuid
+        RETURNING location_id`,
+  );
+  if (rows.length !== new Set(locationIds.map((i) => i.toLowerCase())).size) throw new AppError("INTERNAL");
 }

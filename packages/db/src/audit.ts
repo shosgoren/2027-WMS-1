@@ -77,6 +77,13 @@ export const AUDIT_ACTIONS = [
   // (lokasyon `pick_blocked` olur, sayım görevi açılır; stok etkisi varsa ayrıca `stock_document.posted`).
   "pick_assignment.created",
   "pick.not_found",
+  // T-309: kilitli sayım yaşam döngüsü (stok etkisi varsa fark fişi ayrıca `stock_document.posted`; kilit açma `count.posted`/`count.cancelled` ile aynı transaction'da).
+  "count.started",
+  "count.recorded",
+  "count.submitted",
+  "count.approved",
+  "count.posted",
+  "count.cancelled",
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
