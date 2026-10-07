@@ -66,3 +66,18 @@ export {
   type ReceiptView,
   type ReceivingLocationView,
 } from "./receiving-queries.ts";
+// Müşteri siparişi, sipariş tahsisi ve iptal (T-306). `allocation.ts` saf öneri işlevidir (birim testi); `allocateInTx`/`releaseSelected` iç çekirdeklerdir: burada YOKTUR.
+export {
+  cancelOrderLine,
+  cancelSalesOrder,
+  createSalesOrder,
+  reserveOrder,
+  updateDraftOrder,
+  type CancelOrderLineInput,
+  type CancelSalesOrderInput,
+  type CreateSalesOrderInput,
+  type OrderAllocationOverride,
+  type ReserveOrderInput,
+  type SalesOrderLineInput,
+  type UpdateDraftOrderInput,
+} from "./orders.ts";

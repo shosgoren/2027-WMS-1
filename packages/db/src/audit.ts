@@ -68,6 +68,11 @@ export const AUDIT_ACTIONS = [
   "inbound_receipt.opened",
   "inbound_receipt.cancelled",
   "inbound_receipt.received",
+  // T-306: müşteri siparişi yaşam döngüsü; sipariş tahsisi `reservation.created`, serbest bırakma `reservation.released` ile ayrıca denetlenir.
+  "sales_order.created",
+  "sales_order.updated",
+  "sales_order.cancelled",
+  "sales_order.line_cancelled",
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];

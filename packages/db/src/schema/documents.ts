@@ -78,6 +78,9 @@ export const documents = pgTable(
     reversalOfDocumentId: uuid("reversal_of_document_id"),
     postingJobId: uuid("posting_job_id"),
     postingRequestedBy: uuid("posting_requested_by"),
+    // T-222 (0023): işleme isteği bağlamı; `posting_job_id` ile aynı transaction'da sunucu tarafında yazılır, kilit kalkınca temizlenir.
+    postingMfaVerifiedAt: timestamptz("posting_mfa_verified_at"),
+    postingIdempotencyRecordId: uuid("posting_idempotency_record_id"),
     reason: text("reason"),
     // T-301 (ADR-021 §2): saha belgesi kaynağı (polimorfik; FK yok, A-152). İkisi birlikte dolu/boş; yalnızca INSERT'te yazılır.
     sourceKind: text("source_kind").$type<DocumentSourceKind>(),

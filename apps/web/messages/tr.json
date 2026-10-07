@@ -598,6 +598,12 @@
       "opened": "Beklenen bir teslimi mal kabule açtın.",
       "cancelled": "Beklenen bir teslimi iptal ettin.",
       "received": "Gelen malı teslim kaydına karşı kabul ettin."
+    },
+    "sales_order": {
+      "created": "Bir müşteri siparişi oluşturdun.",
+      "updated": "Bir taslak siparişi güncelledin.",
+      "cancelled": "Bir siparişi iptal ettin.",
+      "line_cancelled": "Bir sipariş satırını iptal ettin."
     }
   },
   "auditLog": {

@@ -598,6 +598,12 @@
       "opened": "You opened an expected delivery for receiving.",
       "cancelled": "You cancelled an expected delivery.",
       "received": "You received goods against a delivery."
+    },
+    "sales_order": {
+      "created": "You created a customer order.",
+      "updated": "You updated a draft order.",
+      "cancelled": "You cancelled an order.",
+      "line_cancelled": "You cancelled an order line."
     }
   },
   "auditLog": {

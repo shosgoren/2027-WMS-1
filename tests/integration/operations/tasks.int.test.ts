@@ -246,7 +246,7 @@ describe("görev komutları", () => {
     expect("completeTask" in ops).toBe(false);
     expect("createTasks" in ops).toBe(false);
     expect(Object.keys(ops).sort()).toEqual(
-      ["REASON_MAX", "TASK_KINDS", "TASK_KIND_PERMISSION", "TASK_LIST_LIMIT_DEFAULT", "TASK_LIST_LIMIT_MAX", "TASK_SOURCE_KINDS", "TASK_STATUSES", "assignTask", "cancelTask", "claimTask", "listMyTasks", "listTasks", "nextTaskStatus", "approveQuality", "cancelInboundReceipt", "createInboundReceipt", "openInboundReceipt", "putaway", "receiveGoods", "RECEIPT_LIST_LIMIT_DEFAULT", "RECEIPT_LIST_LIMIT_MAX", "RECEIPT_STATUSES", "getAvailableAtLocation", "getInboundReceipt", "getLocationBrief", "listInboundReceipts"].sort(),
+      ["REASON_MAX", "TASK_KINDS", "TASK_KIND_PERMISSION", "TASK_LIST_LIMIT_DEFAULT", "TASK_LIST_LIMIT_MAX", "TASK_SOURCE_KINDS", "TASK_STATUSES", "assignTask", "cancelTask", "claimTask", "listMyTasks", "listTasks", "nextTaskStatus", "approveQuality", "cancelInboundReceipt", "createInboundReceipt", "openInboundReceipt", "putaway", "receiveGoods", "RECEIPT_LIST_LIMIT_DEFAULT", "RECEIPT_LIST_LIMIT_MAX", "RECEIPT_STATUSES", "getAvailableAtLocation", "getInboundReceipt", "getLocationBrief", "listInboundReceipts", "cancelOrderLine", "cancelSalesOrder", "createSalesOrder", "reserveOrder", "updateDraftOrder"].sort(),
     );
     const pkg = JSON.parse(readFileSync(new URL("../../../packages/domain/package.json", import.meta.url), "utf8")) as { exports: Record<string, string> };
     expect(pkg.exports["./operations"]).toBe("./src/operations/index.ts");
@@ -297,5 +297,13 @@ describe("görev sorguları", () => {
       expect((await failure(listTasks(admin(w), { after: { createdKey, id: randomUUID() } }))).code).toBe("VALIDATION_FAILED");
       expect((await failure(listMyTasks(picker(w), { after: { createdKey, id: randomUUID() } }))).code).toBe("VALIDATION_FAILED");
     }
+    // T-273: yıl 0000 PostgreSQL timestamptz aralığında yok (JS geçerli sayar) → VALIDATION_FAILED, DB hatası (500) değil; yıl 0001 geçerli sınırdır.
+    for (const createdKey of ["0000-01-01T00:00:00.000000Z", "0000-12-31T23:59:59.999999Z"]) {
+      expect((await failure(listTasks(admin(w), { after: { createdKey, id: randomUUID() } }))).code).toBe("VALIDATION_FAILED");
+      expect((await failure(listMyTasks(picker(w), { after: { createdKey, id: randomUUID() } }))).code).toBe("VALIDATION_FAILED");
+    }
+    const lowest = { createdKey: "0001-01-01T00:00:00.000000Z", id: randomUUID() };
+    expect((await listTasks(admin(w), { after: lowest })).items.length).toBeGreaterThan(0); // her görev bu imleçten sonradır; DB sorgusu hata vermez
+    expect((await listMyTasks(picker(w), { after: lowest })).items).toBeDefined();
   });
 });

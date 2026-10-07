@@ -271,6 +271,8 @@ export interface AssignTaskInput {
 /**
  * Görevi bir üyeye atar (`document.approve`; A-132). Hedef üyelik bu tenant'ta ACTIVE olmalı (aksi `NOT_FOUND`) ve görev türünü
  * tamamlayan izne sahip olmalı (aksi `VALIDATION_FAILED`, A-304-1). OPEN/ASSIGNED görev atanabilir (yeniden atama).
+ * Kapsam reddi (A-46, bayrak açıkken): atananın depo kapsamı görevin deposunu içermiyorsa `VALIDATION_FAILED` (görev değişmez, audit yok);
+ * `TENANT_ADMIN` ve bayrak kapalıyken kapsam kısıtsızdır. Çağıranın kendi kapsamı `lockTask` içinde denetlenir (kapsam dışı görev `NOT_FOUND`).
  */
 export async function assignTask(params: TaskCallParams, input: AssignTaskInput): Promise<{ readonly version: number }> {
   const taskId = uuid(input.taskId);
@@ -382,8 +384,13 @@ export interface TaskPage {
   readonly next: TaskCursor | null;
 }
 
-/** Biçim doğru ama takvimde olmayan zaman (ör. 2026-02-31, 25:00) Postgres'te 500 verirdi; burada reddedilir. */
+/**
+ * Biçim doğru ama takvimde olmayan zaman (ör. 2026-02-31, 25:00) Postgres'te 500 verirdi; burada reddedilir. Yıl 0000 de reddedilir (T-273): JS
+ * onu geçerli sayar (MÖ 1) ama PostgreSQL `timestamptz` aralığında yıl 0 yoktur (4713 MÖ…294276 MS, MÖ 1 = `0001 BC`; ISO `0000` metni
+ * `22008` verir). 4 haneli biçimin üst sınırı (9999) PostgreSQL aralığındadır.
+ */
 export function isCalendarTime(key: string): boolean {
+  if (key.startsWith("0000-")) return false;
   const d = new Date(`${key.slice(0, 23)}Z`);
   return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 23) === key.slice(0, 23);
 }
