@@ -10,6 +10,13 @@ const port = Number(process.env.E2E_PORT ?? "3100");
 const remoteBaseURL = process.env.E2E_BASE_URL?.trim();
 const baseURL = remoteBaseURL || `https://localhost:${port}`;
 
+// T-278: masaüstü ve mobil ayrı cihazlardır; yerel TLS vekili (global-setup, Fly kenarı taklidi) her projeye ayrı
+// istemci adresi (TEST-NET-2) verir → ayrı hız sınırı kovaları. Hız sınırı kuralı değişmez. Uzak hedefte başlık
+// eklenmez (Fly kenarı `Fly-Client-IP`'i kendisi koyar; uygulama bu başlığı okumaz).
+function localClient(ip: string): { extraHTTPHeaders?: Record<string, string> } {
+  return remoteBaseURL ? {} : { extraHTTPHeaders: { "x-e2e-client-ip": ip } };
+}
+
 export default defineConfig({
   testDir: "tests/e2e",
   testMatch: "**/*.spec.ts",
@@ -33,8 +40,8 @@ export default defineConfig({
     screenshot: "only-on-failure",
   },
   projects: [
-    { name: "desktop", use: { ...devices["Desktop Chrome"], viewport: { width: 1280, height: 800 } } },
+    { name: "desktop", use: { ...devices["Desktop Chrome"], viewport: { width: 1280, height: 800 }, ...localClient("198.51.100.1") } },
     // Pixel 5 = 393x727, dokunmatik, mobil Chromium.
-    { name: "mobile", use: { ...devices["Pixel 5"] } },
+    { name: "mobile", use: { ...devices["Pixel 5"], ...localClient("198.51.100.2") } },
   ],
 });

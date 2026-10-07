@@ -16,6 +16,9 @@ import path from "node:path";
 const ROOT = path.resolve(import.meta.dirname, "../..");
 const OUT = path.join(ROOT, ".artifacts/e2e");
 const PLACEHOLDER_SEAL = "0".repeat(64);
+// T-278: playwright.config.ts projeleri bu başlıkla ayrı istemci adresi bildirir (yalnızca yerel vekil okur).
+const E2E_CLIENT_IP_HEADER = "x-e2e-client-ip";
+const TEST_NET_2 = /^198\.51\.100\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
 
 function loadDotEnv(): void {
   // `.env` yoksa `.env.example` (yalnızca yerel yer tutucular; G-09). Var olan ortam değişkenleri ezilmez.
@@ -73,6 +76,10 @@ async function waitFor(what: string, timeoutMs: number, probe: () => Promise<boo
 
 function startTlsProxy(port: number, targetPort: number, keyFile: string, certFile: string): https.Server {
   const server = https.createServer({ key: readFileSync(keyFile), cert: readFileSync(certFile) }, (req, res) => {
+    // T-278: her Playwright projesi ayrı bir cihazdır; vekil istemci adresini test başlığından alır (yalnız TEST-NET-2,
+    // RFC 5737), yoksa soket adresinden. Başlık uygulamaya iletilmez.
+    const { [E2E_CLIENT_IP_HEADER]: declared, ...forwardHeaders } = req.headers;
+    const clientIp = typeof declared === "string" && TEST_NET_2.test(declared) ? declared : (req.socket.remoteAddress ?? "127.0.0.1");
     const upstream = http.request(
       {
         host: "127.0.0.1",
@@ -80,7 +87,7 @@ function startTlsProxy(port: number, targetPort: number, keyFile: string, certFi
         method: req.method,
         path: req.url,
         // Fly kenarını taklit eder: uygulama istemci IP'sini yalnızca `Fly-Client-IP`'den okur (apps/web/lib/rate-limit.ts).
-        headers: { ...req.headers, "x-forwarded-proto": "https", "fly-client-ip": req.socket.remoteAddress ?? "127.0.0.1" },
+        headers: { ...forwardHeaders, "x-forwarded-proto": "https", "fly-client-ip": clientIp },
       },
       (up) => {
         res.writeHead(up.statusCode ?? 502, up.headers);
