@@ -119,6 +119,7 @@ Gerekçe: "metrik doldurma kutusu üretiyordu; kullanıcı görsel kalitesi önc
 | H-04'teki "D-03 bozulmaz" ibaresi netleştirildi (D-03 yalnız kapalı ana ekran) | bu belge güncellemesi (§7.3 öncesi rubrik-yalnız commit) | §7.1 ile çelişkiydi |
 | T-274 kartı madde 3 ("emptyRatio önceliklidir, değişmez", `docs/tasks/T-274.md`) ve `mobile-shell.spec.ts` içindeki "H-01 ... emptyRatio önceliklidir; gerekçe kartı boşluğu doldurur" yorumu bayat | Kart dosyası dokunulacak dosyalar dışında: güncelleme Supervisor'da. Test yorumu rubrik-yalnız commit'ten SONRAKİ kod commit'inde düzeltilir | Güncel kural: §7.1 + §7.3 (açık listede `emptyRatio` yok; B-01/B-02) |
 | T-313 R-11 (§8.1) "TanStack Virtual" → "sayfalı liste ≤50 satır; sanallaştırma 200+ satırlık tek sayfa gerekince takip kartı" | e762fb4 (rubrik-yalnız commit; T-313 görüntüsünden ÖNCE) | `@tanstack/react-virtual` kurulu değil, yeni bağımlılık eklenmeyecek; teslim listesi keyset ile ≤50 satır/sayfa gelir (T-274 aynı sonuca vardı). Diğer R-ölçütleri değişmedi |
+| Ana ekran ölçeklenmesi (§7.4): ≤5 izinli iş tek sütun satır (mevcut), ≥6 eşit 2 sütunlu ızgara; 2 sütunda D-04 88–140 px | Supervisor kararı 2026-10-07 (T-313); rubrik-yalnız commit, T-313 ana ekran görüntüsünden ÖNCE | "6 etkin işte tek sütun D-04'ü ihlal ediyor": 6 döşemeyle 360×740'ta 77 px (<88), 390×664'te son döşeme alt sekmenin 38 px altına taşıyor. Eşikler gevşetilmedi; yerleşim biçimi değişti |
 
 ### 7.3 Yeni ölçütler (bağımsız inceleme "geçmez" sonrası) — ekran görüntüsü ve kod değişikliğinden ÖNCE sabitlendi
 
@@ -137,6 +138,17 @@ Bu bölüm ayrı, yalnız rubrik içeren bir commit'tir; kod ve ekran görüntü
 | S-01 | Kurulum satırı eylem gibi okunur: depo yoksa "Önce depo ekle · 1. adım / 3"; depo var, raf yoksa "Sıradaki: rafları oluştur · 2. adım / 3"; raf da varsa ve sıra üründe ise "Sıradaki: ilk ürünü ekle". Sağda şevron; dokununca doğrudan o adıma gider; ürün adımında satır "Yeni ürün" ile AYNI eylemi açar (ikinci dolu düğme yok) | Hepsi | 1 eksik | ≥ 2 eksik |
 
 Yazma kuralı: bu tablo ve eşikler ekran görüntüsünden sonra değiştirilirse değişiklik §7.2'ye commit ve gerekçesiyle eklenir.
+
+### 7.4 Ana ekran ölçeklenmesi: izinli iş sayısına göre yerleşim (2026-10-07, T-313; görüntüden ÖNCE sabitlendi)
+
+Gerekçe: "6 etkin işte tek sütun D-04'ü ihlal ediyor" (ölçüm: 6 döşeme, yönetici; 360×740 → 77 px, 390×664 → son döşeme alt sekmenin 38 px altında, 390×844 → 94 px, 430×932 → 109 px).
+
+Kural (telefon ana ekranı, `.task-grid`):
+- **≤5 izinli (etkin) iş:** tek sütun yatay satırlar (mevcut §5 B biçimi, D-04 88–140 px; kısa ekranda 72 px).
+- **≥6 izinli iş:** eşit 2 sütunlu ızgara, aynı döşeme biçimi (ikon dairesi + başlık; açıklama 2 sütunda gizlenebilir), eşit satırlar. Tek sayıda iş varsa son döşeme tam genişlik kaplar (yetim döşeme yok; eşitlik yükseklik ve satır genişliğiyle ölçülür, bkz. D-01 notu).
+- **D-04 (2 sütun):** döşeme yüksekliği 88–140 px (görünür yüksekliği < 700 px olan ekranda 72 px alt sınırı, mevcut D-04 notu). **B-02 aynen geçerlidir.**
+- Her iki modda aynı güçte ölçülür: eşit boyut (±2 px), yetim yok, ızgara alt kenarı alt sekmenin ≤ 16 px üstünde (alttan yukarı), dokunma hedefi ≥ 48×48 px ve aralık ≥ 8 px, sayfa kayması yok; 360×740, 390×664, 390×844, 430×932. Başlık ≤ 2 satır (D-09).
+- Eşikler değişmedi; yalnızca 6+ iş için yerleşim biçimi eklendi.
 
 ## 8. T-313 mal kabul ve yerleştirme ekranları — tasarım ölçütleri (görüntüden ÖNCE yazıldı)
 
