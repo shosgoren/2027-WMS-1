@@ -22,6 +22,7 @@ import * as reliability from "../../../packages/db/src/schema/reliability.ts";
 import * as stock from "../../../packages/db/src/schema/stock.ts";
 import * as tenancy from "../../../packages/db/src/schema/tenancy.ts";
 import * as warehouse from "../../../packages/db/src/schema/warehouse.ts";
+import { NUMBER_PREFIX } from "../../../packages/domain/src/stock/numbering.ts";
 import { readIntEnv, redactErrorChain, secretUrls } from "../harness/env.ts";
 
 const env = readIntEnv(process.env);
@@ -521,5 +522,23 @@ describe(`document_lines hedef durum bekçisi (0020, T-258; target=${env.target}
     expect(trg[0]?.src).toContain("'QUARANTINE>AVAILABLE', 'AVAILABLE>QUARANTINE'");
     expect(trg[0]?.src).toContain("'STOCK_MOVE'");
     expect((trg[0]?.acl ?? []).some((a) => a.startsWith("="))).toBe(false); // PUBLIC girdisi yok
+  });
+});
+
+describe(`number_sequences tür CHECK'i ile numbering.ts eşitliği (0022, T-305; target=${env.target})`, () => {
+  it("CHECK'teki türler = NUMBER_PREFIX anahtarları + COUNT_ADJUSTMENT (0017; T-309 numaralamayı ekleyene dek TS'te yok)", async () => {
+    const client = new pg.Client({ connectionString: env.databaseUrlDirect });
+    try {
+      await client.connect();
+      const r = await client.query<{ def: string }>("SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = 'number_sequences_kind_chk'");
+      expect(r.rows).toHaveLength(1);
+      const kinds = [...((r.rows[0] as { def: string }).def.matchAll(/'([A-Z_]+)'::text/g))].map((m) => m[1] as string).sort();
+      expect(kinds).toEqual([...Object.keys(NUMBER_PREFIX), "COUNT_ADJUSTMENT"].sort());
+      expect(NUMBER_PREFIX.INBOUND_RECEIPT).toBe("KBL");
+    } catch (e) {
+      throw new Error(redactErrorChain(e, secretUrls(env)));
+    } finally {
+      await client.end();
+    }
   });
 });

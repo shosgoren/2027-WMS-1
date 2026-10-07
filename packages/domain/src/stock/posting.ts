@@ -26,7 +26,7 @@ import type { LockedState } from "@wms/db";
 import { AppError } from "@wms/shared/errors";
 import type { AccessTx } from "../identity/access.ts";
 import { pgUuidArray } from "../warehouse/scope.ts";
-import { EMPTY_LOCK_PLAN, executeStockCommand, type StockCommandPlan } from "./command.ts";
+import { EMPTY_LOCK_PLAN, executeStockCommand, type StockCommandApplied, type StockCommandContext, type StockCommandPlan } from "./command.ts";
 import { assertItemsActive, assertLocationsActiveInWarehouse, assertNotProcessing, readDocumentHeader, type StockDocCallParams } from "./documents.ts";
 import type { StockCommandResult } from "./idempotency.ts";
 import {
@@ -226,78 +226,101 @@ export async function postDocument(
     },
     apply: async (tx, locked, ctx) => {
       if (locked.document === undefined) throw new AppError("INTERNAL");
-      const header = await readDocumentHeader(tx, ctx.tenantId, documentId); // belge kilitli
-      assertNotProcessing(header); // M-6
-      if (header.status !== "APPROVED") throw documentState();
-      if (!KINDS.has(header.kind)) throw new AppError("VALIDATION_FAILED");
-      const kind = header.kind as PostingKind;
-      const lines = await loadLines(tx, ctx.tenantId, documentId);
-      if (lines.length < 1) throw new AppError("VALIDATION_FAILED");
-      if (lines.length > SYNC_POST_MAX_LINES) throw documentState(); // T-222 gelene dek kapalı yol: açık hata
-      const built = buildPostingPlan(kind, lines);
-      assertCovered(built, locked);
-
-      // Kilitten SONRA: lokasyon ve ürün FOR SHARE + ACTIVE (T-243 MAJOR; arşivle çakışır).
-      // Sıra: lokasyon (FOR SHARE, ACTIVE, depo eşitliği A-145) → ürün (FOR SHARE, ACTIVE); ikisi de documents.ts yardımcıları.
-      await assertLocationsActiveInWarehouse(tx, ctx.tenantId, built.locationIds, locked.document.warehouseId);
-      const itemIds = [...new Set(lines.map((l) => l.itemId.toLowerCase()))].sort();
-      await assertItemsActive(tx, ctx.tenantId, itemIds, { archivedDetail: "IN_USE" });
-      const items = await readItemInfo(tx, ctx.tenantId, itemIds);
-      const serials = new Map<string, SerialInfo>(locked.serials.map((s) => [s.id.toLowerCase(), { id: s.id, itemId: s.itemId, lotId: s.lotId }]));
-      assertLineRules(lines, items, serials);
-
-      const dimIdByIdentity = new Map(locked.dimensions.map((d) => [dimensionIdentity(d.key), d.id]));
-      const balanceByDim = new Map(locked.balances.map((b) => [b.stockDimensionId, b]));
-      // Rezervasyon etkisi (T-221): kilitli görüntüden; yeterlilikte işlenen satırın KENDİ rezervasyonu rezerveden düşülür.
-      const fx = planReservationEffects({ kind, entries: built.entries, locked, dimIdByIdentity, moves });
-      const balances = new Map<string, BalanceView>();
-      for (const [identity, dimId] of dimIdByIdentity) {
-        const b = balanceByDim.get(dimId);
-        if (b === undefined) throw new AppError("INTERNAL");
-        balances.set(identity, { quantity: toMicro(b.quantity), reserved: reservedExcluding(toMicro(b.reservedQuantity), fx.ownReserved.get(identity) ?? 0n) });
-      }
-      assertSufficient(built, balances);
-      await assertReservableDimensions(tx, ctx.tenantId, fx.targetDims); // taşınan rezervasyonun hedefi de kural 5'e uygun olmalı
-
-      const netByDimensionId = new Map<string, bigint>();
-      const serialOfDimension = new Map<string, string>();
-      for (const [identity, net] of built.net) {
-        const dimId = dimIdByIdentity.get(identity) as string;
-        netByDimensionId.set(dimId, net);
-      }
-      for (const d of locked.dimensions) if (d.key.serialId !== null) serialOfDimension.set(d.id, d.key.serialId);
-      if (built.serialIds.length > 0) {
-        const existing = await readPositiveSerialBalances(tx, ctx.tenantId, built.serialIds);
-        assertSerialUnique(existing, netByDimensionId, serialOfDimension);
-      }
-
-      await writeLedger(tx, ctx.tenantId, documentId, header.businessDate, ctx.userId, built, dimIdByIdentity);
-      await writeBalances(tx, ctx.tenantId, netByDimensionId, fx.reservedDelta);
-      const consumed = await closeReservations(tx, ctx.tenantId, "CONSUMED", fx.consumeOps);
-      const moved = await moveReservations(tx, ctx.tenantId, fx.moveOps);
-      const touched = [...consumed, ...moved];
-
-      return {
-        result: {
-          documentId,
-          status: "POSTED",
-          ...(touched.length === 0 ? {} : { reservationIds: touched }),
-          lines: lines.map((l) => ({ lineId: l.lineId, lineNo: l.lineNo, quantity: l.quantity, baseQuantity: l.baseQuantity })),
-        },
-        audit: {
-          action: "stock_document.posted",
-          entityType: "stock_document",
-          entityId: documentId,
-          requestId: input.requestId ?? null,
-          changeSummary: { kind, lineCount: lines.length, ledgerRows: built.entries.length, warehouseId: header.warehouseId, reservationsConsumed: consumed.length, reservationsMoved: moved.length },
-        },
-        // Numara EN SON; aynı UPDATE belgeyi POSTED yapar (sürüm +1 ve durum geçmişi DB tetikleyicilerindedir).
-        numbering: { documentId, kind: kind, businessDate: header.businessDate, status: "POSTED" },
-      };
+      return postApprovedDocumentInTx(tx, locked, ctx, documentId, { moves, requestId: input.requestId ?? null });
     },
   });
   if (outcome.status !== "COMPLETED") throw new AppError("VERSION_CONFLICT", { retryable: true }); // senkron yolda beklenmez
   return { ...outcome.result, replayed: outcome.replayed };
+}
+
+export interface PostInTxOptions {
+  /** Yalnızca `STOCK_MOVE`: satır → taşınacak rezervasyonlar (normalize edilmiş). */
+  readonly moves?: readonly ReservationMoveInput[] | undefined;
+  readonly requestId: string | null;
+}
+
+/**
+ * Posting çekirdeği (T-305 ayrımı): `APPROVED` belgeyi KİLİTLİ görüntü üzerinde işler. Çağıran `executeStockCommand`'ın `apply`'ı içindedir; kilit planı
+ * (boyutlar/lokasyonlar/seriler) çağıranca ÖNCEDEN tam bildirilmiş olmalıdır (aksi `assertCovered` → `VERSION_CONFLICT`). Belge kilidi: `postDocument`
+ * belgeyi plan ile kilitler; saha komutları belgeyi aynı transaction'da kendileri oluşturur (başka transaction göremez), bu yüzden kilit gerekmez.
+ * Tek yazım yolu korunur (G-01): defter/bakiye yazımı yalnızca bu dosyadadır.
+ */
+export async function postApprovedDocumentInTx(
+  tx: AccessTx,
+  locked: LockedState,
+  ctx: StockCommandContext,
+  documentId: string,
+  opts: PostInTxOptions,
+): Promise<StockCommandApplied> {
+  const moves = opts.moves;
+  const header = await readDocumentHeader(tx, ctx.tenantId, documentId); // belge kilitli
+  assertNotProcessing(header); // M-6
+  if (header.status !== "APPROVED") throw documentState();
+  if (!KINDS.has(header.kind)) throw new AppError("VALIDATION_FAILED");
+  const kind = header.kind as PostingKind;
+  const lines = await loadLines(tx, ctx.tenantId, documentId);
+  if (lines.length < 1) throw new AppError("VALIDATION_FAILED");
+  if (lines.length > SYNC_POST_MAX_LINES) throw documentState(); // T-222 gelene dek kapalı yol: açık hata
+  const built = buildPostingPlan(kind, lines);
+  assertCovered(built, locked);
+
+  // Kilitten SONRA: lokasyon ve ürün FOR SHARE + ACTIVE (T-243 MAJOR; arşivle çakışır).
+  // Sıra: lokasyon (FOR SHARE, ACTIVE, depo eşitliği A-145) → ürün (FOR SHARE, ACTIVE); ikisi de documents.ts yardımcıları.
+  await assertLocationsActiveInWarehouse(tx, ctx.tenantId, built.locationIds, header.warehouseId);
+  const itemIds = [...new Set(lines.map((l) => l.itemId.toLowerCase()))].sort();
+  await assertItemsActive(tx, ctx.tenantId, itemIds, { archivedDetail: "IN_USE" });
+  const items = await readItemInfo(tx, ctx.tenantId, itemIds);
+  const serials = new Map<string, SerialInfo>(locked.serials.map((s) => [s.id.toLowerCase(), { id: s.id, itemId: s.itemId, lotId: s.lotId }]));
+  assertLineRules(lines, items, serials);
+
+  const dimIdByIdentity = new Map(locked.dimensions.map((d) => [dimensionIdentity(d.key), d.id]));
+  const balanceByDim = new Map(locked.balances.map((b) => [b.stockDimensionId, b]));
+  // Rezervasyon etkisi (T-221): kilitli görüntüden; yeterlilikte işlenen satırın KENDİ rezervasyonu rezerveden düşülür.
+  const fx = planReservationEffects({ kind, entries: built.entries, locked, dimIdByIdentity, moves });
+  const balances = new Map<string, BalanceView>();
+  for (const [identity, dimId] of dimIdByIdentity) {
+    const b = balanceByDim.get(dimId);
+    if (b === undefined) throw new AppError("INTERNAL");
+    balances.set(identity, { quantity: toMicro(b.quantity), reserved: reservedExcluding(toMicro(b.reservedQuantity), fx.ownReserved.get(identity) ?? 0n) });
+  }
+  assertSufficient(built, balances);
+  await assertReservableDimensions(tx, ctx.tenantId, fx.targetDims); // taşınan rezervasyonun hedefi de kural 5'e uygun olmalı
+
+  const netByDimensionId = new Map<string, bigint>();
+  const serialOfDimension = new Map<string, string>();
+  for (const [identity, net] of built.net) {
+    const dimId = dimIdByIdentity.get(identity) as string;
+    netByDimensionId.set(dimId, net);
+  }
+  for (const d of locked.dimensions) if (d.key.serialId !== null) serialOfDimension.set(d.id, d.key.serialId);
+  if (built.serialIds.length > 0) {
+    const existing = await readPositiveSerialBalances(tx, ctx.tenantId, built.serialIds);
+    assertSerialUnique(existing, netByDimensionId, serialOfDimension);
+  }
+
+  await writeLedger(tx, ctx.tenantId, documentId, header.businessDate, ctx.userId, built, dimIdByIdentity);
+  await writeBalances(tx, ctx.tenantId, netByDimensionId, fx.reservedDelta);
+  const consumed = await closeReservations(tx, ctx.tenantId, "CONSUMED", fx.consumeOps);
+  const moved = await moveReservations(tx, ctx.tenantId, fx.moveOps);
+  const touched = [...consumed, ...moved];
+
+  return {
+    result: {
+      documentId,
+      status: "POSTED",
+      ...(touched.length === 0 ? {} : { reservationIds: touched }),
+      lines: lines.map((l) => ({ lineId: l.lineId, lineNo: l.lineNo, quantity: l.quantity, baseQuantity: l.baseQuantity })),
+    },
+    audit: {
+      action: "stock_document.posted",
+      entityType: "stock_document",
+      entityId: documentId,
+      requestId: opts.requestId,
+      changeSummary: { kind, lineCount: lines.length, ledgerRows: built.entries.length, warehouseId: header.warehouseId, reservationsConsumed: consumed.length, reservationsMoved: moved.length },
+    },
+    // Numara EN SON; aynı UPDATE belgeyi POSTED yapar (sürüm +1 ve durum geçmişi DB tetikleyicilerindedir).
+    numbering: { documentId, kind: kind, businessDate: header.businessDate, status: "POSTED" },
+  };
 }
 
 /** Salt okuma: planlanan serilerin pozitif bakiyeli boyutları (belge dışı boyutlar dahil; seri kilidi altında kararlıdır). */
