@@ -28,7 +28,7 @@ import type { LockedState } from "@wms/db";
 import { AppError } from "@wms/shared/errors";
 import type { JobQueue } from "@wms/shared/queue";
 import { runTenantQuery, type AccessTx } from "../identity/access.ts";
-import { pgUuidArray } from "../warehouse/scope.ts";
+import { assertWarehouseVisible, pgUuidArray } from "../warehouse/scope.ts";
 import {
   EMPTY_LOCK_PLAN,
   executeStockCommand,
@@ -215,6 +215,8 @@ export interface PostCommandOptions {
   /** Worker yolu: eşik üstü belge işlenir (≤ 2.000) ve işleme kilidi (`posting_job_id`) beklenen durumdur; çağıran (jobs.ts) kimliği doğrular. */
   readonly worker: boolean;
   readonly queue?: PostDocumentParams["queue"];
+  /** İstek yolu: isteği yapan oturum MFA doğrulanmış mı (eşik üstü belgede sunucu tarafında `posting_mfa_verified_at` olur; worker MFA'yı yalnızca buradan türetir). */
+  readonly requesterMfaVerified?: boolean;
 }
 
 /** Senkron ve worker yolunun ORTAK `plan/apply` çifti (`executeStockCommand`'a verilir). */
@@ -343,7 +345,10 @@ async function deferToWorker(
   // `singletonKey` çakışması: önceki iş hâlâ sonlanıyor (FAILED yazıldı, kuyruk satırı kapanmadı). Yeniden denenebilir geçici durum.
   if (enq.jobId === null) throw new AppError("VERSION_CONFLICT", { retryable: true });
   const rows = await tx.execute<{ id: string }>(
-    sql`UPDATE public.documents SET posting_job_id = ${enq.jobId}::uuid, posting_requested_by = ${ctx.userId}::uuid
+    // Bağlam `posting_job_id` ile AYNI ifadede, sunucu tarafında yazılır (0023): MFA damgası DB saati; kayıt kimliği bu isteğin IN_PROGRESS kaydı.
+    sql`UPDATE public.documents SET posting_job_id = ${enq.jobId}::uuid, posting_requested_by = ${ctx.userId}::uuid,
+               posting_mfa_verified_at = CASE WHEN ${o.requesterMfaVerified === true}::boolean THEN now() ELSE NULL END,
+               posting_idempotency_record_id = ${ctx.idempotencyRecordId}::uuid
          WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${header.id}::uuid AND status = 'APPROVED' AND posting_job_id IS NULL RETURNING id`,
   );
   if (rows[0] === undefined) throw documentState();
@@ -372,7 +377,7 @@ export async function postDocument(params: PostDocumentParams, input: PostDocume
     ...(params.retry === undefined ? {} : { retry: params.retry }),
     ...(params.timeouts === undefined ? {} : { timeouts: params.timeouts }),
     ...(params.logger === undefined ? {} : { logger: params.logger }),
-    ...buildPostCommand({ documentId, expectedVersion, moves, requestId: input.requestId, worker: false, ...(params.queue === undefined ? {} : { queue: params.queue }) }),
+    ...buildPostCommand({ documentId, expectedVersion, moves, requestId: input.requestId, worker: false, requesterMfaVerified: params.principal?.mfaVerified === true, ...(params.queue === undefined ? {} : { queue: params.queue }) }),
   });
   // IN_PROGRESS: eşik üstü belge kuyrukta (bu istek ya da aynı anahtarlı önceki istek); sonuç `getPostingStatus` ile yoklanır.
   // Yeni istek ile aynı anahtarlı tekrar ayırt edilmez (ikisi de IN_PROGRESS): `replayed` bu yanıtta anlamsızdır, false.
@@ -392,11 +397,12 @@ export async function getPostingStatus(params: Omit<StockDocCallParams, "clientK
   if (typeof documentId !== "string" || !UUID_RE.test(documentId)) throw new AppError("VALIDATION_FAILED");
   const id = documentId.toLowerCase();
   return runTenantQuery({ ...params, permission: "stock.view" }, async (tx, m) => {
-    const rows = await tx.execute<{ status: DocumentHeader["status"]; posting_job_id: string | null }>(
-      sql`SELECT status, posting_job_id FROM public.documents WHERE tenant_id = ${m.tenantId}::uuid AND id = ${id}::uuid`,
+    const rows = await tx.execute<{ status: DocumentHeader["status"]; posting_job_id: string | null; warehouse_id: string }>(
+      sql`SELECT status, posting_job_id, warehouse_id FROM public.documents WHERE tenant_id = ${m.tenantId}::uuid AND id = ${id}::uuid`,
     );
     const d = rows[0];
     if (d === undefined) throw new AppError("NOT_FOUND");
+    await assertWarehouseVisible(tx, m, [d.warehouse_id]); // kapsam dışı belge varlık sızdırmaz: NOT_FOUND (T-222 inceleme MAJOR-3)
     if (d.posting_job_id !== null) return { status: "PROCESSING" } as const;
     if (d.status !== "APPROVED") return { status: d.status } as const;
     const failed = await tx.execute<{ error_code: string | null }>(

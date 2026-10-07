@@ -215,7 +215,8 @@ async function assignNumber(tx: AccessTx, tenantId: string, n: StockNumbering): 
   const rows =
     n.status === "POSTED"
       ? await tx.execute<{ id: string }>(
-          sql`UPDATE public.documents SET number = ${number}, status = 'POSTED', posting_job_id = NULL, posting_requested_by = NULL
+          sql`UPDATE public.documents SET number = ${number}, status = 'POSTED', posting_job_id = NULL, posting_requested_by = NULL,
+                   posting_mfa_verified_at = NULL, posting_idempotency_record_id = NULL
                WHERE tenant_id = ${tenantId}::uuid AND id = ${n.documentId}::uuid AND number IS NULL RETURNING id`,
         )
       : await tx.execute<{ id: string }>(

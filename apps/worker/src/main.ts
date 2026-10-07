@@ -138,7 +138,7 @@ logger.info("queue started", {
 // pg-boss bakım eşdeğeri (T-222 ZORUNLU notu): adaptör `supervise: false`; süresi dolan `active` `stock.document.post` işini `retry`'a çeviren
 // tarayıcı `wms_worker` bağlantısında çalışır (çöken worker'ın işi yeniden teslim edilir; AC-16).
 const workerDb = createDbClient({ url: workerDatabaseUrl, poolMax: 1, prepare: false });
-const postingRecovery = startPostingJobRecovery({ workerDb, logger });
+const postingRecovery = startPostingJobRecovery({ workerDb, db, logger });
 
 // Demo yeniden tohumlama zamanlaması: açılışta bir kez + günlük 03:00 UTC; `singletonKey` ile tek iş.
 const demoSchedule = demo.startSchedule(() =>

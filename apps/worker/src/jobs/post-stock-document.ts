@@ -3,7 +3,7 @@
 //
 // Pg-boss bakım eşdeğeri (T-222 ZORUNLU notu): adaptör `supervise: false` çalıştığından süresi dolan `active` işi `retry`'a çeviren
 // zamanlayıcı burada kurulur (`startPostingJobRecovery`); `wms_worker` bağlantısında (pgboss.job UPDATE yetkisi) çalışır.
-import { withUser, type DbClient } from "@wms/db";
+import { withSystemTenant, withUser, type DbClient } from "@wms/db";
 import { type AsyncPostingContext, type ConsumeOnceFn, runAsyncPosting, sweepExpiredPostingJobs } from "@wms/domain/stock/jobs";
 import type { AccessDbClient } from "@wms/domain/identity/access";
 import type { Logger } from "@wms/shared/log";
@@ -26,6 +26,8 @@ export const POSTING_RECOVERY_INTERVAL_MS = 60_000;
 export interface PostingJobRecoveryDeps {
   /** `DATABASE_URL_WORKER` (wms_worker) istemcisi. */
   readonly workerDb: DbClient;
+  /** `DATABASE_URL` (wms_app) istemcisi: başarısız işlerin belgelerini serbest bırakır. */
+  readonly db: DbClient;
   readonly logger: Logger;
   readonly intervalMs?: number;
   /** Test: zamanlayıcı enjeksiyonu. */
@@ -33,9 +35,16 @@ export interface PostingJobRecoveryDeps {
   readonly clearTimer?: (t: unknown) => void;
 }
 
-/** Tek tarama (günlük ve hata işleme domain'dedir). `withUser` yalnızca transaction-local kullanıcı ayarı kurar (tenant bağlamı yok); `wms_worker` pgboss'ta RLS "tümü". */
-export function sweepExpiredPostingJobsOnWorker(deps: Pick<PostingJobRecoveryDeps, "workerDb" | "logger">): Promise<void> {
-  return sweepExpiredPostingJobs((fn) => withUser(deps.workerDb, PLATFORM_NO_USER_ID, (tx) => fn(tx as never)), deps.logger);
+/**
+ * Tek tarama (günlük ve hata işleme domain'dedir). `wms_worker` yalnızca `pgboss.job` görür (`withUser` yalnızca transaction-local kullanıcı ayarı
+ * kurar); belge/idempotency yazımı `wms_app` + `withSystemTenant` ile yapılır (kiracı ACTIVE denetimli).
+ */
+export function sweepExpiredPostingJobsOnWorker(deps: Pick<PostingJobRecoveryDeps, "workerDb" | "db" | "logger">): Promise<void> {
+  return sweepExpiredPostingJobs({
+    runOnWorker: (fn) => withUser(deps.workerDb, PLATFORM_NO_USER_ID, (tx) => fn(tx as never)),
+    runInTenant: (tenantId, fn) => withSystemTenant(deps.db, tenantId, "queue.stock.document.post", (tx) => fn(tx as never)),
+    logger: deps.logger,
+  });
 }
 
 /** Zamanlayıcıyı başlatır; dönen işlev durdurur. Açılışta bir tarama yapılır (çöken önceki sürecin işleri için). */

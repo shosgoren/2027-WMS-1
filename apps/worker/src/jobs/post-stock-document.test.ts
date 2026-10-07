@@ -3,7 +3,7 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { isPermanentFailure } from "@wms/queue-adapter";
-import { PermanentPostingError, classifyPostingError } from "@wms/domain/stock/jobs";
+import { PermanentPostingError, classifyPostingError, finalizeFailedPostingJobs } from "@wms/domain/stock/jobs";
 import { AppError, ERROR_CODES } from "@wms/shared/errors";
 import { createPostStockDocumentHandler, startPostingJobRecovery } from "./post-stock-document.js";
 
@@ -40,19 +40,26 @@ describe("hata sınıflandırması", () => {
 });
 
 describe("handler: aktör ve kalıcı hata işareti", () => {
-  it("zarfta aktör yok → kalıcı hata (adaptör yeniden denemez), DB'ye dokunulmaz", async () => {
-    const handler = createPostStockDocumentHandler(deps);
-    const err = await handler(ctxOf(null)).then(
-      () => undefined,
-      (e: unknown) => e,
-    );
-    expect(err).toBeInstanceOf(PermanentPostingError);
-    expect(isPermanentFailure(err)).toBe(true);
-    expect((err as PermanentPostingError).code).toBe("VALIDATION_FAILED");
+  /** inTenant: 1. çağrı kiracı çözümü, 2. çağrı kalıcı hata yazımı (burada bilerek düşer: yazımın denendiği ve yutulmadığı kanıtlanır). */
+  const ctxWithTenant = (actor: string | null) => {
+    const inTenant = vi.fn().mockResolvedValueOnce(randomUUID()).mockRejectedValue(new Error("failure write reached"));
+    return { ctx: { ...(ctxOf(actor) as object), inTenant } as never, inTenant };
+  };
+  it("zarfta aktör yok → kalıcı hata yazımı denenir (belge serbest bırakılır), yazım hatası yutulmaz", async () => {
+    const { ctx, inTenant } = ctxWithTenant(null);
+    await expect(createPostStockDocumentHandler(deps)(ctx)).rejects.toThrow("failure write reached");
+    expect(inTenant).toHaveBeenCalledTimes(2);
   });
-  it("aktör UUID değil → kalıcı hata", async () => {
-    const handler = createPostStockDocumentHandler(deps);
-    await expect(handler(ctxOf("not-a-uuid"))).rejects.toMatchObject({ permanent: true });
+  it("aktör UUID değil → aynı yol", async () => {
+    const { ctx, inTenant } = ctxWithTenant("not-a-uuid");
+    await expect(createPostStockDocumentHandler(deps)(ctx)).rejects.toThrow("failure write reached");
+    expect(inTenant).toHaveBeenCalledTimes(2);
+  });
+  it("kiracı çözülemezse (askıda) hata geçici olarak yayılır; kalıcı işaretlenmez", async () => {
+    const ctx = { ...(ctxOf(randomUUID()) as object), inTenant: vi.fn().mockRejectedValue(new Error("TENANT_SUSPENDED")) } as never;
+    const err = await createPostStockDocumentHandler(deps)(ctx).then(() => undefined, (e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(isPermanentFailure(err)).toBe(false);
   });
   it("PermanentPostingError adaptörde kalıcı, düz Error geçici sayılır", () => {
     expect(isPermanentFailure(new PermanentPostingError("FORBIDDEN"))).toBe(true);
@@ -67,6 +74,7 @@ describe("bakım zamanlayıcısı (pg-boss supervise eşdeğeri)", () => {
     const clear = vi.fn();
     const rec = startPostingJobRecovery({
       workerDb: {} as never,
+      db: {} as never,
       logger,
       intervalMs: 1234,
       setTimer: (fn, ms) => {
@@ -80,5 +88,41 @@ describe("bakım zamanlayıcısı (pg-boss supervise eşdeğeri)", () => {
     expect(typeof tick).toBe("function");
     rec.stop();
     expect(clear).toHaveBeenCalledWith("h");
+  });
+});
+
+describe("başarısız işlerin belge sonlandırması (MAJOR-2, bakım taraması)", () => {
+  const tenant = randomUUID();
+  const job = { id: randomUUID(), tenant_id: tenant, document_id: randomUUID(), record_id: randomUUID() };
+  const mkDeps = (runInTenant: (t: string) => Promise<unknown>) => {
+    const marked: string[] = [];
+    let calls = 0;
+    const deps = {
+      // 1. çağrı liste sorgusu, sonrakiler işaretleme (sırayla).
+      runOnWorker: async (fn: (tx: { execute: (q: unknown) => Promise<unknown> }) => Promise<unknown>) =>
+        fn({
+          execute: async () => {
+            calls += 1;
+            if (calls === 1) return [job];
+            marked.push(job.id);
+            return [];
+          },
+        }),
+      runInTenant: ((t: string) => runInTenant(t)) as never,
+      logger,
+    };
+    return { deps: deps as never, marked };
+  };
+  it("kiracı askıdayken yazım başarısız olur: iş işaretlenmez, sonraki tura kalır", async () => {
+    const { deps, marked } = mkDeps(async () => {
+      throw new Error("TENANT_SUSPENDED");
+    });
+    expect(await finalizeFailedPostingJobs(deps)).toEqual({ finalized: 0, deferred: 1 });
+    expect(marked).toEqual([]);
+  });
+  it("yazım başarılıysa iş işaretlenir", async () => {
+    const { deps, marked } = mkDeps(async () => true);
+    expect(await finalizeFailedPostingJobs(deps)).toEqual({ finalized: 1, deferred: 0 });
+    expect(marked).toEqual([job.id]);
   });
 });

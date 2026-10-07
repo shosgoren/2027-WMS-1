@@ -440,11 +440,11 @@ describe("AC-16/AC-36: worker çökmesi (gerçek SIGKILL) ve bakım eşdeğeri i
     await sleep(1500);
     expect((await jobsOf(d.id))[0]?.state).toBe("active");
     // Süresi dolmamış iş bakımda dokunulmaz.
-    await sweepExpiredPostingJobsOnWorker({ workerDb, logger: silent });
+    await sweepExpiredPostingJobsOnWorker({ workerDb, db: app, logger: silent });
     expect((await jobsOf(d.id))[0]?.state).toBe("active");
     // Süre aşımı simülasyonu (varsayılan 15 dk): başlangıç geçmişe çekilir → bakım eşdeğeri retry'a çevirir.
     await q("UPDATE pgboss.job SET started_on = now() - interval '2 hours' WHERE id = $1", [(await jobsOf(d.id))[0]?.id]);
-    await sweepExpiredPostingJobsOnWorker({ workerDb, logger: silent });
+    await sweepExpiredPostingJobsOnWorker({ workerDb, db: app, logger: silent });
     expect((await jobsOf(d.id))[0]?.state).toBe("retry");
     // Yeni worker yeniden teslimi işler: tek etki.
     await newWorker();
@@ -455,17 +455,197 @@ describe("AC-16/AC-36: worker çökmesi (gerçek SIGKILL) ve bakım eşdeğeri i
     await waitFor(async () => (await jobsOf(d.id))[0]?.state === "completed", "job completed");
   }, 180_000);
 
-  it("deneme hakkı biten süresi dolmuş iş 'failed' olur ve raporlanır; belge PROCESSING'te kalır (bilinen sınır → T-225 kurtarma)", async () => {
+  it("deneme hakkı biten süresi dolmuş iş 'failed' olur ve bakım turu belgeyi serbest bırakır: belge APPROVED + FAILED(INTERNAL), kilit yok (MAJOR-2)", async () => {
     const x = await mkItem();
     const loc = await mkLoc();
     const d = await mkApproved("STOCK_IN", many(250, () => ln(x, { targetLocationId: loc })));
-    await requestPost(d, pickerP());
+    const key = uuid();
+    await requestPost(d, pickerP(key));
     const jobId = (await jobsOf(d.id))[0]?.id;
     await q("UPDATE pgboss.job SET state = 'active', started_on = now() - interval '2 hours', retry_count = retry_limit WHERE id = $1", [jobId]);
-    await sweepExpiredPostingJobsOnWorker({ workerDb, logger: silent });
+    await sweepExpiredPostingJobsOnWorker({ workerDb, db: app, logger: silent });
     expect((await jobsOf(d.id))[0]?.state).toBe("failed");
-    expect(await statusOf(d.id)).toEqual({ status: "PROCESSING" }); // T-225: posting_job_id kurtarması
+    expect(await statusOf(d.id)).toEqual({ status: "FAILED", errorCode: "INTERNAL" });
+    expect(await docRow(d.id)).toMatchObject({ status: "APPROVED", posting_job_id: null, posting_requested_by: null });
+    expect((await idemOf(key))[0]).toMatchObject({ status: "FAILED", error_code: "INTERNAL" });
     expect(await ledgerOf(d.id)).toHaveLength(0);
+    // İşaretlendi: ikinci tur aynı işi yeniden işlemez (belge yeniden istenip kilitlense bile dokunulmaz).
+    expect(((await q<{ output: { finalized?: boolean } }>("SELECT output FROM pgboss.job WHERE id = $1", [jobId]))[0] as { output: { finalized?: boolean } }).output.finalized).toBe(true);
+    expect(await requestPost({ ...d, version: (await docRow(d.id)).version }, pickerP())).toMatchObject({ status: "PROCESSING" });
+    await sweepExpiredPostingJobsOnWorker({ workerDb, db: app, logger: silent });
+    expect(await statusOf(d.id)).toEqual({ status: "PROCESSING" });
+  }, 60_000);
+});
+
+describe("MAJOR-2: son denetimde geçici hata kalıcı sayılır; askıdaki kiracı bakım turuyla sonlanır", () => {
+  /** İlk `consumeOnce` (işleme transaction'ı) geçici hata verir; sonrakiler (kalıcı hata yazımı) gerçek. */
+  const failFirst = (): ConsumeOnceFn => {
+    let n = 0;
+    return (tx, consumer, id, fn) => {
+      if (n++ === 0) return Promise.reject(new Error("transient boom"));
+      return (consumeOnce as unknown as ConsumeOnceFn)(tx, consumer, id, fn);
+    };
+  };
+
+  it("son denemede geçici hata → FAILED(INTERNAL), belge APPROVED + kilit yok, iş kalıcı başarısız", async () => {
+    const x = await mkItem();
+    const loc = await mkLoc();
+    const d = await mkApproved("STOCK_IN", many(250, () => ln(x, { targetLocationId: loc })));
+    const key = uuid();
+    await requestPost(d, pickerP(key));
+    await q("UPDATE pgboss.job SET retry_count = retry_limit WHERE id = $1", [(await jobsOf(d.id))[0]?.id]);
+    await newWorker(failFirst());
+    await waitFor(async () => (await docRow(d.id)).posting_job_id === null, "failure recorded on final attempt");
+    expect((await idemOf(key))[0]).toMatchObject({ status: "FAILED", error_code: "INTERNAL" });
+    expect(await docRow(d.id)).toMatchObject({ status: "APPROVED" });
+    expect(await statusOf(d.id)).toEqual({ status: "FAILED", errorCode: "INTERNAL" });
+    expect(await ledgerOf(d.id)).toHaveLength(0);
+    await waitFor(async () => (await jobsOf(d.id))[0]?.state === "failed", "job failed");
+  }, 90_000);
+
+  it("son deneme DEĞİLSE geçici hata belgeyi kilitli bırakır (pg-boss yeniden dener); kalıcı yazım yok", async () => {
+    const x = await mkItem();
+    const loc = await mkLoc();
+    const d = await mkApproved("STOCK_IN", many(250, () => ln(x, { targetLocationId: loc })));
+    const key = uuid();
+    await requestPost(d, pickerP(key));
+    await newWorker(failFirst());
+    await waitFor(async () => (await jobsOf(d.id))[0]?.state === "retry", "job back to retry");
+    expect((await docRow(d.id)).posting_job_id).not.toBeNull();
+    expect((await idemOf(key))[0]).toMatchObject({ status: "IN_PROGRESS" });
+  }, 90_000);
+
+  it("kiracı askıdayken son denemede iş 'failed' olur ve belge kilitli kalır; askıdayken bakım turu ertelenir, kiracı açılınca belge FAILED(INTERNAL) olur", async () => {
+    const x = await mkItem();
+    const loc = await mkLoc();
+    const d = await mkApproved("STOCK_IN", many(250, () => ln(x, { targetLocationId: loc })));
+    const key = uuid();
+    await requestPost(d, pickerP(key));
+    const jobId = (await jobsOf(d.id))[0]?.id;
+    await q("UPDATE pgboss.job SET retry_count = retry_limit WHERE id = $1", [jobId]);
+    await q("UPDATE public.tenants SET status = 'SUSPENDED' WHERE id = $1", [A.tenantId]);
+    try {
+      await newWorker();
+      await waitFor(async () => (await jobsOf(d.id))[0]?.state === "failed", "job failed while tenant suspended");
+      await stopWorkers();
+      expect((await docRow(d.id)).posting_job_id).not.toBeNull(); // yazım yapılamadı
+      await sweepExpiredPostingJobsOnWorker({ workerDb, db: app, logger: silent });
+      expect((await docRow(d.id)).posting_job_id).not.toBeNull(); // askıdayken ertelenir
+    } finally {
+      await q("UPDATE public.tenants SET status = 'ACTIVE' WHERE id = $1", [A.tenantId]);
+    }
+    await sweepExpiredPostingJobsOnWorker({ workerDb, db: app, logger: silent });
+    expect(await docRow(d.id)).toMatchObject({ status: "APPROVED", posting_job_id: null });
+    expect((await idemOf(key))[0]).toMatchObject({ status: "FAILED", error_code: "INTERNAL" });
+    expect(await statusOf(d.id)).toEqual({ status: "FAILED", errorCode: "INTERNAL" });
+    expect(await ledgerOf(d.id)).toHaveLength(0);
+  }, 120_000);
+});
+
+describe("MAJOR-1: MFA (TENANT_ADMIN istek sahibi) — worker MFA'yı yalnızca sunucu damgasıyla, sınırlı pencerede ve sıfırlanmadıysa tanır", () => {
+  async function adminRequest(mfa: boolean = true): Promise<{ d: Doc; admin: string; key: string; x: string }> {
+    const admin = await mkUser(adm, reg, "admin222");
+    await mkMembership(adm, A.tenantId, admin, { roles: ["TENANT_ADMIN"] });
+    const x = await mkItem();
+    const loc = await mkLoc();
+    const d = await mkApproved("STOCK_IN", many(250, () => ln(x, { targetLocationId: loc })));
+    const key = uuid();
+    const out = await requestPost(d, asUser(admin, key, { principal: { userId: admin, mfaVerified: mfa } }));
+    expect(out.status).toBe("PROCESSING");
+    return { d, admin, key, x };
+  }
+  const stamp = (id: string) =>
+    q<{ posting_mfa_verified_at: Date | null; posting_idempotency_record_id: string | null }>(
+      "SELECT posting_mfa_verified_at, posting_idempotency_record_id FROM public.documents WHERE id = $1", [id]).then((r) => r[0] as { posting_mfa_verified_at: Date | null; posting_idempotency_record_id: string | null });
+  const failedWith = async (d: Doc, key: string, code: string): Promise<void> => {
+    await newWorker();
+    await waitFor(async () => (await docRow(d.id)).posting_job_id === null, "failure recorded");
+    expect((await idemOf(key))[0]).toMatchObject({ status: "FAILED", error_code: code });
+    expect(await docRow(d.id)).toMatchObject({ status: "APPROVED" });
+    expect(await ledgerOf(d.id)).toHaveLength(0);
+    await waitFor(async () => (await jobsOf(d.id))[0]?.state === "failed", "job failed (kalıcı)");
+  };
+
+  it("MFA'lı TENANT_ADMIN isteği başarıyla işlenir; bağlam sütunları sunucu tarafında yazılır ve POSTED'da temizlenir", async () => {
+    const { d, admin, key, x } = await adminRequest(true);
+    const s = await stamp(d.id);
+    expect(s.posting_mfa_verified_at).not.toBeNull();
+    expect(s.posting_idempotency_record_id).toBe((await idemOf(key))[0]?.id);
+    await newWorker();
+    await waitFor(async () => (await docRow(d.id)).status === "POSTED", "document POSTED");
+    expect(await physical(x)).toBe("250.000000");
+    expect(new Set((await ledgerOf(d.id)).map((l) => l.actor_user_id))).toEqual(new Set([admin]));
+    expect(await stamp(d.id)).toEqual({ posting_mfa_verified_at: null, posting_idempotency_record_id: null });
+  }, 120_000);
+
+  it("MFA damgası yoksa (NULL) kalıcı FORBIDDEN/MFA_REQUIRED; MFA gerektirmeyen rol (PICKER) MFA'sız oturumla yine işlenir", async () => {
+    const { d, key } = await adminRequest(true);
+    await q("UPDATE public.documents SET posting_mfa_verified_at = NULL WHERE id = $1", [d.id]);
+    await failedWith(d, key, "FORBIDDEN/MFA_REQUIRED");
+    await stopWorkers();
+    // PICKER, mfaVerified=false oturum: damga NULL, worker yine işler (MFA yalnızca TENANT_ADMIN için aranır).
+    const x = await mkItem();
+    const loc = await mkLoc();
+    const p = await mkApproved("STOCK_IN", many(250, () => ln(x, { targetLocationId: loc })));
+    await requestPost(p, asUser(A.memberUserId, uuid(), { principal: { userId: A.memberUserId, mfaVerified: false } }));
+    expect((await stamp(p.id)).posting_mfa_verified_at).toBeNull();
+    await newWorker();
+    await waitFor(async () => (await docRow(p.id)).status === "POSTED", "picker document POSTED");
+  }, 120_000);
+
+  it("istekten sonra kullanıcının MFA'sı sıfırlanırsa (two_factor_disabled) kalıcı FORBIDDEN/MFA_REQUIRED", async () => {
+    const { d, admin, key } = await adminRequest(true);
+    // Kimlik olayları yalnızca wms_auth yazar (0005/0007): gerçek yazıcı rolüyle.
+    const authUrl = process.env.AUTH_DATABASE_URL;
+    expect(authUrl).toBeTruthy();
+    const authC = new pg.Client({ connectionString: authUrl });
+    authC.on("error", () => undefined);
+    await authC.connect();
+    try {
+      await authC.query("INSERT INTO public.security_events (user_id, event_type) VALUES ($1, 'two_factor_disabled')", [admin]);
+    } finally {
+      await authC.end();
+    }
+    await failedWith(d, key, "FORBIDDEN/MFA_REQUIRED");
+  }, 120_000);
+
+  it("pencere dışı damga (süresi dolmuş) kalıcı FORBIDDEN/MFA_REQUIRED", async () => {
+    const { d, key } = await adminRequest(true);
+    await q("UPDATE public.documents SET posting_mfa_verified_at = now() - interval '2 hours' WHERE id = $1", [d.id]);
+    await failedWith(d, key, "FORBIDDEN/MFA_REQUIRED");
+  }, 120_000);
+
+  it("kayıt kimliği belgedeki posting_idempotency_record_id ile uyuşmazsa iş reddedilir (IDEMPOTENCY_MISMATCH); stok etkisi yok", async () => {
+    // PICKER: MFA aranmaz, böylece ret doğrudan kayıt kimliği denetiminden gelir.
+    const x = await mkItem();
+    const loc = await mkLoc();
+    const d = await mkApproved("STOCK_IN", many(250, () => ln(x, { targetLocationId: loc })));
+    const key = uuid();
+    await requestPost(d, pickerP(key));
+    await q("UPDATE public.documents SET posting_idempotency_record_id = $2 WHERE id = $1", [d.id, uuid()]);
+    await failedWith(d, key, "IDEMPOTENCY_MISMATCH");
+  }, 120_000);
+});
+
+describe("MAJOR-3: getPostingStatus depo kapsamı (IDOR)", () => {
+  it("kapsam dışı belge NOT_FOUND döner (varlık sızdırılmaz); kapsamdaki ve kısıtsız kullanıcı durumu görür", async () => {
+    const wh2 = uuid();
+    await q("INSERT INTO public.warehouses (tenant_id, id, code, name) VALUES ($1,$2,'D2','T222 Depo 2')", [A.tenantId, wh2]);
+    const x = await mkItem();
+    const loc = await mkLoc();
+    const d = await mkApproved("STOCK_IN", many(3, () => ln(x, { targetLocationId: loc })));
+    const asPicker = () => getPostingStatus({ db: app, principal: { userId: A.memberUserId, mfaVerified: true }, tenantSlug: A.slug }, d.id);
+    try {
+      await q("INSERT INTO public.membership_warehouse_scopes (tenant_id, membership_id, warehouse_id) VALUES ($1,$2,$3)", [A.tenantId, A.memberMembershipId, wh2]);
+      process.env.WAREHOUSE_SCOPE_ENABLED = "true";
+      expect((await failure(asPicker())).code).toBe("NOT_FOUND");
+      expect(await statusOf(d.id)).toEqual({ status: "APPROVED" }); // TENANT_ADMIN kısıtsız
+      await q("INSERT INTO public.membership_warehouse_scopes (tenant_id, membership_id, warehouse_id) VALUES ($1,$2,$3)", [A.tenantId, A.memberMembershipId, A.warehouseId]);
+      expect(await asPicker()).toEqual({ status: "APPROVED" }); // kapsama alınınca görünür
+    } finally {
+      delete process.env.WAREHOUSE_SCOPE_ENABLED;
+      await q("DELETE FROM public.membership_warehouse_scopes WHERE tenant_id=$1 AND membership_id=$2", [A.tenantId, A.memberMembershipId]);
+    }
   }, 60_000);
 });
 
