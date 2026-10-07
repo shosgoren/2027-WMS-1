@@ -118,6 +118,7 @@ export const documentLines = pgTable(
     // T-301: kaynak saha belgesi satırı (polimorfik, FK yok; yalnızca INSERT).
     sourceLineId: uuid("source_line_id"),
     // T-301: STOCK_MOVE hedef durumu (NULL = kaynak durumla aynı); stock_status ile aynı küme.
+    // T-258 (0020 tetikleyicisi, Drizzle ifade etmez): NULL değilse belge türü STOCK_MOVE ve (stock_status, hedef) çifti beyaz listede olmalı (A-154).
     targetStockStatus: text("target_stock_status").$type<LineStockStatus>(),
     reversedQuantity: numeric("reversed_quantity").notNull().default("0"),
     reversalStatus: text("reversal_status").$type<ReversalStatus>().notNull().default("NONE"),

@@ -24,6 +24,7 @@ import { pgUuidArray } from "../warehouse/scope.ts";
 import { EMPTY_LOCK_PLAN, executeStockCommand, type StockCommandOutcome, type StockCommandParams } from "./command.ts";
 import type { StockCommandResult, StockResultLine } from "./idempotency.ts";
 import { yearOfBusinessDate } from "./numbering.ts";
+import { isStatusTransitionAllowed, type PostingStatus } from "./plan.ts";
 import { readCancellationLockSet, releaseForCancellation } from "./reservations.ts";
 
 /** Çağıran bağlamı: izin komuta bağlıdır; `clientKey` her komutta zorunludur (A-73). */
@@ -148,9 +149,16 @@ function recordset(lines: readonly NormalizedLine[]) {
      source_location_id uuid, target_location_id uuid, lot_id uuid, serial_id uuid, stock_status text, target_stock_status text, inventory_owner_id uuid, handling_unit_id uuid)`;
 }
 
-/** T-248: hedef durum yalnız `STOCK_MOVE` satırında kabul edilir (16 kural 3: durum değişimi bir −/+ çiftidir; IN/OUT tek uçludur). */
-function assertTargetStatusAllowed(kind: string, lines: readonly NormalizedLine[]): void {
-  if (kind !== "STOCK_MOVE" && lines.some((l) => l.target_stock_status !== null)) throw new AppError("VALIDATION_FAILED");
+/**
+ * T-248/T-258: hedef durum yalnız `STOCK_MOVE` satırında ve izinli (kaynak, hedef) çiftinde kabul edilir (16 kural 3: durum değişimi bir −/+
+ * çiftidir; IN/OUT tek uçludur; A-154 beyaz liste). Taslak/onay aşamasında erken ret; posting denetimi savunma derinliği olarak kalır.
+ */
+function assertTargetStatusAllowed(kind: string, lines: readonly { readonly stock_status: string; readonly target_stock_status: string | null }[]): void {
+  for (const l of lines) {
+    if (l.target_stock_status === null) continue;
+    if (kind !== "STOCK_MOVE") throw new AppError("VALIDATION_FAILED");
+    if (!isStatusTransitionAllowed(l.stock_status as PostingStatus, l.target_stock_status as PostingStatus)) throw new AppError("VALIDATION_FAILED");
+  }
 }
 
 /** Açık sütun listeli, tek ifadelik satır yazımı (sunucu türetimli sütun yok). Başlık ÖNCEDEN kilitli olmalıdır. */
@@ -545,6 +553,12 @@ export async function approveDocument(
           sql`SELECT count(*)::text AS n FROM public.document_lines WHERE tenant_id = ${ctx.tenantId}::uuid AND document_id = ${documentId}::uuid`,
         );
         if (Number(count[0]?.n ?? "0") < 1) throw new AppError("VALIDATION_FAILED");
+        // T-258: kayıtlı satırların hedef durumu onayda yeniden doğrulanır (taslak APPROVED'a izinsiz geçişle ulaşmaz).
+        const targets = await tx.execute<{ stock_status: string; target_stock_status: string }>(
+          sql`SELECT DISTINCT stock_status, target_stock_status FROM public.document_lines
+               WHERE tenant_id = ${ctx.tenantId}::uuid AND document_id = ${documentId}::uuid AND target_stock_status IS NOT NULL`,
+        );
+        assertTargetStatusAllowed(header.kind, targets);
         await tx.execute(
           sql`UPDATE public.documents SET status = 'APPROVED' WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${documentId}::uuid`,
         );

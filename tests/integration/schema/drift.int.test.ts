@@ -491,3 +491,34 @@ describe(`invitation_preview_for_token (0008, T-117d; target=${env.target})`, ()
     expect(grantees.map((g) => g.grantee).filter((g) => g !== "wms_identity_probe")).toEqual(["wms_app"]);
   });
 });
+
+describe(`document_lines hedef durum bekçisi (0020, T-258; target=${env.target})`, () => {
+  async function query<T extends pg.QueryResultRow>(sql: string, params: unknown[] = []): Promise<T[]> {
+    const client = new pg.Client({ connectionString: env.databaseUrlDirect });
+    try {
+      await client.connect();
+      return (await client.query<T>(sql, params)).rows;
+    } catch (e) {
+      throw new Error(redactErrorChain(e, secretUrls(env)));
+    } finally {
+      await client.end();
+    }
+  }
+
+  it("tetikleyici BEFORE INSERT OR UPDATE ROW, ENABLE ORIGIN, SECURITY INVOKER, sabit search_path; PUBLIC EXECUTE yok; gövde izinli çift listesini içerir", async () => {
+    const trg = await query<{ tgenabled: string; tgtype: number; tgattrs: number; prosecdef: boolean; proconfig: string[] | null; src: string; acl: string[] | null }>(
+      `SELECT t.tgenabled, t.tgtype, cardinality(t.tgattr::int2[]) AS tgattrs, p.prosecdef, p.proconfig, p.prosrc AS src, p.proacl::text[] AS acl
+         FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
+        WHERE t.tgrelid = 'public.document_lines'::regclass AND t.tgname = 'stock_move_target_status_guard'`,
+    );
+    expect(trg).toHaveLength(1);
+    expect(trg[0]?.tgenabled).toBe("O");
+    expect(trg[0]?.tgtype).toBe(1 | 2 | 4 | 16); // ROW=1, BEFORE=2, INSERT=4, UPDATE=16 (DELETE yok)
+    expect(trg[0]?.tgattrs).toBe(3); // UPDATE OF target_stock_status, stock_status, document_id
+    expect(trg[0]?.prosecdef).toBe(false);
+    expect(trg[0]?.proconfig).toEqual(["search_path=pg_catalog, pg_temp"]);
+    expect(trg[0]?.src).toContain("'QUARANTINE>AVAILABLE', 'AVAILABLE>QUARANTINE'");
+    expect(trg[0]?.src).toContain("'STOCK_MOVE'");
+    expect((trg[0]?.acl ?? []).some((a) => a.startsWith("="))).toBe(false); // PUBLIC girdisi yok
+  });
+});

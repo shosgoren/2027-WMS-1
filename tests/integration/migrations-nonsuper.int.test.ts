@@ -1400,5 +1400,81 @@ describe("0013–0014 — süper kullanıcı olmayan migrator", () => {
         expect(await digest16(u)).toEqual(before);
       });
     });
+
+    // ---- 0020 (T-258): hedef durum bekçisi (tetikleyici); süper kullanıcı olmayan migrator ----
+    describe("0020 target_status_guard", () => {
+      let thru20Dir: string | undefined;
+      let thru19Dir: string | undefined;
+      const thru20 = (): string => (thru20Dir ??= copyMigrations("0020"));
+      const thru19 = (): string => (thru19Dir ??= copyMigrations("0019"));
+      const ALL19 = [...ALL16, "0017", "0018", "0019"];
+      const ALL20 = [...ALL19, "0020"];
+      const hasTrigger = async (u: string): Promise<boolean> =>
+        withClient(u, async (c) => {
+          const r = await c.query("SELECT 1 FROM pg_trigger WHERE tgrelid = 'public.document_lines'::regclass AND tgname = 'stock_move_target_status_guard'");
+          return r.rows.length === 1;
+        });
+      /** STOCK_IN belgesi + hedef durumlu satır (migrator = tablo sahibi; yalnızca tenant bağlamı transaction-local). */
+      async function seedStockIn(u: string, target: string | null): Promise<string> {
+        const DOC = randomUUID();
+        return freshTenant(u, async (c, t) => {
+          await seedBase(c, t);
+          await c.query(
+            `INSERT INTO public.documents (id, tenant_id, kind, type_version_id, warehouse_id, business_date, created_by)
+             SELECT $3, $1, 'STOCK_IN', v.id, w.id, '2026-02-01', $2
+               FROM public.document_type_versions v, public.warehouses w WHERE v.tenant_id IS NULL AND v.key = 'STOCK_IN' AND w.code = 'NS-W'`,
+            [t, randomUUID(), DOC],
+          );
+          await c.query(
+            `INSERT INTO public.document_lines (tenant_id, document_id, line_no, item_id, unit_id, quantity, conversion_factor, base_quantity, target_location_id, stock_status, target_stock_status)
+             SELECT $1, $2, 1, i.id, i.base_unit_id, 1, 1, 1, l.id, 'QUARANTINE', $3
+               FROM public.items i, public.locations l WHERE i.code = 'NS-I' AND l.code = 'NS-L'`,
+            [t, DOC, target],
+          );
+        });
+      }
+
+      it("ileri → 0020 geri (to 0019) → ileri: parmak izi birebir; tetikleyici down'da yok; ileri durumda STOCK_IN satırına hedef durum 23514, down'da kabul", async () => {
+        await setProbeMemberships(STANDARD_GRANT);
+        const u = await freshDatabase();
+        expect((await migrateUp({ url: u, dir: thru20() })).applied).toEqual(ALL20);
+        const before = await digest16(u);
+        expect(await hasTrigger(u)).toBe(true);
+        await expect(seedStockIn(u, "AVAILABLE")).rejects.toMatchObject({ code: "23514", message: expect.stringContaining("TARGET_STATUS_KIND") });
+        await seedStockIn(u, null); // NULL hedef her zaman geçer
+
+        expect((await migrateDown({ url: u, dir: thru20(), to: "0019", wmsEnv: "ci" })).reverted).toEqual(["0020"]);
+        expect(await digest16(u)).not.toEqual(before);
+        expect(await hasTrigger(u)).toBe(false);
+        await withClient(u, async (c) => {
+          const fn = await c.query("SELECT 1 FROM pg_proc WHERE proname = 'stock_move_target_status_guard'");
+          expect(fn.rows).toEqual([]);
+        });
+        await seedStockIn(u, "AVAILABLE"); // bekçi yok → kabul (down kuralı gerçekten kaldırır)
+
+        const u2 = await freshDatabase();
+        expect((await migrateUp({ url: u2, dir: thru20() })).applied).toEqual(ALL20);
+        expect((await migrateDown({ url: u2, dir: thru20(), to: "0019", wmsEnv: "ci" })).reverted).toEqual(["0020"]);
+        expect((await migrateUp({ url: u2, dir: thru20() })).applied).toEqual(["0020"]);
+        expect(await digest16(u2)).toEqual(before);
+      });
+
+      it("kuralı ihlal eden mevcut satır varken 0020 yüksek sesle başarısız olur ve deftere yazılmaz; düzeltilince uygulanır", async () => {
+        await setProbeMemberships(STANDARD_GRANT);
+        const u = await freshDatabase();
+        expect((await migrateUp({ url: u, dir: thru19() })).applied).toEqual(ALL19);
+        const tenantId = await seedStockIn(u, "AVAILABLE");
+        await expect(migrateUp({ url: u, dir: thru20() })).rejects.toThrow(/0020_target_status_guard:.*ihlal eden/);
+        await withClient(u, async (c) => {
+          const ledger = await c.query<{ version: string }>("SELECT version FROM wms_meta.schema_migrations ORDER BY version");
+          expect(ledger.rows.map((r) => r.version)).toEqual(ALL19);
+          await c.query("BEGIN");
+          await c.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+          await c.query("UPDATE public.document_lines SET target_stock_status = NULL");
+          await c.query("COMMIT");
+        });
+        expect((await migrateUp({ url: u, dir: thru20() })).applied).toEqual(["0020"]);
+      });
+    });
   });
 });
