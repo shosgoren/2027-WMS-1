@@ -453,52 +453,76 @@
     "tasks": {
       "members": {
         "title": "Ekibimi yönet",
-        "description": "Kimin hangi işi yapabileceğini belirle"
+        "description": "Kimin hangi işi yapabileceğini belirle",
+        "short": "Ekip ve yetkiler"
       },
       "settings": {
         "title": "Ayarlar",
-        "description": "Ad, dil ve saat dilimi"
+        "description": "Ad, dil ve saat dilimi",
+        "short": "Ad ve dil"
       },
       "audit": {
         "title": "Kim ne yaptı?",
-        "description": "Denetim kaydı"
+        "description": "Kim ne yaptığını gör",
+        "short": "Son işlemler"
       },
       "items": {
         "title": "Ürünlerim",
-        "description": "Ürün kartı, birim ve barkod"
+        "description": "Ürün kartı, birim ve barkod",
+        "short": "Ürün ve barkod"
       },
       "receive": {
         "title": "Depoya mal geldi",
-        "description": "Gelen ürünü say, kaydet"
+        "description": "Gelen ürünü say, kaydet",
+        "short": "Gelen ürünü say",
+        "tile": "Mal kabul"
       },
       "issue": {
         "title": "Depodan mal çıkacak",
-        "description": "Çıkan malı kaydet"
+        "description": "Çıkan malı kaydet",
+        "short": "Çıkan ürünü yaz"
       },
       "transfer": {
         "title": "Malı başka depoya taşıyacağım",
-        "description": "Depolar arası taşıma"
+        "description": "Depolar arası taşıma",
+        "short": "Depolar arası"
       },
       "count": {
         "title": "Rafı sayacağım",
-        "description": "Raftaki ürünleri tek tek say"
+        "description": "Raftaki ürünleri tek tek say",
+        "short": "Raftakini say"
       },
       "lookup": {
         "title": "Bir ürün nerede, kaç tane var?",
-        "description": "Stok ve raf bilgisini gör"
+        "description": "Stok ve raf bilgisini gör",
+        "short": "Stok ve raf bak"
       },
       "undo": {
         "title": "Yanlış bir şey yaptım",
-        "description": "Hatalı kaydı birlikte düzeltelim"
+        "description": "Hatalı kaydı birlikte düzeltelim",
+        "short": "Hatayı düzelt"
       },
       "warehouses": {
         "title": "Depo ve raflar",
-        "description": "Depoları ve raf düzenini yönet"
+        "description": "Depoları ve raf düzenini yönet",
+        "short": "Raf düzeni"
       }
     },
     "today": {
       "title": "Bugün yaptıkların",
       "empty": "Bugün henüz bir işlem yapmadın. Yaptıkların burada görünecek."
+    },
+    "now": {
+      "title": "Şimdi yapılacaklar",
+      "empty": "Bekleyen iş yok",
+      "receive": "{count} teslim kabul bekliyor",
+      "putaway": "{count} ürün yerleştirme bekliyor",
+      "receiveShort": "Teslim kabul",
+      "putawayShort": "Yerleştirme",
+      "next": "Sıradaki: {title} · {detail}",
+      "lines": "{n} kalem",
+      "qty": "{n} adet",
+      "taskFallback": "Yerleştirme görevi"
     }
   },
   "audit": {
@@ -1375,7 +1399,7 @@
       "verify": "Okuttuğun ürün:",
       "received": "Gelen ({unit})",
       "damagedLabel": "Hasarlı adet",
-      "hasDamaged": "Hasarlı var",
+      "hasDamaged": "Hasarlı ekle",
       "rackLabel": "Kabul rafı",
       "rackAuto": "Kabul rafı: {name}",
       "confirm": "Kabul et",
@@ -1385,7 +1409,7 @@
       "savedRemaining": "Kalan: {n}",
       "receiptDone": "Teslim tamam",
       "openStays": "Eksik kalan ürünler açık kalır.",
-      "nextItem": "Sıradaki ürün",
+      "nextItem": "Sıradaki ürüne geç",
       "allDone": "Bu teslimdeki her ürün alındı.",
       "noLocationTitle": "Kabul rafı yok",
       "noLocation": "Bu depoda kabul rafı tanımlı değil.",
@@ -1427,12 +1451,16 @@
       "warehouseInstruction": "Çalışacağın depoyu seç.",
       "sourcePrompt": "Malı aldığın rafın etiketini okut.",
       "itemPrompt": "Elindeki ürünün barkodunu okut.",
-      "targetPrompt": "Koyacağın rafın etiketini okut."
+      "targetPrompt": "Koyacağın rafın etiketini okut.",
+      "lockedTitle": "Yerleştirme sana kapalı",
+      "lockedReason": "Yerleştirme için yetkin yok. Yöneticine haber ver ya da yardım çağır."
     },
     "camera": {
       "title": "Kamera",
       "hint": "Barkodu çerçeveye getir.",
-      "failed": "Kamera açılamadı. Okuyucunun tetiğini kullan ya da barkodu elle gir."
+      "failed": "Kamera açılamadı. Okuyucunun tetiğini kullan ya da barkodu elle gir.",
+      "dropped": "Bir kod okundu ama okuma şu an kapalıydı. Kodu yeniden okut.",
+      "ok": "Tamam"
     }
   }
 }

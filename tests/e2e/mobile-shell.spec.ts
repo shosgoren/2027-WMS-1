@@ -2,7 +2,7 @@
 // yatay taşma yok, üst çubuk <= 56 px, dokunma hedefleri >= 48 px, Akış/Kokpit ve Çıkış menüden erişilir. Masaüstünde (1280x800)
 // eski kök üst bar korunur, telefon üst çubuğu ve alt sekme çubuğu görünmez. Piksel karşılaştırma yok: ölçülen yerleşim değerleri.
 // Tek demo girişi (demo girişi hız sınırlıdır). Ekran görüntüleri `.artifacts/t-254/` altına yazılır (git'e girmez).
-import { mkdirSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
 import type { Locator, Page } from "@playwright/test";
@@ -228,7 +228,7 @@ async function homeLayout(page: Page, itemSelector: string): Promise<HomeLayout>
     const parts = [box(document.querySelector('main header')), ...tiles];
     const top = document.querySelector('.top-rows');
     if (top && visible(top)) parts.push(box(top));
-    for (const sel of ['.locked-note', '.soon-note', '.my-tasks-row']) { const n = document.querySelector(sel); if (n && visible(n)) parts.push(box(n)); }
+    for (const sel of ['.locked-note', '.soon-note', '.my-tasks-row', '.now-card[data-state="rows"]']) { const n = document.querySelector(sel); if (n && visible(n)) parts.push(box(n)); }
     const topY = bar.b, bottom = nav.y;
     const spans = parts.map((p) => [Math.max(p.y, topY), Math.min(p.b, bottom)]).sort((a, b) => a[0] - b[0]);
     let covered = 0, cur = null;
@@ -244,7 +244,7 @@ async function homeLayout(page: Page, itemSelector: string): Promise<HomeLayout>
  * üstü); `panel` verilirse (alt sayfa açık) yalnız o kutu (kararmış zemin sayılmaz). İçerik öğesi: etkileşimli öğe (kutusu), metin düğümü
  * (metnin kendi kutusu), svg simgesi. Kenarlıklı/boyalı kutular tek başına içerik sayılmaz.
  */
-async function expectBand(page: Page, where: string, panel: string | null): Promise<number> {
+async function expectBand(page: Page, where: string, panel: string | null, assertBand = true): Promise<number> {
   const max = await page.evaluate<number>(`(() => {
     const r = (el) => el.getBoundingClientRect();
     const bar = r(document.querySelector('[data-testid="app-bar"]')), nav = r(document.querySelector('[data-testid="bottom-nav"]'));
@@ -267,7 +267,8 @@ async function expectBand(page: Page, where: string, panel: string | null): Prom
     best = Math.max(best, area.bottom - cursor);
     return best;
   })()`);
-  expect(max, `${where}: en büyük boş dikey bant (B-02)`).toBeLessThanOrEqual(120);
+  // T-280 (DESIGN_REVIEW §7.4.1): "bekleyen iş yok" durumunda 2 sütun ana ekranda boşluk dürüstçe ÖLÇÜLÜR ve kaydedilir, assert edilmez (assertBand=false).
+  if (assertBand) expect(max, `${where}: en büyük boş dikey bant (B-02)`).toBeLessThanOrEqual(120);
   return max;
 }
 
@@ -339,6 +340,7 @@ test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş al
   mkdirSync(OUT_T270, { recursive: true });
   const tag = test.info().project.name;
   const clockSizes: number[] = [];
+  const zeroState: Array<Record<string, unknown>> = [];
   for (const role of T270_ROLES) {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto("/");
@@ -381,26 +383,39 @@ test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş al
       expect(Math.max(...ws) - Math.min(...ws), `${where}: genişlik farkı`).toBeLessThanOrEqual(2);
       expect(Math.max(...hs) - Math.min(...hs), `${where}: yükseklik farkı`).toBeLessThanOrEqual(2);
       expect(Math.min(...hs), `${where}: en küçük döşeme yüksekliği`).toBeGreaterThanOrEqual(88);
-      // Tek sütun ≤ 140 px. 2 sütunda (DESIGN_REVIEW §7.4.1): ≤ 140 px; 140 px'i yalnızca döşeme GERÇEK içerik (görünür açıklama) taşıyorsa aşabilir ve ≤ kare;
-      // D-04b: döşeme içinde ikon/başlık/açıklama blokları arasındaki toplam dikey boşluk ≤ 24 px (iç yükseklik = yükseklik − kenarlık 2×2 − dolgu 2×12).
+      // D-04 SIKI (DESIGN_REVIEW §7.4.1, T-280): her iki kipte döşeme ≤ 140 px, İSTİSNA YOK. 2 sütunda ayrıca: ikon boyutu tüm döşemelerde eşit ve sabit (3 rem),
+      // açıklama TEK satır ve KESİLMEMİŞ (scrollWidth ≤ clientWidth), D-04b: döşeme içi dikey boşluk ≤ 24 px (iç yükseklik = yükseklik − kenarlık 2×2 − dolgu 2×12).
+      expect(Math.max(...hs), `${where}: en büyük döşeme yüksekliği (≤ 140, istisna yok)`).toBeLessThanOrEqual(140);
       if (twoCol) {
-        expect(Math.max(...hs), `${where}: 2 sütun döşeme ≤ kare (yükseklik ≤ genişlik ${Math.min(...ws)})`).toBeLessThanOrEqual(Math.min(...ws) + 0.5);
-        const inside = await page.evaluate<Array<{ h: number; blank: number; hasDesc: boolean; label: string }>>(`[...document.querySelectorAll('.task-grid > .task-item > [data-state]')].filter((t) => t.getBoundingClientRect().height > 0).map((t) => {
-          const h = t.getBoundingClientRect().height;
-          const blocks = [...t.querySelectorAll('.tile-badge, .tile-title, .tile-desc')].map((e) => e.getBoundingClientRect().height);
-          const desc = t.querySelector('.tile-desc');
-          return { h, blank: h - 4 - 24 - blocks.reduce((a, b) => a + b, 0), hasDesc: !!desc && desc.getBoundingClientRect().height > 0 && (desc.textContent || '').trim() !== '', label: (t.querySelector('.tile-title')?.textContent || '') };
+        const inside = await page.evaluate<Array<{ h: number; blank: number; badge: number; descLines: number; descCut: boolean; titleLines: number; label: string }>>(`[...document.querySelectorAll('.task-grid > .task-item > [data-state]')].filter((t) => t.getBoundingClientRect().height > 0).map((t) => {
+          const r = (e) => e.getBoundingClientRect();
+          const h = r(t).height;
+          const blocks = [...t.querySelectorAll('.tile-badge, .tile-title, .tile-desc')].map((e) => r(e).height);
+          const desc = t.querySelector('.tile-desc'), title = t.querySelector('.tile-title'), badge = t.querySelector('.tile-badge');
+          const lines = (e) => Math.round(r(e).height / parseFloat(getComputedStyle(e).lineHeight));
+          return { h, blank: h - 4 - 24 - blocks.reduce((a, b) => a + b, 0), badge: Math.round(r(badge).width * 10) / 10, descLines: desc ? lines(desc) : 0, descCut: desc ? desc.scrollWidth > desc.clientWidth + 0.5 : true, titleLines: lines(title), label: title.textContent || '' };
         })`);
+        expect(new Set(inside.map((x) => x.badge)).size, `${where}: ikon boyutu tüm döşemelerde eşit`).toBe(1);
+        expect(inside[0]?.badge, `${where}: ikon boyutu sabit (48 px)`).toBe(48);
         for (const tile of inside) {
-          if (tile.h > 140.5) expect(tile.hasDesc, `${where}: ${tile.label} 140 px'i aşıyor ama açıklaması yok`).toBe(true);
+          expect(tile.descLines, `${where}: ${tile.label} açıklaması tek satır`).toBe(1);
+          expect(tile.descCut, `${where}: ${tile.label} açıklaması kesilmemiş`).toBe(false);
+          expect(tile.titleLines, `${where}: ${tile.label} başlığı ≤ 2 satır (D-09)`).toBeLessThanOrEqual(2);
           expect(tile.blank, `${where}: ${tile.label} döşeme içi dikey boşluk (D-04b, ${Math.round(tile.h)} px döşeme)`).toBeLessThanOrEqual(24);
+          expect(tile.blank, `${where}: ${tile.label} içerik döşemeye sığıyor (taşma yok)`).toBeGreaterThanOrEqual(-1);
         }
-      } else expect(Math.max(...hs), `${where}: en büyük döşeme yüksekliği`).toBeLessThanOrEqual(140);
+      }
 
       // Başparmak bölgesi: ızgara alt sekmeye yaslı (<= 16 px), boş dikey alan <= %15, ilk iş en alt satırda.
+      // T-280: 2 sütunda "bekleyen iş yok" durumunda (Şimdi kartı gerçek veri satırı içermez) emptyRatio ve B-02 ÖLÇÜLÜR + kaydedilir, assert edilmez.
       const gridBottom = Math.max(...L.tiles.map((t) => t.y + t.h));
       expect(L.navTop - gridBottom, `${where}: ızgara alt kenarı ile alt sekme arası`).toBeLessThanOrEqual(16);
-      expect(L.emptyRatio, `${where}: boş dikey alan oranı`).toBeLessThanOrEqual(0.15);
+      const nowState = twoCol ? await page.getByTestId("now-card").getAttribute("data-state") : null;
+      const honestEmpty = twoCol && nowState !== "rows";
+      if (twoCol) expect(nowState, `${where}: Şimdi kartı çizilir (stock.post)`).not.toBeNull();
+      if (nowState === "empty") await expect(page.getByTestId("now-empty"), `${where}: bekleyen iş yok satırı`).toHaveText("Bekleyen iş yok");
+      if (honestEmpty) zeroState.push({ where, emptyRatio: Math.round(L.emptyRatio * 1000) / 1000, nowState });
+      else expect(L.emptyRatio, `${where}: boş dikey alan oranı`).toBeLessThanOrEqual(0.15);
       expect(L.tiles[0]?.y, `${where}: ilk (en öncelikli) döşeme en alt satırda`).toBe(Math.max(...L.tiles.map((t) => t.y)));
 
       // Sıra: saha işleri (depo, ürün) yönetim işlerinden önce; ilk döşeme saha işi.
@@ -449,7 +464,8 @@ test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş al
       }
       await expect(page.getByRole("dialog")).toBeHidden();
       // B-02 (kapalı ana ekran): en büyük boş dikey bant ≤ 120 px; B-04: şevron sağda, ≥ 48 px, kapalıyken dönmemiş.
-      await expectBand(page, `${where}: kapalı ana ekran`, null);
+      const band = await expectBand(page, `${where}: kapalı ana ekran`, null, !honestEmpty);
+      if (honestEmpty) zeroState.push({ where, band });
       const sc = await chevronInfo(page, ".soon-toggle");
       expect(sc.h, `${where}: Yakında düğmesi yüksekliği (B-04)`).toBeGreaterThanOrEqual(48);
       expect(sc.rightGap, `${where}: şevron sağda (B-04)`).toBeLessThanOrEqual(16);
@@ -515,6 +531,8 @@ test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş al
     await page.getByRole("button", { name: "Çıkış yap" }).click();
     await expect(page).toHaveURL(/\/login$/);
   }
+  // T-280: "bekleyen iş yok" durumunda ölçülen (assert edilmeyen) boşluk değerleri raporlanır.
+  writeFileSync(path.join(OUT_T270, `metrics-home-zero-state-${tag}.json`), JSON.stringify(zeroState, null, 2));
   // H-03: saat ikonu 360/390/430'da tutarlı (rol başına 3 ölçüm; hepsi birbirine ≤ 1 px).
   expect(clockSizes.length, "saat ikonu ölçümleri").toBe(T270_ROLES.length * T270_SIZES.length);
   expect(Math.max(...clockSizes) - Math.min(...clockSizes), `saat ikonu boyutu tutarlı (${clockSizes.join("/")})`).toBeLessThanOrEqual(1);

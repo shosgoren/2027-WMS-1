@@ -9,8 +9,7 @@ import { execFileSync } from "node:child_process";
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
-// T-278: yerel TLS vekili `x-e2e-client-ip` ile bu dosyaya ayrı istemci kovası verir (demo girişi hız sınırı kovası); uzak (staging) koşuda başlık eklenmez.
-if (!process.env.E2E_BASE_URL?.trim()) test.use({ extraHTTPHeaders: { "x-e2e-client-ip": "198.51.100.211" } });
+// Demo girişi hız sınırı kovası: proje başına ayrı istemci adresi playwright.config.ts projelerindedir (receiving-desktop/-mobile); dosya düzeyinde ezilmez (T-280).
 
 const OUT = process.env.T313_OUT ?? path.resolve(import.meta.dirname, "../../.artifacts/t-313");
 const SIZES = [
@@ -128,44 +127,38 @@ async function seed(): Promise<Fx> {
     if (tenantId === undefined) throw new Error("e2e: demo tenant yok");
     await q("UPDATE public.tenant_settings SET receiving_qc_enabled = true WHERE tenant_id = $1", [tenantId]);
     const membershipId = (await q<{ id: string }>("SELECT id FROM public.tenant_memberships WHERE tenant_id = $1 ORDER BY joined_at LIMIT 1", [tenantId]))[0]?.id as string;
-    let createdWarehouse = false;
-    let warehouseId = (await q<{ id: string }>("SELECT id FROM public.warehouses WHERE tenant_id = $1 AND status = 'ACTIVE' ORDER BY code LIMIT 1", [tenantId]))[0]?.id;
-    if (warehouseId === undefined) {
-      createdWarehouse = true;
-      warehouseId = randomUUID();
-      await q("INSERT INTO public.warehouses (tenant_id, id, code, name) VALUES ($1,$2,$3,'E2E depo')", [tenantId, warehouseId, `E2E${run}`]);
-    }
-    const unitId = randomUUID();
-    await q("INSERT INTO public.units (tenant_id, id, code, name) VALUES ($1,$2,$3,'E2E adet')", [tenantId, unitId, `EA${run}`]);
-    const mkItem = async (name: string): Promise<string> => {
-      const id = randomUUID();
-      await q("INSERT INTO public.items (tenant_id, id, code, name, base_unit_id, tracking_mode, quantity_scale) VALUES ($1,$2,$3,$4,$5,'NONE',0)", [tenantId, id, `E2E-${run}-${name.slice(0, 1)}`, name, unitId]);
-      return id;
+    const existingWh = (await q<{ id: string }>("SELECT id FROM public.warehouses WHERE tenant_id = $1 AND status = 'ACTIVE' ORDER BY code LIMIT 1", [tenantId]))[0]?.id;
+    const createdWarehouse = existingWh === undefined;
+    const warehouseId = existingWh ?? randomUUID();
+    // Tüm kimlikler ÖNCEDEN üretilir ve fikstür temizlik listesine HEMEN kaydedilir: kurulum yarıda kalsa da afterAll temizliği yazılanları geri alır (T-313 güvenlik MINOR).
+    const fx: Fx = {
+      createdWarehouse, tenantId, warehouseId, unitId: randomUUID(), itemId: randomUUID(), otherItemId: randomUUID(), kabulId: randomUUID(), raf1Id: randomUUID(), raf2Id: randomUUID(),
+      kilitId: randomUUID(), receiptId: randomUUID(), receiptNo: `KBL-E2E-${run}`, membershipId,
     };
-    const itemId = await mkItem(`Vida ${run}`);
-    const otherItemId = await mkItem(`Somun ${run}`);
-    await q("INSERT INTO public.item_barcodes (tenant_id, id, item_id, barcode, quantity) VALUES ($1, gen_random_uuid(), $2, $3, 12)", [tenantId, itemId, BARCODE.koli]);
-    await q("INSERT INTO public.item_barcodes (tenant_id, id, item_id, barcode) VALUES ($1, gen_random_uuid(), $2, $3)", [tenantId, itemId, BARCODE.tekli]);
-    await q("INSERT INTO public.item_barcodes (tenant_id, id, item_id, barcode) VALUES ($1, gen_random_uuid(), $2, $3)", [tenantId, otherItemId, BARCODE.baska]);
-    const mkLoc = async (code: string, kind: "RECEIVING" | "STORAGE"): Promise<string> => {
-      const id = randomUUID();
+    fixtures.push(fx);
+    if (createdWarehouse) await q("INSERT INTO public.warehouses (tenant_id, id, code, name) VALUES ($1,$2,$3,'E2E depo')", [tenantId, warehouseId, `E2E${run}`]);
+    await q("INSERT INTO public.units (tenant_id, id, code, name) VALUES ($1,$2,$3,'E2E adet')", [tenantId, fx.unitId, `EA${run}`]);
+    const mkItem = async (id: string, name: string): Promise<void> => {
+      await q("INSERT INTO public.items (tenant_id, id, code, name, base_unit_id, tracking_mode, quantity_scale) VALUES ($1,$2,$3,$4,$5,'NONE',0)", [tenantId, id, `E2E-${run}-${name.slice(0, 1)}`, name, fx.unitId]);
+    };
+    await mkItem(fx.itemId, `Vida ${run}`);
+    await mkItem(fx.otherItemId, `Somun ${run}`);
+    await q("INSERT INTO public.item_barcodes (tenant_id, id, item_id, barcode, quantity) VALUES ($1, gen_random_uuid(), $2, $3, 12)", [tenantId, fx.itemId, BARCODE.koli]);
+    await q("INSERT INTO public.item_barcodes (tenant_id, id, item_id, barcode) VALUES ($1, gen_random_uuid(), $2, $3)", [tenantId, fx.itemId, BARCODE.tekli]);
+    await q("INSERT INTO public.item_barcodes (tenant_id, id, item_id, barcode) VALUES ($1, gen_random_uuid(), $2, $3)", [tenantId, fx.otherItemId, BARCODE.baska]);
+    const mkLoc = async (id: string, code: string, kind: "RECEIVING" | "STORAGE"): Promise<void> => {
       await q("INSERT INTO public.locations (tenant_id, id, warehouse_id, parent_id, code, name, depth, kind) VALUES ($1,$2,$3,NULL,$4,$5,0,$6)", [tenantId, id, warehouseId, code, `E2E ${code}`, kind]);
-      return id;
     };
-    const kabulId = await mkLoc(CODES.kabul, "RECEIVING");
-    const raf1Id = await mkLoc(CODES.raf1, "STORAGE");
-    const raf2Id = await mkLoc(CODES.raf2, "STORAGE");
-    const kilitId = await mkLoc(CODES.kilit, "STORAGE");
-    const receiptId = randomUUID();
-    const receiptNo = `KBL-E2E-${run}`;
+    await mkLoc(fx.kabulId, CODES.kabul, "RECEIVING");
+    await mkLoc(fx.raf1Id, CODES.raf1, "STORAGE");
+    await mkLoc(fx.raf2Id, CODES.raf2, "STORAGE");
+    await mkLoc(fx.kilitId, CODES.kilit, "STORAGE");
     await q("INSERT INTO public.inbound_receipts (tenant_id, id, warehouse_id, number, supplier_ref, created_by, status) VALUES ($1,$2,$3,$4,'E2E-IRS-1',(SELECT user_id FROM public.tenant_memberships WHERE id = $5),'OPEN')", [
-      tenantId, receiptId, warehouseId, receiptNo, membershipId,
+      tenantId, fx.receiptId, warehouseId, fx.receiptNo, membershipId,
     ]);
     await q("INSERT INTO public.inbound_receipt_lines (tenant_id, id, receipt_id, line_no, item_id, unit_id, conversion_factor, expected_quantity) VALUES ($1, gen_random_uuid(), $2, 1, $3, $4, 1, 30)", [
-      tenantId, receiptId, itemId, unitId,
+      tenantId, fx.receiptId, fx.itemId, fx.unitId,
     ]);
-    const fx: Fx = { createdWarehouse, tenantId, warehouseId, unitId, itemId, otherItemId, kabulId, raf1Id, raf2Id, kilitId, receiptId, receiptNo, membershipId };
-    fixtures.push(fx);
     return fx;
   }
 }
@@ -242,6 +235,8 @@ async function screens(page: Page, projectName: string): Promise<void> {
   const mobile = isMobile(projectName);
   mkdirSync(OUT, { recursive: true });
   const fx = await seed();
+  // Kalite kontrolü kapalı: kabul doğrudan AVAILABLE olur, yerleştirme adım görüntüleri için kaynak rafta mal bulunur (cleanup QC'yi geri açar).
+  await db("UPDATE public.tenant_settings SET receiving_qc_enabled = false WHERE tenant_id = $1", [fx.tenantId]);
   const metrics: Record<string, unknown> = {};
   for (const size of SIZES) {
     await page.setViewportSize({ width: size.width, height: size.height });
@@ -250,6 +245,8 @@ async function screens(page: Page, projectName: string): Promise<void> {
       metrics[`${size.name}-${name}`] = m;
       expect(m.scrollWidth, `${size.name} ${name}: yatay taşma`).toBeLessThanOrEqual(m.clientWidth);
       expect(m.small, `${size.name} ${name}: 48 px altı hedef`).toEqual([]);
+      // Adım ekranları kaydırmasız sığar (R-03); teslim LİSTESİ sayfalı listedir (kaydırma beklenir).
+      if (name !== "receive-pick") expect(m.bodyOverflow, `${size.name} ${name}: içerik sabit çubuğun altına girmez (R-03)`).toBeLessThanOrEqual(1);
       if (mobile) await page.screenshot({ path: path.join(OUT, `final-${size.name}-${name}.png`) });
     };
     await page.goto("/t/demo/field/receive");
@@ -284,18 +281,44 @@ async function screens(page: Page, projectName: string): Promise<void> {
     const prim = await page.locator('[data-variant="primary"]:visible').boundingBox();
     expect(rack, `${size.name}: kabul rafı seçimi görünür`).not.toBeNull();
     expect((rack?.y ?? 0) + (rack?.height ?? 0), `${size.name}: raf seçimi birincil düğmenin üstünde`).toBeLessThanOrEqual((prim?.y ?? 0) + 1);
-    await expect(page.getByTestId("rack-choice").locator('[aria-pressed="true"]')).toHaveCount(1);
+    await expect(page.getByTestId("rack-choice").locator("p", { hasText: "Kabul rafı" }), `${size.name}: "Kabul rafı" etiketi her boyutta görünür`).toBeVisible();
+    // Seçili raf düğmesi akış rengindedir (kabul yeşil), ana mavi değil (R-07): bu çalışmanın rafını seç.
+    await page.getByTestId("rack-chips").getByRole("button", { name: `E2E ${CODES.kabul}` }).click();
+    const chosen = page.getByTestId("rack-chips").locator('[aria-pressed="true"]');
+    await expect(chosen).toHaveCount(1);
+    await expect(chosen).toContainText(CODES.kabul);
+    const chipBg = await chosen.evaluate((e: { ownerDocument: { defaultView: { getComputedStyle: (x: unknown) => { backgroundColor: string } } } }) => e.ownerDocument.defaultView.getComputedStyle(e).backgroundColor);
+    const accentBg = await page.evaluate<string>("(() => { const d = document.createElement('div'); d.className = 'bg-accent-soft'; document.body.appendChild(d); const c = getComputedStyle(d).backgroundColor; d.remove(); return c; })()");
+    expect(chipBg, `${size.name}: seçili raf ana mavi (accent-soft) değil`).not.toBe(accentBg);
     await shot("receive-qty");
-    await page.getByRole("button", { name: "Hasarlı var" }).click();
+    await page.getByRole("button", { name: "Hasarlı ekle" }).click();
+    // R-03/R-06: hasarlı satırı sabit çubuğun altına girmez (bodyOverflow ≤ 1 shot() içinde) ve etiket görünür.
+    await expect(page.getByTestId("rack-choice").locator("p", { hasText: "Kabul rafı" })).toBeVisible();
     await shot("receive-qty-damaged");
     await page.getByRole("textbox", { name: "Hasarlı adet" }).fill("0");
     await page.getByRole("textbox", { name: /^Gelen \(/ }).fill("5");
     await page.getByRole("button", { name: "Kabul et" }).click();
     await expect(page.getByTestId("saved-summary")).toContainText("5 adet kabul edildi");
     await shot("receive-saved");
+    // Yerleştirme (serbest, 5 adım): kaynak → ürün → hedef → miktar/onay → bitti; adım numaraları 1…5 / 5.
     await page.goto(`/t/demo/field/putaway?wh=${fx.warehouseId}`);
     await page.waitForLoadState("networkidle");
+    await expect(page.getByTestId("step-label")).toHaveText("Adım 1 / 5");
     await shot("putaway-source");
+    await scan(page, CODES.kabul);
+    await expect(page.getByTestId("step-label")).toHaveText("Adım 2 / 5");
+    await shot("putaway-item");
+    await scan(page, BARCODE.koli);
+    await expect(page.getByTestId("step-label")).toHaveText("Adım 3 / 5");
+    await shot("putaway-target");
+    await scan(page, CODES.raf1);
+    await expect(page.getByTestId("step-label")).toHaveText("Adım 4 / 5");
+    await expect(page.getByRole("textbox", { name: "Kaç adet?" })).toHaveValue("5");
+    await shot("putaway-confirm");
+    await page.getByRole("button", { name: "Rafa koy" }).click();
+    await expect(page.getByTestId("saved-summary")).toContainText("5 adet");
+    await expect(page.getByTestId("step-label")).toHaveText("Adım 5 / 5");
+    await shot("putaway-saved");
     await page.goto("/t/demo/receipts");
     const m = await measure(page);
     metrics[`${size.name}-receipts`] = m;
@@ -310,6 +333,7 @@ async function screens(page: Page, projectName: string): Promise<void> {
 }
 
 test("kabul → kalite onayı → yerleştirme (görevli ve serbest) + yanlış tarama ve sayım kilidi engelleri", async ({ page }, testInfo) => {
+  test.setTimeout(180_000); // çok ekranlı akış (3 boyutta ekran görüntüsü + iki akış); yalnız süre, assertion değişmez
   mkdirSync(OUT, { recursive: true });
   const fx = await seed();
   const mobile = isMobile(testInfo.project.name);
@@ -379,8 +403,8 @@ test("kabul → kalite onayı → yerleştirme (görevli ve serbest) + yanlış 
   expect(await taps(page), "kabul dokunuş bütçesi: Kabul et (1); teslim seçme +1 ≤ 3").toBeLessThanOrEqual(2);
   log.receiveTaps = await taps(page);
 
-  // İkinci koli aynı teslimden (kalan 18 → 12 daha): "Sıradaki ürün" → tara → kabul.
-  await page.getByRole("button", { name: "Sıradaki ürün" }).click();
+  // İkinci koli aynı teslimden (kalan 18 → 12 daha): "Sıradaki ürüne geç" → tara → kabul.
+  await page.getByRole("button", { name: "Sıradaki ürüne geç" }).click();
   await page.waitForLoadState("networkidle");
   // Elle giriş tek ikincil yoldur: "Elle gir" bağlantısı ScanField'ı açar (tarama sayılmaz, aynı servis yolu); açıkken birincil düğme gizlenir.
   await page.getByRole("button", { name: "Elle gir" }).click();
@@ -393,7 +417,7 @@ test("kabul → kalite onayı → yerleştirme (görevli ve serbest) + yanlış 
   await scan(page, BARCODE.koli);
   await expect(page.getByRole("textbox", { name: /^Gelen \(/ })).toHaveValue("18");
   await page.getByRole("textbox", { name: /^Gelen \(/ }).fill("12");
-  await page.getByRole("button", { name: "Hasarlı var" }).click();
+  await page.getByRole("button", { name: "Hasarlı ekle" }).click();
   await page.getByRole("textbox", { name: "Hasarlı adet" }).fill("2");
   await page.getByRole("button", { name: "Kabul et" }).click();
   await expect(page.getByTestId("saved-summary")).toContainText("12 adet kabul edildi");
@@ -402,7 +426,7 @@ test("kabul → kalite onayı → yerleştirme (görevli ve serbest) + yanlış 
   const lines = await db<{ received: string; damaged: string }>("SELECT received_quantity::text AS received, damaged_quantity::text AS damaged FROM public.inbound_receipt_lines WHERE receipt_id = $1", [fx.receiptId]);
   expect(lines[0]).toEqual({ received: "24.000000", damaged: "2.000000" });
   // Fazla okutma: kalan 6 iken stepper en çok 6'ya çıkar; sunucu kuralı ayrıca aşılamaz (actions.test.ts).
-  await page.getByRole("button", { name: "Sıradaki ürün" }).click();
+  await page.getByRole("button", { name: "Sıradaki ürüne geç" }).click();
   await page.waitForLoadState("networkidle");
   await scan(page, BARCODE.koli);
   await expect(page.getByRole("textbox", { name: /^Gelen \(/ })).toHaveValue("6");
@@ -541,6 +565,137 @@ test("kabul → kalite onayı → yerleştirme (görevli ve serbest) + yanlış 
   await screens(page, testInfo.project.name);
 });
 
+/** Ana ekran ölçümü: en büyük boş dikey bant ve boş alan oranı (mobile-shell expectBand/homeLayout ile aynı tanım; `.now-card` yalnız gerçek veri satırıysa içeriktir). */
+async function homeMetrics(page: Page): Promise<{ band: number; emptyRatio: number; tileHeights: number[]; badge: number[]; descCut: boolean[]; descLines: number[]; blank: number[] }> {
+  return page.evaluate(`(() => {
+    const r = (el) => el.getBoundingClientRect();
+    const bar = r(document.querySelector('[data-testid="app-bar"]')), nav = r(document.querySelector('[data-testid="bottom-nav"]'));
+    const vis = (el) => { const b = r(el); return b.width > 0 && b.height > 0; };
+    const area = { top: bar.bottom, bottom: nav.top };
+    const spans = [];
+    const add = (b) => { if (b.width > 0 && b.height > 0) spans.push([Math.max(b.top, area.top), Math.min(b.bottom, area.bottom)]); };
+    for (const el of document.body.querySelectorAll('*')) {
+      if (!el.checkVisibility || !el.checkVisibility()) continue;
+      if (el.matches('a[href], button, summary, input, select, textarea, [tabindex="0"]')) { add(r(el)); continue; }
+      if (el.tagName.toLowerCase() === 'svg') { add(r(el)); continue; }
+      for (const n of el.childNodes) if (n.nodeType === 3 && n.textContent.trim() !== '') { const g = document.createRange(); g.selectNodeContents(n); for (const q of g.getClientRects()) add(q); }
+    }
+    const iv = spans.filter(([a, b]) => b > a).sort((x, y) => x[0] - y[0]);
+    let cursor = area.top, best = 0;
+    for (const [a, b] of iv) { best = Math.max(best, a - cursor); cursor = Math.max(cursor, b); }
+    best = Math.max(best, area.bottom - cursor);
+    const tiles = [...document.querySelectorAll('.task-grid > .task-item > [data-state]')].filter(vis);
+    const parts = [r(document.querySelector('main header')), ...tiles.map(r)];
+    const top = document.querySelector('.top-rows'); if (top && vis(top)) parts.push(r(top));
+    const now = document.querySelector('.now-card[data-state="rows"]'); if (now && vis(now)) parts.push(r(now));
+    const sp = parts.map((p) => [Math.max(p.top, area.top), Math.min(p.bottom, area.bottom)]).sort((a, b) => a[0] - b[0]);
+    let covered = 0, cur = null;
+    for (const [s, e] of sp) { if (cur && s <= cur[1]) cur[1] = Math.max(cur[1], e); else { if (cur) covered += cur[1] - cur[0]; cur = [s, e]; } }
+    if (cur) covered += cur[1] - cur[0];
+    const lines = (e) => Math.round(r(e).height / parseFloat(getComputedStyle(e).lineHeight));
+    return {
+      band: Math.round(best), emptyRatio: Math.round(((area.bottom - area.top - covered) / (area.bottom - area.top)) * 1000) / 1000,
+      tileHeights: tiles.map((t) => Math.round(r(t).height)),
+      badge: tiles.map((t) => Math.round(r(t.querySelector('.tile-badge')).width * 10) / 10),
+      descCut: tiles.map((t) => { const d = t.querySelector('.tile-desc'); return d ? d.scrollWidth > d.clientWidth + 0.5 : true; }),
+      descLines: tiles.map((t) => { const d = t.querySelector('.tile-desc'); return d ? lines(d) : 0; }),
+      blank: tiles.map((t) => r(t).height - 28 - [...t.querySelectorAll('.tile-badge, .tile-title, .tile-desc')].reduce((a, e) => a + r(e).height, 0)),
+    };
+  })()`);
+}
+
+test("ana ekran 'Şimdi' kartı: bekleyen iş GERÇEK veriden (DB ile eşleşir); 2 sütun döşeme ve boşluk metrikleri; admin + toplayıcı görüntüleri", async ({ page, context }, testInfo) => {
+  mkdirSync(OUT, { recursive: true });
+  const fx = await seed();
+  // Bekleyen iş fikstürü: ikinci açık teslim + iki açık PUTAWAY görevi (SQL; gerçek akışta kabul komutu doğurur). "Sıradaki" satırları DB'deki en eski işlerdir.
+  const receipt2 = randomUUID();
+  await db("INSERT INTO public.inbound_receipts (tenant_id, id, warehouse_id, number, supplier_ref, created_by, status) VALUES ($1,$2,$3,$4,$5,(SELECT user_id FROM public.tenant_memberships WHERE id = $6),'OPEN')", [
+    fx.tenantId, receipt2, fx.warehouseId, `KBL-E2E2-${run}`, `E2E-IRS-B-${run}`, fx.membershipId,
+  ]);
+  await db("INSERT INTO public.inbound_receipt_lines (tenant_id, id, receipt_id, line_no, item_id, unit_id, conversion_factor, expected_quantity) VALUES ($1, gen_random_uuid(), $2, 1, $3, $4, 1, 7)", [fx.tenantId, receipt2, fx.itemId, fx.unitId]);
+  for (const q of [5, 8]) {
+    await db("INSERT INTO public.warehouse_tasks (tenant_id, warehouse_id, kind, status, item_id, location_id, quantity, source_kind, source_id) VALUES ($1,$2,'PUTAWAY','OPEN',$3,$4,$5,'INBOUND_RECEIPT',$6)", [fx.tenantId, fx.warehouseId, fx.itemId, fx.kabulId, q, fx.receiptId]);
+  }
+  const adminM = (await db<{ id: string }>("SELECT m.id FROM public.tenant_memberships m JOIN public.membership_roles r ON r.tenant_id = m.tenant_id AND r.membership_id = m.id WHERE m.tenant_id = $1 AND r.role_key = 'TENANT_ADMIN' LIMIT 1", [fx.tenantId]))[0]?.id;
+  const receiptCount = Number((await db<{ n: string }>("SELECT count(*)::text AS n FROM public.inbound_receipts WHERE tenant_id = $1 AND status = 'OPEN'", [fx.tenantId]))[0]?.n);
+  const putCount = Number(
+    (await db<{ n: string }>("SELECT count(*)::text AS n FROM public.warehouse_tasks WHERE tenant_id = $1 AND kind = 'PUTAWAY' AND (status = 'OPEN' OR (status = 'ASSIGNED' AND assigned_membership_id = $2))", [fx.tenantId, adminM ?? randomUUID()]))[0]?.n,
+  );
+  expect(receiptCount).toBeGreaterThan(1);
+  expect(putCount).toBeGreaterThan(1);
+  const nextReceipts = await db<{ number: string; supplier_ref: string | null; n: string }>(
+    "SELECT r.number, r.supplier_ref, (SELECT count(*)::text FROM public.inbound_receipt_lines l WHERE l.tenant_id = r.tenant_id AND l.receipt_id = r.id) AS n FROM public.inbound_receipts r WHERE r.tenant_id = $1 AND r.status = 'OPEN' ORDER BY r.created_at, r.id LIMIT 2",
+    [fx.tenantId],
+  );
+  const nextTasks = await db<{ name: string; quantity: string }>(
+    "SELECT i.name, t.quantity::text AS quantity FROM public.warehouse_tasks t JOIN public.items i ON i.tenant_id = t.tenant_id AND i.id = t.item_id WHERE t.tenant_id = $1 AND t.kind = 'PUTAWAY' AND (t.status = 'OPEN' OR (t.status = 'ASSIGNED' AND t.assigned_membership_id = $2)) ORDER BY t.created_at, t.id LIMIT 2",
+    [fx.tenantId, adminM ?? randomUUID()],
+  );
+  const recDetail = (r: { supplier_ref: string | null; n: string }): string => (r.supplier_ref === null ? `${r.n} kalem` : r.supplier_ref);
+  const qtyText = (q: string): string => `${Number(q)} adet`;
+  const mobile = isMobile(testInfo.project.name);
+  const metrics: Record<string, unknown> = {};
+  await login(page, "Yönetici");
+  for (const [w, h] of [[360, 740], [390, 664], [390, 844], [430, 932]] as const) {
+    await page.setViewportSize({ width: w, height: h });
+    await page.goto("/t/demo");
+    const card = page.getByTestId("now-card");
+    await expect(card).toHaveAttribute("data-state", "rows");
+    // Satırlar DB'deki gerçek bekleyen işle eşleşir (uydurma sayı yok).
+    await expect(page.getByTestId("now-receive")).toHaveAttribute("data-count", String(receiptCount));
+    await expect(page.getByTestId("now-receive")).toContainText(`${receiptCount} teslim kabul bekliyor`);
+    await expect(page.getByTestId("now-putaway")).toHaveAttribute("data-count", String(putCount));
+    await expect(page.getByTestId("now-putaway")).toContainText(`${putCount} ürün yerleştirme bekliyor`);
+    await expect(page.getByTestId("now-receive")).toHaveAttribute("href", "/t/demo/field/receive");
+    // "Sıradaki" ayrıntıları DB'deki en eski açık işlerdir (uydurma yok); ikinci satır yalnız yüksek ekranda (≥ 880 px) görünür.
+    await expect(page.getByTestId("now-receive-next")).toHaveText(`Sıradaki: ${nextReceipts[0]?.number} · ${recDetail(nextReceipts[0] as never)}`);
+    await expect(page.getByTestId("now-putaway-next")).toHaveText(`Sıradaki: ${nextTasks[0]?.name} · ${qtyText(nextTasks[0]?.quantity ?? "0")}`);
+    if (h >= 880) {
+      await expect(page.getByTestId("now-receive-extra")).toContainText(`${nextReceipts[1]?.number}`);
+      await expect(page.getByTestId("now-receive-extra")).toContainText(recDetail(nextReceipts[1] as never));
+      await expect(page.getByTestId("now-putaway-extra")).toContainText(`${nextTasks[1]?.name}`);
+      await expect(page.getByTestId("now-putaway-extra")).toContainText(qtyText(nextTasks[1]?.quantity ?? "0"));
+    } else {
+      await expect(page.getByTestId("now-receive-extra")).toBeHidden();
+    }
+    const m = await homeMetrics(page);
+    metrics[`admin-${w}x${h}`] = m;
+    // Çakışma yok: selam başlığı kartın üstünde, kart ızgaranın üstünde (içerik alana sığar; üst üste binen/kesilen içerik yok).
+    const geo = await page.evaluate<{ headB: number; cardT: number; cardB: number; gridT: number }>(`(() => { const r = (e) => e.getBoundingClientRect(); const top = document.querySelector('.task-grid .top-rows'); return { headB: r(document.querySelector('main header')).bottom, cardT: r(document.querySelector('.now-card')).top, cardB: r(document.querySelector('.now-card')).bottom, gridT: r(top || document.querySelector('.task-grid')).top }; })()`);
+    expect(geo.cardT, `${w}x${h}: Şimdi kartı selam başlığıyla çakışmaz`).toBeGreaterThanOrEqual(geo.headB - 0.5);
+    expect(geo.gridT, `${w}x${h}: ızgara Şimdi kartıyla çakışmaz`).toBeGreaterThanOrEqual(geo.cardB - 0.5);
+    // D-04 SIKI + D-04b + açıklama tek satır kesilmeden + ikon sabit/eşit; B-02 ve emptyRatio "bekleyen iş VAR" durumunda ASSERT.
+    expect(Math.max(...m.tileHeights), `${w}x${h}: döşeme ≤ 140 (istisna yok)`).toBeLessThanOrEqual(140);
+    expect(Math.min(...m.tileHeights), `${w}x${h}: döşeme ≥ ${h < 700 ? 72 : 88}`).toBeGreaterThanOrEqual(h < 700 ? 72 : 88);
+    expect(new Set(m.badge).size, `${w}x${h}: ikon boyutu eşit`).toBe(1);
+    expect(m.badge[0]).toBe(48);
+    expect(m.descCut.some(Boolean), `${w}x${h}: açıklama kesilmemiş`).toBe(false);
+    expect(m.descLines.every((n) => n === 1), `${w}x${h}: açıklama tek satır`).toBe(true);
+    expect(Math.max(...m.blank), `${w}x${h}: D-04b döşeme içi boşluk ≤ 24`).toBeLessThanOrEqual(24);
+    expect(Math.min(...m.blank), `${w}x${h}: içerik döşemeye sığar`).toBeGreaterThanOrEqual(-1);
+    expect(m.band, `${w}x${h}: B-02 en büyük boş dikey bant ≤ 120 (bekleyen iş var)`).toBeLessThanOrEqual(120);
+    expect(m.emptyRatio, `${w}x${h}: emptyRatio ≤ 0,15 (bekleyen iş var)`).toBeLessThanOrEqual(0.15);
+    const pw = await measure(page);
+    expect(pw.scrollWidth).toBeLessThanOrEqual(pw.clientWidth);
+    expect(pw.small, `${w}x${h}: 48 px altı hedef`).toEqual([]);
+    if (mobile) await page.screenshot({ path: path.join(OUT, `final-home-admin-${w}x${h}.png`) });
+  }
+  // Toplayıcı (tek sütun kipi): görüntüler + taşma/hedef ölçümü; "Görevlerim" özeti bu kipin gerçek içeriğidir.
+  await context.clearCookies();
+  await login(page, "Toplayıcı");
+  for (const [w, h] of [[360, 740], [390, 664], [390, 844], [430, 932]] as const) {
+    await page.setViewportSize({ width: w, height: h });
+    await page.goto("/t/demo");
+    await expect(page.getByTestId("now-card")).toHaveCount(0);
+    const pw = await measure(page);
+    metrics[`picker-${w}x${h}`] = pw;
+    expect(pw.scrollWidth).toBeLessThanOrEqual(pw.clientWidth);
+    expect(pw.small, `${w}x${h} toplayıcı: 48 px altı hedef`).toEqual([]);
+    if (mobile) await page.screenshot({ path: path.join(OUT, `final-home-picker-${w}x${h}.png`) });
+  }
+  writeFileSync(path.join(OUT, `metrics-home-pending-${testInfo.project.name}.json`), JSON.stringify(metrics, null, 2));
+});
+
 test("fikstür SQL hata iletisi parola/URL/argv içermez ve loopback dışına yazılmaz", async () => {
   const secret = `pw-${randomUUID()}`;
   // Kapalı loopback portu: psql bağlanamaz; ileti sterilize olmalı.
@@ -563,16 +718,15 @@ test("fikstür SQL hata iletisi parola/URL/argv içermez ve loopback dışına y
   expect(remote).not.toContain(secret);
 });
 
-test("kamera taraması: Barkodu okut kamerayı açar, okunan kod aynı servis yoluyla işlenir (sahte BarcodeDetector)", async ({ page }, testInfo) => {
+test("kamera taraması: Barkodu okut kamerayı açar; kod TEK kez işlenir (çift okuma yok); okuma kapalıyken gelen kod bildirilir", async ({ page }) => {
   const fx = await seed();
   await page.addInitScript(`
-    window.__fakeCode = "";
-    window.BarcodeDetector = class { async detect() { return window.__fakeCode ? [{ rawValue: window.__fakeCode }] : []; } };
+    window.__fakeCode = ""; window.__detects = 0;
     navigator.mediaDevices.getUserMedia = async () => { const c = document.createElement("canvas"); c.width = 64; c.height = 64; c.getContext("2d").fillRect(0, 0, 64, 64); return c.captureStream(5); };
   `);
   await login(page, "Yönetici");
-  // login() başlatma betiği BarcodeDetector'ı siler; sahte olan sonradan (sayfa yüklemesinden önce) yeniden tanımlanır.
-  await page.addInitScript(`window.BarcodeDetector = class { async detect() { return window.__fakeCode ? [{ rawValue: window.__fakeCode }] : []; } };`);
+  // login() başlatma betiği BarcodeDetector'ı siler; sahte olan sonradan (sayfa yüklemesinden önce) tanımlanır. Kod SÜREKLİ döner (kamera aynı barkodu karelerce görür).
+  await page.addInitScript(`window.BarcodeDetector = class { async detect() { window.__detects++; return window.__fakeCode ? [{ rawValue: window.__fakeCode }] : []; } };`);
   await page.goto(`/t/demo/field/receive?receipt=${fx.receiptId}`);
   await page.waitForLoadState("networkidle");
   await page.getByRole("button", { name: "Barkodu okut" }).click();
@@ -580,8 +734,26 @@ test("kamera taraması: Barkodu okut kamerayı açar, okunan kod aynı servis yo
   await page.evaluate(`window.__fakeCode = ${JSON.stringify(BARCODE.koli)}`);
   await expect(page.getByTestId("flow-step")).toHaveAttribute("data-step", "3");
   await expect(page.getByTestId("camera-overlay")).toHaveCount(0);
+  // Çift okuma yok: akış ve zamanlayıcı durdu (algılama sayısı artmaz) ve miktar 12 kalır (ikinci okuma 24 yapardı).
+  const before = await page.evaluate<number>("window.__detects");
+  await page.waitForTimeout(900);
+  expect(await page.evaluate<number>("window.__detects"), "okuma sonrası kamera algılaması durdu").toBe(before);
   await expect(page.getByRole("textbox", { name: /^Gelen \(/ })).toHaveValue("12");
-  void testInfo;
+
+  // Okuma kapalıyken (uyarı açık) gelen kamera kodu kullanıcıya bildirilir, sessizce düşmez.
+  await page.goto(`/t/demo/field/receive?receipt=${fx.receiptId}`);
+  await page.waitForLoadState("networkidle");
+  await page.evaluate(`window.__fakeCode = ""`);
+  await page.getByRole("button", { name: "Barkodu okut" }).click();
+  await expect(page.getByTestId("camera-overlay")).toBeVisible();
+  await scan(page, "0000000000000");
+  await expect(page.getByTestId("scan-alert")).toBeVisible();
+  await page.evaluate(`window.__fakeCode = ${JSON.stringify(BARCODE.koli)}`);
+  await expect(page.getByTestId("camera-dropped")).toBeVisible();
+  await expect(page.getByTestId("camera-dropped")).toContainText("okuma şu an kapalıydı");
+  await page.getByRole("button", { name: "Anladım, tekrar okut" }).click();
+  await page.getByRole("button", { name: "Tamam" }).click();
+  await expect(page.getByTestId("flow-step")).toHaveAttribute("data-step", "2"); // kod işlenmedi: yine tarama adımı
 });
 
 test("yetkisiz kullanıcı: kilit ekranı gerekçe + Yardım çağır yolu; tek birincil", async ({ page }, testInfo) => {
@@ -589,9 +761,16 @@ test("yetkisiz kullanıcı: kilit ekranı gerekçe + Yardım çağır yolu; tek 
   await login(page, "Salt okunur");
   for (const size of [{ n: "390", w: 390, h: 844 }, { n: "390s", w: 390, h: 664 }]) {
     await page.setViewportSize({ width: size.w, height: size.h });
-    for (const flow of ["receive", "putaway"]) {
+    for (const [flow, title, reason, other] of [
+      ["receive", "Bu iş sana kapalı", "Mal kabul için yetkin yok", "Yerleştirme için"],
+      ["putaway", "Yerleştirme sana kapalı", "Yerleştirme için yetkin yok", "Mal kabul için"],
+    ] as const) {
       await page.goto(`/t/demo/field/${flow}`);
-      await expect(page.getByText("Bu iş sana kapalı")).toBeVisible();
+      // Her kilit ekranı KENDİ gerekçesini söyler (yerleştirme kabulün metnini kullanmaz) ve yanlış adım sayısı göstermez.
+      await expect(page.getByRole("heading", { level: 1, name: title })).toBeVisible();
+      await expect(page.locator("main")).toContainText(reason);
+      await expect(page.locator("main")).not.toContainText(other);
+      await expect(page.getByTestId("step-label")).toHaveCount(0);
       await expect(page.getByTestId("help-link")).toHaveAttribute("href", "/help");
       await expect(page.locator('[data-variant="primary"]:visible')).toHaveCount(1);
       const m = await measure(page);

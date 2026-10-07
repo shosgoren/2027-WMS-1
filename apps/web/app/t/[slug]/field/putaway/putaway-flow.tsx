@@ -7,7 +7,7 @@ import { useTranslations } from "next-intl";
 import { Banner, CircleCheck, MapPinned } from "@wms/ui";
 import { ErrorNotice, errorKeyOf, intOf, scanMismatch, submitWithKey, useKeyHolder, type ErrorInfo } from "../../receipts/receipt-form.tsx";
 import { availableAtLocationAction, putawayAction, resolveItemScanAction, resolveLocationScanAction } from "../../receipts/actions.ts";
-import { FlowShell, PrimaryButton, PrimaryLink, QtyStepper, ScanAlert, ScanPanel, useScanPrimary, useScanner, type AlertState } from "../receive/receive-flow.tsx";
+import { DroppedNotice, FlowShell, PrimaryButton, PrimaryLink, QtyStepper, ScanAlert, ScanPanel, useScanPrimary, useScanner, type AlertState } from "../receive/receive-flow.tsx";
 
 export interface PutawayTask {
   readonly id: string;
@@ -116,7 +116,7 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
     [busy, alert, stage, slug, warehouseId, task, source],
   );
   const scanning = stage === "source" || stage === "item" || stage === "target";
-  const { service: scanner, camera } = useScanner((v) => void onScanned(v), scanning && alert === null && !busy);
+  const { service: scanner, camera, dropped, clearDropped } = useScanner((v) => void onScanned(v), scanning && alert === null && !busy);
   const scanPrimary = useScanPrimary(camera);
 
   async function confirm() {
@@ -156,16 +156,20 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
     }
     setAlert(null);
   };
-  const alertView =
-    alert === null ? null : (
-      <ScanAlert
-        title={t(alert.titleKey)}
-        reason={t(`errors.${alert.reasonKey}`, { remaining: "-" })}
-        action={t(`errors.${alert.reasonKey}Action`)}
-        {...(alert.code === undefined ? {} : { code: alert.code })}
-        onClose={closeAlert}
-      />
-    );
+  const alertView = (
+    <>
+      <DroppedNotice show={dropped} onClose={clearDropped} />
+      {alert === null ? null : (
+        <ScanAlert
+          title={t(alert.titleKey)}
+          reason={t(`errors.${alert.reasonKey}`, { remaining: "-" })}
+          action={t(`errors.${alert.reasonKey}Action`)}
+          {...(alert.code === undefined ? {} : { code: alert.code })}
+          onClose={closeAlert}
+        />
+      )}
+    </>
+  );
 
   const prev: Partial<Record<Stage, Stage>> = task === null ? { item: "source", target: "item", confirm: "target" } : { target: "item", confirm: "target" };
   const back = (): void => {
@@ -267,7 +271,6 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
   }
 
   const titleKey = stage === "source" ? "putaway.sourceTitle" : stage === "item" ? "putaway.itemTitle" : "putaway.targetTitle";
-  const instrKey = stage === "source" ? "putaway.sourceInstruction" : stage === "item" ? "putaway.itemInstruction" : "putaway.targetInstruction";
   return (
     <>
       <FlowShell
@@ -276,7 +279,6 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
         step={stepOf(stage)}
         total={total}
         title={t(titleKey)}
-        instruction={t(instrKey)}
         {...backProps}
         scanProxy
         footer={<PrimaryButton onClick={scanPrimary.press}>{t("flow.scanNow")}</PrimaryButton>}

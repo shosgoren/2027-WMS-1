@@ -34,11 +34,31 @@ export type MyTasksSummary =
   | { readonly kind: "count"; readonly count: number; readonly more: boolean }
   | { readonly kind: "error"; readonly message: string; readonly code: string };
 
+/**
+ * "Şimdi" kartı (T-280, DESIGN_REVIEW §7.4.2): kullanıcının yetkili olduğu işlerde GERÇEK bekleyen iş sayıları (açık teslim, yerleştirilecek görev).
+ * Satır yalnızca sayı > 0 ise vardır; hiç yoksa "Bekleyen iş yok". Hata: sunucu mesajı + kod (yutulmaz). Sabit/uydurma veri yok (G-07).
+ */
+export type NowSummary =
+  | {
+      readonly kind: "rows";
+      readonly rows: ReadonlyArray<{
+        readonly key: "receive" | "putaway";
+        readonly count: number;
+        readonly more: boolean;
+        /** Sıradaki en çok 2 GERÇEK iş (başlık + ayrıntı + bağlantı); ilki toplam satırının ikinci satırında, ikincisi yüksek ekranda ayrı satırdır. */
+        readonly next: ReadonlyArray<{ readonly href: `/${string}`; readonly title: string; readonly detail: string }>;
+      }>;
+    }
+  | { readonly kind: "empty" }
+  | { readonly kind: "error"; readonly message: string; readonly code: string };
+
 export interface TaskMenuProps {
   readonly slug: string;
   readonly allowed: { readonly usersManage: boolean; readonly settingsManage: boolean; readonly auditView: boolean; readonly stockView: boolean; readonly stockPost?: boolean };
   /** Verilirse (yalnız saha rolleri) ızgaranın üstünde telefon özet kartı çizilir. */
   readonly myTasks?: MyTasksSummary;
+  /** `stock.post` sahibi için gerçek bekleyen işler; yalnız 2 sütun kipinde (≥ 6 izinli iş) çizilir. */
+  readonly now?: NowSummary;
 }
 
 export type TaskKey = "members" | "settings" | "audit" | "items" | "warehouses" | "receive" | "issue" | "transfer" | "count" | "lookup" | "undo";
@@ -184,7 +204,7 @@ export function TaskTile({ name, hue, title, description, what, href, locked, so
 const TWO_COL_FROM = 6;
 const TWO_COL_MAX = 10;
 
-export async function TaskMenu({ slug, allowed, myTasks }: TaskMenuProps) {
+export async function TaskMenu({ slug, allowed, myTasks, now }: TaskMenuProps) {
   const t = await getTranslations("home");
   const base = `/t/${encodeURIComponent(slug)}` as const;
   const hrefs: Partial<Record<TaskKey, { allowed: boolean; href: `/${string}` }>> = {
@@ -299,7 +319,7 @@ export async function TaskMenu({ slug, allowed, myTasks }: TaskMenuProps) {
       : undefined;
     items.push(
       <li key={d.key} className="task-item flex min-w-0" style={row}>
-        <TaskTile name={d.key} hue={d.hue} title={t(`tasks.${d.key}.title`)} description={t(`tasks.${d.key}.description`)} href={h.href} />
+        <TaskTile name={d.key} hue={d.hue} title={twoCol && t.has(`tasks.${d.key}.tile`) ? t(`tasks.${d.key}.tile`) : t(`tasks.${d.key}.title`)} description={t(twoCol ? `tasks.${d.key}.short` : `tasks.${d.key}.description`)} href={h.href} />
       </li>,
     );
   });
@@ -318,7 +338,66 @@ export async function TaskMenu({ slug, allowed, myTasks }: TaskMenuProps) {
     );
   }
 
-  return (
+  const nowCard =
+    twoCol && now !== undefined ? (
+      <section aria-labelledby="now-title" data-testid="now-card" data-state={now.kind} className="now-card flex min-w-0 flex-col gap-2 rounded-card border-2 border-border bg-surface p-3">
+        <h2 id="now-title" className="now-title text-base font-extrabold text-ink">
+          {t("now.title")}
+        </h2>
+        {now.kind === "error" ? (
+          <Banner kind="warning">
+            <p>{now.message}</p>
+            <p className="mt-1 text-sm">{now.code}</p>
+          </Banner>
+        ) : now.kind === "empty" ? (
+          <p data-testid="now-empty" className="m-0 text-base text-ink-muted">
+            {t("now.empty")}
+          </p>
+        ) : (
+          <ul className="now-list m-0 flex list-none flex-col gap-2 p-0">
+            {now.rows.map((r) => (
+              <li key={r.key} className="flex min-w-0 flex-col gap-2">
+                <a
+                  href={r.key === "receive" ? `${base}/field/receive` : `${base}/field/tasks`}
+                  data-testid={`now-${r.key}`}
+                  data-count={r.count}
+                  className={`${FOCUS} flex min-h-16 w-full min-w-0 items-center gap-3 rounded-control border-2 border-border bg-surface px-3 py-1 text-ink`}
+                >
+                  <span aria-hidden="true" className={`flex size-10 shrink-0 items-center justify-center rounded-full text-lg font-extrabold ${r.key === "receive" ? HUE.green.circle : HUE.teal.circle}`}>
+                    {r.more ? `${r.count}+` : r.count}
+                  </span>
+                  <span className="flex min-w-0 flex-1 flex-col">
+                    <span className="now-long break-words text-base font-bold">{t(`now.${r.key}`, { count: r.more ? `${r.count}+` : String(r.count) })}</span>
+                    <span className="now-short hidden truncate text-sm font-bold">{t(`now.${r.key}Short`)}</span>
+                    {r.next[0] === undefined ? null : (
+                      <span data-testid={`now-${r.key}-next`} className="now-next truncate text-sm text-ink-muted">
+                        {t("now.next", { title: r.next[0].title, detail: r.next[0].detail })}
+                      </span>
+                    )}
+                  </span>
+                  <ChevronRight aria-hidden="true" className="size-6 shrink-0" />
+                </a>
+                {r.next[1] === undefined ? null : (
+                  <a
+                    href={r.next[1].href}
+                    data-testid={`now-${r.key}-extra`}
+                    className={`${FOCUS} now-extra min-h-14 w-full min-w-0 items-center gap-3 rounded-control border-2 border-border bg-surface px-3 py-1 text-ink`}
+                  >
+                    <span className="flex min-w-0 flex-1 flex-col">
+                      <span className="truncate text-base font-bold">{r.next[1].title}</span>
+                      <span className="truncate text-sm text-ink-muted">{r.next[1].detail}</span>
+                    </span>
+                    <ChevronRight aria-hidden="true" className="size-6 shrink-0" />
+                  </a>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+    ) : null;
+
+  const grid = (
     <ul
       aria-label={t("tasksLabel")}
       style={gridStyle}
@@ -326,5 +405,12 @@ export async function TaskMenu({ slug, allowed, myTasks }: TaskMenuProps) {
     >
       {items}
     </ul>
+  );
+  if (!twoCol) return grid;
+  return (
+    <div className="task-menu task-menu-2col flex min-w-0 flex-col gap-2">
+      {nowCard}
+      {grid}
+    </div>
   );
 }

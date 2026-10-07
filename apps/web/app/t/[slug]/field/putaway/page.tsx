@@ -41,7 +41,7 @@ export default async function FieldPutawayPage({ params, searchParams }: { param
   const call = { db, principal, tenantSlug: slug };
   const icon = <MapPinned aria-hidden="true" className="size-6" />;
   const message = (title: string, body: string, href: string, label: string, help = false) => (
-    <FlowShell hue="teal" icon={icon} step={1} total={4} title={title} backHref={href} footer={<PrimaryLink href={href}>{label}</PrimaryLink>}>
+    <FlowShell hue="teal" icon={icon} title={title} backHref={href} footer={<PrimaryLink href={href}>{label}</PrimaryLink>}>
       <p className="break-words text-lg text-ink" data-testid="putaway-message">
         {body}
       </p>
@@ -64,7 +64,7 @@ export default async function FieldPutawayPage({ params, searchParams }: { param
   const current = summary.memberships.find((m) => m.slug === slug);
   if (current === undefined) notFound();
   const roles = current.roles;
-  if (!hasPermission(roles, "stock.post")) return message(t("flow.lockedTitle"), t("flow.lockedReason"), fieldHome, t("flow.toField"), true);
+  if (!hasPermission(roles, "stock.post")) return message(t("putaway.lockedTitle"), t("putaway.lockedReason"), fieldHome, t("flow.toField"), true);
 
   const taskId = first(sp.task);
   if (taskId !== undefined && taskId !== "") {

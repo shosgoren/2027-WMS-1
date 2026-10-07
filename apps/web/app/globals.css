@@ -215,13 +215,98 @@ html {
     grid-row: var(--row);
   }
 
-  /* 6+ izinli iş (DESIGN_REVIEW §7.4): eşit 2 sütun; satırlar 88-140 px (kısa ekranda 72 px alt sınır), ızgara alta yaslı; tek sayıda iş varsa
-     en üstteki son döşeme tam genişlik (`--col: 1 / -1`). Döşeme aynı biçemde (ikon dairesi + başlık), açıklama ve şevron gizli. */
+  /* Ana ekran kabı: ızgara (ve 2 sütunda "Şimdi" kartı) kalan alanı paylaşır. */
+  .task-menu {
+    flex: 1 1 0%;
+    min-height: 0;
+  }
+
+  .task-menu.task-menu-2col {
+    justify-content: flex-end;
+  }
+
+  /* Kalan dikey alan "Şimdi" kartı ile ızgara arasında EŞİT paylaşılır (otomatik üst boşluklar): tek büyük boş bant yerine iki küçük aralık; ızgara alta yaslı kalır. */
+  /* İkinci sıradaki iş satırı yalnız yüksek ekranda (≥ 880 px) görünür: yer varsa GERÇEK ek bilgi gösterilir (dolgu değil; veri yoksa satır hiç yoktur). */
+  .now-extra {
+    display: none;
+  }
+
+  @media (min-height: 880px) {
+    .now-extra {
+      display: flex;
+    }
+  }
+
+  /* "Şimdi" kartı görünür yüksekliğe göre sığar (gerçek veri, yalnız sunum): < 800 px yükseklikte kompakt (başlık ve "Sıradaki" satırı yok; iki bağlantı alt alta, 48 px);
+     ≥ 800 px tam kart; ≥ 880 px ikinci sıradaki iş satırı da. */
+  @media (max-height: 799px) {
+    .now-card {
+      gap: 0;
+      padding: 0.5rem;
+    }
+
+    .now-card .now-title,
+    .now-card .now-next {
+      display: none;
+    }
+
+    .now-card .now-list {
+      gap: 0.25rem;
+    }
+
+    .now-card .now-list > li > a:first-child {
+      min-height: 3rem;
+      padding-block: 0;
+      gap: 0.5rem;
+    }
+
+    .now-card .now-list > li > a:first-child > span:first-child {
+      width: 2rem;
+      height: 2rem;
+      font-size: 1rem;
+    }
+  }
+
+  /* < 700 px yükseklik: iki bağlantı yan yana, tek satır kısa etiket + sayı rozeti (sayı gerçek veri). */
+  @media (max-height: 699px) {
+    .now-card {
+      padding: 0.25rem;
+    }
+
+    .now-card .now-list {
+      flex-direction: row;
+    }
+
+    .now-card .now-list > li {
+      flex: 1 1 0%;
+      min-width: 0;
+    }
+
+    .now-card .now-long {
+      display: none;
+    }
+
+    .now-card .now-short {
+      display: block;
+    }
+
+    .now-card .now-list > li > a:first-child > svg {
+      display: none;
+    }
+  }
+
+  .task-menu.task-menu-2col > .now-card,
+  .task-menu.task-menu-2col > .task-grid {
+    margin-top: auto;
+  }
+
+  /* 6+ izinli iş (DESIGN_REVIEW §7.4, §7.4.1 SIKI): eşit 2 sütun; döşeme yüksekliği İÇERİKTEN gelir (ızgara alanı doldurmak için uzatmaz, ikon büyümez):
+     satırlar eşit (en yüksek içeriğe göre), alta yaslı; tek sayıda iş varsa en üstteki son döşeme tam genişlik (`--col: 1 / -1`).
+     Kalan dikey alan dolgu ile değil gerçek bilgiyle ("Şimdi" kartı, §7.4.2) kullanılır. */
   .task-grid.task-grid-2col {
+    flex: 0 0 auto;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    /* Satır tavanı = döşeme genişliği (en çok kare, DESIGN_REVIEW §7.4.1): (görünüm genişliği − 1.5rem kenar boşluğu (phone:px-3 × 2) − 0.5rem aralık) / 2. */
-    grid-template-rows: auto repeat(var(--rows), minmax(4.5rem, calc((100dvw - 2rem) / 2)));
-    align-content: end;
+    grid-template-rows: auto repeat(var(--rows), 1fr);
     min-height: 0;
   }
 
@@ -229,63 +314,50 @@ html {
     grid-column: 1 / -1;
   }
 
-  /* 2 sütunda üst düğme biraz daha yüksek (56 px, başparmak için rahat); boşluk oranı hesabında düğme alanı içeriktir. */
-  .task-grid.task-grid-2col > .top-rows > button {
-    min-height: 3.5rem;
-  }
-
   .task-grid.task-grid-2col > .task-item {
     grid-column: var(--col);
   }
 
-  /* Döşeme içeriği döşeme yüksekliğine göre ÖLÇEKLENİR (DESIGN_REVIEW §7.4.1, D-04b): ikon dairesi kalan yüksekliği doldurur (aralık ≤ 24 px),
-     başlık ve açıklama döşemeye göre büyür. Döşeme 140 px'i yalnızca açıklama (gerçek içerik) görünürken aşar; ≤ 140 px'te açıklama gizlidir. */
   .task-grid.task-grid-2col .task-tile {
-    container-type: size;
-    container-name: tile;
     flex-direction: column;
     align-items: flex-start;
     justify-content: flex-start;
-    gap: 0.5rem;
+    gap: 0.25rem;
     padding: 0.75rem;
   }
 
+  /* İkon dairesi SABİT boyutta ve tüm döşemelerde eşit (3 rem); flex/yüzde ile büyümez. */
   .task-grid.task-grid-2col .tile-badge {
-    flex: 1 1 0;
-    width: auto;
-    height: auto;
-    min-height: 2.5rem;
-    max-height: 7rem;
-    aspect-ratio: 1;
+    flex: none;
+    width: 3rem;
+    height: 3rem;
+  }
+
+  .task-grid.task-grid-2col .tile-badge svg {
+    width: 1.5rem;
+    height: 1.5rem;
   }
 
   .task-grid.task-grid-2col .tile-body {
     flex: none;
     width: 100%;
-    gap: 0.25rem;
+    gap: 0.125rem;
   }
 
+  /* Başlık: sabit boy (yalnız görünüm genişliğine bağlı), en çok 2 satır; açıklama: TEK satır, kesilmez (sığmayan metin çeviri anahtarında kısaltılır). */
   .task-grid.task-grid-2col .tile-title {
-    font-size: clamp(1rem, 10.5cqh, 1.375rem);
-    line-height: 1.15;
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    overflow: hidden;
+    font-size: 0.9375rem;
+    line-height: 1.2;
+    display: block;
   }
 
   .task-grid.task-grid-2col .tile-desc {
-    display: none;
-    font-size: clamp(0.8125rem, 7.8cqh, 1rem);
-    line-height: 1.25;
-  }
-
-  /* Kapsayıcı sorgusu İÇERİK kutusunu ölçer: döşeme 140,5 px ⇒ içerik 112,5 px (kenarlık 2×2 + dolgu 2×12 = 28 px). */
-  @container tile (min-height: 112.5px) {
-    .task-grid.task-grid-2col .tile-desc {
-      display: -webkit-box;
-      -webkit-line-clamp: 2;
-    }
+    display: block;
+    font-size: 0.875rem;
+    line-height: 1.2;
+    white-space: nowrap;
+    overflow: visible;
+    color: var(--color-ink-muted);
   }
 
   .task-grid.task-grid-2col .tile-chevron {

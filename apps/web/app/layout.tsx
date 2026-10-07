@@ -90,19 +90,15 @@ export default async function RootLayout({ children }: Readonly<{ children: Reac
                 </div>
               </form>
 
-              <div
-                role="group"
-                aria-label={t("userChip.label")}
-                className={`${TOUCH} flex items-center gap-2 rounded-full border-2 border-border px-1 pr-3`}
-              >
-                <span
-                  aria-hidden="true"
-                  className="flex size-10 items-center justify-center rounded-full bg-accent-soft text-sm font-bold text-accent-ink"
-                >
-                  {t("userChip.placeholderInitials")}
-                </span>
-                <span className="hidden text-sm font-semibold sm:inline">{t("userChip.placeholderName")}</span>
-              </div>
+              {/* Oturum varken kullanıcı adı alt çubukta ("Giriş yapan: …") gösterilir; sabit "Oturum yok" rozeti yalnızca oturum YOKKEN çizilir (T-280, B4). */}
+              {hasSession ? null : (
+                <div role="group" aria-label={t("userChip.label")} className={`${TOUCH} flex items-center gap-2 rounded-full border-2 border-border px-1 pr-3`}>
+                  <span aria-hidden="true" className="flex size-10 items-center justify-center rounded-full bg-accent-soft text-sm font-bold text-accent-ink">
+                    {t("userChip.placeholderInitials")}
+                  </span>
+                  <span className="hidden text-sm font-semibold sm:inline">{t("userChip.placeholderName")}</span>
+                </div>
+              )}
 
               {hasSession ? <SignOutButton /> : null}
 

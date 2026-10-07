@@ -43,14 +43,18 @@ export function PrimaryLink({ href, children }: { href: string; children: React.
     </Link>
   );
 }
-export function SecondaryButton({ children, onClick, disabled, pressed }: { children: React.ReactNode; onClick: () => void; disabled?: boolean; pressed?: boolean }) {
+const PRESSED: Record<FlowHue, string> = {
+  green: "aria-pressed:border-cat-green-ink aria-pressed:bg-cat-green-bg aria-pressed:text-cat-green-ink",
+  teal: "aria-pressed:border-cat-teal-ink aria-pressed:bg-cat-teal-bg aria-pressed:text-cat-teal-ink",
+};
+export function SecondaryButton({ children, onClick, disabled, pressed, tone }: { children: React.ReactNode; onClick: () => void; disabled?: boolean; pressed?: boolean; tone?: FlowHue }) {
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={disabled}
       aria-pressed={pressed}
-      className={`flex min-h-12 min-w-12 items-center justify-center rounded-control border-2 border-border-strong bg-surface px-4 text-base font-bold text-ink aria-pressed:bg-accent-soft ${FOCUS}`}
+      className={`flex min-h-12 min-w-12 items-center justify-center rounded-control border-2 border-border-strong bg-surface px-4 text-base font-bold text-ink ${tone === undefined ? "aria-pressed:bg-accent-soft" : PRESSED[tone]} ${FOCUS}`}
     >
       {children}
     </button>
@@ -66,8 +70,9 @@ const ArrowLeft = () => (
 export interface FlowShellProps {
   hue: FlowHue;
   icon: React.ReactNode;
-  step: number;
-  total: number;
+  /** Adım numarası/sayısı; hata, kilit ve boş durum ekranlarında verilmez (yanlış sayı gösterilmez). */
+  step?: number;
+  total?: number;
   title: string;
   instruction?: string;
   /** Geri: ya bağlantı ya işlev; yoksa gösterilmez. */
@@ -89,7 +94,7 @@ export function FlowShell({ hue, icon, step, total, title, instruction, backHref
     <main
       className={`group flex min-h-[calc(100dvh-8.25rem)] w-full min-w-0 flex-col gap-3 px-4 pt-3 ${footerExtra === undefined ? "pb-24" : "pb-44"} ${scanProxy === true ? "[&_[data-mode=scan]]:hidden" : ""}`}
       data-testid="flow-step"
-      data-step={step}
+      data-step={step ?? 0}
     >
       <header className="flex min-w-0 items-center gap-3">
         {backHref !== undefined ? (
@@ -105,9 +110,11 @@ export function FlowShell({ hue, icon, step, total, title, instruction, backHref
           {icon}
         </span>
         <div className="flex min-w-0 flex-col">
-          <p className="text-xs font-bold text-ink-muted" data-testid="step-label">
-            {t("stepOf", { n: step, total })}
-          </p>
+          {step === undefined || total === undefined ? null : (
+            <p className="text-xs font-bold text-ink-muted" data-testid="step-label">
+              {t("stepOf", { n: step, total })}
+            </p>
+          )}
           <h1 className="break-words text-xl font-extrabold leading-tight text-ink">{title}</h1>
         </div>
       </header>
@@ -160,7 +167,7 @@ export function ScanAlert({ title, reason, action, code, onClose }: { title: str
 export function QtyStepper({ label, value, min, max, onChange }: { label: string; value: number; min: number; max: number | null; onChange: (n: number) => void }) {
   const inputId = useId();
   const clamp = (n: number): number => Math.min(max ?? 999_999_999, Math.max(min, n));
-  const btn = `flex size-14 [@media(max-height:700px)]:size-12 shrink-0 items-center justify-center rounded-control border-2 border-border-strong bg-surface text-3xl font-bold text-ink disabled:opacity-40 ${FOCUS}`;
+  const btn = `flex size-12 shrink-0 items-center justify-center rounded-control border-2 border-border-strong bg-surface text-3xl font-bold text-ink disabled:opacity-40 ${FOCUS}`;
   return (
     <div className="flex min-w-0 flex-col gap-1">
       <label className="text-base font-semibold text-ink" htmlFor={inputId}>
@@ -180,7 +187,7 @@ export function QtyStepper({ label, value, min, max, onChange }: { label: string
             const d = e.target.value.replace(/\D/g, "").slice(0, 9);
             onChange(clamp(d === "" ? min : Number(d)));
           }}
-          className={`min-h-14 [@media(max-height:700px)]:min-h-12 w-full min-w-0 flex-1 rounded-card border-2 border-border-strong bg-surface px-2 text-center text-3xl font-extrabold text-ink ${FOCUS}`}
+          className={`min-h-12 w-full min-w-0 flex-1 rounded-card border-2 border-border-strong bg-surface px-2 text-center text-2xl font-extrabold text-ink ${FOCUS}`}
         />
         <button type="button" aria-label={`${label} +`} disabled={max !== null && value >= max} onClick={() => onChange(clamp(value + 1))} className={btn}>
           <span aria-hidden="true">+</span>
@@ -194,8 +201,11 @@ export function QtyStepper({ label, value, min, max, onChange }: { label: string
  * Tarama kaynakları: klavye kaması (DataWedge) ve kamera servis arkasındadır (ADR-010); etkin ekran tek dinleyicidir. `enabled=false` iken tarama iletilmez.
  * `camera(code)` kamera okumasını aynı servis yoluyla (`source: "camera"`) iletir.
  */
-export function useScanner(handler: (value: string, source: ScanSource) => void, enabled: boolean): { service: ScannerService | null; camera: (code: string) => void } {
+export function useScanner(handler: (value: string, source: ScanSource) => void, enabled: boolean): { service: ScannerService | null; camera: (code: string) => void; dropped: boolean; clearDropped: () => void } {
   const [service, setService] = useState<ScannerService | null>(null);
+  const [dropped, setDropped] = useState(false);
+  const enabledRef = useRef(enabled);
+  enabledRef.current = enabled;
   const ref = useRef(handler);
   ref.current = handler;
   const cameraEmit = useRef<((v: string) => void) | null>(null);
@@ -216,8 +226,16 @@ export function useScanner(handler: (value: string, source: ScanSource) => void,
   }, []);
   const stable = useCallback((v: string, src: ScanSource) => ref.current(v, src), []);
   useEffect(() => (service !== null && enabled ? service.onScan(stable) : undefined), [service, enabled, stable]);
-  const camera = useCallback((code: string) => cameraEmit.current?.(code), []);
-  return { service, camera };
+  // Okuma kapalıyken (işlem sürüyor ya da uyarı açık) gelen kamera kodu SESSİZCE düşmez: kullanıcıya bildirilir (T-313 güvenlik MINOR).
+  const camera = useCallback((code: string) => {
+    if (!enabledRef.current) {
+      setDropped(true);
+      return;
+    }
+    cameraEmit.current?.(code);
+  }, []);
+  const clearDropped = useCallback(() => setDropped(false), []);
+  return { service, camera, dropped, clearDropped };
 }
 
 interface BarcodeDetectorLike {
@@ -243,6 +261,7 @@ export function CameraOverlay({ onCode, onClose }: { onCode: (code: string) => v
     let stream: MediaStream | null = null;
     let timer: ReturnType<typeof setInterval> | null = null;
     let stopped = false;
+    let sent = false;
     const detector = new Ctor({ formats: ["ean_13", "ean_8", "code_128", "code_39", "qr_code", "data_matrix", "upc_a"] });
     navigator.mediaDevices
       .getUserMedia({ video: { facingMode: "environment" }, audio: false })
@@ -261,7 +280,13 @@ export function CameraOverlay({ onCode, onClose }: { onCode: (code: string) => v
             .detect(v)
             .then((found) => {
               const raw = found[0]?.rawValue;
-              if (raw !== undefined && raw !== "" && !stopped) onCode(raw);
+              // Tek uçuş kilidi: ilk okumadan sonra akış ve zamanlayıcı DURDURULUR; aynı kod ikinci kez gönderilemez (250 ms aralıklı çift okuma kapalı).
+              if (raw === undefined || raw === "" || stopped || sent) return;
+              sent = true;
+              stopped = true;
+              if (timer !== null) clearInterval(timer);
+              if (stream !== null) for (const tr of stream.getTracks()) tr.stop();
+              onCode(raw);
             })
             .catch(() => undefined);
         }, 250);
@@ -296,9 +321,9 @@ export function ScanPanel({ service, prompt, last, ready }: { service: ScannerSe
       data-testid="scan-panel"
       data-ready={ready ? "true" : "false"}
       aria-live="polite"
-      className={`flex min-h-44 min-w-0 flex-1 flex-col items-center justify-center gap-3 rounded-card border-2 border-dashed bg-surface p-4 text-center ${ready ? "border-accent" : "border-border"}`}
+      className={`flex min-w-0 flex-none flex-col items-center gap-2 rounded-card border-2 bg-surface p-4 text-center ${ready ? "border-accent" : "border-border"}`}
     >
-      <ScanLine aria-hidden="true" className="size-20 text-accent-ink" strokeWidth={1.75} />
+      <ScanLine aria-hidden="true" className="size-16 text-accent-ink" strokeWidth={1.75} />
       <p className="break-words text-lg font-bold text-ink">{ready ? t("flow.readerReady") : prompt}</p>
       {last === "" ? null : <p className="break-all text-sm text-ink-muted">{t("flow.lastScan", { code: last })}</p>}
       <div ref={wrap} className="w-full min-w-0">
@@ -342,6 +367,20 @@ export function useScanPrimary(camera: (code: string) => void): { ready: boolean
     }
   };
   return { ready, press, overlay: cam ? <CameraOverlay onCode={onCode} onClose={() => setCam(false)} /> : null };
+}
+
+/** Okuma kapalıyken gelen kod bildirimi (uyarı açıkken de görünür: üstte, `z-[60]`). */
+export function DroppedNotice({ show, onClose }: { show: boolean; onClose: () => void }) {
+  const t = useTranslations("receiving");
+  if (!show) return null;
+  return (
+    <div role="alert" data-testid="camera-dropped" className="fixed inset-x-4 top-16 z-[60] mx-auto flex max-w-md items-center gap-3 rounded-card border-2 border-warning bg-warning-bg px-4 py-3 text-warning-ink shadow-card">
+      <p className="min-w-0 flex-1 break-words text-base font-bold">{t("camera.dropped")}</p>
+      <button type="button" onClick={onClose} className={`flex min-h-12 min-w-12 shrink-0 items-center justify-center rounded-control border-2 border-warning-ink px-3 text-base font-bold ${FOCUS}`}>
+        {t("camera.ok")}
+      </button>
+    </div>
+  );
 }
 
 export interface AlertState {
@@ -436,7 +475,7 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
     },
     [busy, alert, slug, stage, picked, receipt],
   );
-  const { service: scanner, camera } = useScanner((v) => void onScanned(v), stage !== "done" && alert === null && !busy);
+  const { service: scanner, camera, dropped, clearDropped } = useScanner((v) => void onScanned(v), stage !== "done" && alert === null && !busy);
   const scanPrimary = useScanPrimary(camera);
 
   async function confirm() {
@@ -474,8 +513,10 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
     startTransition(() => router.refresh());
   }
 
-  const alertView =
-    alert === null ? null : (
+  const alertView = (
+    <>
+      <DroppedNotice show={dropped} onClose={clearDropped} />
+      {alert === null ? null : (
       <ScanAlert
         title={t(alert.titleKey)}
         reason={t(`errors.${alert.reasonKey}`, { remaining: "-" })}
@@ -483,7 +524,9 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
         {...(alert.code === undefined ? {} : { code: alert.code })}
         onClose={() => setAlert(null)}
       />
-    );
+      )}
+    </>
+  );
 
   const icon = <PackagePlus aria-hidden="true" className="size-6" />;
 
@@ -550,11 +593,12 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
             receipt.receivingLocations.length > 1 ? (
               <fieldset className="m-0 flex min-w-0 flex-col gap-1 border-0 p-0" data-testid="rack-choice">
                 <legend className="sr-only">{t("flow.rackLabel")}</legend>
-                <p className="text-sm font-bold text-ink-muted [@media(max-height:700px)]:hidden">{t("flow.rackLabel")}</p>
-                <div className="flex min-w-0 flex-wrap gap-2">
+                <p className="text-sm font-bold text-ink-muted">{t("flow.rackLabel")}</p>
+                <div className="flex min-w-0 gap-2 overflow-x-auto" data-testid="rack-chips">
                   {receipt.receivingLocations.map((l) => (
                     <SecondaryButton
                       key={l.id}
+                      tone="green"
                       pressed={picked.locationId === l.id}
                       onClick={() => {
                         holder.contentChanged();
@@ -640,7 +684,6 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
         step={2}
         total={4}
         title={t("flow.scanTitle")}
-        instruction={t("flow.scanInstruction")}
         backHref={base}
         scanProxy
         footer={<PrimaryButton onClick={scanPrimary.press}>{t("flow.scanNow")}</PrimaryButton>}

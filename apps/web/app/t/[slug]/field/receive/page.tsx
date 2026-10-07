@@ -51,7 +51,7 @@ export default async function FieldReceivePage({ params, searchParams }: { param
   const roles = current.roles;
   if (!hasPermission(roles, "stock.post")) {
     return (
-      <FlowShell hue="green" icon={icon} step={1} total={4} title={t("flow.lockedTitle")} backHref={fieldHome} footer={<PrimaryLink href={fieldHome}>{t("flow.toField")}</PrimaryLink>}>
+      <FlowShell hue="green" icon={icon} title={t("flow.lockedTitle")} backHref={fieldHome} footer={<PrimaryLink href={fieldHome}>{t("flow.toField")}</PrimaryLink>}>
         <p className="break-words text-lg text-ink" data-testid="receive-locked">
           {t("flow.lockedReason")}
         </p>
@@ -82,7 +82,7 @@ export default async function FieldReceivePage({ params, searchParams }: { param
     // KAPALI teslim (son kalem alındı) de akışa gider: akış "Teslim tamam" ekranını gösterir; yenilemeden sonra "kaydedildi" ekranı kaybolmaz.
     if (receipt === null || (receipt.status !== "OPEN" && receipt.status !== "CLOSED")) {
       return (
-        <FlowShell hue="green" icon={icon} step={1} total={4} title={t("flow.notOpenTitle")} backHref={base} footer={<PrimaryLink href={base}>{t("flow.otherReceipt")}</PrimaryLink>}>
+        <FlowShell hue="green" icon={icon} title={t("flow.notOpenTitle")} backHref={base} footer={<PrimaryLink href={base}>{t("flow.otherReceipt")}</PrimaryLink>}>
           <p className="break-words text-lg text-ink">{t("flow.notOpen")}</p>
         </FlowShell>
       );

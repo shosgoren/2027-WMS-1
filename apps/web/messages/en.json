@@ -453,52 +453,76 @@
     "tasks": {
       "members": {
         "title": "Manage my team",
-        "description": "Decide who can do which tasks"
+        "description": "Decide who can do which tasks",
+        "short": "Team and roles"
       },
       "settings": {
         "title": "Settings",
-        "description": "Name, language and time zone"
+        "description": "Name, language and time zone",
+        "short": "Name, language"
       },
       "audit": {
         "title": "Who did what?",
-        "description": "Audit log"
+        "description": "See who did what",
+        "short": "Recent actions"
       },
       "items": {
         "title": "My products",
-        "description": "Product card, units and barcodes"
+        "description": "Product card, units and barcodes",
+        "short": "Items, barcodes"
       },
       "receive": {
         "title": "Goods arrived",
-        "description": "Count and record incoming goods"
+        "description": "Count and record incoming goods",
+        "short": "Count incoming",
+        "tile": "Receiving"
       },
       "issue": {
         "title": "Goods are going out",
-        "description": "Record outgoing goods"
+        "description": "Record outgoing goods",
+        "short": "Record outgoing"
       },
       "transfer": {
         "title": "Move goods to another warehouse",
-        "description": "Transfer between warehouses"
+        "description": "Transfer between warehouses",
+        "short": "Between depots"
       },
       "count": {
         "title": "Count a shelf",
-        "description": "Count the items on a shelf one by one"
+        "description": "Count the items on a shelf one by one",
+        "short": "Count a rack"
       },
       "lookup": {
         "title": "Where is a product, how many?",
-        "description": "See stock and shelf information"
+        "description": "See stock and shelf information",
+        "short": "Check stock"
       },
       "undo": {
         "title": "I made a mistake",
-        "description": "Let's fix the wrong record together"
+        "description": "Let's fix the wrong record together",
+        "short": "Fix a mistake"
       },
       "warehouses": {
         "title": "Warehouses and racks",
-        "description": "Manage warehouses and rack layout"
+        "description": "Manage warehouses and rack layout",
+        "short": "Rack layout"
       }
     },
     "today": {
       "title": "What you did today",
       "empty": "You have not done anything yet today. What you do will appear here."
+    },
+    "now": {
+      "title": "To do now",
+      "empty": "Nothing is waiting",
+      "receive": "{count} deliveries waiting to be received",
+      "putaway": "{count} items waiting to be put away",
+      "receiveShort": "Receiving",
+      "putawayShort": "Put away",
+      "next": "Next: {title} · {detail}",
+      "lines": "{n} lines",
+      "qty": "{n} units",
+      "taskFallback": "Putaway task"
     }
   },
   "audit": {
@@ -1375,7 +1399,7 @@
       "verify": "Item you scanned:",
       "received": "Arrived ({unit})",
       "damagedLabel": "Damaged count",
-      "hasDamaged": "Some are damaged",
+      "hasDamaged": "Add damaged",
       "rackLabel": "Receiving rack",
       "rackAuto": "Receiving rack: {name}",
       "confirm": "Receive",
@@ -1385,7 +1409,7 @@
       "savedRemaining": "Remaining: {n}",
       "receiptDone": "Delivery complete",
       "openStays": "Missing items stay open.",
-      "nextItem": "Next item",
+      "nextItem": "Go to next item",
       "allDone": "Every item in this delivery was received.",
       "noLocationTitle": "No receiving rack",
       "noLocation": "This warehouse has no receiving rack.",
@@ -1427,12 +1451,16 @@
       "warehouseInstruction": "Pick the warehouse you work in.",
       "sourcePrompt": "Scan the label of the rack you took goods from.",
       "itemPrompt": "Scan the barcode of the item in your hand.",
-      "targetPrompt": "Scan the label of the rack to put it on."
+      "targetPrompt": "Scan the label of the rack to put it on.",
+      "lockedTitle": "Putting away is closed to you",
+      "lockedReason": "You cannot put goods away. Tell your manager or call for help."
     },
     "camera": {
       "title": "Camera",
       "hint": "Bring the barcode into the frame.",
-      "failed": "The camera could not be opened. Use the reader trigger or type the barcode."
+      "failed": "The camera could not be opened. Use the reader trigger or type the barcode.",
+      "dropped": "A code was read but reading was off. Scan the code again.",
+      "ok": "OK"
     }
   }
 }
