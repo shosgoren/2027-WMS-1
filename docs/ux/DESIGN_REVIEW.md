@@ -98,7 +98,7 @@ Ekranlar: saha kabulü (`/field/receive`: teslim seç → ürün okut → miktar
 | R-08 | Düz Türkçe | Tüm görünür metin (TR) | Cümle ≤ 15 kelime, düğme ≤ 3 kelime ve fiille başlar, teknik terim ("SKU", "FIFO", "RLS") yok | 1–2 sapma | ≥ 3 sapma |
 | R-09 | Hata gösterimi | Sunucu reddi (`OVER_RECEIPT`, `SCAN_MISMATCH`, `LOCATION_LOCKED`, `FORBIDDEN`, ağ) | Neden + sonraki eylem cümlesi + "Ayrıntı" altında kod; hata `aria-live` ile okunur; alan kuralı UI'da yeniden yazılmamış | kod ya da eylem eksik | ham hata, kod yok ya da hata yutuluyor |
 | R-10 | Dokunuş bütçesi (N-16) | e2e `pointerdown` sayacı; tarama dokunuş değildir; akış başlangıcı = akış ekranı açık | Kabul (teslim seçili, tam miktar) ≤ 3; yerleştirme (görev ya da serbest, tam miktar) ≤ 3; teslim seçme ≤ +1 | +1 aşım | > +1 aşım |
-| R-11 | Büyük liste | Teslim/satır listesi | TanStack Virtual, liste içi dikey kaydırma, kart görünümü (tablo yok), keyset "daha fazla" | virtualizer var ama kaydırma sayfaya taşıyor | tüm satırlar DOM'da |
+| R-11 | Sayfalı liste | Teslim/satır listesi | Liste sayfalıdır (≤50 satır/sayfa, keyset "daha fazla"), kart görünümü (tablo yok); sanallaştırma 200+ satırlık tek sayfa gerekince (takip kartı) | sayfa 51–100 satır | sayfa > 100 satır ya da OFFSET/tümünü yükleme |
 | R-12 | Durum yalnız renk değil | Satır durumu (beklenen/kabul/hasarlı/açık) ve sonuç | Her durum ikon + metin + renk; beklenen ve kabul sayıları görünür | 1 durum yalnız renk | ≥ 2 |
 | R-13 | Sonuç ve sıradaki iş | Kayıttan sonra ekran | "Kaydedildi" onayı (kabul/hasarlı/açık sayıları ile) + tek birincil "Sıradaki" düğmesi; çift gönderim engelli (gönderirken düğme kapalı) | onay var, sonraki yok | sessiz başarı ya da çift gönderim mümkün |
 | R-14 | Yetki ve kilit | Yetkisiz kullanıcı (kalite onayı `document.approve` yok; saha `stock.view`/`stock.adjust` yok) | Gizlenmez; kilitli + gerekçe cümlesi + "Yardım çağır" yolu; sunucu `FORBIDDEN`'ı da gösterilir | kilit var, gerekçe yok | gizli ya da tıklanınca sessiz hata |
@@ -118,3 +118,5 @@ Ayrı denetçi puanı ve Supervisor'ın kullanıcıya görüntü gösterimi birl
 ### 7.3 Geçmiş
 
 Bu bölüm önce ölçütleri yazar; uygulama sonrası ölçüm özeti ve denetçi puanı buraya eklenir (ölçüt metinleri değişmez).
+
+**R-11 revizyonu (ekran görüntüsünden önce, ayrı commit).** İlk metin "TanStack Virtual, liste içi kaydırma" istiyordu. Gerekçe: `@tanstack/react-virtual` kurulu değil ve yeni bağımlılık eklenmeyecek (Supervisor kararı 2026-10-07); teslim listesi keyset ile ≤50 satır/sayfa getirilir, bu boyutta sanallaştırma gerekmez (T-274 aynı sonuca vardı). Sanallaştırma 200+ satırlık tek sayfa gerektiğinde takip kartıdır. Diğer ölçütler değişmedi; görüntü henüz üretilmedi.
