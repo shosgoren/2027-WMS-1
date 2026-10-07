@@ -531,9 +531,13 @@ describe("MAJOR-2: son denetimde geçici hata kalıcı sayılır; askıdaki kira
       expect((await docRow(d.id)).posting_job_id).not.toBeNull(); // yazım yapılamadı
       await sweepExpiredPostingJobsOnWorker({ workerDb, db: app, logger: silent });
       expect((await docRow(d.id)).posting_job_id).not.toBeNull(); // askıdayken ertelenir
+      const o = ((await q<{ output: { finalizeAttempts?: number } }>("SELECT output FROM pgboss.job WHERE id = $1", [jobId]))[0] as { output: { finalizeAttempts?: number } }).output;
+      expect(o.finalizeAttempts).toBe(1); // geri çekilme işaretlendi
     } finally {
       await q("UPDATE public.tenants SET status = 'ACTIVE' WHERE id = $1", [A.tenantId]);
     }
+    // Geri çekilme süresi dolmuş say (5 dk beklemeden): kiracı açıkken bir sonraki tur sonlandırır.
+    await q("UPDATE pgboss.job SET output = jsonb_set(output, '{nextFinalizeAt}', to_jsonb(now() - interval '1 minute')) WHERE id = $1", [jobId]);
     await sweepExpiredPostingJobsOnWorker({ workerDb, db: app, logger: silent });
     expect(await docRow(d.id)).toMatchObject({ status: "APPROVED", posting_job_id: null });
     expect((await idemOf(key))[0]).toMatchObject({ status: "FAILED", error_code: "INTERNAL" });
@@ -611,11 +615,11 @@ describe("MAJOR-1: MFA (TENANT_ADMIN istek sahibi) — worker MFA'yı yalnızca 
 
   it("pencere dışı damga (süresi dolmuş) kalıcı FORBIDDEN/MFA_REQUIRED", async () => {
     const { d, key } = await adminRequest(true);
-    await q("UPDATE public.documents SET posting_mfa_verified_at = now() - interval '2 hours' WHERE id = $1", [d.id]);
+    await q("UPDATE public.documents SET posting_mfa_verified_at = now() - interval '4 hours' WHERE id = $1", [d.id]);
     await failedWith(d, key, "FORBIDDEN/MFA_REQUIRED");
   }, 120_000);
 
-  it("kayıt kimliği belgedeki posting_idempotency_record_id ile uyuşmazsa iş reddedilir (IDEMPOTENCY_MISMATCH); stok etkisi yok", async () => {
+  it("kayıt kimliği belgedeki posting_idempotency_record_id ile uyuşmazsa iş reddedilir; belge serbest kalır ama yükteki kayıt FAILED yapılmaz (MINOR-5)", async () => {
     // PICKER: MFA aranmaz, böylece ret doğrudan kayıt kimliği denetiminden gelir.
     const x = await mkItem();
     const loc = await mkLoc();
@@ -623,8 +627,90 @@ describe("MAJOR-1: MFA (TENANT_ADMIN istek sahibi) — worker MFA'yı yalnızca 
     const key = uuid();
     await requestPost(d, pickerP(key));
     await q("UPDATE public.documents SET posting_idempotency_record_id = $2 WHERE id = $1", [d.id, uuid()]);
-    await failedWith(d, key, "IDEMPOTENCY_MISMATCH");
+    await newWorker();
+    await waitFor(async () => (await docRow(d.id)).posting_job_id === null, "document released");
+    await waitFor(async () => (await jobsOf(d.id))[0]?.state === "failed", "job failed (kalıcı)");
+    expect(await docRow(d.id)).toMatchObject({ status: "APPROVED" });
+    expect(await ledgerOf(d.id)).toHaveLength(0);
+    expect((await idemOf(key))[0]).toMatchObject({ status: "IN_PROGRESS" }); // başka isteğin kaydı olabilir: dokunulmaz
   }, 120_000);
+});
+
+describe("bakım taraması açlık önlemi (doğrulama incelemesi MAJOR-1)", () => {
+  const insertFailedJobs = async (tenantId: string, n: number, completedAgo: string): Promise<string[]> => {
+    const ids: string[] = [];
+    for (let i = 0; i < n; i++) {
+      const id = uuid();
+      ids.push(id);
+      await q(
+        `INSERT INTO pgboss.job (id, name, data, state, completed_on) VALUES ($1, 'stock.document.post', $2::jsonb, 'failed', now() - $3::interval)`,
+        [id, JSON.stringify({ v: 1, tenantId, actorUserId: uuid(), payload: { documentId: uuid(), idempotencyRecordId: uuid() } }), completedAgo],
+      );
+    }
+    return ids;
+  };
+  const outputOf = async (id: string) =>
+    ((await q<{ output: { finalized?: boolean; skipped?: string; finalizeAttempts?: number; nextFinalizeAt?: string } | null }>("SELECT output FROM pgboss.job WHERE id = $1", [id]))[0] as {
+      output: { finalized?: boolean; skipped?: string; finalizeAttempts?: number; nextFinalizeAt?: string } | null;
+    }).output;
+
+  it("60 ertelenen iş (askıdaki kiracı) + başka kiracıdan 1 sonlandırılabilir iş: ilk turda sonlandırılır; ertelenenler geri çekilmeyle taranmaz; yeni (denenmemiş) iş öne geçer", async () => {
+    const B = await seedWorld(adm, reg, "B222");
+    const x = await mkItem();
+    const loc = await mkLoc();
+    const d = await mkApproved("STOCK_IN", many(250, () => ln(x, { targetLocationId: loc })));
+    const key = uuid();
+    await requestPost(d, pickerP(key));
+    const jobId = (await jobsOf(d.id))[0]?.id;
+    await q("UPDATE pgboss.job SET state = 'failed', completed_on = now() WHERE id = $1", [jobId]); // en yeni
+    const deferredIds = await insertFailedJobs(B.tenantId, 60, "1 day"); // daha eski → eski-önce sıralamada önde
+    await q("UPDATE public.tenants SET status = 'SUSPENDED' WHERE id = $1", [B.tenantId]);
+    const logs: { msg: string; fields?: Record<string, unknown> }[] = [];
+    const logger = { info: () => undefined, error: (msg: string, fields?: Record<string, unknown>) => logs.push({ msg, ...(fields === undefined ? {} : { fields }) }) };
+    try {
+      await sweepExpiredPostingJobsOnWorker({ workerDb, db: app, logger });
+      // İlk turda sonlandırıldı.
+      expect(await docRow(d.id)).toMatchObject({ status: "APPROVED", posting_job_id: null });
+      expect((await idemOf(key))[0]).toMatchObject({ status: "FAILED", error_code: "INTERNAL" });
+      // 60 ertelenen iş: bir kez denendi, geri çekilme gelecekte, log başına bir satır (jobId + tenantId).
+      for (const id of deferredIds) {
+        const o = await outputOf(id);
+        expect(o?.finalizeAttempts).toBe(1);
+        expect(new Date(o?.nextFinalizeAt as string).getTime()).toBeGreaterThan(Date.now());
+      }
+      const deferLogs = logs.filter((l) => l.msg === "stock.async_post.finalize_deferred");
+      expect(deferLogs).toHaveLength(60);
+      expect(new Set(deferLogs.map((l) => l.fields?.jobId)).size).toBe(60);
+      expect(deferLogs.every((l) => l.fields?.tenantId === B.tenantId)).toBe(true);
+      // İkinci tur: ertelenenler taranmaz (deneme sayısı artmaz, yeni log yok).
+      logs.length = 0;
+      await sweepExpiredPostingJobsOnWorker({ workerDb, db: app, logger });
+      expect(logs).toHaveLength(0);
+      expect((await outputOf(deferredIds[0] as string))?.finalizeAttempts).toBe(1);
+    } finally {
+      await q("UPDATE public.tenants SET status = 'ACTIVE' WHERE id = $1", [B.tenantId]);
+      await q("DELETE FROM pgboss.job WHERE name = 'stock.document.post' AND data->>'tenantId' = $1", [B.tenantId]);
+    }
+  }, 180_000);
+
+  it("kapanan kiracının (CLOSING) başarısız işleri kalıcı atlanır: bir kez log, yeniden denenmez", async () => {
+    const C = await seedWorld(adm, reg, "C222");
+    const ids = await insertFailedJobs(C.tenantId, 3, "1 hour");
+    await q("UPDATE public.tenants SET status = 'CLOSING' WHERE id = $1", [C.tenantId]);
+    const logs: string[] = [];
+    const logger = { info: () => undefined, error: (msg: string) => logs.push(msg) };
+    try {
+      await sweepExpiredPostingJobsOnWorker({ workerDb, db: app, logger });
+      for (const id of ids) expect(await outputOf(id)).toMatchObject({ finalized: true, skipped: "TENANT_CLOSING" });
+      expect(logs.filter((m) => m === "stock.async_post.finalize_skipped")).toHaveLength(3);
+      logs.length = 0;
+      await sweepExpiredPostingJobsOnWorker({ workerDb, db: app, logger });
+      expect(logs).toHaveLength(0);
+    } finally {
+      await q("UPDATE public.tenants SET status = 'ACTIVE' WHERE id = $1", [C.tenantId]);
+      await q("DELETE FROM pgboss.job WHERE name = 'stock.document.post' AND data->>'tenantId' = $1", [C.tenantId]);
+    }
+  }, 60_000);
 });
 
 describe("MAJOR-3: getPostingStatus depo kapsamı (IDOR)", () => {

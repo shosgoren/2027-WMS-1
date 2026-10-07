@@ -3,7 +3,13 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { isPermanentFailure } from "@wms/queue-adapter";
-import { PermanentPostingError, classifyPostingError, finalizeFailedPostingJobs } from "@wms/domain/stock/jobs";
+import {
+  POSTING_QUEUE_WAIT_ALLOWANCE_SECONDS,
+  PermanentPostingError,
+  classifyPostingError,
+  finalizeFailedPostingJobs,
+  postingMfaWindowSeconds,
+} from "@wms/domain/stock/jobs";
 import { AppError, ERROR_CODES } from "@wms/shared/errors";
 import { createPostStockDocumentHandler, startPostingJobRecovery } from "./post-stock-document.js";
 
@@ -93,36 +99,54 @@ describe("bakım zamanlayıcısı (pg-boss supervise eşdeğeri)", () => {
 
 describe("başarısız işlerin belge sonlandırması (MAJOR-2, bakım taraması)", () => {
   const tenant = randomUUID();
-  const job = { id: randomUUID(), tenant_id: tenant, document_id: randomUUID(), record_id: randomUUID() };
-  const mkDeps = (runInTenant: (t: string) => Promise<unknown>) => {
-    const marked: string[] = [];
+  const job = { id: randomUUID(), tenant_id: tenant, document_id: randomUUID(), record_id: randomUUID(), attempts: null };
+  /** `runOnWorker` çağrıları sırayla verilen yanıtları döndürür: [liste, işaretleme, liste(boş)]. */
+  const mkDeps = (runInTenant: (t: string) => Promise<unknown>, responses: unknown[][]) => {
     let calls = 0;
+    const logs: { msg: string; fields?: Record<string, unknown> }[] = [];
     const deps = {
-      // 1. çağrı liste sorgusu, sonrakiler işaretleme (sırayla).
-      runOnWorker: async (fn: (tx: { execute: (q: unknown) => Promise<unknown> }) => Promise<unknown>) =>
-        fn({
-          execute: async () => {
-            calls += 1;
-            if (calls === 1) return [job];
-            marked.push(job.id);
-            return [];
-          },
-        }),
+      runOnWorker: async (fn: (tx: { execute: (q: unknown) => Promise<unknown> }) => Promise<unknown>) => fn({ execute: async () => responses[calls++] ?? [] }),
       runInTenant: ((t: string) => runInTenant(t)) as never,
-      logger,
+      logger: { info: () => undefined, error: (msg: string, fields?: Record<string, unknown>) => logs.push({ msg, ...(fields === undefined ? {} : { fields }) }) },
     };
-    return { deps: deps as never, marked };
+    return { deps: deps as never, calls: () => calls, logs };
   };
-  it("kiracı askıdayken yazım başarısız olur: iş işaretlenmez, sonraki tura kalır", async () => {
-    const { deps, marked } = mkDeps(async () => {
-      throw new Error("TENANT_SUSPENDED");
-    });
+  it("kiracı askıdayken yazım başarısız olur: iş ertelenir (geri çekilme işaretlenir), tek log jobId+tenantId taşır", async () => {
+    const { deps, logs } = mkDeps(async () => {
+      throw Object.assign(new Error("x"), { code: "TENANT_SUSPENDED" });
+    }, [[job], [{ attempts: 1 }], []]);
     expect(await finalizeFailedPostingJobs(deps)).toEqual({ finalized: 0, deferred: 1 });
-    expect(marked).toEqual([]);
+    expect(logs).toEqual([{ msg: "stock.async_post.finalize_deferred", fields: { jobId: job.id, tenantId: tenant, attempts: 1, reason: "TENANT_SUSPENDED" } }]);
   });
-  it("yazım başarılıysa iş işaretlenir", async () => {
-    const { deps, marked } = mkDeps(async () => true);
+  it("kapanan kiracı (TENANT_CLOSING) kalıcı atlanır: bir log, ertelenmez", async () => {
+    const { deps, logs } = mkDeps(async () => {
+      throw Object.assign(new Error("x"), { code: "TENANT_CLOSING" });
+    }, [[job], [], []]);
+    expect(await finalizeFailedPostingJobs(deps)).toEqual({ finalized: 0, deferred: 0 });
+    expect(logs.map((l) => l.msg)).toEqual(["stock.async_post.finalize_skipped"]);
+  });
+  it("yazım başarılıysa iş sonlandırılır", async () => {
+    const { deps, logs } = mkDeps(async () => true, [[job], [], []]);
     expect(await finalizeFailedPostingJobs(deps)).toEqual({ finalized: 1, deferred: 0 });
-    expect(marked).toEqual([job.id]);
+    expect(logs).toEqual([]);
+  });
+});
+
+describe("MFA penceresi formülü (MINOR-3): işin kuyruk ayarlarından türetilir", () => {
+  const defaults = { expireSeconds: 900, retryLimit: 5, retryDelay: 30, retryBackoff: true } as const;
+  it("varsayılan ayarlar: 900×6 + 30×(2+4+8+16+32) + 600 pay", () => {
+    expect(postingMfaWindowSeconds(defaults)).toBe(900 * 6 + 30 * 62 + POSTING_QUEUE_WAIT_ALLOWANCE_SECONDS);
+  });
+  it("geri çekilme kapalı: delay × retryLimit; pay verilebilir", () => {
+    expect(postingMfaWindowSeconds({ ...defaults, retryBackoff: false, queueWaitSeconds: 0 })).toBe(900 * 6 + 30 * 5);
+  });
+  it("deneme yok (retryLimit 0): yalnızca bir deneme süresi + pay", () => {
+    expect(postingMfaWindowSeconds({ ...defaults, retryLimit: 0 })).toBe(900 + POSTING_QUEUE_WAIT_ALLOWANCE_SECONDS);
+  });
+  it("her ayar pencereyi tekdüze büyütür", () => {
+    const base = postingMfaWindowSeconds(defaults);
+    expect(postingMfaWindowSeconds({ ...defaults, expireSeconds: 901 })).toBeGreaterThan(base);
+    expect(postingMfaWindowSeconds({ ...defaults, retryLimit: 6 })).toBeGreaterThan(base);
+    expect(postingMfaWindowSeconds({ ...defaults, retryDelay: 31 })).toBeGreaterThan(base);
   });
 });

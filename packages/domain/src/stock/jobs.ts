@@ -99,11 +99,27 @@ type DocLockRow = {
   posting_idempotency_record_id: string | null;
 };
 
+/** Kuyrukta bekleme + bakım taraması gecikmesi payı (sn): yoklama aralığı, worker durması ve bakım turu aralıkları için sabit pay. */
+export const POSTING_QUEUE_WAIT_ALLOWANCE_SECONDS = 600;
+
 /**
- * MFA penceresi (sn): pg-boss son kullanma süresi (varsayılan 900 sn) × (`retryLimit` 5 + 1 deneme); `QUEUE_DEFAULTS` (queue-adapter) ile birlikte
- * değişir. İsteğin MFA damgası bu pencereden eskiyse worker MFA'yı tanımaz (sınırlı vekâlet).
+ * MFA penceresi (sn), işin GERÇEK kuyruk ayarlarından (`pgboss.job`: `expire_seconds`, `retry_limit`, `retry_delay`, `retry_backoff`; değerler
+ * `QUEUE_DEFAULTS`'tan gelir, burada elle kopyalanmaz) türetilir: her deneme en çok `expire` sürer (`retryLimit + 1` deneme) + deneme arası bekleme
+ * (geri çekilme açıksa üst sınır `delay × (2 + 4 + … + 2^retryLimit)`, kapalıysa `delay × retryLimit`) + kuyruk bekleme payı. Üst sınırdır; `retry_delay_max`
+ * daha düşükse pencere gereğinden geniş kalır (fail-safe değil, ama sınırlı vekâlet).
  */
-export const POSTING_MFA_WINDOW_SECONDS = 900 * (5 + 1);
+export function postingMfaWindowSeconds(q: {
+  readonly expireSeconds: number;
+  readonly retryLimit: number;
+  readonly retryDelay: number;
+  readonly retryBackoff: boolean;
+  readonly queueWaitSeconds?: number;
+}): number {
+  const attempts = q.retryLimit + 1;
+  let wait = 0;
+  for (let i = 1; i <= q.retryLimit; i++) wait += q.retryBackoff ? q.retryDelay * 2 ** Math.min(i, 17) : q.retryDelay;
+  return q.expireSeconds * attempts + wait + (q.queueWaitSeconds ?? POSTING_QUEUE_WAIT_ALLOWANCE_SECONDS);
+}
 
 /**
  * Worker'ın istek sahibi adına verdiği MFA kararı (T-222 inceleme MAJOR-1). `mfaVerified: true` YALNIZCA şunların hepsi doğruysa: işleme kilidi bu işe
@@ -119,22 +135,37 @@ async function mayVouchMfa(ctx: AsyncPostingContext, tenantId: string, documentI
       posting_requested_by: string | null;
       posting_idempotency_record_id: string | null;
       stamped: boolean;
-      fresh: boolean;
+      age_seconds: number | string | null;
       reset: boolean;
+      expire_seconds: number | string | null;
+      retry_limit: number | string | null;
+      retry_delay: number | string | null;
+      retry_backoff: boolean | null;
     }>(
       sql`SELECT d.posting_job_id, d.posting_requested_by, d.posting_idempotency_record_id,
                  d.posting_mfa_verified_at IS NOT NULL AS stamped,
-                 COALESCE(pg_catalog.now() - d.posting_mfa_verified_at <= pg_catalog.make_interval(secs => ${POSTING_MFA_WINDOW_SECONDS}), false) AS fresh,
+                 EXTRACT(EPOCH FROM (pg_catalog.now() - d.posting_mfa_verified_at)) AS age_seconds,
                  EXISTS (SELECT 1 FROM public.security_events e
                           WHERE e.user_id = d.posting_requested_by AND e.occurred_at > d.posting_mfa_verified_at
-                            AND e.event_type IN ('two_factor_disabled', 'two_factor_enabled', 'password_reset', 'password_changed')) AS reset
-            FROM public.documents d WHERE d.tenant_id = ${tenantId}::uuid AND d.id = ${documentId}::uuid`,
+                            AND e.event_type IN ('two_factor_disabled', 'two_factor_enabled', 'password_reset', 'password_changed')) AS reset,
+                 j.expire_seconds, j.retry_limit, j.retry_delay, j.retry_backoff
+            FROM public.documents d LEFT JOIN pgboss.job j ON j.id = ${ctx.jobId}::uuid
+           WHERE d.tenant_id = ${tenantId}::uuid AND d.id = ${documentId}::uuid`,
     ),
   );
   const d = rows[0];
   if (d === undefined) return false;
   const same = (a: string | null, b: string): boolean => a !== null && a.toLowerCase() === b.toLowerCase();
-  return same(d.posting_job_id, ctx.jobId) && same(d.posting_requested_by, actor) && same(d.posting_idempotency_record_id, recordId) && d.stamped && d.fresh && !d.reset;
+  if (!(same(d.posting_job_id, ctx.jobId) && same(d.posting_requested_by, actor) && same(d.posting_idempotency_record_id, recordId) && d.stamped && !d.reset)) return false;
+  // İş satırı okunamazsa (ayar bilinmiyor) pencere hesaplanamaz: MFA tanınmaz (fail-closed).
+  if (d.expire_seconds === null || d.retry_limit === null || d.retry_delay === null || d.retry_backoff === null || d.age_seconds === null) return false;
+  const window = postingMfaWindowSeconds({
+    expireSeconds: Number(d.expire_seconds),
+    retryLimit: Number(d.retry_limit),
+    retryDelay: Number(d.retry_delay),
+    retryBackoff: d.retry_backoff,
+  });
+  return Number(d.age_seconds) <= window;
 }
 
 /** Son deneme mi (pg-boss `fail` yolunda `retry_count >= retry_limit` ise iş kalıcı `failed` olur). Okunamazsa `false` (asıl hata yayılır). */
@@ -254,16 +285,20 @@ export async function failPostingInTx(
   tx: AccessTx,
   f: { readonly tenantId: string; readonly jobId: string; readonly documentId: string; readonly recordId: string; readonly err: AppError },
 ): Promise<boolean> {
-  const locked = await tx.execute<{ id: string }>(
-    sql`SELECT id FROM public.documents
+  const locked = await tx.execute<{ posting_idempotency_record_id: string | null }>(
+    sql`SELECT posting_idempotency_record_id FROM public.documents
          WHERE tenant_id = ${f.tenantId}::uuid AND id = ${f.documentId}::uuid AND status = 'APPROVED' AND posting_job_id = ${f.jobId}::uuid FOR UPDATE`,
   );
-  if (locked[0] === undefined) return false;
+  const row = locked[0];
+  if (row === undefined) return false;
   await tx.execute(
     sql`UPDATE public.documents
            SET posting_job_id = NULL, posting_requested_by = NULL, posting_mfa_verified_at = NULL, posting_idempotency_record_id = NULL
          WHERE tenant_id = ${f.tenantId}::uuid AND id = ${f.documentId}::uuid`,
   );
+  // Kayıt kimliği belgedeki kayıtla eşleşmiyorsa (yük/belge uyuşmazlığı) başka bir isteğin kaydı FAILED yapılmaz; belge yine serbest bırakılır.
+  // NULL: 0023 öncesi kilitlenmiş belge (eski satır) — kimlik bilinmediği için yük kimliği kabul edilir.
+  if (row.posting_idempotency_record_id !== null && row.posting_idempotency_record_id.toLowerCase() !== f.recordId.toLowerCase()) return true;
   await tx.execute(
     sql`UPDATE public.idempotency_records
            SET status = 'FAILED', error_code = ${encodeErrorCode(f.err.code, f.err.detail)}, http_status = ${f.err.httpStatus},
@@ -315,26 +350,54 @@ export async function requeueExpiredPostingJobs(tx: Pick<AccessTx, "execute">): 
   };
 }
 
-type FailedJobRow = { id: string; tenant_id: string | null; document_id: string | null; record_id: string | null };
+type FailedJobRow = { id: string; tenant_id: string | null; document_id: string | null; record_id: string | null; attempts: number | string | null };
 
-/** Belgesi henüz serbest bırakılmamış `failed` işler (`output.finalized` işareti yok); en eskiden `limit` kadar. `wms_worker` bağlantısı. */
+/**
+ * Belgesi henüz serbest bırakılmamış `failed` işler (açlık önlemi, T-222 doğrulama incelemesi MAJOR-1): sonlandırılmış (`output.finalized`) ve
+ * ERTELENMİŞ (`output.nextFinalizeAt` gelecekte) işler taranmaz; hiç denenmemiş işler önce, sonra en eski. Böylece kalıcı ertelenen işler
+ * (askıdaki kiracı) başkalarını sıranın başında tutamaz. `wms_worker` bağlantısı.
+ */
 export async function listUnfinalizedFailedPostingJobs(tx: Pick<AccessTx, "execute">, limit = 50): Promise<readonly FailedJobRow[]> {
   return tx.execute<FailedJobRow>(
-    sql`SELECT id, data->>'tenantId' AS tenant_id, data->'payload'->>'documentId' AS document_id, data->'payload'->>'idempotencyRecordId' AS record_id
+    sql`SELECT id, data->>'tenantId' AS tenant_id, data->'payload'->>'documentId' AS document_id, data->'payload'->>'idempotencyRecordId' AS record_id,
+               CASE WHEN jsonb_typeof(output) = 'object' THEN output->>'finalizeAttempts' END AS attempts
           FROM pgboss.job
-         WHERE name = ${JOB_TYPE} AND state = 'failed' AND (output IS NULL OR jsonb_typeof(output) <> 'object' OR output->>'finalized' IS NULL)
-         ORDER BY completed_on NULLS FIRST, created_on LIMIT ${limit}`,
+         WHERE name = ${JOB_TYPE} AND state = 'failed'
+           AND (output IS NULL OR jsonb_typeof(output) <> 'object'
+                OR (output->>'finalized' IS NULL
+                    AND (output->>'nextFinalizeAt' IS NULL OR (output->>'nextFinalizeAt')::timestamptz <= pg_catalog.now())))
+         ORDER BY (CASE WHEN jsonb_typeof(output) = 'object' AND output->>'finalizeAttempts' IS NOT NULL THEN 1 ELSE 0 END), completed_on NULLS FIRST, created_on
+         LIMIT ${limit}`,
   );
 }
 
-/** Serbest bırakma işaretini (`output.finalized`) yazar; sonraki turlar işi atlar. `wms_worker` bağlantısı. */
-export async function markPostingJobFinalized(tx: Pick<AccessTx, "execute">, jobId: string): Promise<void> {
+/** Serbest bırakma işaretini (`output.finalized`; isteğe bağlı `skipped` nedeni) yazar; sonraki turlar işi atlar. `wms_worker` bağlantısı. */
+export async function markPostingJobFinalized(tx: Pick<AccessTx, "execute">, jobId: string, skipped?: string): Promise<void> {
   await tx.execute(
     sql`UPDATE pgboss.job
-           SET output = pg_catalog.jsonb_build_object('finalized', true) || CASE WHEN jsonb_typeof(output) = 'object' THEN output ELSE '{}'::jsonb END
+           SET output = pg_catalog.jsonb_build_object('finalized', true) || CASE WHEN ${skipped ?? null}::text IS NULL THEN '{}'::jsonb ELSE pg_catalog.jsonb_build_object('skipped', ${skipped ?? null}::text) END
+                        || CASE WHEN jsonb_typeof(output) = 'object' THEN output ELSE '{}'::jsonb END
          WHERE id = ${jobId}::uuid AND name = ${JOB_TYPE} AND state = 'failed'`,
   );
 }
+
+/** Ertelenen işe üstel geri çekilme (5 dk × 2^n, en çok 6 sa) yazar; süre dolana dek taranmaz. Dönen: yeni deneme sayısı. `wms_worker` bağlantısı. */
+export async function markPostingJobDeferred(tx: Pick<AccessTx, "execute">, jobId: string): Promise<number> {
+  const rows = await tx.execute<{ attempts: number | string }>(
+    sql`UPDATE pgboss.job
+           SET output = (CASE WHEN jsonb_typeof(output) = 'object' THEN output ELSE '{}'::jsonb END)
+                        || pg_catalog.jsonb_build_object(
+                             'finalizeAttempts', COALESCE((CASE WHEN jsonb_typeof(output) = 'object' THEN output->>'finalizeAttempts' END)::int, 0) + 1,
+                             'nextFinalizeAt', pg_catalog.now() + LEAST(interval '6 hours',
+                               interval '5 minutes' * pg_catalog.power(2, LEAST(COALESCE((CASE WHEN jsonb_typeof(output) = 'object' THEN output->>'finalizeAttempts' END)::int, 0), 6))))
+         WHERE id = ${jobId}::uuid AND name = ${JOB_TYPE} AND state = 'failed'
+        RETURNING output->>'finalizeAttempts' AS attempts`,
+  );
+  return Number(rows[0]?.attempts ?? 0);
+}
+
+const FINALIZE_BATCH_SIZE = 50;
+const MAX_FINALIZE_BATCHES = 20;
 
 export interface PostingSweepDeps {
   /** `wms_worker` transaction'ı (yalnızca pgboss.job). */
@@ -350,26 +413,42 @@ export interface PostingSweepDeps {
  * sonlandırdıysa yazım olmaz, yalnızca işaret konur. Kiracı askıdaysa yazım başarısız olur ve iş işaretlenmez (kiracı açılınca sonraki turda sonlanır).
  */
 export async function finalizeFailedPostingJobs(deps: PostingSweepDeps): Promise<{ readonly finalized: number; readonly deferred: number }> {
-  const pending = await deps.runOnWorker((tx) => listUnfinalizedFailedPostingJobs(tx));
   let finalized = 0;
   let deferred = 0;
-  for (const j of pending) {
-    if (j.tenant_id === null || j.document_id === null || j.record_id === null || !UUID_RE.test(j.tenant_id)) {
-      await deps.runOnWorker((tx) => markPostingJobFinalized(tx, j.id)); // biçimsiz zarf: yazılacak belge yok
-      continue;
-    }
-    const tenantId = j.tenant_id;
-    const documentId = j.document_id.toLowerCase();
-    const recordId = j.record_id.toLowerCase();
-    try {
-      await deps.runInTenant(tenantId, (tx) =>
-        failPostingInTx(tx, { tenantId, jobId: j.id, documentId, recordId, err: new AppError("INTERNAL") }),
-      );
-      await deps.runOnWorker((tx) => markPostingJobFinalized(tx, j.id));
-      finalized += 1;
-    } catch (err) {
-      deferred += 1;
-      deps.logger.error("stock.async_post.finalize_deferred", { error: err instanceof Error ? err.name : "unknown" });
+  // Bir tur, taranabilir iş kalmayana dek parti parti işler (üst sınırlı): ertelenen işler işaretlenip dışarıda kalır, böylece sıradakiler aynı turda görülür.
+  for (let batch = 0; batch < MAX_FINALIZE_BATCHES; batch++) {
+    const pending = await deps.runOnWorker((tx) => listUnfinalizedFailedPostingJobs(tx, FINALIZE_BATCH_SIZE));
+    if (pending.length === 0) break;
+    for (const j of pending) {
+      if (j.tenant_id === null || j.document_id === null || j.record_id === null || !UUID_RE.test(j.tenant_id)) {
+        await deps.runOnWorker((tx) => markPostingJobFinalized(tx, j.id)); // biçimsiz zarf: yazılacak belge yok
+        continue;
+      }
+      const tenantId = j.tenant_id;
+      const documentId = j.document_id.toLowerCase();
+      const recordId = j.record_id.toLowerCase();
+      try {
+        await deps.runInTenant(tenantId, (tx) => failPostingInTx(tx, { tenantId, jobId: j.id, documentId, recordId, err: new AppError("INTERNAL") }));
+        await deps.runOnWorker((tx) => markPostingJobFinalized(tx, j.id));
+        finalized += 1;
+      } catch (err) {
+        const code = (err as { code?: unknown } | null)?.code;
+        if (code === "TENANT_CLOSING" || code === "FORBIDDEN") {
+          // Kapanan/kapanmış ya da bulunamayan kiracı: belge artık yazılamaz; kalıcı atla (bir kez log).
+          await deps.runOnWorker((tx) => markPostingJobFinalized(tx, j.id, String(code)));
+          deps.logger.error("stock.async_post.finalize_skipped", { jobId: j.id, tenantId, reason: String(code) });
+          continue;
+        }
+        // Geçici (ör. kiracı askıda): üstel geri çekilmeyle ertelenir; her erteleme döneminde job başına tek log.
+        const attempts = await deps.runOnWorker((tx) => markPostingJobDeferred(tx, j.id));
+        deferred += 1;
+        deps.logger.error("stock.async_post.finalize_deferred", {
+          jobId: j.id,
+          tenantId,
+          attempts,
+          reason: typeof code === "string" ? code : err instanceof Error ? err.name : "unknown",
+        });
+      }
     }
   }
   return { finalized, deferred };
