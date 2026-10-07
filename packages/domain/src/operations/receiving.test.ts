@@ -88,12 +88,20 @@ describe("ondalık yardımcıları (I-09: float yok)", () => {
     expect(() => decimalToMicro("1.0000001")).toThrow(AppError);
     expect(() => microToDecimal(-1n)).toThrow(AppError);
   });
-  it("baseQuantityOf: katsayı satıra kopyalanır; 6 basamağa yarım yukarı yuvarlanır", () => {
+  it("baseQuantityOf: katsayı satıra kopyalanır; tam sonuç aynen, 6 ondalığa inmeyen sonuç YUVARLANMAZ, QUANTITY_SCALE ile reddedilir (T-287, K-3)", () => {
     expect(baseQuantityOf("10", "1")).toBe("10.000000");
     expect(baseQuantityOf("3", "12")).toBe("36.000000");
     expect(baseQuantityOf("0.333333", "3")).toBe("0.999999");
-    expect(baseQuantityOf("0.000001", "0.5")).toBe("0.000001"); // 0.0000005 → yukarı
-    expect(baseQuantityOf("0.000001", "0.4")).toBe("0.000000");
+    // Davranış değişikliği: eskiden "0.000001" (0.0000005 yukarı yuvarlanırdı) ve "0.000000" dönerdi; artık kesin ret.
+    for (const [q, f] of [
+      ["0.000001", "0.5"],
+      ["0.000001", "0.4"],
+    ] as const) {
+      expect(() => baseQuantityOf(q, f), `${q} × ${f}`).toThrow(expect.objectContaining({ code: "VALIDATION_FAILED", detail: "QUANTITY_SCALE" }));
+    }
+  });
+  it("baseQuantityOf: 6 ondalıkta tam çıkan kesirli koli bu katmanda geçer (ürün ölçeği 0 denetimi posting çekirdeğinde QUANTITY_SCALE verir)", () => {
+    expect(baseQuantityOf("0.416667", "12")).toBe("5.000004");
   });
 });
 

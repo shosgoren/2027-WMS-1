@@ -8,8 +8,8 @@ import { listMyActionsToday } from "@wms/domain/audit/today";
 import { getAppDb } from "@wms/db";
 import { getMembershipSummary } from "@wms/domain/identity/member-queries";
 import { hasPermission } from "@wms/domain/identity/permissions";
-import { TASK_LIST_LIMIT_MAX, listMyTasks } from "@wms/domain/operations";
-import { TaskMenu, type MyTasksSummary } from "./task-menu.tsx";
+import { TASK_LIST_LIMIT_MAX, listInboundReceipts, listMyTasks } from "@wms/domain/operations";
+import { TaskMenu, type MyTasksSummary, type NowSummary } from "./task-menu.tsx";
 
 export const dynamic = "force-dynamic";
 
@@ -69,6 +69,52 @@ export default async function TenantHomePage({ params }: { params: Promise<{ slu
       myTasks = { kind: "error", message: `${ts(key)} ${ts(`${key}Action`)}`, code: ts("code", { code }) };
     }
   }
+  // "Şimdi" kartı (T-280, DESIGN_REVIEW §7.4.2): yalnız `stock.post` sahibi için GERÇEK bekleyen işler (mevcut domain okumaları: tenant ve depo kapsamı domain'de).
+  // Açık teslim = `listInboundReceipts` (OPEN); yerleştirilecek = `listMyTasks` içindeki PUTAWAY görevleri. Hata: sunucu mesajı + kod (ana ekran düşmez).
+  let now: NowSummary | undefined;
+  if (hasPermission(current.roles, "stock.post")) {
+    try {
+      const call = { db: getAppDb(), principal, tenantSlug: slug };
+      const receipts = await listInboundReceipts(call, { status: "OPEN", limit: 50 });
+      const tasks = await listMyTasks(call, { limit: TASK_LIST_LIMIT_MAX });
+      const put = tasks.items.filter((x) => x.kind === "PUTAWAY");
+      const tn = await getTranslations("home.now");
+      const stripZeros = (q: string): string => q.replace(/\.0+$/, "").replace(/(\.\d*?)0+$/, "$1");
+      const base = `/t/${encodeURIComponent(slug)}`;
+      const rows: Array<NonNullable<Extract<NowSummary, { kind: "rows" }>["rows"]>[number]> = [];
+      // Satır tek davranıştır: sayar, kısa "Sıradaki" etiketi verir ve DOĞRUDAN sıradaki işe götürür (teslim → kabul akışı, görev → yerleştirme akışı).
+      if (receipts.items.length > 0) {
+        rows.push({
+          key: "receive",
+          count: receipts.items.length,
+          more: receipts.next !== null,
+          next: receipts.items.slice(0, 2).map((r) => ({ href: `${base}/field/receive?receipt=${encodeURIComponent(r.id)}` as `/${string}`, label: r.number })),
+        });
+      }
+      if (put.length > 0) {
+        rows.push({
+          key: "putaway",
+          count: put.length,
+          more: tasks.next !== null,
+          next: put.slice(0, 2).map((task) => ({
+            href: `${base}/field/putaway?task=${encodeURIComponent(task.id)}` as `/${string}`,
+            label: tn("qty", { n: task.quantity === null ? "-" : stripZeros(task.quantity) }),
+          })),
+        });
+      }
+      now = rows.length === 0 ? { kind: "empty" } : { kind: "rows", rows };
+    } catch (e) {
+      if (e instanceof AppError) {
+        if (e.code === "NOT_FOUND") notFound();
+        if (e.code === "UNAUTHENTICATED") redirect(`/login?next=${encodeURIComponent(`/t/${slug}`)}`);
+        if (e.code === "FORBIDDEN" && e.detail === "MFA_REQUIRED") redirect(`/mfa?next=${encodeURIComponent(`/t/${slug}`)}`);
+      }
+      console.error(JSON.stringify({ level: "error", msg: "home now failed", error: e instanceof Error ? e.name : typeof e, code: e instanceof AppError ? e.code : undefined }));
+      const code = e instanceof AppError ? e.code : "INTERNAL";
+      const key = ["FORBIDDEN", "RATE_LIMITED", "TENANT_SUSPENDED", "TENANT_CLOSING", "VALIDATION_FAILED"].includes(code) ? code.toLowerCase() : "internal";
+      now = { kind: "error", message: `${ts(key)} ${ts(`${key}Action`)}`, code: ts("code", { code }) };
+    }
+  }
   const firstName = summary.userName.trim().split(/\s+/)[0] ?? summary.userName;
 
   return (
@@ -82,11 +128,13 @@ export default async function TenantHomePage({ params }: { params: Promise<{ slu
       <TaskMenu
         slug={slug}
         myTasks={myTasks}
+        now={now}
         allowed={{
           usersManage: hasPermission(current.roles, "users.manage"),
           settingsManage: hasPermission(current.roles, "settings.manage"),
           auditView: hasPermission(current.roles, "audit.view"),
           stockView: hasPermission(current.roles, "stock.view"),
+          stockPost: hasPermission(current.roles, "stock.post"),
         }}
       />
       {today === null ? (

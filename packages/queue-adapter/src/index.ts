@@ -39,6 +39,23 @@ export const QUEUE_SCHEMA = "pgboss";
 /** Kuyruk başına varsayılanlar: yan etki işleri için yeniden deneme + geri çekilme. */
 const QUEUE_DEFAULTS = { retryLimit: 5, retryDelay: 30, retryBackoff: true } as const;
 
+/**
+ * İş türü başına `expireInSeconds` (T-281). Adaptör `supervise: false` çalıştığı için süresi dolan `active` işi worker bakımı
+ * (`requeueExpiredJobs`) `retry`/`failed` yapar; bu süre bir denemenin EN UZUN meşru çalışmasından uzun olmalı (yoksa canlı iş yanlışlıkla
+ * ikinci kez teslim edilir), ama çöken bir worker'ın işini de gereksiz geciktirmemeli. Tür sayısı sabittir: yeni tür bu tabloya eklenmeden derlenmez.
+ * - `email.send`, `invitation.deliver`: tek HTTP çağrısı (15 sn istek zaman aşımı) + kiracı/mühür denetimi → 300 sn.
+ * - `stock.document.post`: tek transaction'da büyük belge (ADR-019 §1); pg-boss varsayılanı 15 dk korunur. MFA penceresi bu değerden türetilir
+ *   (`postingMfaWindowSeconds`): değiştirmek pencereyi de değiştirir.
+ * - `demo.reseed`, `stock.consistency.check`: kiracı çapında uzun tarama/onarım (parola özeti üretimi, tüm bakiyeler) → 1800 sn.
+ */
+export const QUEUE_EXPIRE_SECONDS: { readonly [T in JobType]: number } = {
+  "email.send": 300,
+  "invitation.deliver": 300,
+  "demo.reseed": 1800,
+  "stock.document.post": 900,
+  "stock.consistency.check": 1800,
+};
+
 /** İş zarfı: tenant kimliği yükten AYRI saklanır; yalnızca `enqueue` yazar. */
 const EnvelopeSchema = z
   .object({
@@ -75,10 +92,12 @@ export function isPermanentFailure(err: unknown): boolean {
 }
 
 /**
- * Worker principal kuralı (T-113 MINOR-4): bir iş, MFA doğrulanmış kimlikle ÇALIŞMAZ. `mfaVerified` ne iş yükünden
+ * Worker principal kuralı (T-113 MINOR-4): GENEL kural — bir iş, iş yükünden/zarftan okunan MFA iddiasıyla ÇALIŞMAZ. `mfaVerified` ne iş yükünden
  * ne zarftan okunur (zarf `strict`: bilinmeyen alan işi `failed` yapar; yük şemaları `strict`) ve `wms_worker`
- * iş satırını değiştirse bile kazanç sağlamaz: worker yolunda principal her zaman `mfaVerified: false` üretilir.
- * Sonuç: TENANT_ADMIN MFA'sı gerektiren komutlar (`enforceMfa`) worker yolunda `MFA_REQUIRED` ile reddedilir.
+ * iş satırını değiştirse bile kazanç sağlamaz: bu işlev her zaman `mfaVerified: false` üretir.
+ * Sonuç: TENANT_ADMIN MFA'sı gerektiren komutlar (`enforceMfa`) bu işlevle kurulan principal'la `MFA_REQUIRED` ile reddedilir.
+ * TEK İSTİSNA `stock.document.post` (T-222, `packages/domain/src/stock/jobs.ts`): principal'ı bu işlevle KURMAZ; MFA kararı istek anında sunucu
+ * tarafında belge satırına yazılmış damgadan (0023; yazımı 0024 tetikleyicisiyle tek yere kilitli) koşullu türetilir (`mayVouchMfa`), damga yoksa `false`.
  * Worker handler'ları ById komutlarına principal'ı YALNIZCA bu işlevle kurar. `actorUserId` kimlik iddiasıdır;
  * yetki yine üyelik denetimiyle (withMembership) doğrulanır.
  */
@@ -174,7 +193,19 @@ export interface JobQueueOptions {
 export { consumeOnce, deliverExternalOnce } from "./consume.ts";
 export type { ConsumeOnceResult, ExternalOnceContext } from "./consume.ts";
 
-export interface PgBossJobQueue extends JobQueue<TenantTx> {
+/** İlk sayfa için `after` sentineli (sıfır UUID); `wms_probe.active_tenant_ids` `NULL` kabul etmez (ADR-019 §1). */
+export const ACTIVE_TENANTS_FIRST_PAGE = "00000000-0000-0000-0000-000000000000";
+export const ACTIVE_TENANTS_MAX_PAGE = 500;
+
+/**
+ * Yalnızca zamanlayıcıya verilen dar arayüz (T-225; `JobQueue` sözleşmesine EKLENMEZ): kuyruğun `wms_worker` bağlantısıyla
+ * `wms_probe.active_tenant_ids` çağrılır (başka sorgu yok). Keyset: `after` = önceki sayfanın son kimliği (ilk sayfa: `ACTIVE_TENANTS_FIRST_PAGE`).
+ */
+export interface ActiveTenantLister {
+  listActiveTenantIds(after: string, limit: number): Promise<readonly string[]>;
+}
+
+export interface PgBossJobQueue extends JobQueue<TenantTx>, ActiveTenantLister {
   /** Bağlanır ve şemanın kurulu olduğunu doğrular (`migrate: false`). Tekrar çağrı aynı sözü döndürür. */
   start(): Promise<void>;
 }
@@ -199,6 +230,8 @@ async function tenantOf(tx: TenantTx): Promise<string> {
 function envelopeOf(job: Job, tenantId: string | null): Envelope {
   return { v: 1, tenantId, actorUserId: job.actorUserId ?? null, payload: job.payload };
 }
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Tenant'a ve türe kapsamlı anahtar: bir tenant başkasının işini anahtar tahminiyle engelleyemez. */
 function scopedKey(tenantId: string | null, key: string): string {
@@ -345,11 +378,51 @@ export function createJobQueue(options: JobQueueOptions): PgBossJobQueue {
         return results;
       });
     },
+    async listActiveTenantIds(after, limit) {
+      if (!ready) throw new Error("job queue is not started; call start() before listActiveTenantIds");
+      if (!UUID_RE.test(after)) throw new QueueError("VALIDATION_FAILED", "after must be a UUID (use the zero UUID for the first page)");
+      if (!Number.isInteger(limit) || limit < 1 || limit > ACTIVE_TENANTS_MAX_PAGE) {
+        throw new QueueError("VALIDATION_FAILED", "limit must be an integer between 1 and 500");
+      }
+      const { rows } = await boss
+        .getDb()
+        .executeSql("SELECT t.id::text AS id FROM wms_probe.active_tenant_ids($1::uuid, $2::integer) AS t(id)", [after, limit]);
+      return rows.map((r: { id: string }) => r.id);
+    },
     async stop() {
       if (starting === undefined) return;
       await boss.stop({ graceful: true, close: true, timeout: Math.max(stopTimeoutMs, 1000) });
     },
   };
+}
+
+export interface ExpiredJobsResult {
+  readonly requeued: readonly { readonly id: string; readonly type: string }[];
+  readonly exhausted: readonly { readonly id: string; readonly type: string }[];
+}
+
+/**
+ * Süresi dolan `active` işleri tür bağımsız kurtarır (T-281; pg-boss `supervise` eşdeğeri): `started_on + expire_seconds` geçmiş satırlar için
+ * deneme hakkı varsa (`retry_count < retry_limit`) hemen `retry`'a (sonraki alımda `retry_count` artar; eski sahibin geç tamamlaması
+ * `state = 'active'` koşuluyla etkisizdir), yoksa `failed`'a çevirir. `wms_worker` bağlantısında (pgboss.job UPDATE yetkisi) çağrılır; yazdığı
+ * alanlar yalnızca `state`, `start_after`, `completed_on`, `heartbeat_on`, `output`'tur. Tek ifade = atomik; eşzamanlı iki worker aynı satırı
+ * iki kez dönüştüremez (ikincisi `state = 'active'` koşulunu artık görmez).
+ */
+export async function requeueExpiredJobs(tx: Pick<TenantTx, "execute">): Promise<ExpiredJobsResult> {
+  const rows = rowsOf(
+    await tx.execute(
+      sql`UPDATE ${sql.identifier(QUEUE_SCHEMA)}.job
+             SET state = (CASE WHEN retry_count < retry_limit THEN 'retry' ELSE 'failed' END)::${sql.identifier(QUEUE_SCHEMA)}.job_state,
+                 start_after = CASE WHEN retry_count < retry_limit THEN ${sql.identifier(QUEUE_SCHEMA)}.job_now() ELSE start_after END,
+                 completed_on = CASE WHEN retry_count < retry_limit THEN NULL ELSE ${sql.identifier(QUEUE_SCHEMA)}.job_now() END,
+                 heartbeat_on = NULL,
+                 output = '{ "value": { "message": "job timed out" } }'::jsonb
+           WHERE state = 'active' AND (started_on + expire_seconds * interval '1 second') < ${sql.identifier(QUEUE_SCHEMA)}.job_now()
+          RETURNING id::text AS id, name::text AS type, state::text AS state`,
+    ),
+  );
+  const pick = (state: string) => rows.filter((r) => r.state === state).map((r) => ({ id: String(r.id), type: String(r.type) }));
+  return { requeued: pick("retry"), exhausted: pick("failed") };
 }
 
 export interface InstallQueueSchemaOptions {
@@ -567,7 +640,9 @@ export async function installQueueSchema(options: InstallQueueSchemaOptions): Pr
   try {
     await boss.start();
     for (const type of JOB_TYPES) {
-      await boss.createQueue(type, { policy: "standard", ...QUEUE_DEFAULTS });
+      await boss.createQueue(type, { policy: "standard", ...QUEUE_DEFAULTS, expireInSeconds: QUEUE_EXPIRE_SECONDS[type] });
+      // createQueue var olan kuyruğu değiştirmez: mevcut kurulumlarda da süre bu tabloyla hizalanır (yalnızca yeni işleri etkiler).
+      await boss.updateQueue(type, { expireInSeconds: QUEUE_EXPIRE_SECONDS[type] });
     }
     const db = boss.getDb();
     // Tek çok-ifadeli sorgu = tek örtük transaction (hata olursa hiçbiri uygulanmaz); RLS önce, yetkiler sonra:

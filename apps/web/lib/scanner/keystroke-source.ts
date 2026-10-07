@@ -3,7 +3,7 @@
 // Türkçe düzende `i`, `ı`, `İ`, `ş`, `-`, `/`, `.` birebir gelir. Odak kaybında tampon korunur (blur dinlenmez).
 import { SCANNER_CONFIG } from "./scanner-config.ts";
 import type { ScannerConfig } from "./scanner-config.ts";
-import type { ScannerSource, Unsubscribe } from "./scanner-service.ts";
+import type { ScannerSource, Unsubscribe } from "./scanner-core.ts";
 
 export interface KeyEventLike {
   readonly key: string;

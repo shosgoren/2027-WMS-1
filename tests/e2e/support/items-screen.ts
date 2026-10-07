@@ -46,7 +46,7 @@ export async function smallTargets(page: Page, scope: string): Promise<string[]>
  * üstü); `panel` verilirse (alt sayfa açık) yalnız o kutu (kararmış zemin sayılmaz). İçerik öğesi: etkileşimli öğe (kutusu), metin düğümü
  * (metnin kendi kutusu), svg simgesi. Kenarlıklı/boyalı kutular tek başına içerik sayılmaz.
  */
-export async function expectBand(page: Page, where: string, panel: string | null): Promise<number> {
+export async function expectBand(page: Page, where: string, panel: string | null, assertBand = true): Promise<number> {
   const max = await page.evaluate<number>(`(() => {
     const r = (el) => el.getBoundingClientRect();
     const bar = r(document.querySelector('[data-testid="app-bar"]')), nav = r(document.querySelector('[data-testid="bottom-nav"]'));
@@ -57,6 +57,7 @@ export async function expectBand(page: Page, where: string, panel: string | null
     const isVisible = (el) => el.checkVisibility && el.checkVisibility();
     for (const el of root.querySelectorAll('*')) {
       if (!isVisible(el)) continue;
+      if (el.closest('.now-card[data-state="empty"]')) continue; // "Bekleyen iş yok" kartı içerik sayılmaz (DESIGN_REVIEW §7.4.1); hata ve gerçek veri satırı sayılır
       if (el.matches('a[href], button, summary, input, select, textarea, [tabindex="0"]')) { add(r(el)); continue; }
       if (el.tagName.toLowerCase() === 'svg') { add(r(el)); continue; }
       for (const n of el.childNodes) {
@@ -69,7 +70,8 @@ export async function expectBand(page: Page, where: string, panel: string | null
     best = Math.max(best, area.bottom - cursor);
     return best;
   })()`);
-  expect(max, `${where}: en büyük boş dikey bant (B-02)`).toBeLessThanOrEqual(120);
+  // T-280 (DESIGN_REVIEW §7.4.1): "bekleyen iş yok" durumunda 2 sütun ana ekranda boşluk dürüstçe ÖLÇÜLÜR ve kaydedilir, assert edilmez (assertBand=false).
+  if (assertBand) expect(max, `${where}: en büyük boş dikey bant (B-02)`).toBeLessThanOrEqual(120);
   return max;
 }
 

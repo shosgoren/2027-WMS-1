@@ -5,6 +5,10 @@
 //   miktar) eşleşmesi vermiyorsa SESSİZCE ilk ürüne atanmaz: `VALIDATION_FAILED`/`BARCODE_AMBIGUOUS` + aday listesi.
 //   Adaylar yalnızca çağıranın tenant'ındandır (RLS).
 // - A-88: `removeBarcode` gerçek silmedir.
+// - K-1 / A-287-1 (T-287): temel OLMAYAN birimdeki barkodda adet DAİMA `unit_conversions` katsayısından gelir. `addBarcode`: dönüşümü olmayan birim
+//   `UNIT_CONVERSION_INVALID`; miktar ≠ 1 de `UNIT_CONVERSION_INVALID` (15-engineering listesinde ayrı kod yok; iki ihlal aynı sade metinle anlatılır).
+//   "Okutma başına miktar" yalnız temel birim barkodunda (ör. 12'li poşet ADET) anlamlıdır. `resolveBarcode` tek doğruluk kaynağıdır:
+//   `unitFactor` ve `baseQuantity` (= okutma başına miktar × katsayı, `toBase`; yuvarlama yok, ürün ölçeğini aşan `QUANTITY_SCALE`).
 // - Çözümleme: ham metin tam eşleşme + (GS1 önek/GS varsa her zaman, yoksa yalnızca tam eşleşme yokken) GTIN'in
 //   depodaki biçimleriyle (GTIN-14/13/12; 8 hane yalnızca önekle) eşleşme; ikisi birleştirilip belirsizlik denetimi yapılır (A-108 önerisi). ARŞİVLİ ürünler çözümlemeye girmez (A-107 önerisi).
 import { sql } from "drizzle-orm";
@@ -12,7 +16,7 @@ import { appendAudit } from "@wms/db";
 import { AppError } from "@wms/shared/errors";
 import { runTenantCommand, runTenantQuery, type AccessTx } from "../identity/access.ts";
 import { gtinLookupForms, parseGs1, type Gs1FailureReason, type Gs1Parsed } from "./gs1.ts";
-import { assertQuantityScale } from "./quantity.ts";
+import { assertConversionFactor, assertQuantityScale, toBase } from "./quantity.ts";
 import { loadItem, parseText, parseUuid, type CatalogCommandParams } from "./units.ts";
 
 const BARCODE_MAX = 128;
@@ -44,6 +48,10 @@ export interface ResolvedBarcode {
   readonly unitId: string;
   /** Okutma başına miktar (barkodun birimi cinsinden); barkodda yoksa `"1"`. */
   readonly quantity: string;
+  /** 1 `unitId` = kaç temel birim (kanonik; temel birimde `"1"`). Temel olmayan birimde `unit_conversions`'tan gelir (K-1). */
+  readonly unitFactor: string;
+  /** Okutma başına TEMEL BİRİM miktarı = `quantity × unitFactor` (kanonik, yuvarlamasız; ürün ölçeğine uyar). Çağıranlar adedi buradan alır. */
+  readonly baseQuantity: string;
   /** Çözümleme GS1 GTIN'i üzerinden yapıldıysa ayrıştırılmış öğeler (lot, SKT, seri, adet). */
   readonly gs1?: Gs1Parsed;
 }
@@ -77,11 +85,21 @@ export async function addBarcode(
       if (unit[0] === undefined) throw new AppError("NOT_FOUND");
       if (unit[0].status !== "ACTIVE") throw new AppError("VALIDATION_FAILED");
     }
+    const inBase = unitId === null || unitId === item.base_unit_id;
+    // Biçim/işaret/ölçek hatası önce (ayrıntısız VALIDATION_FAILED / QUANTITY_SCALE); K-1 kuralları sonra.
     let quantity: string | null = null;
     if (input.quantity !== undefined && input.quantity !== null) {
-      const inBase = unitId === null || unitId === item.base_unit_id;
       // Temel birimde ürünün ölçeği; başka birimde en çok 6 ondalık (numeric(20,6) sınırı). > 0 ve ≤ 14 tam hane.
       quantity = assertQuantityScale(input.quantity, inBase ? item.quantity_scale : 6, "positive");
+    }
+    if (!inBase) {
+      // K-1: dönüşümü olmayan birime barkod eklenemez (ilk kullanımda sebepsiz ret yerine tanımda ret).
+      const conv = await tx.execute<{ id: string }>(
+        sql`SELECT id FROM public.unit_conversions WHERE tenant_id = ${actor.tenantId}::uuid AND item_id = ${itemId}::uuid AND unit_id = ${unitId}::uuid`,
+      );
+      if (conv[0] === undefined) throw new AppError("VALIDATION_FAILED", { detail: "UNIT_CONVERSION_INVALID" });
+      // K-1: temel olmayan birimde adet katsayıdan gelir; barkoda ayrıca miktar yazılırsa çifte sayım olurdu (yalnız 1 kabul).
+      if (quantity !== null && quantity !== "1") throw new AppError("VALIDATION_FAILED", { detail: "UNIT_CONVERSION_INVALID" });
     }
     const rows = await tx.execute<{ id: string }>(
       sql`INSERT INTO public.item_barcodes (tenant_id, id, item_id, unit_id, barcode, quantity)
@@ -132,6 +150,10 @@ type MatchRow = {
   readonly unit_id: string;
   readonly unit_code: string;
   readonly quantity: string | null;
+  readonly base_unit_id: string;
+  readonly quantity_scale: number | string;
+  /** `unit_conversions.to_base_factor`; temel birimde ya da dönüşüm yoksa `null`. */
+  readonly factor: string | null;
 };
 
 async function findMatches(tx: AccessTx, tenantId: string, values: readonly string[]): Promise<MatchRow[]> {
@@ -141,10 +163,12 @@ async function findMatches(tx: AccessTx, tenantId: string, values: readonly stri
   );
   const rows = await tx.execute<MatchRow>(
     sql`SELECT b.item_id, i.code AS item_code, i.name AS item_name,
-               COALESCE(b.unit_id, i.base_unit_id) AS unit_id, u.code AS unit_code, b.quantity::text AS quantity
+               COALESCE(b.unit_id, i.base_unit_id) AS unit_id, u.code AS unit_code, b.quantity::text AS quantity,
+               i.base_unit_id, i.quantity_scale, c.to_base_factor::text AS factor
           FROM public.item_barcodes b
           JOIN public.items i ON i.tenant_id = b.tenant_id AND i.id = b.item_id
           JOIN public.units u ON u.tenant_id = i.tenant_id AND u.id = COALESCE(b.unit_id, i.base_unit_id)
+          LEFT JOIN public.unit_conversions c ON c.tenant_id = b.tenant_id AND c.item_id = b.item_id AND c.unit_id = b.unit_id
          WHERE b.tenant_id = ${tenantId}::uuid AND b.barcode IN (${list}) AND i.status = 'ACTIVE'
          ORDER BY i.code, u.code, b.id
          LIMIT ${MAX_CANDIDATES + 1}`,
@@ -156,6 +180,18 @@ async function findMatches(tx: AccessTx, tenantId: string, values: readonly stri
 function canonicalQuantity(q: string | null): string {
   if (q === null) return "1";
   return q.includes(".") ? q.replace(/0+$/, "").replace(/\.$/, "") : q;
+}
+
+/**
+ * Tek doğruluk kaynağı (K-1): temel birimde katsayı 1; aksi `unit_conversions` katsayısı. Temel olmayan birimde dönüşüm yoksa ya da barkod miktarı ≠ 1 ise
+ * (eski/elle bozulmuş kayıt) kapalı başarısız: `UNIT_CONVERSION_INVALID`. Ürün ölçeğini aşan sonuç `QUANTITY_SCALE` (yuvarlanmaz).
+ */
+function baseOf(m: MatchRow, quantity: string): { unitFactor: string; baseQuantity: string } {
+  const scale = Number(m.quantity_scale);
+  if (m.unit_id.toLowerCase() === m.base_unit_id.toLowerCase()) return { unitFactor: "1", baseQuantity: toBase(quantity, "1", scale) };
+  if (m.factor === null || quantity !== "1") throw new AppError("VALIDATION_FAILED", { detail: "UNIT_CONVERSION_INVALID" });
+  const unitFactor = assertConversionFactor(m.factor);
+  return { unitFactor, baseQuantity: toBase("1", unitFactor, scale) };
 }
 
 /** GS1 çözümleme başarısız ve eşleşme yok: `NOT_FOUND`; GS1 neden reddedildi `gs1Reason` ile görünür (gövdeye girmez). */
@@ -215,7 +251,9 @@ export async function resolveBarcode(tx: AccessTx, tenantId: string, raw: string
     throw new BarcodeAmbiguousError(candidates);
   }
   const only = [...distinct.values()][0] as MatchRow;
-  return { itemId: only.item_id, unitId: only.unit_id, quantity: canonicalQuantity(only.quantity), ...(gs1 === undefined ? {} : { gs1 }) };
+  const quantity = canonicalQuantity(only.quantity);
+  const { unitFactor, baseQuantity } = baseOf(only, quantity);
+  return { itemId: only.item_id, unitId: only.unit_id, quantity, unitFactor, baseQuantity, ...(gs1 === undefined ? {} : { gs1 }) };
 }
 
 export function resolveBarcodeQuery(params: Omit<CatalogCommandParams, "requestId">, raw: string): Promise<ResolvedBarcode> {

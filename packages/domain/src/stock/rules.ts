@@ -6,6 +6,7 @@
 //   - Miktar ölçeği (`QUANTITY_SCALE`), dönüşüm kopyası (I-09), takip modu (`tracking.ts`), seri tekilliği (`TRACKING_VIOLATION`).
 //   - A-145: satır lokasyonları belgenin deposunda olmalı (`VALIDATION_FAILED`).
 import { AppError } from "@wms/shared/errors";
+import { toBase } from "../catalog/quantity.ts";
 import { toMicro, type PostingLine, type PostingPlan } from "./plan.ts";
 import { assertTracking, type TrackingMode } from "./tracking.ts";
 
@@ -37,9 +38,8 @@ export function assertLineRules(
     const base = toMicro(line.baseQuantity);
     const divisor = 10n ** BigInt(MICRO_DIGITS - item.quantityScale);
     if (base % divisor !== 0n) throw new AppError("VALIDATION_FAILED", { detail: "QUANTITY_SCALE" });
-    // I-09: base = round(quantity × factor, 6), yarım yukarı (PostgreSQL numeric round ile aynı, pozitif değerler).
-    const expected = (toMicro(line.quantity) * toMicro(line.conversionFactor) + 500_000n) / 1_000_000n;
-    if (expected !== base) throw new AppError("VALIDATION_FAILED");
+    // I-09: base = quantity × factor TAM (yuvarlama yok); tek kaynak catalog/quantity.ts `toBase`. 6 ondalığa inmeyen sonuç QUANTITY_SCALE.
+    if (toMicro(toBase(line.quantity, line.conversionFactor, MICRO_DIGITS)) !== base) throw new AppError("VALIDATION_FAILED");
     const serial = line.serialId === null ? undefined : serials.get(line.serialId.toLowerCase());
     if (line.serialId !== null && (serial === undefined || serial.itemId.toLowerCase() !== line.itemId.toLowerCase())) {
       throw new AppError("TRACKING_VIOLATION");

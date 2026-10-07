@@ -319,16 +319,32 @@
     "validation_failed_barcode_ambiguousAction": "Choose the item from the list.",
     "validation_failed_code_ambiguous": "This old code matches more than one record.",
     "validation_failed_code_ambiguousAction": "Search the record by its current code.",
-    "validation_failed_unit_conversion_invalid": "The unit conversion factor is not valid.",
-    "validation_failed_unit_conversion_invalidAction": "Enter a factor greater than zero with at most 6 decimals.",
-    "validation_failed_quantity_scale": "The quantity has more decimals than the item allows.",
-    "validation_failed_quantity_scaleAction": "Adjust the quantity to the item's precision.",
+    "validation_failed_unit_conversion_invalid": "The unit conversion is not valid: how many pieces this unit holds is not set, the factor is wrong, or a quantity was entered on a case barcode.",
+    "validation_failed_unit_conversion_invalidAction": "First save how many pieces the unit holds (greater than zero, up to 6 decimals, e.g. 12). Leave the quantity empty on a case barcode.",
+    "validation_failed_quantity_scale": "This quantity does not fit the item's precision: the item does not accept fractional pieces (for example, half a case or 0.5 piece).",
+    "validation_failed_quantity_scaleAction": "Do not enter a fractional case; enter whole cases and pieces separately (e.g. 2 cases + 3 pieces) or enter the quantity in pieces.",
     "validation_failed_document_too_large": "The document exceeds the maximum number of lines.",
     "validation_failed_document_too_largeAction": "Split the document into several documents.",
     "validation_failed_document_state": "The document's status does not allow this action.",
     "validation_failed_document_stateAction": "Refresh the page and check the document's current status.",
+    "validation_failed_scan_mismatch": "The scanned location or product does not match the task.",
+    "validation_failed_scan_mismatchAction": "Scan the location and product shown on the task and try again.",
     "validation_failed_idempotency_key_required": "The request key is missing.",
     "validation_failed_idempotency_key_requiredAction": "Refresh the page and send the action again.",
+    "reversal_blocked_exceeds_remaining": "The requested quantity is more than what is still left to reverse on this line.",
+    "reversal_blocked_exceeds_remainingAction": "Lower the quantity to the amount that has not been reversed yet.",
+    "reversal_blocked_stock_used": "This stock has been used since, so the requested quantity cannot be reversed.",
+    "reversal_blocked_stock_usedAction": "Choose a quantity that does not exceed the stock still in the location, or bring the issued stock back first.",
+    "reversal_blocked_stock_reserved": "Part of this stock is set aside for an order or another task.",
+    "reversal_blocked_stock_reservedAction": "Release the related reservation first, then try again.",
+    "reversal_blocked_serial_in_use": "This serial number currently shows as in stock somewhere else.",
+    "reversal_blocked_serial_in_useAction": "Check the record where the serial number is now; fix that movement first if needed.",
+    "reversal_blocked_source_linked": "This record came from the goods receipt, shipping or counting screen; it is corrected from that screen.",
+    "reversal_blocked_source_linkedAction": "Open the related receipt, shipment or count record and make the correction there.",
+    "reversal_blocked_status_change": "This move changed the stock status (for example a quality approval), so it cannot be reversed here.",
+    "reversal_blocked_status_changeAction": "Change the stock status back with a new move, or tell your manager.",
+    "validation_failed_too_many_lines": "At most 200 lines can be reversed at once.",
+    "validation_failed_too_many_linesAction": "Split the lines into groups of 200 and make a separate reversal for each group.",
     "forbidden_warehouse_out_of_scope": "This warehouse is outside your scope.",
     "forbidden_warehouse_out_of_scopeAction": "If you need access, ask your workspace admin to add it to your scope."
   },
@@ -453,52 +469,73 @@
     "tasks": {
       "members": {
         "title": "Manage my team",
-        "description": "Decide who can do which tasks"
+        "description": "Decide who can do which tasks",
+        "short": "Team and roles"
       },
       "settings": {
         "title": "Settings",
-        "description": "Name, language and time zone"
+        "description": "Name, language and time zone",
+        "short": "Name, language"
       },
       "audit": {
         "title": "Who did what?",
-        "description": "Audit log"
+        "description": "See who did what",
+        "short": "Recent actions"
       },
       "items": {
         "title": "My products",
-        "description": "Product card, units and barcodes"
+        "description": "Product card, units and barcodes",
+        "short": "Items, barcodes"
       },
       "receive": {
         "title": "Goods arrived",
-        "description": "Record incoming goods"
+        "description": "Count and record incoming goods",
+        "short": "Count incoming",
+        "tile": "Receiving"
       },
       "issue": {
         "title": "Goods are going out",
-        "description": "Record outgoing goods"
+        "description": "Record outgoing goods",
+        "short": "Record outgoing"
       },
       "transfer": {
         "title": "Move goods to another warehouse",
-        "description": "Transfer between warehouses"
+        "description": "Transfer between warehouses",
+        "short": "Between depots"
       },
       "count": {
         "title": "Count a shelf",
-        "description": "Count the items on a shelf one by one"
+        "description": "Count the items on a shelf one by one",
+        "short": "Count a rack"
       },
       "lookup": {
         "title": "Where is a product, how many?",
-        "description": "See stock and shelf information"
+        "description": "See stock and shelf information",
+        "short": "Check stock"
       },
       "undo": {
         "title": "I made a mistake",
-        "description": "Let's fix the wrong record together"
+        "description": "Let's fix the wrong record together",
+        "short": "Fix a mistake"
       },
       "warehouses": {
         "title": "Warehouses and racks",
-        "description": "Manage warehouses and rack layout"
+        "description": "Manage warehouses and rack layout",
+        "short": "Rack layout"
       }
     },
     "today": {
       "title": "What you did today",
       "empty": "You have not done anything yet today. What you do will appear here."
+    },
+    "now": {
+      "title": "To do now",
+      "empty": "Nothing is waiting",
+      "receive": "{count} deliveries waiting",
+      "putaway": "{count} putaway tasks waiting",
+      "next": "Next: {label}",
+      "then": "After that: {label}",
+      "qty": "{n} units"
     }
   },
   "audit": {
@@ -604,6 +641,12 @@
       "updated": "You updated a draft order.",
       "cancelled": "You cancelled an order.",
       "line_cancelled": "You cancelled an order line."
+    },
+    "pick_assignment": {
+      "created": "You created a picking assignment."
+    },
+    "pick": {
+      "not_found": "You reported a product as not found while picking; the location was flagged for counting."
     }
   },
   "auditLog": {
@@ -824,8 +867,8 @@
       "validation_failed_code_takenAction": "Enter a different value.",
       "validation_failed_in_use": "This product has stock or an open reservation.",
       "validation_failed_in_useAction": "Clear the stock and close reservations first, then try again.",
-      "validation_failed_unit_conversion_invalid": "A conversion cannot be set for the base unit, or the factor is invalid: it must be greater than zero, with at most 6 decimals and 14 integer digits.",
-      "validation_failed_unit_conversion_invalidAction": "Choose a unit other than the base unit and re-enter the factor within these limits (e.g. 12 or 0.5).",
+      "validation_failed_unit_conversion_invalid": "The conversion could not be saved: the base unit cannot have a factor, the factor is wrong, or how many pieces this unit holds is not set yet. A quantity cannot be entered on a case barcode.",
+      "validation_failed_unit_conversion_invalidAction": "First choose a unit other than the base unit and enter how many pieces it holds (e.g. 12 or 0.5, up to 6 decimals). Then add the case barcode and leave the quantity empty.",
       "version_conflict": "The record was changed by another action at the same time.",
       "version_conflictAction": "Refresh the page and try again.",
       "rate_limited": "Too many actions.",
@@ -1009,7 +1052,8 @@
         "title": "Counting",
         "description": "Count a shelf and show the difference."
       }
-    }
+    },
+    "noPermission": "You cannot do this job. Tell your manager."
   },
   "labels": {
     "title": "Print labels",
@@ -1229,6 +1273,214 @@
       "tenant_closingAction": "Contact your manager.",
       "internal": "Something went wrong.",
       "internalAction": "Try again shortly; if it continues, send the error code to support."
+    }
+  },
+  "receiving": {
+    "title": "Expected deliveries",
+    "intro": "Record incoming goods; receive them on the phone.",
+    "backHome": "Back to home",
+    "back": "Back",
+    "stepOf": "Step {n} / {total}",
+    "primaryBar": "Main action",
+    "detail": "Details",
+    "errorCode": "Error code: {code}",
+    "cancel": "Cancel",
+    "scanAgain": "Got it, scan again",
+    "alert": {
+      "scanTitle": "Code not found",
+      "mismatchTitle": "Wrong item",
+      "networkTitle": "No connection",
+      "putawayTitle": "Could not put on rack"
+    },
+    "errors": {
+      "network": "The connection dropped.",
+      "networkAction": "Try the same action again. It will not be saved twice.",
+      "forbidden": "You are not allowed to do this.",
+      "forbiddenAction": "Ask your manager or call for help.",
+      "forbidden_scope": "You do not have access to this warehouse.",
+      "forbidden_scopeAction": "Ask your manager for access.",
+      "location_locked": "A count is in progress on this rack.",
+      "location_lockedAction": "Try again when the count ends, or scan another rack.",
+      "insufficient_stock": "There is not enough stock on this rack.",
+      "insufficient_stockAction": "Lower the quantity or take from another rack.",
+      "tracking_violation": "This item needs a lot or serial number.",
+      "tracking_violationAction": "Tell your manager about this item.",
+      "version_conflict": "Someone else just changed this record.",
+      "version_conflictAction": "Refresh the page and try again.",
+      "idempotency_mismatch": "This action was changed and sent again.",
+      "idempotency_mismatchAction": "Refresh the page and start over.",
+      "scan_unknown": "This code is not in the system.",
+      "scan_unknownAction": "Scan it again; if that fails, type it.",
+      "not_found": "Record not found.",
+      "not_foundAction": "Refresh the page and try again.",
+      "unauthenticated": "Your session has ended.",
+      "unauthenticatedAction": "Sign in again and continue.",
+      "rate_limited": "Too many actions.",
+      "rate_limitedAction": "Wait a moment and try again.",
+      "tenant_suspended": "The workspace is suspended.",
+      "tenant_suspendedAction": "Tell your manager.",
+      "tenant_closing": "The workspace is closing.",
+      "tenant_closingAction": "Tell your manager.",
+      "barcode_ambiguous": "This barcode belongs to more than one item.",
+      "barcode_ambiguousAction": "Tell your manager.",
+      "document_state": "This job is no longer valid.",
+      "document_stateAction": "Refresh the page to see the current state.",
+      "quantity_scale": "The quantity must be a whole number for this item.",
+      "quantity_scaleAction": "Check the quantity and try again.",
+      "over_receipt": "You scanned more than expected. Remaining: {remaining}",
+      "over_receiptAction": "Lower the quantity to the remaining amount.",
+      "putaway_invalid": "It could not be put on this rack.",
+      "putaway_invalidAction": "Scan another rack.",
+      "validation_failed": "The information is not valid.",
+      "validation_failedAction": "Check it and try again.",
+      "internal": "The action could not be completed.",
+      "internalAction": "Try again shortly; if it continues, give the error code to your manager.",
+      "scan_mismatch": "This item is not part of this job.",
+      "scan_mismatchAction": "Scan the right item.",
+      "line_done": "This item is complete.",
+      "line_doneAction": "Scan the next item.",
+      "finish_first": "Finish the open item first.",
+      "finish_firstAction": "Scan the same item or go back.",
+      "no_stock_here": "There is none of this item on this rack.",
+      "no_stock_hereAction": "Scan the right rack."
+    },
+    "line": {
+      "complete": "Done",
+      "open": "Remaining {open}",
+      "expected": "Expected {n}",
+      "received": "Received {n}",
+      "damaged": "Damaged {n}"
+    },
+    "status": {
+      "DRAFT": "Draft",
+      "OPEN": "Open",
+      "CLOSED": "Closed",
+      "CANCELLED": "Cancelled"
+    },
+    "list": {
+      "title": "Expected delivery list",
+      "empty": "No expected deliveries.",
+      "emptyAction": "Add the first delivery with the form.",
+      "supplier": "Supplier: {ref}",
+      "receiveInField": "Receive in the field",
+      "more": "Show more"
+    },
+    "quality": {
+      "approve": "Approve quality",
+      "locked": "Your manager can approve quality. Call for help.",
+      "done": "{number} approved.",
+      "confirmTitle": "Approve quality?",
+      "confirmBody": "The waiting goods in {number} become available. Damaged goods are not affected."
+    },
+    "form": {
+      "title": "Add a delivery",
+      "locked": "You cannot add deliveries. Tell your manager.",
+      "created": "{number} saved.",
+      "warehouse": "Warehouse",
+      "supplierRef": "Supplier reference",
+      "supplierRefHint": "Do not enter personal data. Only a delivery note or order number.",
+      "lines": "Delivery lines",
+      "removeLine": "Remove line {name}",
+      "remove": "Remove",
+      "item": "Item",
+      "itemHint": "Search by name or code",
+      "unit": "Unit",
+      "expected": "Expected quantity",
+      "addLine": "Add line",
+      "save": "Save delivery"
+    },
+    "flow": {
+      "pickTitle": "Which delivery arrived?",
+      "pickInstruction": "Start with the next one or pick from the list.",
+      "startNext": "Start the next one",
+      "addReceipt": "Add a delivery",
+      "next": "Next",
+      "pickSummary": "{lines} items · {open} open",
+      "emptyTitle": "No waiting deliveries",
+      "emptyAction": "New deliveries appear here. Tell your manager.",
+      "emptyCanCreate": "Add a delivery first.",
+      "lockedTitle": "Receiving is closed to you",
+      "lockedReason": "You cannot receive goods. Tell your manager or call for help.",
+      "toField": "Back to field jobs",
+      "notOpenTitle": "Delivery is not open",
+      "notOpen": "This delivery was not found or is no longer open. Pick another.",
+      "otherReceipt": "Pick another delivery",
+      "scanTitle": "Scan the item",
+      "scanInstruction": "Scan the box barcode.",
+      "scanLabel": "Barcode",
+      "checking": "Checking…",
+      "scanPlaceholder": "Type the barcode",
+      "manual": "Type it",
+      "manualConfirm": "Confirm",
+      "expectedItems": "Expected items",
+      "qtyTitle": "How many arrived?",
+      "qtyInstruction": "Check the number and change it if needed.",
+      "verify": "Item you scanned:",
+      "received": "Arrived ({unit})",
+      "damagedLabel": "Damaged count",
+      "hasDamaged": "Add damaged",
+      "rackLabel": "Receiving rack",
+      "rackAuto": "Receiving rack: {name}",
+      "confirm": "Receive",
+      "savedTitle": "Saved",
+      "saved": "{name}: {received} received.",
+      "savedDamaged": "{n} of them are damaged.",
+      "savedRemaining": "Remaining: {n}",
+      "receiptDone": "Delivery complete",
+      "openStays": "Missing items stay open.",
+      "nextItem": "Go to next item",
+      "allDone": "Every item in this delivery was received.",
+      "noLocationTitle": "No receiving rack",
+      "noLocation": "This warehouse has no receiving rack.",
+      "noLocationAction": "Tell your manager.",
+      "scanNow": "Scan barcode",
+      "scanPrompt": "Press the reader trigger and scan the box barcode.",
+      "readerReady": "Reader ready. Press the trigger and scan the barcode.",
+      "lastScan": "Last scanned: {name}",
+      "lastCode": "Code: {code}",
+      "helpCall": "Call for help"
+    },
+    "putaway": {
+      "title": "Put away",
+      "sourceTitle": "Scan the receiving rack",
+      "sourceInstruction": "Scan the label of the rack you took goods from.",
+      "itemTitle": "Scan the item",
+      "itemInstruction": "Scan the barcode of the item in your hand.",
+      "targetTitle": "Scan the rack",
+      "targetInstruction": "Scan the label of the rack to put it on.",
+      "itemLabel": "Item barcode",
+      "locationLabel": "Rack label",
+      "taskLine": "{qty} units · from rack {from}",
+      "takenFrom": "From rack {from}",
+      "confirmTitle": "Put on the rack",
+      "confirmInstruction": "Confirm if everything is right.",
+      "fromTo": "{from} → {to}",
+      "taskQty": "Quantity on the job: {n}",
+      "qtyLabel": "How many?",
+      "confirm": "Put on rack",
+      "savedTitle": "Put on the rack",
+      "saved": "{name}: {qty} units put on rack {to}.",
+      "noNewStock": "The stock count did not change; only the place did.",
+      "backToTasks": "Back to my jobs",
+      "toTasks": "My jobs",
+      "taskGoneTitle": "Job not found",
+      "taskGone": "This job is no longer yours or is already done.",
+      "noWarehouseTitle": "No warehouse",
+      "noWarehouse": "A warehouse must be set up first. Tell your manager.",
+      "warehouseTitle": "Which warehouse?",
+      "warehouseInstruction": "Pick the warehouse you work in.",
+      "sourcePrompt": "Scan the label of the rack you took goods from.",
+      "itemPrompt": "Scan the barcode of the item in your hand.",
+      "targetPrompt": "Scan the label of the rack to put it on.",
+      "lockedTitle": "Putting away is closed to you",
+      "lockedReason": "You cannot put goods away. Tell your manager or call for help."
+    },
+    "camera": {
+      "title": "Camera",
+      "hint": "Bring the barcode into the frame.",
+      "failed": "The camera could not be opened. Use the reader trigger or type the barcode.",
+      "dropped": "A code was read but reading was off. Scan the code again.",
+      "ok": "OK"
     }
   }
 }

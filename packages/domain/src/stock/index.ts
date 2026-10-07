@@ -72,7 +72,7 @@ export {
 } from "./numbering.ts";
 export { SYNC_POST_MAX_LINES, postDocument, type PostDocumentInput } from "./posting.ts";
 // T-305: saha komutlarının (kabul, yerleştirme…) belgeyi aynı transaction'da oluşturup işlemesi için DAR bileşik yol: yalnızca posting çekirdeği
-// (kilitli görüntü üzerinde işleme) açılır; çekirdek belge kilidini ya da "bu tx'te yaratıldı" kaydını ister (aksi INTERNAL) ve apps/** bu adları import edemez (eslint); defter/bakiye yazımı hâlâ yalnızca posting.ts'tedir (G-01). Kilitler yine executeStockCommand/acquireStockLocks'tadır.
+// (kilitli görüntü üzerinde işleme) açılır; çekirdek belge kilidini ya da "bu tx'te yaratıldı" kaydını ister (aksi INTERNAL) ve apps/web bu adları import edemez (eslint.config.mjs WEB_STOCK_CORE_NAMES: `no-restricted-imports`, yalnızca apps/web kapsamı); defter/bakiye yazımı hâlâ yalnızca posting.ts'tedir (G-01). Kilitler yine executeStockCommand/acquireStockLocks'tadır.
 export { postApprovedDocumentInTx, registerTxCreatedDocument, type PostInTxOptions } from "./posting.ts";
 export {
   RESERVATION_EXPIRY_FLAG,
@@ -118,3 +118,13 @@ export {
 export { assertLineRules, assertSerialUnique, assertSufficient, type BalanceView, type ItemInfo, type SerialInfo } from "./rules.ts";
 export { assertTracking, type TrackedLine, type TrackingMode } from "./tracking.ts";
 export { readAvailability, type AvailabilityFilter, type AvailabilityRow } from "./availability.ts";
+// T-224: ters kayıt (I-08, AC-06): kalan ters çevrilmemiş miktar sınırı, bağımlı işlem denetimi, `REVERSAL_BLOCKED`. Yazım reversal.ts'tedir (eslint STOCK_WRITE_FILES).
+export {
+  REVERSAL_MAX_LINES,
+  getReversalCapacity,
+  reverseDocument,
+  type ReverseDocumentInput,
+  type ReverseDocumentResult,
+  type ReverseLineRequest,
+  type ReversalCapacityLine,
+} from "./reversal.ts";

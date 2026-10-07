@@ -319,16 +319,32 @@
     "validation_failed_barcode_ambiguousAction": "Ürünü listeden elle seç.",
     "validation_failed_code_ambiguous": "Bu eski kod birden fazla kayıtla eşleşiyor.",
     "validation_failed_code_ambiguousAction": "Kaydı güncel koduyla ara.",
-    "validation_failed_unit_conversion_invalid": "Birim dönüşüm katsayısı geçersiz.",
-    "validation_failed_unit_conversion_invalidAction": "Sıfırdan büyük ve en çok 6 ondalıklı bir katsayı gir.",
-    "validation_failed_quantity_scale": "Miktar, ürünün izin verdiği ondalık basamak sayısını aşıyor.",
-    "validation_failed_quantity_scaleAction": "Miktarı ürünün hassasiyetine göre düzelt.",
+    "validation_failed_unit_conversion_invalid": "Birim dönüşümü geçersiz: bu birimin kaç adet ettiği tanımlı değil, katsayı hatalı ya da koli barkoduna miktar yazılmış.",
+    "validation_failed_unit_conversion_invalidAction": "Önce birimin kaç adet ettiğini kaydet (sıfırdan büyük, en çok 6 ondalık; ör. 12). Koli barkodunda miktarı boş bırak.",
+    "validation_failed_quantity_scale": "Bu miktar ürünün hassasiyetine uymuyor: ürün kesirli adet kabul etmiyor (ör. yarım koli ya da 0,5 adet olmaz).",
+    "validation_failed_quantity_scaleAction": "Kesirli koli yazma; tam koli ve adedi ayrı gir (ör. 2 koli + 3 adet) ya da miktarı adetle yaz.",
     "validation_failed_document_too_large": "Belgede izin verilen en fazla satır sayısı aşıldı.",
     "validation_failed_document_too_largeAction": "Belgeyi birkaç belgeye böl.",
     "validation_failed_document_state": "Belgenin durumu bu işleme uygun değil.",
     "validation_failed_document_stateAction": "Sayfayı yenileyip belgenin güncel durumunu kontrol et.",
+    "validation_failed_scan_mismatch": "Okutulan lokasyon veya ürün görevle eşleşmiyor.",
+    "validation_failed_scan_mismatchAction": "Görevde yazan lokasyonu ve ürünü okutup yeniden dene.",
     "validation_failed_idempotency_key_required": "İstek anahtarı eksik.",
     "validation_failed_idempotency_key_requiredAction": "Sayfayı yenileyip işlemi yeniden gönder.",
+    "reversal_blocked_exceeds_remaining": "İstenen miktar, bu satırdan ters çevrilebilecek kalan miktardan fazla.",
+    "reversal_blocked_exceeds_remainingAction": "Miktarı, daha önce ters çevrilmemiş kalan miktara indir.",
+    "reversal_blocked_stock_used": "Bu stok bu arada kullanılmış; istenen miktar ters çevrilemez.",
+    "reversal_blocked_stock_usedAction": "Lokasyonda kalan stoğu aşmayan bir miktar seç ya da önce çıkan stoğu geri getir.",
+    "reversal_blocked_stock_reserved": "Bu stoğun bir kısmı sipariş ya da başka bir işlem için ayrılmış.",
+    "reversal_blocked_stock_reservedAction": "Önce ilgili rezervasyonu serbest bırak, sonra yeniden dene.",
+    "reversal_blocked_serial_in_use": "Bu seri numarası şu an başka bir yerde stokta görünüyor.",
+    "reversal_blocked_serial_in_useAction": "Seri numarasının bulunduğu kaydı kontrol et; gerekirse önce o hareketi düzelt.",
+    "reversal_blocked_source_linked": "Bu kayıt mal kabul, sevk ya da sayım ekranından geldi; düzeltmesi o ekrandan yapılır.",
+    "reversal_blocked_source_linkedAction": "İlgili kabul, sevk veya sayım kaydını açıp düzeltmeyi oradan yap.",
+    "reversal_blocked_status_change": "Bu taşıma stok durumunu değiştirdi (örneğin kalite onayı); burada ters çevrilemez.",
+    "reversal_blocked_status_changeAction": "Stok durumunu yeni bir taşıma ile geri değiştir ya da yöneticine haber ver.",
+    "validation_failed_too_many_lines": "Tek seferde en fazla 200 satır ters çevrilebilir.",
+    "validation_failed_too_many_linesAction": "Satırları 200'erli gruplara bölüp her grup için ayrı ters kayıt yap.",
     "forbidden_warehouse_out_of_scope": "Bu depo senin çalışma kapsamının dışında.",
     "forbidden_warehouse_out_of_scopeAction": "Erişim gerekiyorsa çalışma alanı yöneticinden depoyu kapsamına eklemesini iste."
   },
@@ -453,52 +469,73 @@
     "tasks": {
       "members": {
         "title": "Ekibimi yönet",
-        "description": "Kimin hangi işi yapabileceğini belirle"
+        "description": "Kimin hangi işi yapabileceğini belirle",
+        "short": "Ekip ve yetkiler"
       },
       "settings": {
         "title": "Ayarlar",
-        "description": "Ad, dil ve saat dilimi"
+        "description": "Ad, dil ve saat dilimi",
+        "short": "Ad ve dil"
       },
       "audit": {
         "title": "Kim ne yaptı?",
-        "description": "Denetim kaydı"
+        "description": "Kim ne yaptığını gör",
+        "short": "Son işlemler"
       },
       "items": {
         "title": "Ürünlerim",
-        "description": "Ürün kartı, birim ve barkod"
+        "description": "Ürün kartı, birim ve barkod",
+        "short": "Ürün ve barkod"
       },
       "receive": {
         "title": "Depoya mal geldi",
-        "description": "Gelen malı kaydet"
+        "description": "Gelen ürünü say, kaydet",
+        "short": "Gelen ürünü say",
+        "tile": "Mal kabul"
       },
       "issue": {
         "title": "Depodan mal çıkacak",
-        "description": "Çıkan malı kaydet"
+        "description": "Çıkan malı kaydet",
+        "short": "Çıkan ürünü yaz"
       },
       "transfer": {
         "title": "Malı başka depoya taşıyacağım",
-        "description": "Depolar arası taşıma"
+        "description": "Depolar arası taşıma",
+        "short": "Depolar arası"
       },
       "count": {
         "title": "Rafı sayacağım",
-        "description": "Raftaki ürünleri tek tek say"
+        "description": "Raftaki ürünleri tek tek say",
+        "short": "Raftakini say"
       },
       "lookup": {
         "title": "Bir ürün nerede, kaç tane var?",
-        "description": "Stok ve raf bilgisini gör"
+        "description": "Stok ve raf bilgisini gör",
+        "short": "Stok ve raf bak"
       },
       "undo": {
         "title": "Yanlış bir şey yaptım",
-        "description": "Hatalı kaydı birlikte düzeltelim"
+        "description": "Hatalı kaydı birlikte düzeltelim",
+        "short": "Hatayı düzelt"
       },
       "warehouses": {
         "title": "Depo ve raflar",
-        "description": "Depoları ve raf düzenini yönet"
+        "description": "Depoları ve raf düzenini yönet",
+        "short": "Raf düzeni"
       }
     },
     "today": {
       "title": "Bugün yaptıkların",
       "empty": "Bugün henüz bir işlem yapmadın. Yaptıkların burada görünecek."
+    },
+    "now": {
+      "title": "Şimdi yapılacaklar",
+      "empty": "Bekleyen iş yok",
+      "receive": "{count} teslim bekliyor",
+      "putaway": "{count} yerleştirme görevi bekliyor",
+      "next": "Sıradaki: {label}",
+      "then": "Ardından: {label}",
+      "qty": "{n} adet"
     }
   },
   "audit": {
@@ -604,6 +641,12 @@
       "updated": "Bir taslak siparişi güncelledin.",
       "cancelled": "Bir siparişi iptal ettin.",
       "line_cancelled": "Bir sipariş satırını iptal ettin."
+    },
+    "pick_assignment": {
+      "created": "Bir toplama görevlendirmesi oluşturdun."
+    },
+    "pick": {
+      "not_found": "Toplamada ürünü bulamadığını bildirdin; lokasyon sayıma alındı."
     }
   },
   "auditLog": {
@@ -824,8 +867,8 @@
       "validation_failed_code_takenAction": "Farklı bir değer gir.",
       "validation_failed_in_use": "Bu üründe stok veya açık rezervasyon var.",
       "validation_failed_in_useAction": "Önce stoku boşalt ve rezervasyonları kapat, sonra yeniden dene.",
-      "validation_failed_unit_conversion_invalid": "Temel birim için dönüşüm girilemez ya da katsayı geçersiz: sıfırdan büyük olmalı, en çok 6 ondalık ve 14 tam hane içermeli.",
-      "validation_failed_unit_conversion_invalidAction": "Temel birimden farklı bir birim seç ve katsayıyı bu sınırlara göre yeniden yaz (ör. 12 ya da 0.5).",
+      "validation_failed_unit_conversion_invalid": "Dönüşüm kaydedilemedi: temel birime katsayı girilemez, katsayı hatalı ya da bu birimin kaç adet ettiği henüz tanımlı değil. Koli barkoduna ayrıca miktar yazılamaz.",
+      "validation_failed_unit_conversion_invalidAction": "Önce temel birimden farklı bir birim seç ve kaç adet ettiğini yaz (ör. 12 ya da 0.5; en çok 6 ondalık). Sonra koli barkodunu ekle ve miktar alanını boş bırak.",
       "version_conflict": "Kayıt aynı anda başka bir işlemle değişti.",
       "version_conflictAction": "Sayfayı yenileyip yeniden dene.",
       "rate_limited": "Çok fazla işlem yapıldı.",
@@ -1009,7 +1052,8 @@
         "title": "Sayım",
         "description": "Rafı say, farkı göster."
       }
-    }
+    },
+    "noPermission": "Bu işin yetkisi sende yok. Yöneticine haber ver."
   },
   "labels": {
     "title": "Etiket yazdır",
@@ -1229,6 +1273,214 @@
       "tenant_closingAction": "Sorumluna başvur.",
       "internal": "Bir sorun oluştu.",
       "internalAction": "Biraz sonra yeniden dene; sürerse hata kodunu destek ekibine ilet."
+    }
+  },
+  "receiving": {
+    "title": "Beklenen teslimler",
+    "intro": "Gelecek malı kaydet; telefonda kabul et.",
+    "backHome": "Ana ekrana dön",
+    "back": "Geri",
+    "stepOf": "Adım {n} / {total}",
+    "primaryBar": "Ana eylem",
+    "detail": "Ayrıntı",
+    "errorCode": "Hata kodu: {code}",
+    "cancel": "Vazgeç",
+    "scanAgain": "Anladım, tekrar okut",
+    "alert": {
+      "scanTitle": "Kod bulunamadı",
+      "mismatchTitle": "Yanlış ürün",
+      "networkTitle": "Bağlantı yok",
+      "putawayTitle": "Rafa konamadı"
+    },
+    "errors": {
+      "network": "Bağlantı koptu.",
+      "networkAction": "Aynı işlemi yeniden dene. Çift kayıt olmaz.",
+      "forbidden": "Bu işlem için yetkin yok.",
+      "forbiddenAction": "Yöneticine söyle ya da Yardım çağır.",
+      "forbidden_scope": "Bu depoda çalışma iznin yok.",
+      "forbidden_scopeAction": "Yöneticinden depoyu iste.",
+      "location_locked": "Bu rafta sayım sürüyor.",
+      "location_lockedAction": "Sayım bitince yeniden dene ya da başka raf okut.",
+      "insufficient_stock": "Bu rafta yeterli mal yok.",
+      "insufficient_stockAction": "Miktarı azalt ya da başka raftan al.",
+      "tracking_violation": "Bu ürün lot ya da seri ister.",
+      "tracking_violationAction": "Bu ürünü yöneticine bildir.",
+      "version_conflict": "Kayıt az önce başka biri tarafından değişti.",
+      "version_conflictAction": "Sayfayı yenileyip yeniden dene.",
+      "idempotency_mismatch": "Bu işlem değiştirilip yeniden gönderildi.",
+      "idempotency_mismatchAction": "Sayfayı yenileyip baştan başla.",
+      "scan_unknown": "Bu kod sistemde yok.",
+      "scan_unknownAction": "Kodu tekrar okut; olmuyorsa elle yaz.",
+      "not_found": "Kayıt bulunamadı.",
+      "not_foundAction": "Sayfayı yenileyip yeniden dene.",
+      "unauthenticated": "Oturumun sona ermiş.",
+      "unauthenticatedAction": "Yeniden giriş yapıp devam et.",
+      "rate_limited": "Çok fazla işlem yapıldı.",
+      "rate_limitedAction": "Biraz bekleyip yeniden dene.",
+      "tenant_suspended": "Çalışma alanı askıda.",
+      "tenant_suspendedAction": "Yöneticine haber ver.",
+      "tenant_closing": "Çalışma alanı kapatılıyor.",
+      "tenant_closingAction": "Yöneticine haber ver.",
+      "barcode_ambiguous": "Bu barkod birden çok ürüne ait.",
+      "barcode_ambiguousAction": "Yöneticine haber ver.",
+      "document_state": "Bu iş artık uygun değil.",
+      "document_stateAction": "Sayfayı yenileyip güncel durumu gör.",
+      "quantity_scale": "Bu ürün için miktar tam sayı olmalı.",
+      "quantity_scaleAction": "Miktarı kontrol edip yeniden dene.",
+      "over_receipt": "Beklenenden fazla okuttun. Kalan: {remaining}",
+      "over_receiptAction": "Miktarı kalan adede indir.",
+      "putaway_invalid": "Bu rafa yerleştirilemedi.",
+      "putaway_invalidAction": "Başka bir raf okut.",
+      "validation_failed": "Girilen bilgiler geçersiz.",
+      "validation_failedAction": "Bilgileri kontrol edip yeniden dene.",
+      "internal": "İşlem tamamlanamadı.",
+      "internalAction": "Biraz sonra yeniden dene; sürerse hata kodunu yöneticine ilet.",
+      "scan_mismatch": "Bu ürün bu işte yok.",
+      "scan_mismatchAction": "Doğru ürünü okut.",
+      "line_done": "Bu ürün tamamlandı.",
+      "line_doneAction": "Sıradaki ürünü okut.",
+      "finish_first": "Önce açık ürünü bitir.",
+      "finish_firstAction": "Aynı ürünü okut ya da geri dön.",
+      "no_stock_here": "Bu rafta bu üründen yok.",
+      "no_stock_hereAction": "Doğru rafı okut."
+    },
+    "line": {
+      "complete": "Tamam",
+      "open": "Kalan {open}",
+      "expected": "Beklenen {n}",
+      "received": "Kabul {n}",
+      "damaged": "Hasarlı {n}"
+    },
+    "status": {
+      "DRAFT": "Taslak",
+      "OPEN": "Açık",
+      "CLOSED": "Kapalı",
+      "CANCELLED": "İptal"
+    },
+    "list": {
+      "title": "Beklenen teslim listesi",
+      "empty": "Beklenen teslim yok.",
+      "emptyAction": "Sağdaki formdan ilk teslimi ekle.",
+      "supplier": "Tedarikçi: {ref}",
+      "receiveInField": "Sahada kabul et",
+      "more": "Daha fazla göster"
+    },
+    "quality": {
+      "approve": "Kalite onayı ver",
+      "locked": "Kalite onayını yöneticin verebilir. Yardım çağır.",
+      "done": "{number} onaylandı.",
+      "confirmTitle": "Kalite onayı verilsin mi?",
+      "confirmBody": "{number} teslimindeki bekleyen mal satışa uygun olur. Hasarlı mal etkilenmez."
+    },
+    "form": {
+      "title": "Yeni teslim ekle",
+      "locked": "Teslim eklemek için yetkin yok. Yöneticine söyle.",
+      "created": "{number} kaydedildi.",
+      "warehouse": "Depo",
+      "supplierRef": "Tedarikçi referansı",
+      "supplierRefHint": "Kişisel veri girmeyin. Yalnızca irsaliye ya da sipariş numarası yazın.",
+      "lines": "Teslim satırları",
+      "removeLine": "{name} satırını çıkar",
+      "remove": "Çıkar",
+      "item": "Ürün",
+      "itemHint": "Ad ya da kodla ara",
+      "unit": "Birim",
+      "expected": "Beklenen miktar",
+      "addLine": "Satırı ekle",
+      "save": "Teslimi kaydet"
+    },
+    "flow": {
+      "pickTitle": "Hangi teslim geldi?",
+      "pickInstruction": "Sıradaki teslimle başla ya da listeden seç.",
+      "startNext": "Sıradakini başlat",
+      "addReceipt": "Yeni teslim ekle",
+      "next": "Sıradaki",
+      "pickSummary": "{lines} ürün · {open} açık",
+      "emptyTitle": "Bekleyen teslim yok",
+      "emptyAction": "Yeni teslim gelince burada görünür. Yöneticine söyle.",
+      "emptyCanCreate": "Önce bir teslim ekle.",
+      "lockedTitle": "Mal kabul sana kapalı",
+      "lockedReason": "Mal kabul için yetkin yok. Yöneticine haber ver ya da yardım çağır.",
+      "toField": "Saha işlerine dön",
+      "notOpenTitle": "Teslim açık değil",
+      "notOpen": "Bu teslim bulunamadı ya da artık açık değil. Başka teslim seç.",
+      "otherReceipt": "Başka teslim seç",
+      "scanTitle": "Ürünü okut",
+      "scanInstruction": "Kolinin barkodunu okut.",
+      "scanLabel": "Barkod",
+      "checking": "Kontrol ediliyor…",
+      "scanPlaceholder": "Barkodu yaz",
+      "manual": "Elle gir",
+      "manualConfirm": "Onayla",
+      "expectedItems": "Beklenen ürünler",
+      "qtyTitle": "Kaç adet geldi?",
+      "qtyInstruction": "Sayıyı kontrol et, gerekirse değiştir.",
+      "verify": "Okuttuğun ürün:",
+      "received": "Gelen ({unit})",
+      "damagedLabel": "Hasarlı adet",
+      "hasDamaged": "Hasarlı ekle",
+      "rackLabel": "Kabul rafı",
+      "rackAuto": "Kabul rafı: {name}",
+      "confirm": "Kabul et",
+      "savedTitle": "Kaydedildi",
+      "saved": "{name}: {received} adet kabul edildi.",
+      "savedDamaged": "Bunun {n} adedi hasarlı.",
+      "savedRemaining": "Kalan: {n}",
+      "receiptDone": "Teslim tamam",
+      "openStays": "Eksik kalan ürünler açık kalır.",
+      "nextItem": "Sıradaki ürüne geç",
+      "allDone": "Bu teslimdeki her ürün alındı.",
+      "noLocationTitle": "Kabul rafı yok",
+      "noLocation": "Bu depoda kabul rafı tanımlı değil.",
+      "noLocationAction": "Yöneticine söyle.",
+      "scanNow": "Barkodu okut",
+      "scanPrompt": "Okuyucunun tetiğine bas, kolinin barkodunu okut.",
+      "readerReady": "Okuyucu hazır. Tetiğe bas ve barkodu okut.",
+      "lastScan": "Son okutulan: {name}",
+      "lastCode": "Kod: {code}",
+      "helpCall": "Yardım çağır"
+    },
+    "putaway": {
+      "title": "Yerleştirme",
+      "sourceTitle": "Kabul rafını okut",
+      "sourceInstruction": "Malı aldığın rafın etiketini okut.",
+      "itemTitle": "Ürünü okut",
+      "itemInstruction": "Elindeki ürünün barkodunu okut.",
+      "targetTitle": "Rafı okut",
+      "targetInstruction": "Koyacağın rafın etiketini okut.",
+      "itemLabel": "Ürün barkodu",
+      "locationLabel": "Raf etiketi",
+      "taskLine": "{qty} adet · {from} rafından",
+      "takenFrom": "{from} rafından",
+      "confirmTitle": "Rafa koy",
+      "confirmInstruction": "Bilgiler doğruysa onayla.",
+      "fromTo": "{from} → {to}",
+      "taskQty": "Görevdeki miktar: {n}",
+      "qtyLabel": "Kaç adet?",
+      "confirm": "Rafa koy",
+      "savedTitle": "Rafa kondu",
+      "saved": "{name}: {qty} adet {to} rafına kondu.",
+      "noNewStock": "Stok sayısı değişmedi; yalnız yeri değişti.",
+      "backToTasks": "Görevlerime dön",
+      "toTasks": "Görevlerim",
+      "taskGoneTitle": "Görev bulunamadı",
+      "taskGone": "Bu görev artık sende değil ya da tamamlanmış.",
+      "noWarehouseTitle": "Depo yok",
+      "noWarehouse": "Önce bir depo kurulmalı. Yöneticine söyle.",
+      "warehouseTitle": "Hangi depo?",
+      "warehouseInstruction": "Çalışacağın depoyu seç.",
+      "sourcePrompt": "Malı aldığın rafın etiketini okut.",
+      "itemPrompt": "Elindeki ürünün barkodunu okut.",
+      "targetPrompt": "Koyacağın rafın etiketini okut.",
+      "lockedTitle": "Yerleştirme sana kapalı",
+      "lockedReason": "Yerleştirme için yetkin yok. Yöneticine haber ver ya da yardım çağır."
+    },
+    "camera": {
+      "title": "Kamera",
+      "hint": "Barkodu çerçeveye getir.",
+      "failed": "Kamera açılamadı. Okuyucunun tetiğini kullan ya da barkodu elle gir.",
+      "dropped": "Bir kod okundu ama okuma şu an kapalıydı. Kodu yeniden okut.",
+      "ok": "Tamam"
     }
   }
 }

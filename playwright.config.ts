@@ -20,6 +20,8 @@ function localClient(ip: string): { extraHTTPHeaders?: Record<string, string> } 
 // T-279: boş tenant fikstürü yalnızca yerel yığında (global-setup) kurulur; uzak hedefte (E2E_BASE_URL) o fikstüre bağlı spec dosyaları dışlanır
 // (atlama/skip değil: bu koşuda fikstür kavramı yoktur; demo kapsamı diğer spec dosyalarında sürer).
 const EMPTY_TENANT_SPECS = ["**/empty-tenant.spec.ts", "**/z-easy-setup.spec.ts"];
+// Proje düzeyindeki testIgnore üst düzey ayarın YERİNE geçer (birleşmez); ana projeler bu yüzden ikisini birlikte içerir.
+const MAIN_PROJECT_IGNORE = ["**/zzz-receiving.spec.ts", ...(remoteBaseURL ? EMPTY_TENANT_SPECS : [])];
 
 export default defineConfig({
   testDir: "tests/e2e",
@@ -30,7 +32,7 @@ export default defineConfig({
   reporter: [["list"], ["html", { outputFolder: ".artifacts/e2e/report", open: "never" }]],
   forbidOnly: true,
   retries: 0,
-  // Tek işçi: ortak demo verisi ve yerel ters vekil; iki proje (masaüstü, mobil) sırayla koşar.
+  // Tek işçi: ortak demo verisi ve yerel ters vekil; projeler (yerelde dört, uzakta iki) sırayla koşar.
   workers: 1,
   fullyParallel: false,
   timeout: 60_000,
@@ -44,9 +46,18 @@ export default defineConfig({
     trace: remoteBaseURL ? "off" : "retain-on-failure",
     screenshot: "only-on-failure",
   },
+  // zzz-receiving (T-313) migration rolüyle YEREL compose DB'ye SQL fikstürü (ürün, lokasyon, teslim, stok) yazar: (1) uzak/staging hedefte böyle bir bağlantı
+  // yoktur, bu yüzden yalnızca yerel koşuda ve ayrı projelerde koşar; (2) bıraktığı kayıtlar sonraki spec'lerin boş durum varsayımlarını (T-274, kolay kurulum)
+  // bozacağından ana projelerden SONRA çalışır (masaüstü → mobil → receiving-masaüstü → receiving-mobil). Ana projeler bu dosyayı hariç tutar.
   projects: [
-    { name: "desktop", use: { ...devices["Desktop Chrome"], viewport: { width: 1280, height: 800 }, ...localClient("198.51.100.1") } },
+    { name: "desktop", testIgnore: MAIN_PROJECT_IGNORE, use: { ...devices["Desktop Chrome"], viewport: { width: 1280, height: 800 }, ...localClient("198.51.100.1") } },
     // Pixel 5 = 393x727, dokunmatik, mobil Chromium.
-    { name: "mobile", use: { ...devices["Pixel 5"], ...localClient("198.51.100.2") } },
+    { name: "mobile", testIgnore: MAIN_PROJECT_IGNORE, use: { ...devices["Pixel 5"], ...localClient("198.51.100.2") } },
+    ...(remoteBaseURL
+      ? []
+      : [
+          { name: "receiving-desktop", testMatch: "**/zzz-receiving.spec.ts", use: { ...devices["Desktop Chrome"], viewport: { width: 1280, height: 800 }, ...localClient("198.51.100.3") } },
+          { name: "receiving-mobile", testMatch: "**/zzz-receiving.spec.ts", use: { ...devices["Pixel 5"], ...localClient("198.51.100.4") } },
+        ]),
   ],
 });

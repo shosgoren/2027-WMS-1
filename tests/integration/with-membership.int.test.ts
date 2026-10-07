@@ -759,7 +759,16 @@ describe(`tenants_slug_chk (MINOR-8; target=${env.target})`, () => {
     const bad = await ins("demo", false);
     expect(bad.ok).toBe(false);
     if (!bad.ok) expect(bad.code).toBe(CHECK_VIOLATION);
-    expect((await ins("demo", true)).ok).toBe(true);
+    // demo/seed.int.test.ts kalıcı bir 'demo' tenant bırakır (audit_logs değişmez; satır silinemez) ve dosya sırası
+    // koşudan koşuya değişir. PG CHECK kısıtlarını benzersizlik/çakışma denetiminden ÖNCE uygular (INSERT yürütme
+    // sırası: ExecConstraints → ExecCheckIndexConstraints); bu yüzden ON CONFLICT (slug) DO NOTHING CHECK
+    // ihlalini gizlemez: is_demo=false hâlâ 23514 verir (yukarıda, satır önceden varken de), is_demo=true ise hata vermez.
+    const good = await attempt(adm, "INSERT INTO public.tenants (id, slug, name, is_demo) VALUES ($1, 'demo', 'x', true) ON CONFLICT (slug) DO NOTHING", [randomUUID()]);
+    expect(good.ok, good.ok ? "" : good.message).toBe(true);
+    // Aynı çakışma yoluyla is_demo=false, satır önceden olsa da olmasa da CHECK ihlalidir.
+    const badConflict = await attempt(adm, "INSERT INTO public.tenants (id, slug, name, is_demo) VALUES ($1, 'demo', 'x', false) ON CONFLICT (slug) DO NOTHING", [randomUUID()]);
+    expect(badConflict.ok).toBe(false);
+    if (!badConflict.ok) expect(badConflict.code).toBe(CHECK_VIOLATION);
   });
 });
 

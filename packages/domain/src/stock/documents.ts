@@ -173,10 +173,14 @@ export function assertTargetStatusAllowed(kind: string, lines: readonly { readon
 /** Açık sütun listeli, tek ifadelik satır yazımı (sunucu türetimli sütun yok). Başlık ÖNCEDEN kilitli olmalıdır. */
 async function insertLines(tx: AccessTx, tenantId: string, documentId: string, lines: readonly NormalizedLine[]): Promise<readonly StockResultLine[]> {
   if (lines.length === 0) return [];
-  const bad = await tx.execute<{ n: string }>(
-    sql`SELECT count(*)::text AS n FROM ${recordset(lines)} WHERE round(w.quantity * w.conversion_factor, 6) <> w.base_quantity`,
+  // I-09 (T-290): yuvarlama yok. Kalan = 6 ondalığa inmeyen çarpım (QUANTITY_SCALE, rules.ts/toBase ile aynı kod); eşitsizlik = VALIDATION_FAILED.
+  const bad = await tx.execute<{ remainder: string; mismatch: string }>(
+    sql`SELECT count(*) FILTER (WHERE w.quantity * w.conversion_factor * 1000000 <> trunc(w.quantity * w.conversion_factor * 1000000))::text AS remainder,
+               count(*) FILTER (WHERE w.quantity * w.conversion_factor <> w.base_quantity)::text AS mismatch
+          FROM ${recordset(lines)}`,
   );
-  if (Number(bad[0]?.n ?? "0") > 0) throw new AppError("VALIDATION_FAILED"); // base_quantity = quantity × conversion_factor (A-xx b)
+  if (Number(bad[0]?.remainder ?? "0") > 0) throw new AppError("VALIDATION_FAILED", { detail: "QUANTITY_SCALE" });
+  if (Number(bad[0]?.mismatch ?? "0") > 0) throw new AppError("VALIDATION_FAILED"); // base_quantity = quantity × conversion_factor TAM
   await tx.execute(
     sql`INSERT INTO public.document_lines
           (tenant_id, id, document_id, line_no, item_id, unit_id, quantity, conversion_factor, base_quantity,

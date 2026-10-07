@@ -267,7 +267,9 @@ describe("Faz 2 iş türleri", () => {
     // T-222: `stock.document.post` artık bir handler'a bağlıdır (kart madde 5); ertelenmiş kümede olmamalı.
     expect(deferred).not.toContain('"stock.document.post"');
     expect(handled.has("stock.document.post")).toBe(true);
-    expect(deferred).toContain('"stock.consistency.check"');
+    // T-225: `stock.consistency.check` de artık bir handler'a bağlıdır (kart madde 2); ertelenmiş kümede olmamalı.
+    expect(deferred).not.toContain('"stock.consistency.check"');
+    expect(handled.has("stock.consistency.check")).toBe(true);
   });
 });
 

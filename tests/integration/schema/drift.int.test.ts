@@ -525,6 +525,37 @@ describe(`document_lines hedef durum bekçisi (0020, T-258; target=${env.target}
   });
 });
 
+describe(`documents işleme bağlamı bekçisi (0024, T-275; target=${env.target})`, () => {
+  it("tetikleyici BEFORE UPDATE ROW, ENABLE ORIGIN, SECURITY INVOKER, sabit search_path; PUBLIC EXECUTE yok; INSERT/DELETE'te çalışmaz; gövde yalnızca NULL → dolu geçişe izin verir", async () => {
+    const client = new pg.Client({ connectionString: env.databaseUrlDirect });
+    try {
+      await client.connect();
+      const r = await client.query<{ tgenabled: string; tgtype: number; tgattrs: number; prosecdef: boolean; proconfig: string[] | null; src: string; acl: string[] | null }>(
+        `SELECT t.tgenabled, t.tgtype, cardinality(t.tgattr::int2[]) AS tgattrs, p.prosecdef, p.proconfig, p.prosrc AS src, p.proacl::text[] AS acl
+           FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
+          WHERE t.tgrelid = 'public.documents'::regclass AND t.tgname = 'posting_context_stamp_guard'`,
+      );
+      expect(r.rows).toHaveLength(1);
+      const t = r.rows[0] as (typeof r.rows)[number];
+      expect(t.tgenabled).toBe("O");
+      expect(t.tgtype).toBe(1 | 2 | 16); // ROW=1, BEFORE=2, UPDATE=16 (INSERT/DELETE yok)
+      expect(t.tgattrs).toBe(4); // UPDATE OF posting_mfa_verified_at, posting_idempotency_record_id, posting_job_id, posting_requested_by
+      expect(t.prosecdef).toBe(false);
+      expect(t.proconfig).toEqual(["search_path=pg_catalog, pg_temp"]);
+      expect(t.src).toContain("OLD.posting_job_id IS NOT NULL OR NEW.posting_job_id IS NULL");
+      expect(t.src).toContain("NEW.posting_mfa_verified_at IS NOT NULL");
+      expect(t.src).toContain("NEW.posting_mfa_verified_at <> pg_catalog.now()"); // damga yalnızca işlemin now() değeri
+      expect(t.src).toContain("NEW.posting_requested_by IS DISTINCT FROM OLD.posting_requested_by");
+      expect(t.src).toContain("NEW.posting_idempotency_record_id IS NOT NULL");
+      expect((t.acl ?? []).some((a) => a.startsWith("="))).toBe(false); // PUBLIC girdisi yok
+    } catch (e) {
+      throw new Error(redactErrorChain(e, secretUrls(env)));
+    } finally {
+      await client.end();
+    }
+  });
+});
+
 describe(`number_sequences tür CHECK'i ile numbering.ts eşitliği (0022, T-305; target=${env.target})`, () => {
   it("CHECK'teki türler = NUMBER_PREFIX anahtarları + COUNT_ADJUSTMENT (0017; T-309 numaralamayı ekleyene dek TS'te yok)", async () => {
     const client = new pg.Client({ connectionString: env.databaseUrlDirect });

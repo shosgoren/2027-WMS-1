@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { MAIN_WRITES_NOTE, createDbFacade, cleanupBranch, computeRpoRto, drillBranchName, isDrillBranchName, latestCommitAt, main, runDrill, writeSummary, SCOPE_NOTE } from "./restore-drill.mjs";
+import { CONTENT_TABLES } from "./db-fingerprint.mjs";
+import { CONSISTENCY_PREFIX, MAIN_WRITES_NOTE, STOCK_CONSISTENCY_SQL, consistencyProblems, createDbFacade, parseConsistencyOutput, takeConsistency, cleanupBranch, computeRpoRto, drillBranchName, isDrillBranchName, latestCommitAt, main, runDrill, writeSummary, SCOPE_NOTE } from "./restore-drill.mjs";
 import { createRedactor, maskSecret } from "./neon-spike.mjs";
 
 
@@ -25,6 +26,7 @@ function makeFingerprint(over = {}) {
     tables: { "public.users": 3, "public.audit_logs": 10, "public.security_events": 7 },
     audit_logs: { count: 10, latest_at: "2026-10-06T09:00:00.000000Z", digest: hex() },
     security_events: { count: 7, latest_at: "2026-10-06T09:59:58.000000Z", digest: hex() },
+    content: Object.fromEntries(Object.keys(CONTENT_TABLES).map((t) => [t, { count: 4, digest: hex() }])),
     schema: { columns: 80, digest: hex() },
     rls: { tables: 12, digest: hex() },
     policies: { count: 9, digest: hex() },
@@ -32,6 +34,12 @@ function makeFingerprint(over = {}) {
     ...over,
   };
 }
+
+/** Temiz tutarlılık sonucu. */
+const cleanConsistency = () => ({
+  rls_bypass: true, dimensions: 5, balances: 5, ledger_rows: 9,
+  ledger_ne_balance: 0, reservations_ne_reserved: 0, reserved_gt_quantity: 0, negative_quantity: 0, negative_reserved: 0,
+});
 
 const RUN = "123456";
 const NAME = `restore-drill-${RUN}`;
@@ -76,6 +84,10 @@ function harness(opts = {}) {
   };
   let fpCalls = 0;
   const db = {
+    consistency: () => {
+      if (opts.consistencyThrows) throw new Error("consistency failed");
+      return { ...cleanConsistency(), ...(opts.consistency ?? {}) };
+    },
     fingerprint: (/** @type {Any} */ t) => {
       if (t.host === "main.invalid") return mainFp;
       fpCalls++;
@@ -118,6 +130,47 @@ describe("runDrill", () => {
     expect(h.log.some((l) => l[0] === "marker")).toBe(false);
     expect(h.existing.has("br-tmp")).toBe(false);
     expect(h.existing.has("br-main")).toBe(true);
+  });
+
+  it("stok içeriği: satır sayısı aynı, bir tablonun özeti farklı → FAIL (T-284)", async () => {
+    const h = harness({ mutateRestored: (/** @type {Any} */ r) => { r.content.stock_balances.digest = hex(); } });
+    const s = await runDrill(h.deps, { runId: RUN, branchName: NAME });
+    expect(s.result).toBe("fail");
+    expect(s.table_counts_equal).toBe(true);
+    expect(s.content_equal).toBe(false);
+    expect(s.sections.content_stock_balances).toBe(false);
+    expect(s.error).toContain("content_stock_balances");
+    expect(s.restored_branch_deleted).toBe(true);
+  });
+
+  it.each([
+    ["ledger_ne_balance", 1],
+    ["reservations_ne_reserved", 2],
+    ["reserved_gt_quantity", 1],
+    ["negative_quantity", 1],
+  ])("restore sonrası tutarlılık ihlali (%s) → FAIL, özet yalnızca sayı içerir", async (name, n) => {
+    const h = harness({ consistency: { [name]: n } });
+    const s = await runDrill(h.deps, { runId: RUN, branchName: NAME });
+    expect(s.result).toBe("fail");
+    expect(s.fingerprints_equal).toBe(true);
+    expect(s.stock_consistency_ok).toBe(false);
+    expect(s.error).toContain(`${name}=${n}`);
+    expect(s.restored_branch_deleted).toBe(true);
+  });
+
+  it("tutarlılık sorgusu hata verirse FAIL (fail-closed), dal silinir", async () => {
+    const h = harness({ consistencyThrows: true });
+    const s = await runDrill(h.deps, { runId: RUN, branchName: NAME });
+    expect(s.result).toBe("fail");
+    expect(s.restored_branch_deleted).toBe(true);
+  });
+
+  it("temiz kopyada tutarlılık yeşil ve özette yer alır", async () => {
+    const s = await runDrill(harness().deps, { runId: RUN, branchName: NAME });
+    expect(s.result).toBe("pass");
+    expect(s.stock_consistency_ok).toBe(true);
+    expect(s.content_equal).toBe(true);
+    expect(s.stock_consistency.ledger_rows).toBe(9);
   });
 
   it("tek satır fark → FAIL, yine de dal silinir", async () => {
@@ -326,6 +379,29 @@ describe("createDbFacade", () => {
     expect(seen).toHaveLength(1);
     expect(seen[0]).toContain("READ ONLY");
     expect(seen[0]).not.toMatch(/\bINSERT\b/i);
+  });
+});
+
+describe("stok tutarlılık sorgusu (T-284)", () => {
+  const target = { host: "h", user: "u", password: "p", database: "d" };
+  it("SQL salt-okunur transaction'da; yazma ifadesi ve sır içermez", () => {
+    expect(STOCK_CONSISTENCY_SQL).toContain("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    const code = STOCK_CONSISTENCY_SQL.replace(/--[^\n]*/g, "");
+    expect(code).not.toMatch(/\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|GRANT)\b/i);
+  });
+  it("ayrıştırma + ihlal listesi; rol BYPASSRLS değilse kullanılamaz", () => {
+    const sc = cleanConsistency();
+    expect(consistencyProblems(parseConsistencyOutput(`x\n${CONSISTENCY_PREFIX}${JSON.stringify(sc)}`))).toEqual([]);
+    expect(consistencyProblems({ ...sc, rls_bypass: false })).toEqual(["rls_bypass_yok"]);
+    expect(consistencyProblems({ ...sc, ledger_ne_balance: 3, negative_reserved: 1 })).toEqual(["ledger_ne_balance=3", "negative_reserved=1"]);
+    expect(() => parseConsistencyOutput("")).toThrow(/bulunamadı/);
+    expect(() => parseConsistencyOutput(`${CONSISTENCY_PREFIX}{`)).toThrow(/JSON/);
+    expect(() => parseConsistencyOutput(`${CONSISTENCY_PREFIX}${JSON.stringify({ ...sc, negative_quantity: -1 })}`)).toThrow(/negative_quantity/);
+  });
+  it("psql hatası SQLSTATE ile bildirilir", () => {
+    const psql = () => ({ ok: false, stdout: "", sqlstate: "42501", error: "secret-ish" });
+    expect(() => takeConsistency(target, createRedactor(), { psql })).toThrow(/42501/);
+    expect(() => takeConsistency(target, createRedactor(), { psql })).not.toThrow(/secret-ish/);
   });
 });
 

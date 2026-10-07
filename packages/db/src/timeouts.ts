@@ -26,3 +26,11 @@ export async function setLocalTimeouts(tx: TenantTx, t: LocalTimeouts): Promise<
     sql`SELECT set_config('lock_timeout', ${`${t.lockTimeoutMs}ms`}, true), set_config('statement_timeout', ${`${t.statementTimeoutMs}ms`}, true)`,
   );
 }
+
+/**
+ * Bu transaction'ı salt okunur yapar (`transaction_read_only`, transaction-local; ADR-019 §8 denetim katmanı a). Çağıran tenant bağlamı ve
+ * kilidi kurduktan SONRA çağırır; sonrasında aynı transaction'da yazma `25006` ile reddedilir. Geri alınamaz (READ WRITE'a dönüş yok).
+ */
+export async function setLocalReadOnly(tx: TenantTx): Promise<void> {
+  await tx.execute(sql`SELECT set_config('transaction_read_only', 'on', true)`);
+}
