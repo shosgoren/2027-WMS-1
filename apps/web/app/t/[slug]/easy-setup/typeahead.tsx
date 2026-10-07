@@ -26,6 +26,7 @@ const INPUT_CLS =
 export function Typeahead<T>({
   label,
   hint,
+  placeholder,
   name,
   defaultValue = "",
   search,
@@ -39,6 +40,8 @@ export function Typeahead<T>({
 }: {
   label: string;
   hint?: string;
+  /** Alanın örnek metni (isteğe bağlı; verilmezse yok). */
+  placeholder?: string;
   name?: string;
   defaultValue?: string;
   search: (q: string) => Promise<readonly T[]>;
@@ -128,6 +131,7 @@ export function Typeahead<T>({
           id={id}
           name={name}
           type="search"
+          placeholder={placeholder}
           autoComplete="off"
           maxLength={128}
           value={q}

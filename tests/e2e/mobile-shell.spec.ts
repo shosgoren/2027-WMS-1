@@ -437,6 +437,7 @@ async function itemsScreenChecks(page: Page): Promise<void> {
       Array.from(el.querySelectorAll("input, select, textarea, button[type=submit]")).filter((e) => e.checkVisibility()).length,
     );
     expect(controls, `${where}: görünür arama denetimi (I-01)`).toBe(1);
+    await expect(page.getByRole("searchbox", { name: "Ürün ara" }), `${where}: örnek metin (I-11)`).toHaveAttribute("placeholder", "Örn. URN-0001, koli ya da barkod");
     await expect(page.getByRole("button", { name: "Ara", exact: true })).toHaveCount(0);
     await expect(page.getByLabel("Barkodla ürün bul")).toHaveCount(0);
     await expect(page.getByLabel("Durum")).toBeHidden();

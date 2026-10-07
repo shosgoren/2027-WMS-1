@@ -392,6 +392,7 @@ export function ItemsView({
         <Typeahead<ItemHit>
           label={t("search.label")}
           hint={t("search.hint")}
+          placeholder={t("search.placeholder")}
           name="q"
           defaultValue={query.q}
           listLabel={te("searchSuggestLabel")}

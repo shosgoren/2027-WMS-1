@@ -689,6 +689,7 @@
     "search": {
       "label": "Ürün ara",
       "hint": "Kod, ad ya da barkod yaz; barkodu okutabilirsin.",
+      "placeholder": "Örn. URN-0001, koli ya da barkod",
       "advanced": "Gelişmiş",
       "setupSummary": "Kurulum {done}/3 · Sıradaki: {next}",
       "status": "Durum",

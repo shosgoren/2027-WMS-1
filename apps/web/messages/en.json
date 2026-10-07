@@ -689,6 +689,7 @@
     "search": {
       "label": "Search products",
       "hint": "Type a code, name or barcode; you can scan the barcode.",
+      "placeholder": "E.g. URN-0001, box or barcode",
       "advanced": "More options",
       "setupSummary": "Setup {done}/3 · Next: {next}",
       "status": "Status",
