@@ -102,9 +102,9 @@ const TRACKING = ["NONE", "LOT", "SERIAL", "LOT_AND_SERIAL"] as const;
 const PICK = ["FIFO", "FEFO"] as const;
 const SCALES = [0, 1, 2, 3, 4, 5, 6] as const;
 
-/** Akıllı varsayılan (A-250-5): birim ADET (sektör şablonları temel birim olarak ADET önerir), yoksa listedeki ilk birim. */
+/** Akıllı varsayılan (A-250-5): birim ADET (sektör şablonları temel birim olarak ADET önerir). ADET yoksa SESSİZ SEÇİM YOK (T-259): boş kalır, kullanıcı seçer. */
 function defaultUnitId(units: readonly UnitOption[]): string {
-  return (units.find((u) => u.code.toUpperCase() === "ADET") ?? units[0])?.id ?? "";
+  return units.find((u) => u.code.toUpperCase() === "ADET")?.id ?? "";
 }
 
 /** Sunucunun `renamedFrom` bilgisini sonuç satırlarına işler; birden çok aday varsa hepsi listelenir (sessiz seçim yok, N-14). */
@@ -230,6 +230,7 @@ function CreateItemDialog({ open, slug, units, returnTo, onClose, onDone }: { op
         <span className="text-sm text-ink-muted">{t("baseUnitHint")}</span>
         <select id="create-base-unit" name="baseUnitId" required={units.length > 0} disabled={units.length === 0} value={unitId} onChange={(e) => setUnitId(e.target.value)} className={SELECT_CLS}>
           {units.length === 0 ? <option value="">{te("items.unitDefaultOption")}</option> : null}
+          {units.length > 0 && unitId === "" ? <option value="">{t("baseUnitChoose")}</option> : null}
           {units.map((u) => (
             <option key={u.id} value={u.id}>
               {u.code} · {u.name}
