@@ -15,7 +15,8 @@ const slugSchema = z.string().min(1).max(63);
 // Karakter üst sınırı baytın üst sınırıdır değil: asıl bayt/satır sınırları domain'dedir (`classify`); bu yalnız kaba kötüye kullanım sınırı.
 const textSchema = z.string().min(1).max(IMPORT_MAX_BYTES);
 const previewSchema = z.object({ slug: slugSchema, text: textSchema }).strict();
-const applySchema = z.object({ slug: slugSchema, text: textSchema, chunk: z.number().int().min(0).max(1000) }).strict();
+// `digest`: önizlemenin içerik özeti (sha-256 hex); uygulama dosyayı yeniden ayrıştırır ve özet uyuşmazsa reddeder.
+const applySchema = z.object({ slug: slugSchema, text: textSchema, chunk: z.number().int().min(0).max(1000), digest: z.string().regex(/^[0-9a-f]{64}$/) }).strict();
 
 async function writeContext(slug: string, ctx: ActionContext) {
   const principal = ctx.principal;
@@ -36,6 +37,8 @@ export async function previewImportAction(raw: unknown) {
 export async function applyImportChunkAction(raw: unknown) {
   return guardedAction({ schema: applySchema }, async (input, ctx) => {
     const params = await writeContext(input.slug, ctx);
-    return applyImportChunk({ ...params, requestId: ctx.requestId }, { text: input.text, chunk: input.chunk });
+    const report = await applyImportChunk({ ...params, requestId: ctx.requestId }, { text: input.text, chunk: input.chunk, digest: input.digest });
+    // Ayrıntı kodu (errorDetail) istemciye gönderilmez: ekranda yalnız sade metin gösterilir.
+    return { ...report, rows: report.rows.map((r) => ({ row: r.row, code: r.code, status: r.status, ...(r.errorCode === undefined ? {} : { errorCode: r.errorCode }) })) };
   })(raw);
 }

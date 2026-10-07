@@ -21,6 +21,7 @@ vi.mock("@wms/domain/identity/access", () => ({ runTenantQuery: () => Promise.re
 import { applyImportChunkAction, previewImportAction } from "./actions.ts";
 
 const CSV = "kod;ad\nA1;Vida\n";
+const DIGEST = "a".repeat(64);
 let savedUrl: string | undefined;
 
 beforeEach(() => {
@@ -41,9 +42,11 @@ describe("doğrulama hataları (domain çağrılmaz)", () => {
     ["önizleme: metin değil", () => previewImportAction({ slug: "acme", text: 5 })],
     ["önizleme: sınırı aşan metin", () => previewImportAction({ slug: "acme", text: "a".repeat(512 * 1024 + 1) })],
     ["önizleme: bilinmeyen alan", () => previewImportAction({ slug: "acme", text: CSV, extra: 1 })],
-    ["uygula: negatif parça", () => applyImportChunkAction({ slug: "acme", text: CSV, chunk: -1 })],
-    ["uygula: kesirli parça", () => applyImportChunkAction({ slug: "acme", text: CSV, chunk: 0.5 })],
-    ["uygula: parça eksik", () => applyImportChunkAction({ slug: "acme", text: CSV })],
+    ["uygula: negatif parça", () => applyImportChunkAction({ slug: "acme", text: CSV, chunk: -1, digest: DIGEST })],
+    ["uygula: kesirli parça", () => applyImportChunkAction({ slug: "acme", text: CSV, chunk: 0.5, digest: DIGEST })],
+    ["uygula: parça eksik", () => applyImportChunkAction({ slug: "acme", text: CSV, digest: DIGEST })],
+    ["uygula: özet eksik", () => applyImportChunkAction({ slug: "acme", text: CSV, chunk: 0 })],
+    ["uygula: özet biçimi geçersiz", () => applyImportChunkAction({ slug: "acme", text: CSV, chunk: 0, digest: "xyz" })],
   ];
   for (const [name, call] of cases) {
     it(name, async () => {
@@ -69,17 +72,18 @@ describe("domain çağrısı", () => {
   });
 
   it("uygula: parça numarası ve metin iletilir", async () => {
-    applyImportChunk.mockResolvedValue({ chunk: 2, complete: true });
-    const res = await applyImportChunkAction({ slug: "acme", text: CSV, chunk: 2 });
-    expect(res).toEqual({ ok: true, data: { chunk: 2, complete: true } });
-    expect(applyImportChunk.mock.calls[0]?.[1]).toEqual({ text: CSV, chunk: 2 });
+    applyImportChunk.mockResolvedValue({ chunk: 2, complete: false, rows: [{ row: 5, code: "A1", status: "FAILED", errorCode: "INTERNAL", errorDetail: "SECRET_DETAIL" }] });
+    const res = await applyImportChunkAction({ slug: "acme", text: CSV, chunk: 2, digest: DIGEST });
+    // errorDetail istemciye gitmez (MINOR-6); diğer alanlar aynen döner.
+    expect(res).toEqual({ ok: true, data: { chunk: 2, complete: false, rows: [{ row: 5, code: "A1", status: "FAILED", errorCode: "INTERNAL" }] } });
+    expect(applyImportChunk.mock.calls[0]?.[1]).toEqual({ text: CSV, chunk: 2, digest: DIGEST });
   });
 });
 
 describe("hata aktarımı", () => {
   it("yetkisiz: FORBIDDEN kodu döner, dosya içeriği yanıtta yok", async () => {
     applyImportChunk.mockRejectedValue(new AppError("FORBIDDEN"));
-    const res = await applyImportChunkAction({ slug: "acme", text: CSV, chunk: 0 });
+    const res = await applyImportChunkAction({ slug: "acme", text: CSV, chunk: 0, digest: DIGEST });
     expect(res.ok).toBe(false);
     if (res.ok) return;
     expect(res.error.code).toBe("FORBIDDEN");
@@ -88,7 +92,7 @@ describe("hata aktarımı", () => {
 
   it("hatalı satır: VALIDATION_FAILED aktarılır", async () => {
     applyImportChunk.mockRejectedValue(new AppError("VALIDATION_FAILED"));
-    const res = await applyImportChunkAction({ slug: "acme", text: CSV, chunk: 0 });
+    const res = await applyImportChunkAction({ slug: "acme", text: CSV, chunk: 0, digest: DIGEST });
     expect(res.ok === false && res.error.code).toBe("VALIDATION_FAILED");
   });
 

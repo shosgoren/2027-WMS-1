@@ -7,7 +7,7 @@ import { useTranslations } from "next-intl";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { Banner, Button, CircleAlert, ChevronRight, TriangleAlert } from "@wms/ui";
+import { Banner, ChevronRight, CircleAlert, CircleCheck, TriangleAlert } from "@wms/ui";
 import { applyImportChunkAction, previewImportAction } from "./actions.ts";
 
 export interface ImportViewProps {
@@ -30,8 +30,8 @@ interface SafeErr {
 }
 type Stage = "idle" | "previewing" | "ready" | "applying" | "done";
 
-/** Gösterilen en çok hata sayısı (domain en çok 100 döner; rubrik İ-06). */
-const SHOW_ISSUES = 50;
+/** İlk görünümde gösterilen hata kartı (satır) sayısı; "Tümünü göster" ile hepsi (domain en çok 100 hata döner). */
+const FIRST_CARDS = 10;
 const FOCUS = "focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus";
 const SECONDARY = `${FOCUS} inline-flex min-h-12 min-w-12 items-center justify-center gap-2 rounded-control border-2 border-border-strong bg-surface px-5 text-base font-bold text-ink`;
 const KNOWN_ERRORS = ["forbidden", "unauthenticated", "validation_failed", "rate_limited", "not_found", "tenant_suspended", "tenant_closing", "internal"];
@@ -99,10 +99,16 @@ export function ImportView({ slug, templates, columns, limits }: ImportViewProps
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [reports, setReports] = useState<readonly ChunkReport[]>([]);
   const [fatal, setFatal] = useState<SafeErr | null>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
   const summaryRef = useRef<HTMLDivElement>(null);
   const resultRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // Başlık açılışta görünür olsun: uygulama kabuğunun içerik alanı kendi içinde kayar ve sayfa geçişinde kaydırma konumunu korur (ayarlar sayfasındaki
+  // bağlantı sayfanın altındadır); bu yüzden açılışta başlık görünür alana alınır.
+  useEffect(() => {
+    headingRef.current?.scrollIntoView({ block: "start" });
+  }, []);
   // Önizleme hazır olunca özet görünür alana gelir (telefonda adım 1-2 uzundur).
   useEffect(() => {
     if (preview !== null) summaryRef.current?.scrollIntoView({ block: "start" });
@@ -110,7 +116,7 @@ export function ImportView({ slug, templates, columns, limits }: ImportViewProps
   useEffect(() => {
     if (stage === "done") resultRef.current?.scrollIntoView({ block: "start" });
   }, [stage]);
-  // Uygulama sürerken sekmeyi kapatma uyarısı (yarım kalan içe aktarma aynı dosya yeniden yüklenerek tamamlanır; yine de sor).
+  // Uygulama sürerken sekmeyi kapatma uyarısı.
   useEffect(() => {
     if (stage !== "applying") return;
     const h = (e: BeforeUnloadEvent): void => e.preventDefault();
@@ -129,6 +135,7 @@ export function ImportView({ slug, templates, columns, limits }: ImportViewProps
     setFatal(null);
     setProgress({ done: 0, total: 0 });
     if (inputRef.current !== null) inputRef.current.value = "";
+    headingRef.current?.scrollIntoView({ block: "start" });
   }
 
   async function onFile(file: File | undefined): Promise<void> {
@@ -178,7 +185,7 @@ export function ImportView({ slug, templates, columns, limits }: ImportViewProps
     setProgress({ done: 0, total });
     const acc: ChunkReport[] = [];
     for (let c = 0; c < preview.chunkCount; c++) {
-      const r = await applyImportChunkAction({ slug, text, chunk: c });
+      const r = await applyImportChunkAction({ slug, text, chunk: c, digest: preview.digest });
       if (!r.ok) {
         setFatal({ code: r.error.code, requestId: r.error.requestId });
         break;
@@ -191,18 +198,25 @@ export function ImportView({ slug, templates, columns, limits }: ImportViewProps
     setStage("done");
   }
 
-  const issues = preview?.issues ?? [];
   const blocked = preview !== null && preview.issueTotal > 0;
   const applied = reports.flatMap((r) => r.rows);
   const failedRows = applied.filter((r) => r.status === "FAILED");
-  const notAttempted = applied.filter((r) => r.status === "NOT_ATTEMPTED").length + (preview === null ? 0 : Math.max(0, preview.chunkCount - reports.length) * limits.chunkSize);
-  const incomplete = fatal !== null || failedRows.length > 0 || reports.length < (preview?.chunkCount ?? 0);
   const count = (s: string): number => applied.filter((r) => r.status === s).length;
+  const doneCount = count("CREATED") + count("UPDATED") + count("UNCHANGED") + count("APPLIED") + count("REPLAYED");
+  // Denenmeyen = rapor edilen NOT_ATTEMPTED satırları + hiç rapor edilmeyen satırlar (durdurulan/erişilemeyen parçalar).
+  const notTried = preview === null ? 0 : count("NOT_ATTEMPTED") + Math.max(0, preview.rowCount - applied.length);
+  const failedCount = failedRows.length + (fatal === null ? 0 : 1);
+  const incomplete = fatal !== null || failedRows.length > 0 || notTried > 0;
   const kindKey = preview?.kind === "STOCK" ? "stock" : "products";
+  const isStock = preview?.kind === "STOCK";
+  const pickFixed = (): void => inputRef.current?.click();
+  const busy = stage === "applying" || stage === "previewing";
 
   return (
     <>
-      <h1 className="break-words text-2xl font-extrabold text-ink phone:text-xl">{t("title")}</h1>
+      <h1 ref={headingRef} className="scroll-mt-2 break-words text-2xl font-extrabold text-ink phone:text-xl">
+        {t("title")}
+      </h1>
       <p className="text-base text-ink-muted">{t("intro")}</p>
       <ol className="m-0 flex min-w-0 list-none flex-col gap-5 p-0">
         <Step n={1} title={t("step1.title")} current={stage === "idle" && text === null}>
@@ -220,19 +234,26 @@ export function ImportView({ slug, templates, columns, limits }: ImportViewProps
         </Step>
 
         <Step n={2} title={t("step2.title")} current={stage === "idle" && text === null}>
-          <label htmlFor="import-file" className="text-base font-semibold text-ink">
-            {t("step2.label")}
-          </label>
+          {/* Yerel dosya girdisi yalnız ekran okuyucu/klavye içindir (sr-only, display:none DEĞİL: odak alabilir); görünen denetim ≥ 48 px etikettir. */}
           <input
             ref={inputRef}
             id="import-file"
             type="file"
             accept=".csv,text/csv"
-            disabled={stage === "applying" || stage === "previewing"}
+            disabled={busy}
             onChange={(e) => void onFile(e.target.files?.[0])}
-            aria-describedby="import-file-hint"
-            className={`${FOCUS} block w-full min-w-0 cursor-pointer rounded-card border-2 border-border-strong bg-surface text-base text-ink file:mr-3 file:min-h-12 file:cursor-pointer file:border-0 file:bg-accent-soft file:px-5 file:text-base file:font-bold file:text-accent-ink disabled:opacity-60`}
+            aria-describedby="import-file-status import-file-hint"
+            className="peer sr-only"
           />
+          <label
+            htmlFor="import-file"
+            className={`${SECONDARY} peer-focus-visible:outline-3 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-focus cursor-pointer self-start peer-disabled:cursor-not-allowed peer-disabled:opacity-60`}
+          >
+            {t("step2.label")}
+          </label>
+          <p id="import-file-status" className="break-words text-base font-semibold text-ink">
+            {fileName === "" ? t("step2.none") : t("step2.chosen", { name: fileName })}
+          </p>
           <p id="import-file-hint" className="text-sm text-ink-muted">
             {t("step2.hint", { kb: Math.round(limits.maxBytes / 1024), rows: limits.maxRows })}
           </p>
@@ -246,7 +267,6 @@ export function ImportView({ slug, templates, columns, limits }: ImportViewProps
               <p>
                 {te(errorKey(serverError.code))} {te(`${errorKey(serverError.code)}Action`)}
               </p>
-              <p className="mt-1 text-sm">{te("code", { code: serverError.code })}</p>
             </Banner>
           )}
         </Step>
@@ -266,16 +286,21 @@ export function ImportView({ slug, templates, columns, limits }: ImportViewProps
         ) : (
           <>
             <Step n={3} title={t("step3.title")} current={stage === "ready"}>
-              <div ref={summaryRef} role="status" data-testid="import-summary" className="flex scroll-mt-3 min-w-0 flex-col gap-2">
+              <div ref={summaryRef} role="status" data-testid="import-summary" className="flex scroll-mt-2 min-w-0 flex-col gap-2">
                 <p className="break-words text-base font-semibold text-ink">
                   {t(`kind.${kindKey}`)} · <span className="font-normal text-ink-muted">{fileName}</span>
                 </p>
                 {preview.summary === undefined ? null : (
-                  <div className="flex min-w-0 gap-2">
-                    <Stat value={preview.summary.items} label={t("summary.items")} />
-                    <Stat value={preview.summary.stockLines} label={t("summary.stockLines")} />
-                    <Stat value={preview.summary.errorRows} label={t("summary.errorRows")} tone={preview.summary.errorRows > 0 ? "bad" : undefined} />
-                  </div>
+                  <>
+                    <p className="break-words text-base font-semibold text-ink" data-testid="import-summary-line">
+                      {t(isStock ? "summary.lineStock" : "summary.lineProducts", { total: preview.rowCount, ok: preview.rowCount - preview.summary.errorRows, bad: preview.summary.errorRows })}
+                    </p>
+                    <div className="flex min-w-0 gap-2">
+                      <Stat value={preview.summary.items} label={t("summary.items")} />
+                      {isStock ? <Stat value={preview.summary.stockLines} label={t("summary.stockLines")} /> : null}
+                      <Stat value={preview.summary.errorRows} label={t("summary.errorRows")} tone={preview.summary.errorRows > 0 ? "bad" : undefined} />
+                    </div>
+                  </>
                 )}
                 {!blocked && preview.products !== undefined ? (
                   <p className="break-words text-base text-ink">
@@ -285,8 +310,11 @@ export function ImportView({ slug, templates, columns, limits }: ImportViewProps
                 ) : null}
                 {!blocked && preview.stock !== undefined ? (
                   <>
-                    <p className="break-words text-base text-ink">{t("detail.stock", { warehouses: preview.stock.warehouses, total: preview.stock.totalQuantity })}</p>
-                    {preview.stock.tenantHasStock ? (
+                    <p className="break-words text-base text-ink">
+                      {preview.stock.lines === preview.stock.alreadyApplied ? t("detail.stockNothing") : t("detail.stock", { warehouses: preview.stock.warehouses, total: preview.stock.totalQuantity })}
+                      {preview.stock.alreadyApplied > 0 ? ` ${t("detail.stockSkipped", { n: preview.stock.alreadyApplied })}` : ""}
+                    </p>
+                    {preview.stock.tenantHasStock && stage !== "done" ? (
                       <Banner kind="warning">
                         <p>{t("detail.stockExists")}</p>
                       </Banner>
@@ -296,22 +324,38 @@ export function ImportView({ slug, templates, columns, limits }: ImportViewProps
                 {blocked ? (
                   <Banner kind="error">
                     <p>{t("blocked", { n: preview.issueTotal })}</p>
+                    <button type="button" className={`${SECONDARY} mt-2`} onClick={pickFixed} disabled={busy}>
+                      {t("issues.pickFixed")}
+                    </button>
                   </Banner>
-                ) : (
+                ) : stage === "done" ? null : (
                   <Banner kind="success">
                     <p>{t("clean")}</p>
                   </Banner>
                 )}
               </div>
-              {blocked ? <IssueList issues={issues} total={preview.issueTotal} /> : null}
+              {blocked ? <IssueList issues={preview.issues} total={preview.issueTotal} /> : null}
             </Step>
 
-            {stage === "done" ? null : (
-              <Step n={4} title={t("step4.title")} current={stage === "ready" && !blocked}>
+            <Step n={4} title={t("step4.title")} current={stage === "ready" && !blocked}>
+              {stage === "done" ? (
+                <p className={`flex items-start gap-2 break-words text-base font-semibold ${incomplete ? "text-danger-ink" : "text-success-ink"}`} data-testid="import-step4-status">
+                  {incomplete ? <CircleAlert aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-danger" /> : <CircleCheck aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-success" />}
+                  <span className="min-w-0">{incomplete ? t("step4.partial") : t("step4.done")}</span>
+                </p>
+              ) : (
                 <div className="flex min-w-0 flex-col gap-2">
-                  <Button variant="primary" disabled={blocked || stage !== "ready"} loading={stage === "applying"} onClick={() => void onApply()} aria-describedby="import-apply-note">
+                  <button
+                    type="button"
+                    data-variant="primary"
+                    disabled={blocked || stage !== "ready"}
+                    aria-busy={stage === "applying" || undefined}
+                    onClick={() => void onApply()}
+                    aria-describedby="import-apply-note"
+                    className={`${FOCUS} inline-flex min-h-12 min-w-12 items-center justify-center rounded-control px-6 text-base font-bold ${blocked || stage !== "ready" ? "cursor-not-allowed border-2 border-border bg-locked-bg text-locked-ink" : "bg-accent text-on-accent"}`}
+                  >
                     {t("step4.apply")}
-                  </Button>
+                  </button>
                   <p id="import-apply-note" className="break-words text-sm text-ink-muted">
                     {blocked ? t("step4.blocked", { n: preview.issueTotal }) : t("step4.note")}
                   </p>
@@ -322,22 +366,34 @@ export function ImportView({ slug, templates, columns, limits }: ImportViewProps
                     </div>
                   ) : null}
                 </div>
-              </Step>
-            )}
+              )}
+            </Step>
 
             {stage === "done" ? (
               <Step n={5} title={t("step5.title")} current>
-                <div ref={resultRef} data-testid="import-result" className="flex scroll-mt-3 min-w-0 flex-col gap-2">
-                  {incomplete ? (
-                    <Banner kind="error">
-                      <p>{t("result.partial", { done: count("CREATED") + count("UPDATED") + count("UNCHANGED") + count("APPLIED") + count("REPLAYED"), failed: failedRows.length + (fatal === null ? 0 : 1), notTried: notAttempted })}</p>
-                      <p className="mt-1">{t("result.retry")}</p>
-                    </Banner>
-                  ) : (
-                    <Banner kind="success">
-                      <p>{preview.kind === "STOCK" ? t("result.okStock", { applied: count("APPLIED"), replayed: count("REPLAYED") }) : t("result.okProducts", { created: count("CREATED"), updated: count("UPDATED"), unchanged: count("UNCHANGED") })}</p>
-                    </Banner>
-                  )}
+                <div ref={resultRef} data-testid="import-result" className="flex scroll-mt-2 min-w-0 flex-col gap-2">
+                  <Banner kind={incomplete ? "error" : "success"}>
+                    <p>{incomplete ? t("result.partial") : resultSummary(t, preview.kind, count)}</p>
+                    {incomplete ? <p className="mt-1">{t(isStock ? "result.retryStock" : "result.retryProducts")}</p> : null}
+                  </Banner>
+                  <ul className="m-0 flex min-w-0 list-none flex-col gap-1 p-0" data-testid="import-counts">
+                    <li className="flex items-start gap-2 text-base font-semibold text-success-ink">
+                      <CircleCheck aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-success" />
+                      <span className="min-w-0">{t("result.stat.done", { n: doneCount })}</span>
+                    </li>
+                    {incomplete || failedCount > 0 ? (
+                      <li className="flex items-start gap-2 text-base font-semibold text-danger-ink">
+                        <CircleAlert aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-danger" />
+                        <span className="min-w-0">{t("result.stat.failed", { n: failedCount })}</span>
+                      </li>
+                    ) : null}
+                    {incomplete || notTried > 0 ? (
+                      <li className="flex items-start gap-2 text-base font-semibold text-warning-ink">
+                        <TriangleAlert aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-warning" />
+                        <span className="min-w-0">{t("result.stat.skipped", { n: notTried })}</span>
+                      </li>
+                    ) : null}
+                  </ul>
                   {fatal === null ? null : (
                     <p className="flex items-start gap-2 break-words text-base text-danger-ink">
                       <CircleAlert aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-danger" />
@@ -348,7 +404,7 @@ export function ImportView({ slug, templates, columns, limits }: ImportViewProps
                   )}
                   {failedRows.length === 0 ? null : (
                     <ul className="m-0 flex min-w-0 list-none flex-col gap-1 p-0">
-                      {failedRows.slice(0, SHOW_ISSUES).map((r) => (
+                      {failedRows.slice(0, 20).map((r) => (
                         <li key={r.row} className="flex min-w-0 items-start gap-2 break-words text-base text-ink">
                           <TriangleAlert aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-warning" />
                           <span className="min-w-0">
@@ -364,7 +420,7 @@ export function ImportView({ slug, templates, columns, limits }: ImportViewProps
                       {incomplete ? t("result.again") : t("result.another")}
                     </button>
                     <Link href={`/t/${encodeURIComponent(slug)}/items`} className={SECONDARY}>
-                      {t("result.toItems")}
+                      {isStock ? t("result.toStock") : t("result.toItems")}
                       <ChevronRight aria-hidden="true" className="size-5" />
                     </Link>
                   </div>
@@ -380,30 +436,66 @@ export function ImportView({ slug, templates, columns, limits }: ImportViewProps
   );
 }
 
+type Translate = ReturnType<typeof useTranslations>;
+
+/** Başarılı sonuç özeti: yalnız sıfırdan büyük sayılar yazılır ("0 ürün güncellendi" gösterilmez). */
+function resultSummary(t: Translate, kind: "PRODUCTS" | "STOCK", count: (s: string) => number): string {
+  const parts = [t("result.okLead")];
+  if (kind === "STOCK") {
+    if (count("APPLIED") > 0) parts.push(t("result.stockApplied", { n: count("APPLIED") }));
+    if (count("REPLAYED") > 0) parts.push(t("result.stockSkipped", { n: count("REPLAYED") }));
+  } else {
+    if (count("CREATED") > 0) parts.push(t("result.created", { n: count("CREATED") }));
+    if (count("UPDATED") > 0) parts.push(t("result.updated", { n: count("UPDATED") }));
+    if (count("UNCHANGED") > 0) parts.push(t("result.unchanged", { n: count("UNCHANGED") }));
+  }
+  return parts.join(" ");
+}
+
 function IssueList({ issues, total }: { issues: readonly ImportIssue[]; total: number }) {
   const t = useTranslations("import");
-  const shown = issues.slice(0, SHOW_ISSUES);
+  const [all, setAll] = useState(false);
+  // Aynı satırın hataları tek kartta (sıra korunur).
+  const groups: { row: number; items: ImportIssue[] }[] = [];
+  for (const i of issues) {
+    const g = groups.find((x) => x.row === i.row);
+    if (g === undefined) groups.push({ row: i.row, items: [i] });
+    else g.items.push(i);
+  }
+  const shown = all ? groups : groups.slice(0, FIRST_CARDS);
   return (
     <div className="flex min-w-0 flex-col gap-2">
-      <p className="break-words text-base font-semibold text-ink">{total > shown.length ? t("issues.truncated", { shown: shown.length, total }) : t("issues.all", { total })}</p>
+      <p className="break-words text-base font-semibold text-ink">{total > issues.length ? t("issues.truncated", { shown: issues.length, total }) : t("issues.all", { total })}</p>
       <ul className="m-0 flex min-w-0 list-none flex-col gap-2 p-0" data-testid="import-issues">
-        {shown.map((i, idx) => (
-          <li key={`${i.row}-${i.column}-${i.code}-${idx}`} data-testid="import-issue" className="flex min-w-0 flex-col gap-0.5 rounded-card bg-surface p-3 shadow-card">
-            <p className="flex min-w-0 flex-wrap items-center gap-x-2 text-base font-bold text-ink">
-              <span data-testid="issue-row">{i.row === 0 ? t("issues.file") : t("issues.row", { row: i.row })}</span>
-              <span aria-hidden="true">·</span>
-              <span data-testid="issue-column">{t(`column.${COLUMN_KEY[i.column] ?? "file"}`)}</span>
+        {shown.map((g) => (
+          <li key={g.row} data-testid="import-issue" className="flex min-w-0 flex-col gap-2 rounded-card bg-surface p-3 shadow-card">
+            <p className="text-base font-bold text-ink" data-testid="issue-row">
+              {g.row === 0 ? t("issues.file") : t("issues.row", { row: g.row })}
             </p>
-            <p data-testid="issue-reason" className="flex min-w-0 items-start gap-2 break-words text-base text-danger-ink">
-              <CircleAlert aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-danger" />
-              <span className="min-w-0">{t(`issue.${i.code}.reason`, { ...i.params })}</span>
-            </p>
-            <p data-testid="issue-fix" className="break-words text-base text-ink">
-              {t("issues.fixPrefix")} {t(`issue.${i.code}.fix`, { ...i.params })}
-            </p>
+            <ul className="m-0 flex min-w-0 list-none flex-col gap-2 p-0">
+              {g.items.map((i, idx) => (
+                <li key={`${i.column}-${i.code}-${idx}`} data-testid="issue-item" className="flex min-w-0 flex-col gap-0.5">
+                  <p className="text-base font-bold text-ink" data-testid="issue-column">
+                    {t(`column.${COLUMN_KEY[i.column] ?? "file"}`)}
+                  </p>
+                  <p data-testid="issue-reason" className="flex min-w-0 items-start gap-2 break-words text-base text-danger-ink">
+                    <CircleAlert aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-danger" />
+                    <span className="min-w-0">{t(`issue.${i.code}.reason`, { ...i.params })}</span>
+                  </p>
+                  <p data-testid="issue-fix" className="break-words text-base text-ink">
+                    {t("issues.fixPrefix")} {t(`issue.${i.code}.fix`, { ...i.params })}
+                  </p>
+                </li>
+              ))}
+            </ul>
           </li>
         ))}
       </ul>
+      {groups.length > FIRST_CARDS ? (
+        <button type="button" className={`${SECONDARY} self-start`} aria-expanded={all} onClick={() => setAll(!all)} data-testid="issues-toggle">
+          {all ? t("issues.less") : t("issues.more", { n: groups.length })}
+        </button>
+      ) : null}
     </div>
   );
 }

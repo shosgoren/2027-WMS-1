@@ -3,6 +3,9 @@ import { describe, expect, it } from "vitest";
 import {
   IMPORT_MAX_BYTES,
   IMPORT_MAX_ROWS,
+  DATA_CELL_MAX,
+  HEADER_CELL_MAX,
+  MAX_COLUMNS,
   classify,
   detectKind,
   foldHeader,
@@ -238,5 +241,84 @@ describe("classify sınırları", () => {
     expect(!enc.ok && enc.issues[0]?.code).toBe("FILE_ENCODING");
     const unk = classify("foo;bar\n1;2");
     expect(!unk.ok && unk.issues[0]?.code).toBe("FORMAT_UNKNOWN");
+  });
+});
+
+describe("hücre/sütun sınırları ve doğrusal çalışma (ReDoS, B-1)", () => {
+  /** Süre assert edilir (gevşetilmez): en kötü girdilerde 512 KiB'lik dosya bile < 200 ms. */
+  const timed = <T,>(fn: () => T): { out: T; ms: number } => {
+    const t0 = performance.now();
+    const out = fn();
+    return { out, ms: performance.now() - t0 };
+  };
+  const SIZE = 512 * 1024;
+  const cases: Array<[string, () => string]> = [
+    ["kapanmayan parantez başlığı", () => `${"(".repeat(SIZE - 10)}\nA;B`],
+    ["kapanmayan parantez + kapanışlar", () => `kod;${"( ".repeat(SIZE / 4)}\nA;B`],
+    ["tırnaklı çöp (çift tırnak kaçışları)", () => `kod;ad\n"${'""'.repeat(SIZE / 4)}";x`],
+    ["tırnak karışık uzun alan", () => `kod;ad\n${'a"'.repeat(SIZE / 4)};x`],
+    ["tek satırda yüz binlerce sütun", () => `kod${";x".repeat(SIZE / 2 - 4)}`],
+    ["yüz binlerce boş satır", () => `kod;ad${"\n".repeat(SIZE - 10)}`],
+    ["boşluk dolu alan + tırnak", () => `kod;ad\n${" ".repeat(SIZE / 2)}"${'x'.repeat(10)}`],
+  ];
+  for (const [name, make] of cases) {
+    it(`${name}: 200 ms altında biter`, () => {
+      const text = make();
+      expect(text.length).toBeLessThanOrEqual(SIZE);
+      const { ms } = timed(() => classify(text));
+      expect(ms, `${name} ${ms.toFixed(0)} ms`).toBeLessThan(200);
+    });
+  }
+  it("foldHeader: kapanmayan parantez dizisi doğrusal", () => {
+    const { out, ms } = timed(() => foldHeader(`${"(".repeat(HEADER_CELL_MAX * 2000)}ad`));
+    expect(ms).toBeLessThan(200);
+    expect(out).toBe("ad");
+    expect(foldHeader("Miktar (adet) toplam")).toBe("miktar toplam");
+    expect(foldHeader("Miktar ((a)")).toBe("miktar"); // iç içe: ilk "(" en yakın ")" e kadar atılır; kapanmayan "(" metni yutmaz
+    expect(foldHeader("Miktar (a")).toBe("miktar a");
+  });
+  it("başlık hücresi > 200, veri hücresi > 1000, sütun > 40: satır hatası (dosya reddedilir)", () => {
+    const h = classify(`${"k".repeat(HEADER_CELL_MAX + 1)};ad\nA;B`);
+    expect(!h.ok && h.issues.map((i) => `${i.row}:${i.code}`)).toEqual(["1:CELL_TOO_LONG"]);
+    const d = classify(`kod;ad\nA;B\nC;${"x".repeat(DATA_CELL_MAX + 1)}`);
+    expect(!d.ok && d.issues.map((i) => `${i.row}:${i.code}`)).toEqual(["3:CELL_TOO_LONG"]);
+    const edge = classify(`kod;ad\nA;${"x".repeat(DATA_CELL_MAX)}`);
+    expect(edge.ok).toBe(true);
+    const c = classify(`kod;ad${";x".repeat(MAX_COLUMNS)}\nA;B`);
+    expect(!c.ok && c.issues.map((i) => `${i.row}:${i.code}`)).toEqual(["1:TOO_MANY_COLUMNS"]);
+  });
+  it("bayt sınırı gerçek bayttır (çok baytlı karakterler)", () => {
+    const big = classify(`kod;ad\nA;${"ş".repeat(IMPORT_MAX_BYTES / 2)}`); // karakter sayısı sınırın yarısı, bayt sayısı sınırı aşar
+    expect(!big.ok && big.issues[0]?.code).toBe("FILE_TOO_LARGE");
+  });
+});
+
+describe("açılış stoku: stoğu olan (ürün, raf) çifti", () => {
+  const ctx = (pairs: StockContext["pairs"]): StockContext => ({ ...stockCtx(), pairs });
+  const run = (rows: string[], pairs: StockContext["pairs"]) => {
+    const c = classify(["ürün kodu;raf kodu;miktar", ...rows].join("\n"));
+    if (!c.ok) throw new Error("classify");
+    return validateStock(c.records, ctx(pairs));
+  };
+  it("stok varsa hata; aynı miktar önceki içe aktarmadan geliyorsa 'zaten uygulanmış' (hata değil)", () => {
+    const pairs = new Map([
+      ["i-A1|l-A-01-w1", { hasStock: true, applied: new Set(["10"]) }],
+      ["i-A2|l-A-01-w1", { hasStock: true, applied: new Set<string>() }],
+    ]);
+    const r = run(["A1;A-01;10", "A1;A-01;12", "A2;A-01;3"], pairs);
+    expect(r.issues.map((i) => `${i.row}:${i.code}`)).toEqual(["3:PAIR_DUPLICATE_FILE", "4:PAIR_HAS_STOCK"]);
+  });
+  it("aynı çift iki satırda (A1,A-01 → 10 ve 12) dosya içi mükerrer ayrı yakalanır", () => {
+    const r = run(["A1;A-01;10", "A1;A-01;12"], new Map());
+    expect(r.issues.map((i) => i.code)).toEqual(["PAIR_DUPLICATE_FILE"]);
+  });
+  it("uygulanmış satır planda alreadyApplied işaretli; satır sırası sonucu değiştirmez", () => {
+    const pairs = new Map([["i-A1|l-A-01-w1", { hasStock: true, applied: new Set(["10"]) }]]);
+    const a = run(["A1;A-01;10", "A2;A-01;4"], pairs);
+    const b = run(["A2;A-01;4", "A1;A-01;10"], pairs);
+    expect(a.issues).toEqual([]);
+    expect(b.issues).toEqual([]);
+    expect(a.plans.filter((p) => p.alreadyApplied).map((p) => p.itemCode)).toEqual(["A1"]);
+    expect(b.plans.filter((p) => p.alreadyApplied).map((p) => p.itemCode)).toEqual(["A1"]);
   });
 });

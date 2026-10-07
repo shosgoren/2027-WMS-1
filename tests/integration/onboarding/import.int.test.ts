@@ -7,8 +7,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDbClient } from "../../../packages/db/src/index.ts";
 import { DB_CLIENT_SETTINGS, type DbClient } from "../../../packages/db/src/client.ts";
 import { AppError } from "../../../packages/shared/src/errors.ts";
-import { createLocation } from "../../../packages/domain/src/warehouse/index.ts";
-import { IMPORT_CHUNK_SIZE, applyImportChunk, previewImport, stockClientKey, type ChunkReport, type ImportCallParams } from "../../../packages/domain/src/onboarding/index.ts";
+import { createLocation, createWarehouse } from "../../../packages/domain/src/warehouse/index.ts";
+import { IMPORT_CHUNK_SIZE, applyImportChunk, previewImport, linesDigestOf, stockClientKey, type ChunkReport, type ImportCallParams } from "../../../packages/domain/src/onboarding/index.ts";
 import { newRegistry, seedWorld, type TenantWorld } from "../fixtures/tenants.ts";
 import { readIntEnv } from "../harness/env.ts";
 
@@ -21,6 +21,7 @@ let B: TenantWorld;
 
 const asAdmin = (w: TenantWorld): ImportCallParams => ({ db: app, principal: { userId: w.ownerUserId, mfaVerified: true }, tenantSlug: w.slug, requestId: randomUUID() });
 const asPicker = (w: TenantWorld): ImportCallParams => ({ db: app, principal: { userId: w.memberUserId, mfaVerified: true }, tenantSlug: w.slug });
+const NO_DIGEST = "0".repeat(64);
 const pfx = (): string => `Z${randomUUID().replace(/-/g, "").slice(0, 8).toUpperCase()}`;
 
 async function failure(p: Promise<unknown>): Promise<AppError> {
@@ -44,7 +45,7 @@ async function applyAll(params: () => ImportCallParams, text: string): Promise<C
   expect(pv.issueTotal).toBe(0);
   const out: ChunkReport[] = [];
   for (let c = 0; c < pv.chunkCount; c++) {
-    const r = await applyImportChunk(params(), { text, chunk: c });
+    const r = await applyImportChunk(params(), { text, chunk: c, digest: pv.digest });
     out.push(r);
     if (!r.complete) break;
   }
@@ -119,7 +120,7 @@ describe("ürünler (koli ve barkod)", () => {
     const pv = await previewImport(asAdmin(A), csv);
     expect(pv.issues.map((i) => `${i.row}:${i.column}:${i.code}`)).toEqual(["3:ad:NAME_MISSING", "4:koli içi adet:PACK_QTY_FRACTIONAL", "5:kod:CODE_DUPLICATE_FILE"]);
     expect(pv.chunkCount).toBe(0);
-    expect((await failure(applyImportChunk(asAdmin(A), { text: csv, chunk: 0 }))).code).toBe("VALIDATION_FAILED");
+    expect((await failure(applyImportChunk(asAdmin(A), { text: csv, chunk: 0, digest: NO_DIGEST }))).code).toBe("VALIDATION_FAILED");
     expect(await countItems(A, p)).toBe(0);
   });
 
@@ -203,16 +204,61 @@ describe("açılış stoku", () => {
     const pv = await previewImport(asAdmin(A), csv);
     expect(pv.issues.map((i) => `${i.row}:${i.column}:${i.code}`)).toEqual(["3:ürün kodu:ITEM_UNKNOWN", "4:raf kodu:SHELF_UNKNOWN", "5:miktar:QTY_FRACTIONAL", "6:ürün kodu:ITEM_TRACKED"]);
     const before = await countLedger(A, p);
-    expect((await failure(applyImportChunk(asAdmin(A), { text: csv, chunk: 0 }))).code).toBe("VALIDATION_FAILED");
+    expect((await failure(applyImportChunk(asAdmin(A), { text: csv, chunk: 0, digest: NO_DIGEST }))).code).toBe("VALIDATION_FAILED");
     expect(await countLedger(A, p)).toBe(before);
     expect(await num("SELECT count(*) AS n FROM public.stock_dimensions d JOIN public.items i ON i.tenant_id = d.tenant_id AND i.id = d.item_id WHERE d.tenant_id = $1 AND i.code LIKE $2", [A.tenantId, `${p}%`])).toBe(0);
   });
 
-  it("anahtar kararlıdır: aynı dosya + parça + depo + adım aynı anahtar; farklı içerik/parça/adım farklı", () => {
-    const k = stockClientKey("d1", 0, A.warehouseId, "post");
-    expect(k).toBe(stockClientKey("d1", 0, A.warehouseId, "post"));
+  it("anahtar satır İÇERİĞİNDEN türer: sıra değişimi aynı anahtar; farklı içerik/depo/adım farklı", () => {
+    const l1 = { itemId: "i1", locationId: "l1", quantity: "5" };
+    const l2 = { itemId: "i2", locationId: "l2", quantity: "7" };
+    const d = linesDigestOf([l1, l2]);
+    expect(linesDigestOf([l2, l1])).toBe(d);
+    const k = stockClientKey(d, A.warehouseId, "post");
+    expect(k).toBe(stockClientKey(linesDigestOf([l2, l1]), A.warehouseId, "post"));
     expect(k).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}$/);
-    expect(new Set([k, stockClientKey("d2", 0, A.warehouseId, "post"), stockClientKey("d1", 1, A.warehouseId, "post"), stockClientKey("d1", 0, A.warehouseId, "create")]).size).toBe(4);
+    expect(new Set([k, stockClientKey(linesDigestOf([l1, { ...l2, quantity: "8" }]), A.warehouseId, "post"), stockClientKey(d, B.warehouseId, "post"), stockClientKey(d, A.warehouseId, "create")]).size).toBe(4);
+  });
+
+  it("çiftte stok varsa satır hatası (M-1); dosyayı sıralamak ya da satır eklemek önceden yazılmış satırı iki kez yazmaz (M-2)", async () => {
+    const p = pfx();
+    await applyAll(() => asAdmin(A), `kod;ad\n${p}-1;Bir\n${p}-2;İki\n${p}-3;Üç`);
+    const s1 = `${p}-R1`;
+    const s2 = `${p}-R2`;
+    await newShelf(A, s1);
+    await newShelf(A, s2);
+    const head = "ürün kodu;raf kodu;miktar";
+    await applyAll(() => asAdmin(A), [head, `${p}-1;${s1};10`, `${p}-2;${s1};20`].join("\n"));
+    expect(await countLedger(A, p)).toBe(2);
+
+    // Aynı çiftte farklı miktar: açılış stoku yalnız boş raflar içindir → hata, hiçbir şey yazılmaz.
+    const conflict = [head, `${p}-1;${s1};12`].join("\n");
+    const pv = await previewImport(asAdmin(A), conflict);
+    expect(pv.issues.map((i) => `${i.row}:${i.code}`)).toEqual(["2:PAIR_HAS_STOCK"]);
+    expect((await failure(applyImportChunk(asAdmin(A), { text: conflict, chunk: 0, digest: NO_DIGEST }))).code).toBe("VALIDATION_FAILED");
+    expect(await countLedger(A, p)).toBe(2);
+
+    // Sıra değişti + yeni satır eklendi: eski iki satır "zaten uygulanmış" (REPLAYED), yalnız yeni satır yazılır.
+    const reordered = [head, `${p}-3;${s2};30`, `${p}-2;${s1};20`, `${p}-1;${s1};10`].join("\n");
+    const rep = await applyAll(() => asAdmin(A), reordered);
+    expect(rep[0]?.rows.map((r) => [r.code, r.status])).toEqual([[`${p}-3`, "APPLIED"], [`${p}-2`, "REPLAYED"], [`${p}-1`, "REPLAYED"]]);
+    expect(await countLedger(A, p)).toBe(3);
+    const bal = await adm.query<{ code: string; q: string }>(
+      "SELECT i.code, sum(b.quantity)::text AS q FROM public.stock_balances b JOIN public.stock_dimensions d ON d.tenant_id = b.tenant_id AND d.id = b.stock_dimension_id JOIN public.items i ON i.tenant_id = d.tenant_id AND i.id = d.item_id WHERE i.tenant_id = $1 AND i.code LIKE $2 GROUP BY i.code ORDER BY i.code",
+      [A.tenantId, `${p}%`],
+    );
+    expect(bal.rows.map((r) => [r.code, Number(r.q)])).toEqual([[`${p}-1`, 10], [`${p}-2`, 20], [`${p}-3`, 30]]);
+  });
+
+  it("apply önizleme özetini ister: içerik önizlemeden sonra değiştiyse reddedilir ve hiçbir şey yazılmaz (MINOR-1)", async () => {
+    const p = pfx();
+    await applyAll(() => asAdmin(A), `kod;ad\n${p}-1;Bir`);
+    await newShelf(A, `${p}-R`);
+    const a = `ürün kodu;raf kodu;miktar\n${p}-1;${p}-R;5`;
+    const b = `ürün kodu;raf kodu;miktar\n${p}-1;${p}-R;6`;
+    const pv = await previewImport(asAdmin(A), a);
+    expect((await failure(applyImportChunk(asAdmin(A), { text: b, chunk: 0, digest: pv.digest }))).code).toBe("VALIDATION_FAILED");
+    expect(await countLedger(A, p)).toBe(0);
   });
 });
 
@@ -221,7 +267,7 @@ describe("yetki ve tenant izolasyonu", () => {
     const p = pfx();
     const csv = `kod;ad\n${p}-1;Bir`;
     expect((await failure(previewImport(asPicker(A), csv))).code).toBe("FORBIDDEN");
-    expect((await failure(applyImportChunk(asPicker(A), { text: csv, chunk: 0 }))).code).toBe("FORBIDDEN");
+    expect((await failure(applyImportChunk(asPicker(A), { text: csv, chunk: 0, digest: NO_DIGEST }))).code).toBe("FORBIDDEN");
     const stockCsv = "ürün kodu;raf kodu;miktar\nU3;X;1";
     expect((await failure(previewImport(asPicker(A), stockCsv))).code).toBe("FORBIDDEN");
     expect(await countItems(A, p)).toBe(0);
@@ -244,5 +290,85 @@ describe("yetki ve tenant izolasyonu", () => {
     expect((await previewImport(asAdmin(A), "")).issues.map((i) => i.code)).toEqual(["FILE_EMPTY"]);
     expect((await previewImport(asAdmin(A), "foo;bar\n1;2")).issues.map((i) => i.code)).toEqual(["FORMAT_UNKNOWN"]);
     expect((await previewImport(asAdmin(A), 'kod;ad\n"A;B')).issues.map((i) => i.code)).toEqual(["CSV_UNTERMINATED_QUOTE"]);
+  });
+});
+
+// M-3: satır düzeyi FAILED / NOT_ATTEMPTED yolları. Hata TEST-YALNIZ DB tetikleyicisiyle enjekte edilir (üretim koduna kanca yok): `t289_inject` tablosunda
+// satır varsa belge ONAYI ya da belirli kodlu ÜRÜN eklemesi hata verir. Tetikleyici/tablo testten sonra kaldırılır.
+describe("kısmi başarısızlık ve yeniden deneme (M-3)", () => {
+  beforeAll(async () => {
+    await adm.query("CREATE TABLE IF NOT EXISTS public.t289_inject (tenant_id uuid NOT NULL, what text NOT NULL, PRIMARY KEY (tenant_id, what))");
+    await adm.query(`CREATE OR REPLACE FUNCTION public.t289_inject_fn() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        IF TG_TABLE_NAME = 'documents' THEN
+          IF OLD.status = 'DRAFT' AND NEW.status = 'APPROVED' AND NEW.reason = 'import.opening_stock'
+             AND EXISTS (SELECT 1 FROM public.t289_inject WHERE tenant_id = NEW.tenant_id AND what = 'approve') THEN
+            RAISE EXCEPTION 't289 injected approve failure' USING ERRCODE = 'XX000';
+          END IF;
+        ELSIF TG_TABLE_NAME = 'items' THEN
+          IF EXISTS (SELECT 1 FROM public.t289_inject WHERE tenant_id = NEW.tenant_id AND what = 'item:' || NEW.code) THEN
+            RAISE EXCEPTION 't289 injected item failure' USING ERRCODE = 'XX000';
+          END IF;
+        END IF;
+        RETURN NEW;
+      END $$`);
+    await adm.query("CREATE TRIGGER t289_inject_docs BEFORE UPDATE ON public.documents FOR EACH ROW EXECUTE FUNCTION public.t289_inject_fn()");
+    await adm.query("CREATE TRIGGER t289_inject_items BEFORE INSERT ON public.items FOR EACH ROW EXECUTE FUNCTION public.t289_inject_fn()");
+  });
+  afterAll(async () => {
+    await adm.query("DROP TRIGGER IF EXISTS t289_inject_docs ON public.documents");
+    await adm.query("DROP TRIGGER IF EXISTS t289_inject_items ON public.items");
+    await adm.query("DROP FUNCTION IF EXISTS public.t289_inject_fn()");
+    await adm.query("DROP TABLE IF EXISTS public.t289_inject");
+  });
+  const inject = (w: TenantWorld, what: string) => adm.query("INSERT INTO public.t289_inject (tenant_id, what) VALUES ($1, $2) ON CONFLICT DO NOTHING", [w.tenantId, what]);
+  const clear = (w: TenantWorld) => adm.query("DELETE FROM public.t289_inject WHERE tenant_id = $1", [w.tenantId]);
+  const importDocs = (w: TenantWorld, p: string) =>
+    num(
+      `SELECT count(DISTINCT d.id) AS n FROM public.documents d JOIN public.document_lines dl ON dl.tenant_id = d.tenant_id AND dl.document_id = d.id
+         JOIN public.items i ON i.tenant_id = dl.tenant_id AND i.id = dl.item_id WHERE d.tenant_id = $1 AND d.reason = 'import.opening_stock' AND i.code LIKE $2`,
+      [w.tenantId, `${p}%`],
+    );
+
+  it("stok: belge oluşur ama onayda kalır → ilk grup FAILED, sonrakiler NOT_ATTEMPTED, defter boş; yeniden denemede aynı belge sürdürülür (çift belge yok)", async () => {
+    const p = pfx();
+    await applyAll(() => asAdmin(A), `kod;ad\n${p}-1;Bir\n${p}-2;İki\n${p}-3;Üç`);
+    const w2 = (await createWarehouse({ db: app, principal: { userId: A.ownerUserId, mfaVerified: true }, tenantSlug: A.slug }, { code: pfx(), name: "İkinci depo" })).warehouseId;
+    const s1 = `${p}-R1`;
+    const s2 = `${p}-R2`;
+    await newShelf(A, s1);
+    await createLocation({ db: app, principal: { userId: A.ownerUserId, mfaVerified: true }, tenantSlug: A.slug }, { warehouseId: w2, code: s2, name: s2, kind: "STORAGE" });
+    const csv = ["ürün kodu;raf kodu;miktar", `${p}-1;${s1};5`, `${p}-2;${s1};6`, `${p}-3;${s2};7`].join("\n");
+    await inject(A, "approve");
+    const pv = await previewImport(asAdmin(A), csv);
+    expect(pv.issueTotal).toBe(0);
+    const r = await applyImportChunk(asAdmin(A), { text: csv, chunk: 0, digest: pv.digest });
+    expect(r.complete).toBe(false);
+    expect(r.rows.map((x) => [x.row, x.status, x.errorCode])).toEqual([[2, "FAILED", "INTERNAL"], [3, "FAILED", "INTERNAL"], [4, "NOT_ATTEMPTED", undefined]]);
+    expect(r.counts).toMatchObject({ FAILED: 2, NOT_ATTEMPTED: 1, APPLIED: 0 });
+    expect(await countLedger(A, p)).toBe(0); // sahte başarı yok: hiçbir stok yazılmadı
+    expect(await importDocs(A, p)).toBe(1); // yalnız ilk grubun taslağı
+
+    await clear(A);
+    const again = await applyImportChunk(asAdmin(A), { text: csv, chunk: 0, digest: pv.digest });
+    expect(again.complete).toBe(true);
+    expect(again.counts).toMatchObject({ APPLIED: 3, FAILED: 0, NOT_ATTEMPTED: 0 });
+    expect(await countLedger(A, p)).toBe(3);
+    expect(await importDocs(A, p)).toBe(2); // ilk grubun taslağı SÜRDÜRÜLDÜ (aynı içerik anahtarı), ikinci depo için yeni belge
+  });
+
+  it("ürün: satır hatası ilk başarısız satırda durur (önceki CREATED, sonrakiler NOT_ATTEMPTED); yeniden denemede kalanlar tamamlanır", async () => {
+    const p = pfx();
+    const csv = ["kod;ad", `${p}-1;Bir`, `${p}-2;İki`, `${p}-3;Üç`].join("\n");
+    await inject(B, `item:${p}-2`);
+    const pv = await previewImport(asAdmin(B), csv);
+    const r = await applyImportChunk(asAdmin(B), { text: csv, chunk: 0, digest: pv.digest });
+    expect(r.complete).toBe(false);
+    expect(r.rows.map((x) => [x.row, x.status])).toEqual([[2, "CREATED"], [3, "FAILED"], [4, "NOT_ATTEMPTED"]]);
+    expect(await countItems(B, p)).toBe(1);
+    await clear(B);
+    const again = await applyImportChunk(asAdmin(B), { text: csv, chunk: 0, digest: pv.digest });
+    expect(again.rows.map((x) => [x.row, x.status])).toEqual([[2, "UNCHANGED"], [3, "CREATED"], [4, "CREATED"]]);
+    expect(await countItems(B, p)).toBe(3);
   });
 });

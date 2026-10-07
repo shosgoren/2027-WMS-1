@@ -1252,8 +1252,10 @@
     },
     "step2": {
       "title": "Choose the file",
-      "label": "Your filled-in CSV file",
-      "hint": "Up to {kb} KB and {rows} rows. The file is checked before anything is saved."
+      "label": "Choose file",
+      "hint": "Up to {kb} KB and {rows} rows. The file is checked before anything is saved.",
+      "none": "No file chosen yet",
+      "chosen": "Chosen: {name}"
     },
     "clientErrors": {
       "tooBig": "The file is too large. It can be at most {kb} KB. Split it in two and choose it again.",
@@ -1266,43 +1268,63 @@
     "summary": {
       "items": "Products",
       "stockLines": "Stock lines",
-      "errorRows": "Rows with errors"
+      "errorRows": "Rows with errors",
+      "lineProducts": "{total} products: {ok} ready, {bad} with errors",
+      "lineStock": "{total} stock lines: {ok} ready, {bad} with errors"
     },
     "detail": {
       "products": "{create} new products will be added, {existing} products already exist. {packs} carton definitions, {barcodes} barcodes.",
       "packUnit": "The carton unit will be created too.",
       "stock": "A total of {total} pieces will be added to {warehouses} warehouses.",
-      "stockExists": "There is already stock in the system. These quantities are added on top of it. If you imported this same file before, it is not added twice."
+      "stockExists": "There is already stock in the system. These quantities are added on top of it. If you imported this same file before, it is not added twice.",
+      "stockNothing": "There are no new lines to write.",
+      "stockSkipped": "{n} lines were processed before and will be skipped."
     },
     "blocked": "There are {n} errors. Fix the file and choose it again.",
     "clean": "No errors. You can import.",
     "issues": {
       "all": "All errors ({total}):",
-      "truncated": "Showing the first {shown} errors of {total}. Fix these and the rest will appear.",
+      "truncated": "Showing {shown} errors of {total}. Fix these and the rest will appear.",
       "file": "File",
       "row": "Row {row}",
-      "fixPrefix": "How to fix:"
+      "fixPrefix": "How to fix:",
+      "more": "Show all ({n} rows)",
+      "less": "Show less",
+      "pickFixed": "Choose the fixed file"
     },
     "step4": {
       "title": "Import",
       "apply": "Import",
       "note": "If you upload the same file again, it is not added twice.",
       "blocked": "Fix the {n} errors first. Nothing can be imported while there are errors.",
-      "progress": "{done} / {total} rows"
+      "progress": "{done} / {total} rows",
+      "done": "Finished",
+      "partial": "Stopped halfway"
     },
     "step5": {
       "title": "Result"
     },
     "result": {
-      "okProducts": "Done. {created} products added, {updated} updated, {unchanged} already existed.",
-      "okStock": "Done. {applied} stock lines added, {replayed} lines were added before.",
-      "partial": "The import stopped halfway. {done} rows are done, {failed} rows failed, {notTried} rows were not started.",
-      "retry": "Fix the problem and upload the same file again. Finished rows are not added twice; the rest are completed.",
+      "partial": "The import stopped halfway.",
       "failedRow": "Row {row} ({code}):",
       "nextStock": "Now you can upload the opening stock file.",
       "again": "Choose the file again",
       "another": "Upload another file",
-      "toItems": "Go to products"
+      "toItems": "Go to products",
+      "okLead": "Done.",
+      "created": "{n} products added.",
+      "updated": "Carton or barcode details completed for {n} products.",
+      "unchanged": "{n} products already existed.",
+      "stockApplied": "{n} stock lines added.",
+      "stockSkipped": "{n} lines were processed before and skipped.",
+      "retryProducts": "Fix the problem and upload the same file again. Finished products are not added twice; the rest are completed.",
+      "retryStock": "Do not change the quantities of finished lines. Fix only the failed line and upload the file again; finished lines are skipped as “processed before” and the rest are written.",
+      "stat": {
+        "done": "{n} rows done",
+        "failed": "{n} rows failed",
+        "skipped": "{n} rows not tried"
+      },
+      "toStock": "See stock in products"
     },
     "column": {
       "code": "Code",
@@ -1492,6 +1514,18 @@
       "PAIR_DUPLICATE_FILE": {
         "reason": "This product and shelf are also on row {firstRow}.",
         "fix": "Merge the two rows into one with the total quantity."
+      },
+      "PAIR_HAS_STOCK": {
+        "reason": "Product {code} already has stock on shelf {shelf}.",
+        "fix": "Opening stock is only for empty shelves. Use a stock document to correct it, or delete the row."
+      },
+      "CELL_TOO_LONG": {
+        "reason": "A cell is too long.",
+        "fix": "Shorten the cell to at most {max} characters or save the file again from Excel."
+      },
+      "TOO_MANY_COLUMNS": {
+        "reason": "The row has too many columns.",
+        "fix": "At most {max} columns are allowed. Delete the extra columns."
       }
     }
   }

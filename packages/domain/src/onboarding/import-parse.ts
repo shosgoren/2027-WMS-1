@@ -7,8 +7,11 @@
 // yalnız bu katsayıdan gelir (barkoda ayrı adet yazılmaz, K-1). Miktarlar tam sayı (A-33; ürün ölçeği 0), kesir yalnız ürün ölçeği izin verirse.
 import { parseGs1 } from "../catalog/gs1.ts";
 
-/** A-289-1: dosya üst sınırları. 512 KiB ≈ 8.000 kısa satır; 5.000 satır pilot kataloğunun (birkaç yüz–bin ürün) üzerinde bol payla yeter ve sunucu eylemi gövde sınırının altında kalır. */
-export const IMPORT_MAX_BYTES = 512 * 1024;
+/**
+ * A-289-1: dosya üst sınırları. Sınır GERÇEK bayttır (UTF-8). Next sunucu eylemi gövde sınırı 1 MB (ayarlanmaz); metin JSON içinde gider ve satır sonları/tırnaklar
+ * kaçışla en çok ~1,1x büyür, bu yüzden 384 KiB (≈ 5.000 satır × ~80 bayt) güvenli pay bırakır. Aşan dosya bölünür.
+ */
+export const IMPORT_MAX_BYTES = 384 * 1024;
 export const IMPORT_MAX_ROWS = 5000;
 /** Parça boyutu: bir sunucu çağrısında işlenen satır (ürün) / bir stok belgesindeki satır sayısı (A-07 belge sınırı 2.000'in çok altında). */
 export const IMPORT_CHUNK_SIZE = 200;
@@ -75,7 +78,10 @@ export type IssueCode =
   | "QTY_AMBIGUOUS"
   | "QTY_FRACTIONAL"
   | "QTY_TOO_LARGE"
-  | "PAIR_DUPLICATE_FILE";
+  | "PAIR_DUPLICATE_FILE"
+  | "PAIR_HAS_STOCK"
+  | "CELL_TOO_LONG"
+  | "TOO_MANY_COLUMNS";
 
 export type ImportColumn = "kod" | "ad" | "temel birim" | "koli içi adet" | "adet barkodu" | "koli barkodu" | "ürün kodu" | "raf kodu" | "miktar" | "dosya";
 
@@ -96,9 +102,21 @@ const clip = (s: string): string => (s.length > 40 ? `${s.slice(0, 40)}…` : s)
 
 // --- CSV ---------------------------------------------------------------------------------------------------------------
 
-export type CsvResult = { readonly ok: true; readonly records: readonly (readonly string[])[]; readonly delimiter: ";" | "," } | { readonly ok: false; readonly code: "CSV_UNTERMINATED_QUOTE" | "FILE_EMPTY" };
+/** A-289-5: ayrıştırma SIRASINDA hücre/sütun üst sınırları (kötü niyetli ya da bozuk dosya bellek ve süreyi şişiremesin). */
+export const HEADER_CELL_MAX = 200;
+export const DATA_CELL_MAX = 1000;
+export const MAX_COLUMNS = 40;
+const MAX_LIMIT_ISSUES = 200;
 
-/** İlk kayıttaki (tırnak dışı) `;` ve `,` sayısına göre ayırıcı; eşitlikte `;` (Türkçe Excel). */
+export interface CsvLimitIssue {
+  readonly row: number;
+  readonly code: "CELL_TOO_LONG" | "TOO_MANY_COLUMNS";
+}
+export type CsvResult =
+  | { readonly ok: true; readonly records: readonly (readonly string[])[]; readonly delimiter: ";" | ","; readonly limitIssues: readonly CsvLimitIssue[] }
+  | { readonly ok: false; readonly code: "CSV_UNTERMINATED_QUOTE" | "FILE_EMPTY" };
+
+/** İlk kayıttaki (tırnak dışı) `;` ve `,` sayısına göre ayırıcı; eşitlikte `;` (Türkçe Excel). Tek geçiş, doğrusal. */
 function detectDelimiter(text: string): ";" | "," {
   let semi = 0;
   let comma = 0;
@@ -113,21 +131,47 @@ function detectDelimiter(text: string): ";" | "," {
   return comma > semi ? "," : ";";
 }
 
-/** RFC 4180 benzeri: tırnaklı alan, `""` kaçışı, tırnak içinde satır sonu; CRLF/LF/CR; BOM atılır. Tamamen boş kayıtlar korunur (satır numarası kayması olmasın). */
+const isBlankChar = (c: string): boolean => c === " " || c === "\t" || c === "\u00a0" || c === "\ufeff";
+
+/**
+ * RFC 4180 benzeri: tırnaklı alan, `""` kaçışı, tırnak içinde satır sonu; CRLF/LF/CR; BOM atılır. Tamamen boş kayıtlar korunur (satır numarası
+ * kaymasın). DOĞRUSAL: her karakter bir kez işlenir; hücre `limit + 1` karakterden fazla saklanmaz (aşım `limitIssues`'a yazılır), sütun sayısı
+ * `MAX_COLUMNS` ile sınırlıdır (fazlası atılır). Başlık satırı (ilk kayıt) 200, veri satırı 1000 karakter hücre sınırı taşır.
+ */
 export function parseCsv(input: string): CsvResult {
   const text = input.charCodeAt(0) === 0xfeff ? input.slice(1) : input;
   if (text.trim() === "") return { ok: false, code: "FILE_EMPTY" };
   const delimiter = detectDelimiter(text);
   const records: string[][] = [];
+  const limitIssues: CsvLimitIssue[] = [];
   let row: string[] = [];
   let field = "";
+  let fieldLen = 0;
+  let blank = true; // alan şimdiye dek yalnız boşluk (tırnak açılışı için)
   let quoted = false;
   let fieldWasQuoted = false;
   let atRecordStart = true;
+  let rowFlag: CsvLimitIssue["code"] | null = null;
+  const cellMax = (): number => (records.length === 0 ? HEADER_CELL_MAX : DATA_CELL_MAX);
+  const append = (c: string): void => {
+    fieldLen++;
+    if (fieldLen <= cellMax() + 1) field += c;
+    else rowFlag ??= "CELL_TOO_LONG";
+  };
   const endField = (): void => {
-    row.push(fieldWasQuoted ? field : field.trim());
+    if (fieldLen > cellMax()) rowFlag ??= "CELL_TOO_LONG";
+    if (row.length < MAX_COLUMNS) row.push(fieldWasQuoted ? field : field.trim());
+    else rowFlag ??= "TOO_MANY_COLUMNS";
     field = "";
+    fieldLen = 0;
+    blank = true;
     fieldWasQuoted = false;
+  };
+  const endRecord = (): void => {
+    if (rowFlag !== null && limitIssues.length < MAX_LIMIT_ISSUES) limitIssues.push({ row: records.length + 1, code: rowFlag });
+    rowFlag = null;
+    records.push(row);
+    row = [];
   };
   for (let i = 0; i < text.length; i++) {
     const c = text[i] as string;
@@ -135,38 +179,58 @@ export function parseCsv(input: string): CsvResult {
     if (quoted) {
       if (c === '"') {
         if (text[i + 1] === '"') {
-          field += '"';
+          append('"');
           i++;
         } else quoted = false;
-      } else field += c;
+      } else append(c);
       continue;
     }
-    if (c === '"' && field.trim() === "") {
+    if (c === '"' && blank) {
       quoted = true;
       fieldWasQuoted = true;
       field = "";
+      fieldLen = 0;
     } else if (c === delimiter) endField();
     else if (c === "\n" || c === "\r") {
       if (c === "\r" && text[i + 1] === "\n") i++;
       endField();
-      records.push(row);
-      row = [];
+      endRecord();
       atRecordStart = true;
-    } else field += c;
+    } else {
+      if (blank && !isBlankChar(c)) blank = false;
+      append(c);
+    }
   }
   if (quoted) return { ok: false, code: "CSV_UNTERMINATED_QUOTE" };
   if (!atRecordStart) {
     endField();
-    records.push(row);
+    endRecord();
   }
-  return { ok: true, records: records.map((r) => r.map((v) => v.trim())), delimiter };
+  return { ok: true, records, delimiter, limitIssues };
 }
 
-// --- başlık eşleme ---------------------------------------------------------------------------------------------------
-
-/** Türkçe harfleri ve noktalamayı katlar: "Ürün Kodu", "urun_kodu", "ÜRÜN KODU" aynı anahtar olur. */
+/** Türkçe harfleri ve noktalamayı katlar: "Ürün Kodu", "urun_kodu", "ÜRÜN KODU" aynı anahtar olur. Parantez içi (ör. "(adet)") atılır; DOĞRUSAL tarayıcı (regex yok). */
 export function foldHeader(raw: string): string {
-  return raw
+  // Kapanmayan "(" metnin geri kalanını yutmaz: yalnız kapanan çiftler atılır; en yakın ")" bir kez aranır (indexOf, her "(" için en çok bir ileri tarama,
+  // kapanış yoksa sonraki "(" için tekrar taranmasın diye bu bilgi bir kez saklanır).
+  let out = "";
+  let i = 0;
+  let noCloseAfter = false;
+  while (i < raw.length) {
+    const c = raw[i] as string;
+    if (c === "(" && !noCloseAfter) {
+      const close = raw.indexOf(")", i + 1);
+      if (close === -1) noCloseAfter = true;
+      else {
+        out += " ";
+        i = close + 1;
+        continue;
+      }
+    }
+    out += c;
+    i++;
+  }
+  return out
     .replace(/İ/g, "i")
     .replace(/I/g, "i")
     .toLowerCase()
@@ -176,10 +240,11 @@ export function foldHeader(raw: string): string {
     .replace(/ğ/g, "g")
     .replace(/ö/g, "o")
     .replace(/ü/g, "u")
-    .replace(/\(.*?\)/g, " ")
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
 }
+
+// --- başlık eşleme ---------------------------------------------------------------------------------------------------
 
 const PRODUCT_ALIASES: Readonly<Record<string, (typeof PRODUCT_HEADERS)[number]>> = {
   kod: "kod",
@@ -312,7 +377,14 @@ export interface ProductContext {
   /** Ürün kodu → birim kimliği → katsayı (kanonik dizgi). */
   readonly conversions: ReadonlyMap<string, ReadonlyMap<string, string>>;
 }
+/** (ürün, raf) çiftinin mevcut durumu: `hasStock` = defterde hareket ya da bakiye > 0; `applied` = bu çifte önceki içe aktarmayla yazılmış (kanonik) miktarlar. */
+export interface PairState {
+  readonly hasStock: boolean;
+  readonly applied: ReadonlySet<string>;
+}
 export interface StockContext {
+  /** Anahtar `${itemId}|${locationId}`; verilmezse çiftlerde stok yok sayılır (yalnız saf birim testleri). */
+  readonly pairs?: ReadonlyMap<string, PairState>;
   readonly items: ReadonlyMap<string, ItemInfoCtx>;
   /** Raf kodu (büyük/küçük harf duyarsız anahtar) → aynı kodlu raflar (birden çok depoda olabilir). */
   readonly shelves: ReadonlyMap<string, readonly ShelfInfo[]>;
@@ -342,6 +414,8 @@ export interface PreviewResult<P> {
   readonly issues: readonly ImportIssue[];
   /** Başlık sonrası dosyadaki dolu satır sayısı. */
   readonly rowCount: number;
+  /** Yalnız açılış stoku: tek tek geçerli satırlar (başka satırlarda hata olsa da); çift durumu sorgusu için. */
+  readonly candidates?: readonly P[];
   /** Dosyadaki farklı ürün kodu sayısı (hatalı satırlar dahil; yalnız özet için). */
   readonly distinctItems: number;
 }
@@ -483,6 +557,8 @@ export interface StockPlan {
   readonly warehouseId: string;
   /** Kanonik pozitif ondalık dizgi (temel birim). */
   readonly quantity: string;
+  /** Bu (ürün, raf, miktar) önceki bir içe aktarmayla zaten yazılmış: atlanır, raporda "daha önce işlenmiş" görünür. */
+  readonly alreadyApplied: boolean;
 }
 
 export function validateStock(records: Records, ctx: StockContext): PreviewResult<StockPlan> {
@@ -548,20 +624,33 @@ export function validateStock(records: Records, ctx: StockContext): PreviewResul
       if (first !== undefined) issues.push(issue(row, "raf kodu", "PAIR_DUPLICATE_FILE", { firstRow: first }));
       else pairs.set(pk, row);
     }
+    // Açılış stoku yalnız stoğu OLMAYAN (ürün, raf) çifti için yazılır (A-289-3). Çiftte stok varsa: aynı miktar önceki içe aktarmadan geliyorsa
+    // satır "zaten uygulanmış" (atlanır, hata değil); aksi halde hata (düzeltme için stok belgesi).
+    let alreadyApplied = false;
     if (issues.length === before && item !== undefined && shelf !== undefined && quantity !== null) {
-      plans.push({ row, itemCode, itemId: item.id, shelfCode, locationId: shelf.id, warehouseId: shelf.warehouseId, quantity });
+      const st = ctx.pairs?.get(`${item.id}|${shelf.id}`);
+      if (st !== undefined && st.hasStock) {
+        if (st.applied.has(quantity)) alreadyApplied = true;
+        else issues.push(issue(row, "raf kodu", "PAIR_HAS_STOCK", { code: clip(itemCode), shelf: clip(shelfCode) }));
+      }
+    }
+    if (issues.length === before && item !== undefined && shelf !== undefined && quantity !== null) {
+      plans.push({ row, itemCode, itemId: item.id, shelfCode, locationId: shelf.id, warehouseId: shelf.warehouseId, quantity, alreadyApplied });
     }
   });
-  return { kind: "STOCK", plans: issues.length === 0 ? plans : [], issues, rowCount, distinctItems: distinctCodes.size };
+  return { kind: "STOCK", plans: issues.length === 0 ? plans : [], candidates: plans, issues, rowCount, distinctItems: distinctCodes.size };
 }
 
 /** Başlık satırından dosya türü; ayrıştırma hatası ya da bilinmeyen biçim `issue` ile döner. */
 export function classify(text: string): { readonly ok: true; readonly kind: ImportKind; readonly records: Records } | { readonly ok: false; readonly issues: readonly ImportIssue[] } {
-  if (text.length > IMPORT_MAX_BYTES) return { ok: false, issues: [issue(0, "dosya", "FILE_TOO_LARGE", { maxKb: IMPORT_MAX_BYTES / 1024 })] };
+  if (Buffer.byteLength(text, "utf8") > IMPORT_MAX_BYTES) return { ok: false, issues: [issue(0, "dosya", "FILE_TOO_LARGE", { maxKb: IMPORT_MAX_BYTES / 1024 })] };
   // U+FFFD: dosya UTF-8 değil (ör. Excel'in eski "CSV (noktalı virgül)" kaydı Windows-1254); Türkçe harfler bozulmuş olurdu.
   if (text.includes("\uFFFD")) return { ok: false, issues: [issue(0, "dosya", "FILE_ENCODING")] };
   const csv = parseCsv(text);
   if (!csv.ok) return { ok: false, issues: [issue(0, "dosya", csv.code)] };
+  if (csv.limitIssues.length > 0) {
+    return { ok: false, issues: csv.limitIssues.map((l) => issue(l.row, "dosya", l.code, l.code === "CELL_TOO_LONG" ? { max: l.row === 1 ? HEADER_CELL_MAX : DATA_CELL_MAX } : { max: MAX_COLUMNS })) };
+  }
   const kind = detectKind(csv.records[0] ?? []);
   if (kind === null) return { ok: false, issues: [issue(1, "dosya", "FORMAT_UNKNOWN")] };
   return { ok: true, kind, records: csv.records };

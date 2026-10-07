@@ -18,6 +18,7 @@ import { addBarcode } from "../catalog/barcodes.ts";
 import { createItem } from "../catalog/items.ts";
 import { createUnit, setUnitConversion } from "../catalog/units.ts";
 import { runTenantQuery, type AccessTx, type TenantAccessParams } from "../identity/access.ts";
+import { resolveWarehouseScope } from "../warehouse/scope.ts";
 import { approveDocument, createStockDocument, postDocument, type DocumentLineInput } from "../stock/index.ts";
 import {
   IMPORT_CHUNK_SIZE,
@@ -31,6 +32,7 @@ import {
   type ImportIssue,
   type ImportKind,
   type ItemInfoCtx,
+  type PairState,
   type PreviewResult,
   type ProductContext,
   type ProductPlan,
@@ -60,7 +62,7 @@ export interface ImportPreview {
   /** Yalnız ürünler: yeni oluşturulacak / sistemde zaten olan ürün sayısı, koli tanımı ve barkod sayıları. */
   readonly products?: { readonly create: number; readonly existing: number; readonly packs: number; readonly barcodes: number; readonly willCreatePackUnit: boolean };
   /** Yalnız açılış stoku: satır, ürün ve depo sayısı; toplam miktar (kanonik dizgi). */
-  readonly stock?: { readonly lines: number; readonly items: number; readonly warehouses: number; readonly totalQuantity: string; readonly tenantHasStock: boolean };
+  readonly stock?: { readonly lines: number; readonly alreadyApplied: number; readonly items: number; readonly warehouses: number; readonly totalQuantity: string; readonly tenantHasStock: boolean };
   /** Hata yoksa kaç parçada uygulanır. */
   readonly chunkCount: number;
   /** Dosya özeti (kanonik içerik; biçimden bağımsız); stok anahtarlarının kaynağı. */
@@ -121,6 +123,9 @@ async function loadProductContext(params: ImportCallParams): Promise<ProductCont
 async function loadStockContext(params: ImportCallParams): Promise<{ readonly ctx: StockContext; readonly tenantHasStock: boolean }> {
   return runTenantQuery({ ...params, permission: "stock.view" }, async (tx, m) => {
     const items = await loadItems(tx, m.tenantId);
+    // Depo kapsamı (T-2xx): kapsam dışı depoların rafları "bilinmeyen raf" gibi görünür (varlık sızmaz) ve stok yazılamaz.
+    const scope = await resolveWarehouseScope(tx, m);
+    const allowed = scope === null ? null : new Set(scope);
     const rows = await tx.execute<{ id: string; warehouse_id: string; wcode: string; code: string; kind: string; status: "ACTIVE" | "ARCHIVED"; wstatus: string }>(
       sql`SELECT l.id, l.warehouse_id, w.code AS wcode, l.code, l.kind, l.status, w.status AS wstatus
             FROM public.locations l
@@ -129,6 +134,7 @@ async function loadStockContext(params: ImportCallParams): Promise<{ readonly ct
     );
     const shelves = new Map<string, ShelfInfo[]>();
     for (const r of rows) {
+      if (allowed !== null && !allowed.has(r.warehouse_id.toLowerCase())) continue;
       const k = shelfKey(r.code);
       shelves.set(k, [
         ...(shelves.get(k) ?? []),
@@ -153,11 +159,20 @@ export function digestOf(kind: ImportKind, plans: readonly (ProductPlan | StockP
   return sha(`${kind}\n${lines.join("\n")}`);
 }
 
-/** Belge adımı için kararlı istemci anahtarı (UUID biçimli; parseClientKey). Aynı dosya + parça + depo + adım → aynı anahtar (I-06). */
-export function stockClientKey(digest: string, chunk: number, warehouseId: string, phase: "create" | "approve" | "post"): string {
-  const h = sha(`import-stock|${digest}|${chunk}|${warehouseId}|${phase}`);
+/**
+ * Belge adımı için kararlı istemci anahtarı (UUID biçimli; parseClientKey). Anahtar satır SIRASINDAN değil satır İÇERİĞİNDEN türer: depo + sıralanmış
+ * (ürün, raf, miktar) satırlarının özeti + adım. Aynı satır kümesi yeniden gönderilirse (yarım kalan işlem) önceki belge sürdürülür; dosyayı sıralamak/
+ * düzeltmek önceden yazılmış satırı iki kez yazmaz (o satır `alreadyApplied` olarak atlanır).
+ */
+export function stockClientKey(linesDigest: string, warehouseId: string, phase: "create" | "approve" | "post"): string {
+  const h = sha(`import-stock|${warehouseId}|${linesDigest}|${phase}`);
   // v4 biçimli UUID: sürüm/varyant bitleri sabitlenir.
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
+}
+
+/** Bir depo grubunun satır özeti (sıra bağımsız). */
+export function linesDigestOf(lines: readonly { readonly itemId: string; readonly locationId: string; readonly quantity: string }[]): string {
+  return sha([...lines].map((l) => `${l.itemId}|${l.locationId}|${l.quantity}`).sort().join("\n"));
 }
 
 function addDecimal(a: string, b: string): string {
@@ -192,7 +207,43 @@ async function evaluate(params: ImportCallParams, text: string): Promise<Evaluat
     return { kind: c.kind, result: validateProducts(c.records, productCtx), productCtx, tenantHasStock: false };
   }
   const { ctx, tenantHasStock } = await loadStockContext(params);
-  return { kind: c.kind, result: validateStock(c.records, ctx), stockCtx: ctx, tenantHasStock };
+  // İki geçiş: önce satırlar tek tek doğrulanır, sonra geçerli satırların (ürün, raf) çiftlerinin stok durumu okunur ve çift kuralı uygulanır.
+  const first = validateStock(c.records, ctx);
+  const candidates = first.candidates ?? [];
+  const pairs = await loadPairStates(params, candidates);
+  const withPairs: StockContext = { ...ctx, pairs };
+  return { kind: c.kind, result: validateStock(c.records, withPairs), stockCtx: withPairs, tenantHasStock };
+}
+
+const dec = (v: string): string => (v.includes(".") ? v.replace(/0+$/, "").replace(/\.$/, "") : v);
+
+/**
+ * (ürün, raf) çiftlerinin durumu: defterde herhangi bir hareket (`hasStock`) ve bu çifte önceki içe aktarmayla (POSTED `import.opening_stock` STOCK_IN)
+ * yazılmış miktarlar (`applied`). Yalnız dosyadaki ürünler sorgulanır.
+ */
+async function loadPairStates(params: ImportCallParams, candidates: readonly StockPlan[]): Promise<ReadonlyMap<string, PairState>> {
+  const out = new Map<string, { hasStock: boolean; applied: Set<string> }>();
+  const itemIds = [...new Set(candidates.map((c) => c.itemId))];
+  if (itemIds.length === 0) return out;
+  const list = sql.join(itemIds.map((id) => sql`${id}::uuid`), sql`, `);
+  await runTenantQuery({ ...params, permission: "stock.view" }, async (tx, m) => {
+    const moved = await tx.execute<{ item_id: string; location_id: string }>(
+      sql`SELECT DISTINCT d.item_id, d.location_id FROM public.stock_dimensions d
+           WHERE d.tenant_id = ${m.tenantId}::uuid AND d.item_id IN (${list})
+             AND (EXISTS (SELECT 1 FROM public.stock_ledger l WHERE l.tenant_id = d.tenant_id AND l.stock_dimension_id = d.id)
+                  OR EXISTS (SELECT 1 FROM public.stock_balances b WHERE b.tenant_id = d.tenant_id AND b.stock_dimension_id = d.id AND b.quantity > 0))`,
+    );
+    for (const r of moved) out.set(`${r.item_id}|${r.location_id}`, { hasStock: true, applied: new Set() });
+    const lines = await tx.execute<{ item_id: string; location_id: string; q: string }>(
+      sql`SELECT dl.item_id, dl.target_location_id AS location_id, dl.base_quantity::text AS q
+            FROM public.document_lines dl
+            JOIN public.documents d ON d.tenant_id = dl.tenant_id AND d.id = dl.document_id
+           WHERE dl.tenant_id = ${m.tenantId}::uuid AND d.kind = 'STOCK_IN' AND d.reason = ${STOCK_REASON} AND d.status = 'POSTED'
+             AND dl.item_id IN (${list}) AND dl.target_location_id IS NOT NULL`,
+    );
+    for (const r of lines) out.get(`${r.item_id}|${r.location_id}`)?.applied.add(dec(r.q));
+  });
+  return out;
 }
 
 export async function previewImport(params: ImportCallParams, text: string): Promise<ImportPreview> {
@@ -230,9 +281,10 @@ export async function previewImport(params: ImportCallParams, text: string): Pro
     ...base,
     stock: {
       lines: clean ? plans.length : 0,
+      alreadyApplied: clean ? plans.filter((p) => p.alreadyApplied).length : 0,
       items: clean ? new Set(plans.map((p) => p.itemId)).size : 0,
-      warehouses: clean ? new Set(plans.map((p) => p.warehouseId)).size : 0,
-      totalQuantity: clean ? plans.reduce((s, p) => addDecimal(s, p.quantity), "0") : "0",
+      warehouses: clean ? new Set(plans.filter((p) => !p.alreadyApplied).map((p) => p.warehouseId)).size : 0,
+      totalQuantity: clean ? plans.filter((p) => !p.alreadyApplied).reduce((s, p) => addDecimal(s, p.quantity), "0") : "0",
       tenantHasStock: ev.tenantHasStock,
     },
     chunkCount: clean ? Math.ceil(plans.length / IMPORT_CHUNK_SIZE) : 0,
@@ -281,10 +333,12 @@ const isCodeTaken = (e: unknown): boolean => e instanceof AppError && e.code ===
  * Bir parçayı uygular. Yetki/doğrulama hataları (`FORBIDDEN`, `VALIDATION_FAILED`) FIRLATILIR (hiçbir şey yazılmamıştır); satır düzeyindeki
  * komut hataları rapora `FAILED` olarak girer ve parça orada durur (sonraki satırlar `NOT_ATTEMPTED`).
  */
-export async function applyImportChunk(params: ImportCallParams, input: { readonly text: string; readonly chunk: number }): Promise<ChunkReport> {
-  if (!Number.isSafeInteger(input.chunk) || input.chunk < 0) throw new AppError("VALIDATION_FAILED");
+export async function applyImportChunk(params: ImportCallParams, input: { readonly text: string; readonly chunk: number; readonly digest: string }): Promise<ChunkReport> {
+  if (!Number.isSafeInteger(input.chunk) || input.chunk < 0 || typeof input.digest !== "string") throw new AppError("VALIDATION_FAILED");
   const ev = await evaluate(params, input.text);
   if ("early" in ev || ev.result.issues.length > 0) throw new AppError("VALIDATION_FAILED"); // hata varken HİÇBİR şey yazılmaz
+  // Önizlemedeki içerik özeti: önizleme ile uygulama arasında dosya içeriği ya da bağlı veri değiştiyse reddedilir (HİÇBİR şey yazılmaz).
+  if (digestOf(ev.kind, ev.result.plans) !== input.digest) throw new AppError("VALIDATION_FAILED");
   const chunkCount = Math.ceil(ev.result.plans.length / IMPORT_CHUNK_SIZE);
   if (input.chunk >= chunkCount) throw new AppError("VALIDATION_FAILED");
   const from = input.chunk * IMPORT_CHUNK_SIZE;
@@ -295,7 +349,7 @@ export async function applyImportChunk(params: ImportCallParams, input: { readon
   }
   const all = ev.result.plans as readonly StockPlan[];
   const digest = digestOf("STOCK", all);
-  const rows = await applyStock(params, all.slice(from, from + IMPORT_CHUNK_SIZE), ev.stockCtx as StockContext, digest, input.chunk);
+  const rows = await applyStock(params, all.slice(from, from + IMPORT_CHUNK_SIZE), ev.stockCtx as StockContext);
   return { kind: "STOCK", chunk: input.chunk, chunkCount, digest, rows, counts: counts(rows), complete: !rows.some((r) => r.status === "FAILED") };
 }
 
@@ -373,11 +427,14 @@ async function applyProducts(params: ImportCallParams, plans: readonly ProductPl
   return rows;
 }
 
-async function applyStock(params: ImportCallParams, plans: readonly StockPlan[], ctx: StockContext, digest: string, chunk: number): Promise<RowReport[]> {
+async function applyStock(params: ImportCallParams, allPlans: readonly StockPlan[], ctx: StockContext): Promise<RowReport[]> {
   const itemById = new Map([...ctx.items.values()].map((i) => [i.id, i] as const));
   const byWarehouse = new Map<string, StockPlan[]>();
-  for (const pl of plans) byWarehouse.set(pl.warehouseId, [...(byWarehouse.get(pl.warehouseId) ?? []), pl]);
   const reports = new Map<number, RowReport>();
+  // Önceki içe aktarmayla zaten yazılmış satırlar atlanır ve raporda "daha önce işlenmiş" görünür.
+  const plans = allPlans;
+  for (const pl of plans) if (pl.alreadyApplied) reports.set(pl.row, { row: pl.row, code: pl.itemCode, status: "REPLAYED" });
+  for (const pl of plans) if (!pl.alreadyApplied) byWarehouse.set(pl.warehouseId, [...(byWarehouse.get(pl.warehouseId) ?? []), pl]);
   let failed = false;
   for (const [warehouseId, group] of byWarehouse) {
     if (failed) {
@@ -390,7 +447,7 @@ async function applyStock(params: ImportCallParams, plans: readonly StockPlan[],
         if (item === undefined) throw new AppError("INTERNAL");
         return { itemId: pl.itemId, unitId: item.baseUnitId, quantity: pl.quantity, conversionFactor: "1", baseQuantity: pl.quantity, targetLocationId: pl.locationId };
       });
-      const call = (phase: "create" | "approve" | "post") => ({ db: params.db, principal: params.principal, tenantSlug: params.tenantSlug, clientKey: stockClientKey(digest, chunk, warehouseId, phase) });
+      const call = (phase: "create" | "approve" | "post") => ({ db: params.db, principal: params.principal, tenantSlug: params.tenantSlug, clientKey: stockClientKey(linesDigestOf(group), warehouseId, phase) });
       const rid = params.requestId === undefined ? {} : { requestId: params.requestId };
       const doc = await createStockDocument(call("create"), { kind: "STOCK_IN", warehouseId, reason: STOCK_REASON, lines, ...rid });
       const documentId = doc.documentId;

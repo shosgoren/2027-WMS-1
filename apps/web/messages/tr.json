@@ -1252,8 +1252,10 @@
     },
     "step2": {
       "title": "Dosyayı seç",
-      "label": "Doldurduğun CSV dosyası",
-      "hint": "En çok {kb} KB ve {rows} satır. Dosya cihazından çıkmadan önce kontrol edilir."
+      "label": "Dosya seç",
+      "hint": "En çok {kb} KB ve {rows} satır. Dosya cihazından çıkmadan önce kontrol edilir.",
+      "none": "Henüz dosya seçmedin",
+      "chosen": "Seçilen: {name}"
     },
     "clientErrors": {
       "tooBig": "Dosya çok büyük. En çok {kb} KB olabilir. Dosyayı ikiye bölüp tekrar seç.",
@@ -1266,43 +1268,63 @@
     "summary": {
       "items": "Ürün",
       "stockLines": "Stok satırı",
-      "errorRows": "Hatalı satır"
+      "errorRows": "Hatalı satır",
+      "lineProducts": "{total} ürün: {ok} hazır, {bad} hatalı",
+      "lineStock": "{total} stok satırı: {ok} hazır, {bad} hatalı"
     },
     "detail": {
       "products": "{create} yeni ürün eklenecek, {existing} ürün zaten var. {packs} koli tanımı, {barcodes} barkod.",
       "packUnit": "Koli birimi de oluşturulacak.",
       "stock": "{warehouses} depoya toplam {total} adet girilecek.",
-      "stockExists": "Sistemde zaten stok var. Bu dosyadaki miktarlar mevcut stokun üstüne eklenir. Aynı dosyayı daha önce aldıysan ikinci kez eklenmez."
+      "stockExists": "Sistemde zaten stok var. Bu dosyadaki miktarlar mevcut stokun üstüne eklenir. Aynı dosyayı daha önce aldıysan ikinci kez eklenmez.",
+      "stockNothing": "Yazılacak yeni satır yok.",
+      "stockSkipped": "{n} satır daha önce işlenmiş, atlanacak."
     },
     "blocked": "{n} hata var. Dosyayı düzeltip yeniden seç.",
     "clean": "Hata yok. İçe aktarabilirsin.",
     "issues": {
       "all": "Hataların hepsi ({total}):",
-      "truncated": "İlk {shown} hata gösteriliyor, toplam {total} hata var. Bunları düzeltince kalanlar görünür.",
+      "truncated": "{shown} hata gösteriliyor, toplam {total} hata var. Bunları düzeltince kalanlar görünür.",
       "file": "Dosya",
       "row": "Satır {row}",
-      "fixPrefix": "Nasıl düzeltilir:"
+      "fixPrefix": "Nasıl düzeltilir:",
+      "more": "Tümünü göster ({n} satır)",
+      "less": "Daha az göster",
+      "pickFixed": "Düzeltilmiş dosyayı seç"
     },
     "step4": {
       "title": "İçe aktar",
       "apply": "İçe aktar",
       "note": "Aynı dosyayı tekrar yüklersen ikinci kez eklenmez.",
       "blocked": "Önce {n} hatayı düzelt. Hata varken içe aktarılamaz.",
-      "progress": "{done} / {total} satır"
+      "progress": "{done} / {total} satır",
+      "done": "Tamamlandı",
+      "partial": "Yarım kaldı"
     },
     "step5": {
       "title": "Sonuç"
     },
     "result": {
-      "okProducts": "Tamam. {created} ürün eklendi, {updated} ürün güncellendi, {unchanged} ürün zaten vardı.",
-      "okStock": "Tamam. {applied} stok satırı eklendi, {replayed} satır daha önce eklenmişti.",
-      "partial": "İşlem yarım kaldı. {done} satır tamam, {failed} satır hatalı, {notTried} satıra hiç başlanmadı.",
-      "retry": "Sorunu giderip aynı dosyayı tekrar yükle. Tamamlanan satırlar ikinci kez eklenmez, kalanlar tamamlanır.",
+      "partial": "İşlem yarım kaldı.",
       "failedRow": "Satır {row} ({code}):",
       "nextStock": "Şimdi açılış stoku dosyasını yükleyebilirsin.",
       "again": "Dosyayı yeniden seç",
       "another": "Başka dosya yükle",
-      "toItems": "Ürünlere git"
+      "toItems": "Ürünlere git",
+      "okLead": "Tamam.",
+      "created": "{n} ürün eklendi.",
+      "updated": "{n} ürünün koli ya da barkod bilgisi tamamlandı.",
+      "unchanged": "{n} ürün zaten vardı.",
+      "stockApplied": "{n} stok satırı eklendi.",
+      "stockSkipped": "{n} satır daha önce işlenmişti, atlandı.",
+      "retryProducts": "Sorunu giderip aynı dosyayı tekrar yükle. Tamamlanan ürünler ikinci kez eklenmez, kalanlar tamamlanır.",
+      "retryStock": "Tamamlanan satırların miktarını değiştirme. Yalnız hatalı satırı düzeltip dosyayı tekrar yükle; tamamlanan satırlar “daha önce işlenmiş” diye atlanır, kalanlar yazılır.",
+      "stat": {
+        "done": "{n} satır tamam",
+        "failed": "{n} satır hatalı",
+        "skipped": "{n} satır denenmedi"
+      },
+      "toStock": "Ürünlerde stoğu gör"
     },
     "column": {
       "code": "Kod",
@@ -1492,6 +1514,18 @@
       "PAIR_DUPLICATE_FILE": {
         "reason": "Bu ürün ve raf {firstRow}. satırda da var.",
         "fix": "İki satırı birleştirip toplam miktarı tek satıra yaz."
+      },
+      "PAIR_HAS_STOCK": {
+        "reason": "{code} ürünü {shelf} rafında zaten stokta.",
+        "fix": "Açılış stoku yalnız boş raflar içindir. Düzeltme için stok belgesi kullan ya da satırı sil."
+      },
+      "CELL_TOO_LONG": {
+        "reason": "Bir hücre çok uzun.",
+        "fix": "Hücreyi en çok {max} karaktere indir ya da dosyayı Excel'den yeniden kaydet."
+      },
+      "TOO_MANY_COLUMNS": {
+        "reason": "Satırda çok fazla sütun var.",
+        "fix": "En çok {max} sütun olabilir. Fazla sütunları sil."
       }
     }
   }
