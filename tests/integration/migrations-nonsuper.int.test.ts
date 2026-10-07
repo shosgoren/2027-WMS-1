@@ -1644,5 +1644,143 @@ describe("0013–0014 — süper kullanıcı olmayan migrator", () => {
         expect(await hasColumns(u)).toBe(true);
       });
     });
+    // ---- 0024 (T-275): işleme bağlamı damga bekçisi (tetikleyici) + 0022 down→up sayaç yeniden kurulumu; süper kullanıcı olmayan migrator ----
+    describe("0024 posting_stamp_guard_and_kbl_counter", () => {
+      let thru24Dir: string | undefined;
+      const thru24 = (): string => (thru24Dir ??= copyMigrations("0024"));
+      const ALL24 = [...ALL16, "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024"];
+      const hasGuard = async (u: string): Promise<boolean> =>
+        withClient(u, async (c) => {
+          const t = await c.query("SELECT 1 FROM pg_trigger WHERE tgrelid = 'public.documents'::regclass AND tgname = 'posting_context_stamp_guard'");
+          const f = await c.query("SELECT 1 FROM pg_proc WHERE proname = 'posting_context_stamp_guard'");
+          expect(t.rows.length).toBe(f.rows.length); // tetikleyici ve işlev birlikte var/yok
+          return t.rows.length === 1;
+        });
+      /** Tenant + APPROVED STOCK_IN belgesi (kilitsiz) üzerinde `work`; tek transaction (migrator = tablo sahibi: tetikleyici onu da bağlar). */
+      async function withDoc(u: string, work: (c: pg.Client, docId: string) => Promise<void>): Promise<void> {
+        await freshTenant(u, async (c, t) => {
+          await seedBase(c, t);
+          const docId = randomUUID();
+          await c.query(
+            `INSERT INTO public.documents (id, tenant_id, kind, type_version_id, warehouse_id, business_date, created_by, status)
+             SELECT $3, $1, 'STOCK_IN', v.id, w.id, '2026-02-01', $2, 'APPROVED'
+               FROM public.document_type_versions v, public.warehouses w WHERE v.tenant_id IS NULL AND v.key = 'STOCK_IN' AND w.code = 'NS-W'`,
+            [t, randomUUID(), docId],
+          );
+          await work(c, docId);
+        });
+      }
+      const stmt = async (c: pg.Client, text: string, params: unknown[]): Promise<"ok" | string> => {
+        await c.query("SAVEPOINT s");
+        try {
+          await c.query(text, params);
+          await c.query("RELEASE SAVEPOINT s");
+          return "ok";
+        } catch (e) {
+          await c.query("ROLLBACK TO SAVEPOINT s");
+          return (e as { code?: string; message?: string }).code === "23514" && /POSTING_STAMP_GUARD/.test((e as Error).message) ? "guard" : `other:${(e as Error).message}`;
+        }
+      };
+
+      it("ileri (0001–0024) → 0024 geri (to 0023) → ileri: parmak izi birebir; damga yalnızca NULL→dolu geçişte yazılır, temizleme serbest", async () => {
+        await setProbeMemberships(STANDARD_GRANT);
+        const u = await freshDatabase();
+        expect((await migrateUp({ url: u, dir: thru24() })).applied).toEqual(ALL24);
+        const before = await digest16(u);
+        expect(await hasGuard(u)).toBe(true);
+
+        await withDoc(u, async (c, id) => {
+          const job = randomUUID();
+          const rec = randomUUID();
+          // (1) kilit yokken damga yazımı: reddedilir (tetikleyici; CHECK'ten önce).
+          expect(await stmt(c, "UPDATE public.documents SET posting_mfa_verified_at = now() WHERE id = $1", [id])).toBe("guard");
+          expect(await stmt(c, "UPDATE public.documents SET posting_idempotency_record_id = $2 WHERE id = $1", [id, rec])).toBe("guard");
+          // (2) kilitle AYNI ifadede damga: izinli (deferToWorker biçimi).
+          expect(
+            await stmt(c, "UPDATE public.documents SET posting_job_id = $2, posting_requested_by = $3, posting_mfa_verified_at = now(), posting_idempotency_record_id = $4 WHERE id = $1", [id, job, randomUUID(), rec]),
+          ).toBe("ok");
+          // (3) kilit doluyken damgayı yeniden yazma/değiştirme: reddedilir.
+          expect(await stmt(c, "UPDATE public.documents SET posting_mfa_verified_at = now() + interval '1 second' WHERE id = $1", [id])).toBe("guard");
+          expect(await stmt(c, "UPDATE public.documents SET posting_idempotency_record_id = $2 WHERE id = $1", [id, randomUUID()])).toBe("guard");
+          // (4) değeri değiştirmeyen yazım: no-op, izinli.
+          expect(await stmt(c, "UPDATE public.documents SET posting_mfa_verified_at = posting_mfa_verified_at, posting_idempotency_record_id = posting_idempotency_record_id WHERE id = $1", [id])).toBe("ok");
+          // (5) kilidi başka işe devrederken damga yazma: reddedilir.
+          expect(await stmt(c, "UPDATE public.documents SET posting_job_id = $2, posting_mfa_verified_at = now() + interval '2 seconds' WHERE id = $1", [id, randomUUID()])).toBe("guard");
+          // (6) temizleme (failPostingInTx biçimi: APPROVED kalır): izinli.
+          expect(await stmt(c, "UPDATE public.documents SET posting_job_id = NULL, posting_requested_by = NULL, posting_mfa_verified_at = NULL, posting_idempotency_record_id = NULL WHERE id = $1", [id])).toBe("ok");
+          // (6b) GELECEK (ya da geçmiş) damga iki adımlı yoldan (temizle → kilitle) bile yazılamaz: yalnızca işlemin now() değeri kabul edilir (MAJOR).
+          expect(
+            await stmt(c, "UPDATE public.documents SET posting_job_id = $2, posting_requested_by = $3, posting_mfa_verified_at = now() + interval '1 hour', posting_idempotency_record_id = $4 WHERE id = $1", [id, job, randomUUID(), rec]),
+          ).toBe("guard");
+          expect(
+            await stmt(c, "UPDATE public.documents SET posting_job_id = $2, posting_requested_by = $3, posting_mfa_verified_at = now() - interval '4 hours', posting_idempotency_record_id = $4 WHERE id = $1", [id, job, randomUUID(), rec]),
+          ).toBe("guard");
+          // (6c) damga işine bağlıdır (MINOR-1): kilit doluyken istek sahibi/iş, damga temizlenmeden değiştirilemez; temizlenerek devredilebilir.
+          const by = randomUUID();
+          expect(
+            await stmt(c, "UPDATE public.documents SET posting_job_id = $2, posting_requested_by = $3, posting_mfa_verified_at = now(), posting_idempotency_record_id = $4 WHERE id = $1", [id, job, by, rec]),
+          ).toBe("ok");
+          expect(await stmt(c, "UPDATE public.documents SET posting_requested_by = $2 WHERE id = $1", [id, randomUUID()])).toBe("guard"); // yalnız istek sahibi
+          expect(await stmt(c, "UPDATE public.documents SET posting_job_id = $2 WHERE id = $1", [id, randomUUID()])).toBe("guard"); // yalnız iş
+          expect(await stmt(c, "UPDATE public.documents SET posting_job_id = $2, posting_requested_by = $3, posting_mfa_verified_at = NULL, posting_idempotency_record_id = NULL WHERE id = $1", [id, randomUUID(), randomUUID()])).toBe("ok"); // temizleyerek devir
+          expect(await stmt(c, "UPDATE public.documents SET posting_job_id = NULL, posting_requested_by = NULL WHERE id = $1", [id])).toBe("ok");
+          // (7) damgasız kilit (MFA'sız istek) sonradan damgalanamaz.
+          expect(await stmt(c, "UPDATE public.documents SET posting_job_id = $2, posting_requested_by = $3, posting_mfa_verified_at = NULL, posting_idempotency_record_id = $4 WHERE id = $1", [id, job, randomUUID(), rec])).toBe("ok");
+          expect(await stmt(c, "UPDATE public.documents SET posting_mfa_verified_at = now() WHERE id = $1", [id])).toBe("guard");
+          // (8) temizleme + POSTED (assignNumber biçimi): izinli.
+          expect(
+            await stmt(c, "UPDATE public.documents SET number = $2, status = 'POSTED', posting_job_id = NULL, posting_requested_by = NULL, posting_mfa_verified_at = NULL, posting_idempotency_record_id = NULL WHERE id = $1", [id, `N-${randomBytes(3).toString("hex")}`]),
+          ).toBe("ok");
+        });
+
+        expect((await migrateDown({ url: u, dir: thru24(), to: "0023", wmsEnv: "staging" })).reverted).toEqual(["0024"]); // veri kaybettirmez: staging'de de çalışır
+        expect(await hasGuard(u)).toBe(false);
+        expect((await migrateUp({ url: u, dir: thru24() })).applied).toEqual(["0024"]);
+        expect(await digest16(u)).toEqual(before);
+        expect(await hasGuard(u)).toBe(true);
+      });
+
+      it("0022 down → up: numaralı KBL kabulü varken sayaç max + 1'den yeniden kurulur (UNIQUE çakışması yok); dönem başına ayrı", async () => {
+        await setProbeMemberships(STANDARD_GRANT);
+        const u = await freshDatabase();
+        expect((await migrateUp({ url: u, dir: thru24() })).applied).toEqual(ALL24);
+        let tenant = "";
+        tenant = await freshTenant(u, async (c, t) => {
+          await seedBase(c, t);
+          for (const no of ["KBL-2026-000001", "KBL-2026-000002", "KBL-2025-000007"]) {
+            await c.query(
+              `INSERT INTO public.inbound_receipts (tenant_id, warehouse_id, number, created_by) SELECT $1, id, $2, $3 FROM public.warehouses WHERE code = 'NS-W'`,
+              [t, no, randomUUID()],
+            );
+          }
+          await c.query("INSERT INTO public.number_sequences (tenant_id, document_kind, period, next_value) VALUES ($1, 'INBOUND_RECEIPT', '2026', 3), ($1, 'INBOUND_RECEIPT', '2025', 8)", [t]);
+        });
+        const seqs = async (): Promise<Record<string, string>> =>
+          withClient(u, async (c) => {
+            await c.query("BEGIN");
+            await c.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenant]);
+            const r = await c.query<{ period: string; next_value: string }>("SELECT period, next_value::text FROM public.number_sequences WHERE document_kind = 'INBOUND_RECEIPT' ORDER BY period");
+            await c.query("COMMIT");
+            return Object.fromEntries(r.rows.map((x) => [x.period, x.next_value]));
+          });
+        expect(await seqs()).toEqual({ "2025": "8", "2026": "3" });
+
+        expect((await migrateDown({ url: u, dir: thru24(), to: "0021", wmsEnv: "ci" })).reverted).toEqual(["0024", "0023", "0022"]);
+        expect(await seqs()).toEqual({}); // down sayaçları sildi
+        expect((await migrateUp({ url: u, dir: thru24() })).applied).toEqual(["0022", "0023", "0024"]);
+        expect(await seqs()).toEqual({ "2025": "8", "2026": "3" }); // max + 1; çakışan bir sonraki numara KBL-2026-000003 olur
+
+        // Sayaç yeniden kurulmasaydı ilk numara KBL-2026-000001 (UNIQUE çakışması) olurdu: sonraki numara gerçekten boş.
+        await withClient(u, async (c) => {
+          await c.query("BEGIN");
+          await c.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenant]);
+          await c.query(
+            `INSERT INTO public.inbound_receipts (tenant_id, warehouse_id, number, created_by) SELECT $1, id, 'KBL-2026-000003', $2 FROM public.warehouses WHERE code = 'NS-W'`,
+            [tenant, randomUUID()],
+          );
+          await c.query("COMMIT");
+        });
+      });
+    });
   });
 });

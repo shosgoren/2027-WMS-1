@@ -569,6 +569,35 @@ describe("MAJOR-1: MFA (TENANT_ADMIN istek sahibi) — worker MFA'yı yalnızca 
   const stamp = (id: string) =>
     q<{ posting_mfa_verified_at: Date | null; posting_idempotency_record_id: string | null }>(
       "SELECT posting_mfa_verified_at, posting_idempotency_record_id FROM public.documents WHERE id = $1", [id]).then((r) => r[0] as { posting_mfa_verified_at: Date | null; posting_idempotency_record_id: string | null });
+  /**
+   * 0024 damga bekçisi: kilit doluyken damga doğrudan değiştirilemez, dolu MFA damgası yalnızca işlemin now() değeri olabilir. Bayat/gelecek damga ya da uyumsuz
+   * kayıt kimliği durumu kurmak için kilit + damgalar tek UPDATE'te temizlenir, sonra AYNI kilit/istek sahibi ve istenen değer tek UPDATE'te (NULL → dolu)
+   * yazılır. `mfaSql` now()'dan farklı bir damga ise (bayat/gelecek) bekçi bunu zaten reddeder: yalnızca bu test bağlantısında (süper kullanıcı)
+   * `session_replication_role = replica` ile tetikleyici o ifade için atlanır; diğer oturumlar/dosyalar etkilenmez. Amaç worker'ın (`mayVouchMfa`) bu durumu
+   * reddettiğini sınamaktır (bekçi bypass edilmiş/eski veri varsayımı). `mfaSql`: damga SQL ifadesi (null = damga varsa taze now(), yoksa NULL; eski değer aynen geri yazılamaz: bekçi yalnızca now() kabul eder), `recordId`: kayıt kimliği (null = mevcut).
+   */
+  const restamp = async (id: string, mfaSql: string | null, recordId: string | null): Promise<void> => {
+    const cur = (await q<{ job: string; by: string; rec: string; mfa: Date | null }>(
+      "SELECT posting_job_id AS job, posting_requested_by AS by, posting_idempotency_record_id AS rec, posting_mfa_verified_at AS mfa FROM public.documents WHERE id = $1", [id]))[0] as {
+      job: string; by: string; rec: string; mfa: Date | null;
+    };
+    await q("UPDATE public.documents SET posting_job_id = NULL, posting_requested_by = NULL, posting_mfa_verified_at = NULL, posting_idempotency_record_id = NULL WHERE id = $1", [id]);
+    const upd = (): Promise<unknown> =>
+      q(
+        `UPDATE public.documents SET posting_job_id = $2, posting_requested_by = $3, posting_idempotency_record_id = $4, posting_mfa_verified_at = ${mfaSql ?? (cur.mfa === null ? "NULL" : "now()")} WHERE id = $1`,
+        [id, cur.job, cur.by, recordId ?? cur.rec],
+      );
+    if (mfaSql === null) {
+      await upd();
+      return;
+    }
+    await q("SET session_replication_role = replica");
+    try {
+      await upd();
+    } finally {
+      await q("RESET session_replication_role");
+    }
+  };
   const failedWith = async (d: Doc, key: string, code: string): Promise<void> => {
     await newWorker();
     await waitFor(async () => (await docRow(d.id)).posting_job_id === null, "failure recorded");
@@ -623,7 +652,13 @@ describe("MAJOR-1: MFA (TENANT_ADMIN istek sahibi) — worker MFA'yı yalnızca 
 
   it("pencere dışı damga (süresi dolmuş) kalıcı FORBIDDEN/MFA_REQUIRED", async () => {
     const { d, key } = await adminRequest(true);
-    await q("UPDATE public.documents SET posting_mfa_verified_at = now() - interval '4 hours' WHERE id = $1", [d.id]);
+    await restamp(d.id, "now() - interval '4 hours'", null);
+    await failedWith(d, key, "FORBIDDEN/MFA_REQUIRED");
+  }, 120_000);
+
+  it("GELECEKTEKİ damga (negatif yaş) tanınmaz: kalıcı FORBIDDEN/MFA_REQUIRED (T-275 MAJOR; mayVouchMfa)", async () => {
+    const { d, key } = await adminRequest(true);
+    await restamp(d.id, "now() + interval '1 hour'", null);
     await failedWith(d, key, "FORBIDDEN/MFA_REQUIRED");
   }, 120_000);
 
@@ -634,7 +669,7 @@ describe("MAJOR-1: MFA (TENANT_ADMIN istek sahibi) — worker MFA'yı yalnızca 
     const d = await mkApproved("STOCK_IN", many(250, () => ln(x, { targetLocationId: loc })));
     const key = uuid();
     await requestPost(d, pickerP(key));
-    await q("UPDATE public.documents SET posting_idempotency_record_id = $2 WHERE id = $1", [d.id, uuid()]);
+    await restamp(d.id, null, uuid());
     await newWorker();
     await waitFor(async () => (await docRow(d.id)).posting_job_id === null, "document released");
     await waitFor(async () => (await jobsOf(d.id))[0]?.state === "failed", "job failed (kalıcı)");

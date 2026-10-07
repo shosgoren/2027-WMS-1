@@ -75,10 +75,12 @@ export function isPermanentFailure(err: unknown): boolean {
 }
 
 /**
- * Worker principal kuralı (T-113 MINOR-4): bir iş, MFA doğrulanmış kimlikle ÇALIŞMAZ. `mfaVerified` ne iş yükünden
+ * Worker principal kuralı (T-113 MINOR-4): GENEL kural — bir iş, iş yükünden/zarftan okunan MFA iddiasıyla ÇALIŞMAZ. `mfaVerified` ne iş yükünden
  * ne zarftan okunur (zarf `strict`: bilinmeyen alan işi `failed` yapar; yük şemaları `strict`) ve `wms_worker`
- * iş satırını değiştirse bile kazanç sağlamaz: worker yolunda principal her zaman `mfaVerified: false` üretilir.
- * Sonuç: TENANT_ADMIN MFA'sı gerektiren komutlar (`enforceMfa`) worker yolunda `MFA_REQUIRED` ile reddedilir.
+ * iş satırını değiştirse bile kazanç sağlamaz: bu işlev her zaman `mfaVerified: false` üretir.
+ * Sonuç: TENANT_ADMIN MFA'sı gerektiren komutlar (`enforceMfa`) bu işlevle kurulan principal'la `MFA_REQUIRED` ile reddedilir.
+ * TEK İSTİSNA `stock.document.post` (T-222, `packages/domain/src/stock/jobs.ts`): principal'ı bu işlevle KURMAZ; MFA kararı istek anında sunucu
+ * tarafında belge satırına yazılmış damgadan (0023; yazımı 0024 tetikleyicisiyle tek yere kilitli) koşullu türetilir (`mayVouchMfa`), damga yoksa `false`.
  * Worker handler'ları ById komutlarına principal'ı YALNIZCA bu işlevle kurar. `actorUserId` kimlik iddiasıdır;
  * yetki yine üyelik denetimiyle (withMembership) doğrulanır.
  */

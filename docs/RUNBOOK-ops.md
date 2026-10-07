@@ -91,3 +91,17 @@ Migration tek transaction'dır; RAISE her şeyi geri alır (kısmi uygulanmış 
    c. Aynı transaction'da ön sorguyu yeniden çalıştırın; sonuç 0 değilse `ROLLBACK`. 0 ise `COMMIT`.
    d. **Geri dönüş:** hata fark edilirse kayıtlı kimlik + eski değerlerle ters `UPDATE` (yine onayla); onaydan önce `ROLLBACK` her şeyi geri alır.
 4. Deploy'u yeniden çalıştırın; `0020` uygulanınca `pnpm test:int tests/integration/stock/posting.int.test.ts` (4x4 eşitlik) ve operations-schema testi doğrulama içindir.
+
+## Dağıtım sırası: migration → worker → web (T-222/T-275)
+Eşik üstü belge işleme (`stock.document.post`, ADR-018 §6) web ve worker'ın birlikte sürümlenmesine bağlıdır. Sıra: (1) migration (`pnpm db:migrate`; 0023 sütunları + 0024 bekçisi
+yalnızca genişletir, eski kodla uyumludur), (2) **worker**, (3) **web**.
+Gerekçe: yeni web isteği belgeye `posting_job_id` + MFA damgası + idempotency kaydı yazıp işi kuyruğa bırakır; bu işi çözen (damgayı doğrulayan `mayVouchMfa`, kayıt kimliğini
+sürdüren `resume`) kod worker'dadır. Web önce çıkarsa, eski worker yeni işi tanımaz/yanlış yorumlar: iş kuyrukta bekler, belge `PROCESSING`'te (kilitli) takılı kalır ve
+istemci `IN_PROGRESS` görür. Worker önce çıkarsa durum zararsızdır: eski web iş üretmez ya da damgasız üretir; yeni worker damgasız işi fail-closed (`mfaVerified: false`) işler.
+Geri alma tersidir: önce web, sonra worker. Not: 0024 tetikleyicisi damgayı yalnızca `posting_job_id` NULL → dolu geçişinde yazdırır; eski sürüm web bunu zaten aynı ifadede yazar,
+farklı bir yazım yolu 23514 `POSTING_STAMP_GUARD` ile reddedilir (bu hata dağıtım sırası yanlışlığının değil, kodun belirtisidir).
+Takılı işleme kilidi gözlenirse (belge APPROVED + `posting_job_id` dolu, işlenmiyor): önce worker'ın ayakta ve yeni sürümde olduğunu doğrulayın; sonlandırma süpürücüsü kiracı
+açıksa kilidi temizler (kiracı askıda/kapanıştaysa ertelenir, A-222-4).
+Geçiş notu (T-275, özet normalizasyonu): kabul komutlarının (`createInboundReceipt`, `receiveGoods`, `approveQuality`) idempotency özeti artık ondalık dizgileri normalleştirir
+("10" = "10.000000"). Dağıtımdan ÖNCE oluşmuş `IN_PROGRESS`/`COMPLETED` kayıtlar ham dizgiyle hesaplanmış özet taşır; aynı istemci anahtarı dağıtımdan sonra aynı HAM dizgiyle
+yeniden denenirse özet değişeceği için `IDEMPOTENCY_MISMATCH` döner (yinelenen etki oluşmaz, güvenli taraf). Beklenen ve zararsızdır; istemci yeni anahtarla yeniden dener.
