@@ -56,3 +56,15 @@ export class ScannerService {
     this.running.delete(id);
   }
 }
+
+/**
+ * Okuma kapısı (T-286 düşme yarışı): ekran aboneliği `enabled` değişince sökülüp takılmaz (söküm anında gelen tarama dinleyicisiz kalıp sessizce kaybolurdu);
+ * abonelik sürekli kalır, kapı her taramada GÜNCEL durumu okur. Kapalıyken donanım/kamera okuması iletilmez ama `onDropped` ile bildirilir;
+ * `manual` (elle yazım) donanım taraması değildir, kapalıyken eskisi gibi sessizce yok sayılır.
+ */
+export function gateScan(isEnabled: () => boolean, deliver: ScanHandler, onDropped: () => void): ScanHandler {
+  return (value, source) => {
+    if (isEnabled()) deliver(value, source);
+    else if (source !== "manual") onDropped();
+  };
+}

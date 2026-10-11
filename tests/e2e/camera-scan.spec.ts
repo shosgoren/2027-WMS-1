@@ -594,3 +594,26 @@ function writeMeasures(data: Record<string, unknown>, tag: string, project: stri
   mkdirSync(SHOTS, { recursive: true });
   writeFileSync(path.join(SHOTS, `olcumler-${tag}-${project}.json`), JSON.stringify(data, null, 2));
 }
+
+test("okuma kapalıyken (uyarı açık) gelen klavye kaması taraması bildirilir ve başlığı örtmez; normal klavye girişi etkilenmez", async ({ page }, testInfo) => {
+  await page.addInitScript(`${NATIVE_STUB} ${FEEDBACK_STUBS}`);
+  await login(page, testInfo);
+  await openCamera(page);
+  await expect(page.getByTestId("camera-overlay")).toHaveAttribute("data-phase", "scanning");
+  await keystrokeScan(page, "0000000000000"); // sunucu reddi → tam ekran uyarı → okuma kapalı
+  const alert = page.getByTestId("scan-alert");
+  await expect(alert).toBeVisible();
+  // Normal (önek yok) hızlı yazım: yakalanmaz, bildirim çıkmaz, olay engellenmez.
+  const prevented = await page.evaluate<boolean>(`(() => { let p = false; const l = (e) => { if (e.defaultPrevented) p = true; }; document.addEventListener("keydown", l); for (const k of "12 34") document.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true })); document.removeEventListener("keydown", l); return p; })()`);
+  expect(prevented, "önek yokken keydown engellenmez").toBe(false);
+  await expect(page.getByTestId("camera-dropped")).toHaveCount(0);
+  // Kapalıyken STX önekli tarama: sessiz düşmez.
+  await keystrokeScan(page, "1111111111116");
+  const notice = page.getByTestId("camera-dropped");
+  await expect(notice).toBeVisible();
+  const n = await notice.boundingBox();
+  const h = await page.locator("#scan-alert-title").boundingBox();
+  expect(n !== null && h !== null && n.y + n.height <= h.y, "bildirim ana uyarı başlığını örtmez").toBe(true);
+  await notice.getByRole("button").click();
+  await expect(notice).toHaveCount(0);
+});
