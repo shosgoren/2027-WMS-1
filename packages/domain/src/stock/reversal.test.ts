@@ -1,6 +1,7 @@
 // T-224: ters kayıt saf mantığı (kalan hesabı, satır seçimi, ters defter girdileri, bakiye yeterliliği, girdi doğrulaması). Veritabanı yok.
 import { describe, expect, it } from "vitest";
 import { AppError } from "@wms/shared/errors";
+import { toBase } from "../catalog/quantity.ts";
 import { dimensionIdentity, toMicro } from "./plan.ts";
 import {
   REVERSAL_MAX_LINES,
@@ -160,12 +161,26 @@ describe("reversalLineQuantity (I-09, A-224-8)", () => {
     const tiny = reversalLineQuantity(l({ quantity: "1", conversionFactor: "1000000", baseQuantity: "1000000" }), 1n, BASE_UNIT);
     expect(tiny).toEqual({ unitId: BASE_UNIT, quantity: "0.000001", conversionFactor: "1.000000" });
   });
-  it("seçilen her durumda base = round(quantity × katsayı, 6) (özellik)", () => {
-    for (const [q, cf, base, take] of [["3", "0.333333", "1", 400_000n], ["7", "1.5", "10.5", 3_500_000n], ["2", "3", "6", 1_000_001n], ["5", "0.1", "0.5", 123_456n]] as const) {
+  it("seçilen her durumda base = quantity × katsayı KESİN çarpım (özellik; yuvarlama payı yok)", () => {
+    for (const [q, cf, base, take] of [["3", "0.333333", "1", 400_000n], ["7", "1.5", "10.5", 3_500_000n], ["2", "3", "6", 1_000_001n], ["5", "0.1", "0.5", 123_456n], ["1000000", "0.333333", "333333", 1_000_000n]] as const) {
       const r = reversalLineQuantity(l({ quantity: q, conversionFactor: cf, baseQuantity: base }), take, BASE_UNIT);
-      const back = (toMicro(r.quantity) * toMicro(r.conversionFactor) + 500_000n) / 1_000_000n;
-      expect(back).toBe(take);
+      expect(toMicro(toBase(r.quantity, r.conversionFactor, 6))).toBe(take);
     }
+  });
+  it("T-298 örneği: katsayı 0,333333, temel 1 → eski yuvarlama 3,000003 yazardı (kesin çarpım 0,999999999999); temel birim, katsayı 1", () => {
+    expect(reversalLineQuantity(l({ quantity: "1000000", conversionFactor: "0.333333", baseQuantity: "333333" }), 1_000_000n, BASE_UNIT)).toEqual({
+      unitId: BASE_UNIT, quantity: "1.000000", conversionFactor: "1.000000",
+    });
+  });
+  it("eski yuvarlama kuralıyla yazılmış satır (3 × 0,333333 ≠ 1): tam ve kısmi ters reddedilmez, temel birime düşer", () => {
+    const legacy = l({ quantity: "3", conversionFactor: "0.333333", baseQuantity: "1" });
+    expect(reversalLineQuantity(legacy, 1_000_000n, BASE_UNIT)).toEqual({ unitId: BASE_UNIT, quantity: "1.000000", conversionFactor: "1.000000" });
+    expect(reversalLineQuantity(legacy, 500_000n, BASE_UNIT)).toEqual({ unitId: BASE_UNIT, quantity: "0.500000", conversionFactor: "1.000000" });
+  });
+  it("kesin çarpımı sağlayan kesirli bölüm asıl birimde kalır (1 ÷ 0,5 = 2; 2 × 0,5 = 1)", () => {
+    expect(reversalLineQuantity(l({ quantity: "4", conversionFactor: "0.5", baseQuantity: "2" }), 1_000_000n, BASE_UNIT)).toEqual({
+      unitId: l({}).unitId, quantity: "2.000000", conversionFactor: "0.5",
+    });
   });
 });
 

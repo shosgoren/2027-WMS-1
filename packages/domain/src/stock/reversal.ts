@@ -23,6 +23,7 @@ import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import type { LockedState } from "@wms/db";
 import { AppError } from "@wms/shared/errors";
+import { toBase } from "../catalog/quantity.ts";
 import { runTenantQuery, type AccessTx } from "../identity/access.ts";
 import { assertWarehouseVisible, pgUuidArray } from "../warehouse/scope.ts";
 import { EMPTY_LOCK_PLAN, executeStockCommand, type StockCommandApplied, type StockCommandPlan } from "./command.ts";
@@ -506,21 +507,38 @@ async function systemTypeVersionId(tx: AccessTx): Promise<string> {
   return id;
 }
 
+/** I-09 belge satırı denetimi (`assertLineRules` ile aynı kaynak: `toBase`): `quantity × katsayı` KESİN olarak `micro`ya eşit mi? Ölçek/biçim hatası = eşit değil. */
+function exactProduct(quantity: string, factor: string, micro: bigint): boolean {
+  try {
+    return toMicro(toBase(quantity, factor, 6)) === micro;
+  } catch (e) {
+    if (e instanceof AppError && e.code === "VALIDATION_FAILED") return false;
+    throw e;
+  }
+}
+
 /**
- * Ters satır miktarı (A-224-8, I-09: `base = round(quantity × katsayı, 6)` korunur, değer uydurulmaz): tam satırda asıl miktar/birim/katsayı aynen kopyalanır;
- * kısmi satırda asıl birimde `quantity = round(base/katsayı)` geri çarpımda tam `base`'i veriyorsa o birim, vermiyorsa ürünün temel birimi (katsayı 1,
- * miktar = base). Saf.
+ * Ters satır miktarı (A-224-8, I-09: `base = quantity × katsayı` KESİN çarpım, yuvarlama yok; T-298): asıl birimde aday miktar yalnız `base ÷ katsayı`
+ * TAM bölünüyorsa üretilir ve `toBase(aday, katsayı) = base` ile doğrulanır; tam satırda asıl (miktar, katsayı) da aynı sınanır (T-287/T-290 öncesi
+ * yuvarlamayla yazılmış eski satır eşitliği sağlamıyorsa ters kayıt reddedilmez, temel birime düşer). Eşitlik tutmazsa ürünün temel birimi (katsayı 1,
+ * miktar = base). Döndürülen üçlü her durumda belge satırı denetiminden geçer; geçmiyorsa `VALIDATION_FAILED`. Saf.
  */
 export function reversalLineQuantity(
   line: Pick<SourceLine, "quantity" | "conversionFactor" | "baseQuantity" | "unitId">,
   micro: bigint,
   baseUnitId: string,
 ): { readonly unitId: string; readonly quantity: string; readonly conversionFactor: string } {
-  if (micro === toMicro(line.baseQuantity)) return { unitId: line.unitId, quantity: line.quantity, conversionFactor: line.conversionFactor };
+  if (micro === toMicro(line.baseQuantity) && exactProduct(line.quantity, line.conversionFactor, micro)) {
+    return { unitId: line.unitId, quantity: line.quantity, conversionFactor: line.conversionFactor };
+  }
   const cf = toMicro(line.conversionFactor);
-  const q = (micro * MICRO + cf / 2n) / cf;
-  if (q > 0n && (q * cf + MICRO / 2n) / MICRO === micro) return { unitId: line.unitId, quantity: fromMicro(q), conversionFactor: line.conversionFactor };
-  return { unitId: baseUnitId, quantity: fromMicro(micro), conversionFactor: fromMicro(MICRO) };
+  if (cf > 0n && (micro * MICRO) % cf === 0n) {
+    const quantity = fromMicro((micro * MICRO) / cf);
+    if (micro > 0n && exactProduct(quantity, line.conversionFactor, micro)) return { unitId: line.unitId, quantity, conversionFactor: line.conversionFactor };
+  }
+  const baseLine = { unitId: baseUnitId, quantity: fromMicro(micro), conversionFactor: fromMicro(MICRO) };
+  if (!exactProduct(baseLine.quantity, baseLine.conversionFactor, micro)) throw new AppError("VALIDATION_FAILED");
+  return baseLine;
 }
 
 /**

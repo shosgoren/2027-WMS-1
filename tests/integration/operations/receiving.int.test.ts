@@ -481,6 +481,10 @@ describe("kurallar", () => {
     expect(await bal(X, KABUL, "QUARANTINE")).toBe(n(6));
     expect(await bal(X, KABUL, "AVAILABLE")).toBe(n(4));
     expect(codeOf(await failure(approveQuality(ownerP(), { receiptId: g.id, lines: [{ lineId, locationId: KABUL, quantity: "7" }] })))).toBe("VALIDATION_FAILED");
+    // T-298 (A-298-1): bekleyeni 1 mikro aşan istek bekleyene KIRPILMAZ, reddedilir; hiçbir şey yazılmaz.
+    expect(codeOf(await failure(approveQuality(ownerP(), { receiptId: g.id, lines: [{ lineId, locationId: KABUL, quantity: "6.000001" }] })))).toBe("VALIDATION_FAILED");
+    expect(await bal(X, KABUL, "QUARANTINE")).toBe(n(6));
+    expect(await bal(X, KABUL, "AVAILABLE")).toBe(n(4));
     await approveQuality(ownerP(), { dimensions: [{ itemId: X, locationId: KABUL, quantity: "2" }] });
     expect(await bal(X, KABUL, "QUARANTINE")).toBe(n(4));
     expect(await bal(X, KABUL, "AVAILABLE")).toBe(n(6));
