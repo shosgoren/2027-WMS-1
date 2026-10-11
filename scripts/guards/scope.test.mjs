@@ -778,3 +778,238 @@ describe("scope argümanları", () => {
     expect(() => parseScopeArgs(["--base=a", "--base=b"])).toThrow(/birden fazla/);
   });
 });
+
+describe("T-299 main push kipi: PR birleştirme commit'inden dal çözümü", () => {
+  const OWNER = "owner";
+  const REPO = `${OWNER}/repo`;
+
+  /**
+   * GitHub `GET /pulls/N` yanıtının doğru içerikli karşılığı; `mutate` ile bozulur.
+   * @param {ReturnType<typeof fixture>} r
+   * @param {{ number?: number, branch: string, tip: string, head: string, mutate?: (j: any) => void }} o
+   * @returns {string} dosya yolu
+   */
+  function prJsonFile(r, o) {
+    const j = {
+      number: o.number ?? 9,
+      merged_at: "2026-10-07T10:00:00Z",
+      merge_commit_sha: o.head,
+      base: { ref: "main", repo: { full_name: REPO } },
+      head: { ref: o.branch, sha: o.tip, repo: { full_name: REPO } },
+    };
+    o.mutate?.(j);
+    const f = path.join(r.dir, ".git", `pr-${o.number ?? 9}.json`);
+    writeFileSync(f, JSON.stringify(j));
+    return f;
+  }
+
+  /**
+   * `from` dalını main'e PR birleştirme commit'iyle alır (push öncesi uç = birleştirmeden önceki main).
+   * @param {ReturnType<typeof fixture>} r
+   * @param {string} from
+   * @param {string} subject
+   */
+  function mergeToMain(r, from, subject) {
+    r.checkout("main");
+    r.merge(from, subject);
+    return { before: r.git("rev-parse", "HEAD^1").trim(), tip: r.git("rev-parse", "HEAD^2").trim(), head: r.git("rev-parse", "HEAD").trim() };
+  }
+
+  /**
+   * Doğru kanıtla main-push kontrolü; her alan ezilebilir.
+   * @param {ReturnType<typeof fixture>} r
+   * @param {{ before: string, tip: string, head: string }} m
+   * @param {string} branch PR dalı (JSON head.ref)
+   * @param {{ before?: string | null, json?: string | null | ((j: any) => void), event?: string | null, branchArg?: string }} [o]
+   */
+  function checkMain(r, m, branch, o = {}) {
+    const before = o.before === undefined ? m.before : o.before;
+    const json = typeof o.json === "function" || o.json === undefined ? prJsonFile(r, { branch, tip: m.tip, head: m.head, mutate: o.json }) : o.json;
+    const event = o.event === undefined ? "push" : o.event;
+    return check(r.dir, [
+      "--branch",
+      o.branchArg ?? "main",
+      ...(event === null ? [] : ["--event", event]),
+      ...(before === null ? [] : ["--push-before", before]),
+      ...(json === null ? [] : ["--pr-json", json]),
+    ]);
+  }
+
+  it("PR birleştirme commit'i (int dalı, başlık eki, Supervisor yolu) → OK", async () => {
+    const r = fixture();
+    r.branch("int/dilim");
+    r.branch("feat/T-100-x").write("src/a.mjs", "a2\n").commit("100").checkout("int/dilim");
+    r.merge("feat/T-100-x", "Merge pull request #7 from owner/feat/T-100-x");
+    r.write("docs/STATE.md", "durum\n").commit("supervisor");
+    r.publish("int/dilim");
+    const m = mergeToMain(r, "int/dilim", "Merge pull request #9 from owner/int/dilim — Paket 2");
+    const res = await checkMain(r, m, "int/dilim");
+    expect(res.lines).toEqual(["check:scope OK"]);
+    expect(res.code).toBe(0);
+  });
+
+  it("PR birleştirme commit'i (feat dalı, kart içi) → OK; kapsam dışı dosya → FAIL OUT_OF_SCOPE", async () => {
+    const ok = fixture();
+    ok.branch("feat/T-100-x").write("src/a.mjs", "a2\n").commit("iş");
+    const mo = mergeToMain(ok, "feat/T-100-x", "Merge pull request #9 from owner/feat/T-100-x");
+    expect((await checkMain(ok, mo, "feat/T-100-x")).code).toBe(0);
+
+    const bad = fixture();
+    bad.branch("feat/T-100-x").write("src/a.mjs", "a2\n").write("README.md", "değişti\n").commit("iş");
+    const mb = mergeToMain(bad, "feat/T-100-x", "Merge pull request #9 from owner/feat/T-100-x");
+    const res = await checkMain(bad, mb, "feat/T-100-x");
+    expect(res.code).toBe(1);
+    expect(res.lines).toContainEqual(expect.stringMatching(/^\[check:scope\] FAIL OUT_OF_SCOPE README\.md — kart dosya listesinde yok \(T-100; durum M\)$/));
+  });
+
+  it("int PR'ında birleştirilmemiş kartın dosyası → FAIL OUT_OF_SCOPE", async () => {
+    const r = fixture();
+    r.branch("int/dilim").write("src/c.mjs", "c2\n").commit("T-102 dosyası doğrudan int'te");
+    const m = mergeToMain(r, "int/dilim", "Merge pull request #9 from owner/int/dilim");
+    const res = await checkMain(r, m, "int/dilim");
+    expect(res.code).toBe(1);
+    expect(res.text).toContain("FAIL OUT_OF_SCOPE src/c.mjs");
+  });
+
+  it("PR'sız doğrudan commit ve squash/rebase (tek ebeveyn, sahte PR konusu) → FAIL MAIN_DIRECT_PUSH", async () => {
+    for (const msg of ["doğrudan", "Merge pull request #9 from owner/feat/T-100-x", "feat: iş (#9)"]) {
+      const r = fixture();
+      const before = r.git("rev-parse", "HEAD").trim();
+      r.write("src/a.mjs", "a2\n").commit(msg);
+      const head = r.git("rev-parse", "HEAD").trim();
+      const res = await checkMain(r, { before, tip: before, head }, "feat/T-100-x");
+      expect(res.code, msg).toBe(1);
+      expect(res.text, msg).toContain("FAIL MAIN_DIRECT_PUSH");
+    }
+  });
+
+  it("REGRESYON (BLOCKER): doğrudan commit A + üstüne sahte/gerçek PR birleştirmesi → FAIL MAIN_PUSH_RANGE", async () => {
+    const r = fixture();
+    const before = r.git("rev-parse", "HEAD").trim();
+    r.branch("feat/T-100-x", before).write("src/a.mjs", "a2\n").commit("iş");
+    r.checkout("main").write("README.md", "gizli kapsam dışı değişiklik\n").commit("A: doğrudan commit");
+    const m = mergeToMain(r, "feat/T-100-x", "Merge pull request #9 from owner/feat/T-100-x");
+    // push öncesi uç gerçekten `before`; HEAD^1 = A → aralık before..HEAD^1 denetimsiz kalırdı.
+    const res = await checkMain(r, m, "feat/T-100-x", { before });
+    expect(res.code).toBe(1);
+    expect(res.text).toContain("FAIL MAIN_PUSH_RANGE");
+    expect(res.text).not.toContain("check:scope OK");
+  });
+
+  it("push öncesi uç eksik / sıfır / geçersiz → FAIL MAIN_PUSH_RANGE", async () => {
+    const r = fixture();
+    r.branch("feat/T-100-x").write("src/a.mjs", "a2\n").commit("iş");
+    const m = mergeToMain(r, "feat/T-100-x", "Merge pull request #9 from owner/feat/T-100-x");
+    for (const before of [null, "0".repeat(40), "abc", m.tip]) {
+      const res = await checkMain(r, m, "feat/T-100-x", { before });
+      expect(res.code, String(before)).toBe(1);
+      expect(res.text, String(before)).toContain("FAIL MAIN_PUSH_RANGE");
+    }
+  });
+
+  it("biçimi bozuk konu → FAIL MAIN_PR_SUBJECT", async () => {
+    for (const subject of ["Merge branch 'feat/T-100-x'", "Merge pull request 9 from owner/feat/T-100-x", "Merge pull request #9 from feat/T-100-x"]) {
+      const r = fixture();
+      r.branch("feat/T-100-x").write("src/a.mjs", "a2\n").commit("iş");
+      const m = mergeToMain(r, "feat/T-100-x", subject);
+      const res = await checkMain(r, m, "feat/T-100-x");
+      expect(res.code, subject).toBe(1);
+      expect(res.text, subject).toContain("FAIL MAIN_PR_SUBJECT");
+    }
+  });
+
+  it("kart kalıbına uymayan PR dalı → FAIL MAIN_PR_SUBJECT (API/ata denetiminden önce)", async () => {
+    const r = fixture();
+    r.branch("deneme").write("src/a.mjs", "a2\n").commit("iş");
+    const m = mergeToMain(r, "deneme", "Merge pull request #9 from owner/deneme");
+    const res = await checkMain(r, m, "deneme", { json: null });
+    expect(res.code).toBe(1);
+    expect(res.text).toContain("FAIL MAIN_PR_SUBJECT");
+  });
+
+  it("PR API kaydı bozuk/eksik → hepsi FAIL MAIN_PR_API", async () => {
+    /** @type {Array<[string, ((j: any) => void) | null]>} */
+    const cases = [
+      ["dosya yok", null],
+      ["merged_at null", (j) => (j.merged_at = null)],
+      ["merge_commit_sha farklı", (j) => (j.merge_commit_sha = "1".repeat(40))],
+      ["base main değil", (j) => (j.base.ref = "int/dilim")],
+      ["head.ref farklı", (j) => (j.head.ref = "feat/T-101-y")],
+      ["head.sha farklı", (j) => (j.head.sha = "2".repeat(40))],
+      ["fork", (j) => (j.head.repo.full_name = "evil/repo")],
+      ["fork silinmiş (head.repo null)", (j) => (j.head.repo = null)],
+      ["numara farklı", (j) => (j.number = 10)],
+      ["sahip farklı", (j) => (j.base.repo.full_name = "baska/repo") && (j.head.repo.full_name = "baska/repo")],
+    ];
+    for (const [name, mutate] of cases) {
+      const r = fixture();
+      r.branch("feat/T-100-x").write("src/a.mjs", "a2\n").commit("iş");
+      const m = mergeToMain(r, "feat/T-100-x", "Merge pull request #9 from owner/feat/T-100-x");
+      const res = await checkMain(r, m, "feat/T-100-x", { json: mutate === null ? null : mutate });
+      expect(res.code, name).toBe(1);
+      expect(res.text, name).toContain("FAIL MAIN_PR_API");
+    }
+    const r = fixture();
+    r.branch("feat/T-100-x").write("src/a.mjs", "a2\n").commit("iş");
+    const m = mergeToMain(r, "feat/T-100-x", "Merge pull request #9 from owner/feat/T-100-x");
+    const bozuk = path.join(r.dir, ".git", "bozuk.json");
+    writeFileSync(bozuk, "{ bozuk");
+    const res = await checkMain(r, m, "feat/T-100-x", { json: bozuk });
+    expect(res.code).toBe(1);
+    expect(res.text).toContain("FAIL MAIN_PR_API");
+  });
+
+  it("dal origin'de var ama ikinci ebeveyn onun commit'i değil → FAIL MAIN_PR_UNVERIFIED", async () => {
+    const r = fixture();
+    r.branch("feat/T-100-x").write("src/a.mjs", "a2\n").commit("iş").publish("feat/T-100-x");
+    r.checkout("main").branch("yan").write("src/a.mjs", "a3\n").commit("yan");
+    const m = mergeToMain(r, "yan", "Merge pull request #9 from owner/feat/T-100-x");
+    const res = await checkMain(r, m, "feat/T-100-x");
+    expect(res.code).toBe(1);
+    expect(res.text).toContain("FAIL MAIN_PR_UNVERIFIED");
+  });
+
+  it("kip olaya bağlı: pull_request olayında / olay yokken dal adı main → PR kuralı (CARD_NOT_FOUND), main kipi yok", async () => {
+    const r = fixture();
+    r.branch("feat/T-100-x").write("src/a.mjs", "a2\n").commit("iş");
+    const m = mergeToMain(r, "feat/T-100-x", "Merge pull request #9 from owner/feat/T-100-x");
+    const saved = process.env.GITHUB_EVENT_NAME;
+    try {
+      delete process.env.GITHUB_EVENT_NAME; // olay yokken (yerel): main kipi açılmaz
+      for (const event of ["pull_request", "pull_request_target", null]) {
+        const res = await checkMain(r, m, "feat/T-100-x", { event });
+        expect(res.code, String(event)).toBe(1);
+        expect(res.text, String(event)).toMatch(/FAIL CARD_NOT_FOUND - — dal adı "main" kart kalıbına uymuyor/);
+      }
+      // olay yalnız ortamdan (Actions `all` argüman geçirmez): push → main kipi
+      process.env.GITHUB_EVENT_NAME = "pull_request";
+      expect((await checkMain(r, m, "feat/T-100-x", { event: null })).text).toContain("FAIL CARD_NOT_FOUND");
+      process.env.GITHUB_EVENT_NAME = "push";
+      expect((await checkMain(r, m, "feat/T-100-x", { event: null })).code).toBe(0);
+    } finally {
+      if (saved === undefined) delete process.env.GITHUB_EVENT_NAME;
+      else process.env.GITHUB_EVENT_NAME = saved;
+    }
+  });
+
+  it("main kipinde --base verilemez → kullanım hatası (çıkış 2); yeni argümanlar tekrar/eksik değerde hata", async () => {
+    const r = fixture();
+    expect((await check(r.dir, ["--branch", "main", "--event", "push", "--base", "origin/main"])).code).toBe(2);
+    expect((await check(r.dir, ["--event"])).code).toBe(2);
+    expect((await check(r.dir, ["--push-before=a", "--push-before=b"])).code).toBe(2);
+  });
+});
+
+describe("guards.yml eşzamanlılık (T-299 SR @1e53492, @3b33440 MAJOR)", () => {
+  it("push koşusu çalışırken/beklerken iptal edilmez; PR olayında edilir", () => {
+    const yml = readFileSync(path.join(import.meta.dirname, "../../.github/workflows/guards.yml"), "utf8");
+    const block = yml.match(/^concurrency:\n((?: {2}.*\n)+)/m);
+    expect(block).not.toBeNull();
+    const cancel = (block?.[1] ?? "").match(/^ {2}cancel-in-progress: (.+)$/m);
+    expect(cancel?.[1]).toBe("${{ github.event_name != 'push' }}");
+    // Bekleyen koşu da iptal edilebildiğinden push grubu koşu başına benzersiz olmalı (@3b33440 MAJOR).
+    // Koruma çizgisi: metin eşleşmesidir, GitHub'ın kuyruk davranışını kanıtlamaz.
+    const group = (block?.[1] ?? "").match(/^ {2}group: (.+)$/m);
+    expect(group?.[1]).toBe("guards-${{ github.event.pull_request.number || github.run_id }}");
+  });
+});
