@@ -23,11 +23,13 @@ function hasCookie(request: NextRequest, pattern: RegExp): boolean {
  * (Next kendi betiklerine nonce'u istek başlığındaki CSP'den okuyarak ekler). `style-src 'unsafe-inline'` gerekçesi: React/Next
  * ve bileşenler satır içi `style` öznitelikleri üretir (öznitelikler nonce alamaz); Tailwind v4 derleme zamanı CSS'tir.
  * Betikte `unsafe-inline` YOKTUR. `unsafe-eval` yalnızca geliştirmede (React hata yığını/HMR).
+ * `wasm-unsafe-eval` (T-286): uygulama içi barkod çözücü (zxing-wasm) WebAssembly derler; JS `eval`/`new Function`ı AÇMAZ, yalnızca WASM derlemesine izin verir.
+ * WASM dosyası kendi kaynağımızdan gelir (`connect-src 'self'`); üçüncü taraf CDN yoktur.
  */
 export function buildCsp(nonce: string, dev = false): string {
   return [
     "default-src 'self'",
-    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${dev ? " 'unsafe-eval'" : ""}`,
+    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic' 'wasm-unsafe-eval'${dev ? " 'unsafe-eval'" : ""}`,
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data:",
     "connect-src 'self'",
