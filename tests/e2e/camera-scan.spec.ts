@@ -352,6 +352,48 @@ test("el terminali tetiği (klavye kaması): kamera katmanı açıkken de kapal�
   await expect(page.getByTestId("scan-alert")).toBeVisible();
 });
 
+test("kamera ile el terminali aynı anda: tek sunucu çağrısı, tek uyarı; geç kalan kamera kodu sessizce düşmez (bildirilir)", async ({ page }, testInfo) => {
+  await page.addInitScript(`${NATIVE_STUB} ${FEEDBACK_STUBS}`);
+  await login(page, testInfo);
+  await openCamera(page);
+  const overlay = page.getByTestId("camera-overlay");
+  await expect(overlay).toHaveAttribute("data-phase", "scanning");
+  await expect.poll(() => page.evaluate<number>("document.querySelector('[data-testid=camera-video]').videoWidth")).toBeGreaterThan(0);
+  const posts: string[] = [];
+  page.on("request", (r) => {
+    if (r.method() === "POST") posts.push(r.url());
+  });
+  // Aynı turda: kamera kodu hazır (döngü sonraki karede okur) ve terminal tetiği ateşlenir; terminal önce akışa girer.
+  await page.evaluate(`window.__code = ${JSON.stringify(CODE)}`);
+  await keystrokeScan(page, "0000000000000");
+  await expect(page.getByTestId("scan-alert")).toBeVisible();
+  await expect(page.getByTestId("camera-dropped")).toBeVisible();
+  await page.waitForTimeout(1500);
+  expect(posts.length, "iki kaynaktan tek akış çağrısı (çift işleme yok)").toBe(1);
+  await expect(page.getByTestId("scan-alert")).toHaveCount(1);
+  await expect(page.getByTestId("last-scan-code")).toContainText("0000000000000");
+});
+
+test("izin reddi: Tekrar dene izin hâlâ kapalıyken rehbere döner (tekrarlı ve çift tık), izin gelince kamerayı açar", async ({ page }, testInfo) => {
+  await page.addInitScript(`${NATIVE_STUB} ${FEEDBACK_STUBS} ${GUM_WRAP} window.__deny = true;`);
+  await login(page, testInfo);
+  await openCamera(page);
+  const overlay = page.getByTestId("camera-overlay");
+  await expect(overlay).toHaveAttribute("data-phase", "failed");
+  for (let i = 0; i < 3; i++) {
+    await overlay.getByRole("button", { name: "Tekrar dene" }).click();
+    await expect(overlay).toHaveAttribute("data-phase", "failed");
+    await expect(overlay.getByRole("button", { name: "Tekrar dene" })).toBeVisible();
+    await expect(overlay.getByRole("button", { name: "Elle gir" })).toBeVisible();
+  }
+  await overlay.getByRole("button", { name: "Tekrar dene" }).dblclick();
+  await expect(overlay).toHaveAttribute("data-phase", "failed");
+  await page.evaluate("window.__deny = false");
+  await overlay.getByRole("button", { name: "Tekrar dene" }).click();
+  await expect(overlay).toHaveAttribute("data-phase", "scanning");
+  await expect.poll(() => page.evaluate<number>("document.querySelector('[data-testid=camera-video]').videoWidth")).toBeGreaterThan(0);
+});
+
 test("kamera açılış ekranı: çerçeve (nişangâh) ve 'Kamera açılıyor…' göstergesi", async ({ page }, testInfo) => {
   mkdirSync(SHOTS, { recursive: true });
   await page.addInitScript(`${NATIVE_STUB} ${FEEDBACK_STUBS} ${GUM_WRAP}`);
