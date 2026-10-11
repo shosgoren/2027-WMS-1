@@ -3,8 +3,17 @@
 @source "../../../packages/ui/src";
 
 /* Cihaz algısı CSS ile (T-254; kullanıcı ajanı koklama yok): "telefon" = dar ekran (<768 px) YA DA dokunmatik + alçak ekran
-   (yatay telefon). Tablet/masaüstü yerleşimi bu kırılımın dışındadır ve değişmez. Aynı sorgu aşağıdaki düz CSS bloklarında tekrarlanır. */
-@custom-variant phone (@media (max-width: 767px), ((pointer: coarse) and (max-height: 500px)));
+   (yatay telefon). Tablet/masaüstü yerleşimi bu kırılımın dışındadır ve değişmez. Aynı iki koşul aşağıdaki düz CSS bloklarında tekrarlanır.
+   Virgüllü tek sorgu biçimi Tailwind 4 derlemesinde sınıfları iki bloğa böler (T-292); bu yüzden her koşul ayrı @media + @slot. */
+@custom-variant phone {
+  @media (max-width: 767px) {
+    @slot;
+  }
+
+  @media (pointer: coarse) and (max-height: 500px) {
+    @slot;
+  }
+}
 
 /* Tasarım belirteçleri (ADR-020 / docs/design/palette.md; kontrast: theme-contrast.test.ts).
    Her anlam rengi üç rol: <ad> (dolu zemin + ikon), <ad>-ink (metin), <ad>-bg (açık zemin).

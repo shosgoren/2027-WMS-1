@@ -329,6 +329,8 @@
     "validation_failed_document_stateAction": "Refresh the page and check the document's current status.",
     "validation_failed_scan_mismatch": "The scanned location or product does not match the task.",
     "validation_failed_scan_mismatchAction": "Scan the location and product shown on the task and try again.",
+    "validation_failed_return_exceeds_shipped": "The return quantity is more than what was shipped and not yet returned.",
+    "validation_failed_return_exceeds_shippedAction": "Enter a quantity up to the shipped quantity minus earlier returns.",
     "validation_failed_idempotency_key_required": "The request key is missing.",
     "validation_failed_idempotency_key_requiredAction": "Refresh the page and send the action again.",
     "reversal_blocked_exceeds_remaining": "The requested quantity is more than what is still left to reverse on this line.",

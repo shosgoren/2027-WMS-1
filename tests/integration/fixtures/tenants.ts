@@ -328,10 +328,19 @@ export async function seedWorld(
   );
   // T-302: görev, sayım oturumu (+ satır), min-maks politikası ve uyarı. Sayım oturumu SUBMITTED tohumlanır (terminal olmaz: kapanmış oturumun satırı eklenemez/değişmez; kilit satırını COUNTING yapmaz:
   // başka testlerin lokasyonlarını LOCATION_LOCKED'a düşürmez). Satır, kök lokasyondaki boyuta bağlıdır.
+  const seedTaskId = (
+    await c.query<{ id: string }>(
+      `INSERT INTO public.warehouse_tasks (tenant_id, warehouse_id, kind, location_id, item_id, quantity)
+       VALUES ($1, $2, 'PUTAWAY', $3, $4, 1) RETURNING id`,
+      [tenantId, warehouseId, rootLocationId, itemNoneId],
+    )
+  ).rows[0]?.id;
+  // T-293 (ADR-025): tohum görevi için bir ilerleme satırı (AC-04 keşfi her tenant tablosunda A ve B için satır ister). Görev OPEN kalır; ilerleme yalnızca
+  // atanan üyelik için geçerlidir (domain), bu satır hiçbir komutla okunmaz/yazılmaz; görev sürümü tohumda 1'dir.
   await c.query(
-    `INSERT INTO public.warehouse_tasks (tenant_id, warehouse_id, kind, location_id, item_id, quantity)
-     VALUES ($1, $2, 'PUTAWAY', $3, $4, 1)`,
-    [tenantId, warehouseId, rootLocationId, itemNoneId],
+    `INSERT INTO public.warehouse_task_progress (tenant_id, task_id, membership_id, task_version, step, item_id)
+     VALUES ($1, $2, $3, 1, 'SCAN_TARGET', $4)`,
+    [tenantId, seedTaskId, memberMembershipId, itemNoneId],
   );
   const countSessionId = randomUUID();
   await c.query("INSERT INTO public.count_sessions (tenant_id, id, warehouse_id, started_by) VALUES ($1, $2, $3, $4)", [
@@ -460,7 +469,7 @@ export async function cleanupDocuments(c: pg.Client, tenantIds: string[]): Promi
         WHERE tenant_id = ANY($1::uuid[]) AND count_session_id IS NOT NULL`,
       [tenantIds],
     );
-    for (const t of ["stock_alerts", "item_stock_policies", "warehouse_tasks", "count_session_lines", "count_sessions", "customer_return_lines", "customer_returns", "sales_order_lines", "sales_orders", "inbound_receipt_lines", "inbound_receipts", "idempotency_records", "number_sequences", "document_status_history", "document_lines", "documents"]) {
+    for (const t of ["stock_alerts", "item_stock_policies", "warehouse_task_progress", "warehouse_tasks", "count_session_lines", "count_sessions", "customer_return_lines", "customer_returns", "sales_order_lines", "sales_orders", "inbound_receipt_lines", "inbound_receipts", "idempotency_records", "number_sequences", "document_status_history", "document_lines", "documents"]) {
       await c.query(`DELETE FROM public.${t} WHERE tenant_id = ANY($1::uuid[])`, [tenantIds]);
     }
     await c.query("COMMIT");

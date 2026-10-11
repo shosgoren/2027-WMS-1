@@ -1,4 +1,4 @@
-// Playwright globalSetup (T-131): yerel yığını kurar; `E2E_BASE_URL` verilmişse (staging) hiçbir şey yapmaz.
+// Playwright globalSetup (T-131): yerel yığını kurar; `E2E_BASE_URL` verilmişse (staging) yığın kurmaz, yalnız paylaşılan yönetici oturumunu açar (T-300).
 //
 // Yerel yığın (compose postgres + pgbouncer ÖNCEDEN ayakta olmalı: `docker compose up -d --wait`):
 //   1. `pnpm db:migrate` (demo tenant satırı dahil; DEMO_MODE=1, WMS_ENV=staging)
@@ -14,6 +14,7 @@ import https from "node:https";
 import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { chromium } from "@playwright/test";
+import { mintSharedSession } from "./support/demo-session.ts";
 import { provisionEmptyTenant } from "./support/empty-tenant.ts";
 
 const ROOT = path.resolve(import.meta.dirname, "../..");
@@ -108,7 +109,18 @@ function startTlsProxy(port: number, targetPort: number, keyFile: string, certFi
 }
 
 export default async function globalSetup(): Promise<(() => Promise<void>) | undefined> {
-  if (process.env.E2E_BASE_URL?.trim()) return undefined; // staging/uzak koşu: yığın dışarıda
+  const remote = process.env.E2E_BASE_URL?.trim();
+  if (remote) {
+    // staging/uzak koşu: yığın dışarıda. T-300: tek runner IP'si demo giriş sınırını (10 / 10 dk) aşmasın diye yönetici için BİR KEZ gerçek
+    // ekrandan girilir; oturum `.artifacts/session/` altına yazılır (artifact'a girmez). Çıkış yapan spec'ler kendi girişini yapar.
+    const browser = await chromium.launch();
+    try {
+      await mintSharedSession(browser, remote);
+    } finally {
+      await browser.close();
+    }
+    return undefined;
+  }
 
   mkdirSync(OUT, { recursive: true });
   loadDotEnv();

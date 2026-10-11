@@ -19,7 +19,16 @@ env:
 
 jobs:
   e2e-staging:
-    name: e2e-staging
+    name: e2e-staging (${{ matrix.project }})
+    # T-300: demo girişi istemci IP başına 10 / 10 dk. Her proje AYRI job (ayrı runner, genelde ayrı çıkış IP'si): job başına en çok
+    # 6 giriş (global-setup 1 + proje başına 5); defter runner başına tutulur.
+    # İki proje aynı staging demo tenant'ına yazar ve spec'ler sırayla koşmayı varsayar (playwright.config.ts, zz-code-edit): job'lar
+    # SIRAYLA koşar (max-parallel: 1); ayrı runner yine ayrı çıkış IP'si getirir. Aynı IP'ye düşülürse ikinci job öncekinin girişlerini bilmez ve RATE_LIMITED ile dürüstçe kırmızı olur (gizleme yok).
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        project: [desktop, mobile]
     # Yalnızca main'deki iş akışı tanımı staging'e karşı koşar (deploy-staging.yml ile aynı desen).
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
@@ -41,7 +50,7 @@ jobs:
         run: |
           mkdir -p .artifacts/e2e
           set -o pipefail
-          pnpm test:e2e 2>&1 | tee .artifacts/e2e/run.log
+          pnpm test:e2e --project=${{ matrix.project }} 2>&1 | tee .artifacts/e2e/run.log
       # T-245: artifact indirilemeyen ortamlarda kök neden için hata bağlamı (sayfa erişilebilirlik anlık görüntüsü) loga.
       # İçerik demo verisidir (sentetik, example.invalid); iş akışı sır kullanmaz (G-09).
       - name: Print Playwright error context
@@ -71,7 +80,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: e2e-staging-artifacts
+          name: e2e-staging-artifacts-${{ matrix.project }}
+          # Yalnızca .artifacts/e2e/: paylaşılan demo oturumu (.artifacts/session/) artifact'a GİRMEZ (G-09).
           path: .artifacts/e2e/
           if-no-files-found: warn
           retention-days: 14

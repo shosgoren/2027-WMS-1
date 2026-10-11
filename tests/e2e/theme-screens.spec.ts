@@ -4,6 +4,7 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
+import { enterDemoShared } from "./support/demo-session.ts";
 
 const OUT = path.resolve(import.meta.dirname, "../../.artifacts/t-246b");
 const SIZES = [
@@ -82,7 +83,7 @@ for (const size of SIZES) {
       }
 
       // Demo girişi → ana ekran; görünüm anahtarı ile Kokpit sonra Akış.
-      await page.getByRole("button", { name: "Yönetici olarak gir" }).click();
+      await enterDemoShared(page, "Yönetici");
       await expect(page).toHaveURL(/\/t\/demo$/);
       const tasks = page.getByRole("list", { name: "İşler" });
       await expect(tasks).toBeVisible();

@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Zamanlanmış uptime denetimi (T-129, A-44). `.github/workflows/uptime.yml` 15 dakikada bir koşar:
 //   node scripts/uptime-check.mjs --base-url https://etkin-wms-staging.fly.dev --expect-text "Demo ortamı"
-// 1) `/api/health`: HTTP 200, JSON `status:"ok"`, `db:"ok"`, `queue:"ok"`.
+// 1) `/api/health`: HTTP 200, JSON `status:"ok"`, `db:"ok"`, `queue:"ok"` (kuyruk erişimi + ilerleme), `worker:"ok"` (heartbeat taze; T-282).
+//    Bu sunucu tarafı eşiklerin kırmızısı burada FAIL olur; `/api/health/live` (Fly makine kontrolü) DB'ye dokunmaz ve buradan çağrılmaz.
 // 2) `/login`: HTTP 200 ve (verildiyse) `--expect-text` metni (staging demo bandı).
 // Her istek için TEK ölçüm yanıt süresi eşiği (`--max-ms`, varsayılan 3000). Fly `auto_stop_machines` yüzünden ilk istek makineyi
 // başlatır (soğuk başlatma): başarısız/yavaş ilk deneme sayılmaz, 1 yeniden deneme yapılır; karar SON denemeden verilir
@@ -28,6 +29,9 @@ export const DEFAULTS = Object.freeze({
  * @typedef {{ name: string, ok: boolean, reason: string, attempts: number, ms: number, coldStartMs: number | undefined }} CheckOutcome
  */
 
+/** FAIL koşulu olan sağlık alanları; çıktıya yalnızca alan adı + durum girer (sayı/gövde yazılmaz). */
+export const HEALTH_FIELDS = Object.freeze(["status", "db", "queue", "worker"]);
+
 /**
  * `/api/health` gövdesini değerlendirir. Gövde metni sonuca girmez (yalnızca alan adı).
  * @param {Reply} reply
@@ -44,10 +48,10 @@ export function evaluateHealth(reply) {
   }
   if (typeof parsed !== "object" || parsed === null) return { ok: false, reason: "gövde nesne değil" };
   const o = /** @type {Record<string, unknown>} */ (parsed);
-  for (const field of ["status", "db", "queue"]) {
+  for (const field of HEALTH_FIELDS) {
     if (o[field] !== "ok") return { ok: false, reason: `${field} ok değil` };
   }
-  return { ok: true, reason: "HTTP 200 status/db/queue ok" };
+  return { ok: true, reason: `HTTP 200 ${HEALTH_FIELDS.join("/")} ok` };
 }
 
 /**

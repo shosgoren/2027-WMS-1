@@ -1782,5 +1782,38 @@ describe("0013–0014 — süper kullanıcı olmayan migrator", () => {
         });
       });
     });
+    // ---- 0025 (T-282): worker heartbeat tablosu (tenant'sız işletim tablosu, en dar GRANT); süper kullanıcı olmayan migrator ----
+    describe("0025 worker_heartbeats", () => {
+      let thru25Dir: string | undefined;
+      const thru25 = (): string => (thru25Dir ??= copyMigrations("0025"));
+      const ALL25 = [...ALL16, "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025"];
+      const exists = async (u: string): Promise<boolean> => withClient(u, async (c) => (await c.query("SELECT to_regclass('wms_health.worker_heartbeats') IS NOT NULL AS t")).rows[0]?.t === true);
+
+      it("ileri (0001–0025) → 0025 geri (to 0024; veri kaybettirmez, staging'de de çalışır) → ileri: parmak izi birebir; yetkiler en dar", async () => {
+        await setProbeMemberships(STANDARD_GRANT);
+        const u = await freshDatabase();
+        expect((await migrateUp({ url: u, dir: thru25() })).applied).toEqual(ALL25);
+        const before = await digest16(u);
+        expect(await exists(u)).toBe(true);
+        await withClient(u, async (c) => {
+          const g = await c.query<{ grantee: string; priv: string }>(
+            `SELECT grantee::text, privilege_type AS priv FROM information_schema.role_table_grants WHERE table_schema = 'wms_health' AND table_name = 'worker_heartbeats' AND grantee <> current_user ORDER BY 1, 2`,
+          );
+          expect(g.rows.map((r) => `${r.grantee}:${r.priv}`)).toEqual(["wms_app:SELECT", "wms_worker:DELETE", "wms_worker:INSERT", "wms_worker:SELECT"]);
+          const cols = await c.query<{ grantee: string; column_name: string }>(
+            `SELECT grantee::text, column_name::text FROM information_schema.column_privileges WHERE table_schema = 'wms_health' AND table_name = 'worker_heartbeats' AND privilege_type = 'UPDATE' AND grantee = 'wms_worker' ORDER BY 2`,
+          );
+          expect(cols.rows.map((r) => r.column_name)).toEqual(["expired_active", "failed_recent", "last_seen_at", "oldest_waiting_age_s", "version"]);
+          const rls = await c.query("SELECT relrowsecurity FROM pg_class WHERE oid = 'wms_health.worker_heartbeats'::regclass");
+          expect(rls.rows[0]?.relrowsecurity).toBe(false); // tenant verisi yok; koruma yetkiyle (migration başlık notu)
+          await c.query("INSERT INTO wms_health.worker_heartbeats (instance_id, version, started_at) VALUES ('m-1', 'unknown', now())");
+        });
+        expect((await migrateDown({ url: u, dir: thru25(), to: "0024", wmsEnv: "staging" })).reverted).toEqual(["0025"]);
+        expect(await exists(u)).toBe(false);
+        expect((await migrateUp({ url: u, dir: thru25() })).applied).toEqual(["0025"]);
+        expect(await digest16(u)).toEqual(before);
+        expect(await exists(u)).toBe(true);
+      });
+    });
   });
 });
