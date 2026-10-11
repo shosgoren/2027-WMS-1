@@ -555,3 +555,8 @@ Sonraki: Faz 2 — int/faz2-sema ve int/faz2-stok-sema PR'ları, ardından T-205
 ### 2026-10-11 (19:44Z–) — Supervisor
 - 19:47Z PR #83 birleştirildi (fcdc6cb; korunan yol e2e-staging.yml SR 0·0·0 @2c6f737). deploy-staging koşuyor; guards kronik kapsam FAIL (T-299 kapatacak). Abonelik kaldırıldı.
 - 19:48Z T-286 tur 2 commit'leri (ebb9220, d0ad908) gitleaks temiz → push. Ajanlar başlatıldı: T-289 tur 3 bitir, T-298 bitir (uygulama, 2); SR: T-286 @d0ad908, T-309 @53ae201, T-299 @1e53492; T-286 bağımsız tasarım incelemesi.
+- 19:53Z T-309 SR 2·1·4 @53ae201 (BLOCKER approved_by DB kuralı → 0027; dal eski/çakışmalı; MAJOR 2000 vs 200 satır) → tek düzeltme turu (db-engineer). MINOR-2/4 → T-277.
+- 19:55Z T-286 SR 0·0·3 @d0ad908 (MAJOR-1/2 kapandı). MINOR-2 (düşürülen kamera okuması "Okundu"+bip, yanlış ad) → T-287c kapsamına; MINOR-1/3 → T-277. Tasarım incelemesi bekleniyor.
+- 20:12Z T-286 tasarım 8/8 GEÇTİ @d0ad908 (6–10 kapandı); MINOR'lar → T-287c. T-299 SR @1e53492 0·1·3 (MAJOR cancel-in-progress) → Supervisor dar düzeltme 3b33440 (76/76, actionlint OK, check:all OK; verify'de yük kaynaklı 5000ms zaman aşımı, yük ort. 14 — gevşetilmedi) → delta SR.
+- 20:22Z T-299 SR @3b33440 0·1·2 (bekleyen koşu iptali) → 2198197 (grup run_id) → SR 0·0·0 @2198197. int/faz3a-local fc9c48f; tam test:int koşuyor. T-286 ekran görüntüleri kullanıcıya gönderildi; qa-verifier başladı.
+- 20:21Z e2e-staging @fcdc6cb YEŞİL (desktop + mobile sıralı; koşu 38169731316) → T-300 RATE_LIMITED düzeltmesi canlıda doğrulandı.
