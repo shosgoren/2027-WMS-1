@@ -3,15 +3,22 @@
 //   --base <ref>     hedef dal (varsayılan: kartın Dal satırındaki `→ int/…` hedefi
 //                    `origin/int/…`, yoksa `origin/main`; `int/*` dalında `origin/main`)
 //   --branch <ad>    dal adı (varsayılan: geçerli dal; CI'da ayrık HEAD için)
+// `main` kipi (T-299; yalnız `push` olayında [--event | GITHUB_EVENT_NAME] ve dal adı `main`): HEAD
+// push'taki TEK commit olmalı (HEAD^1 == --push-before | GUARD_PUSH_BEFORE) ve bir PR birleştirme
+// commit'i (2 ebeveyn + "Merge pull request #N from <sahip>/<dal>"); PR dalı konudan çözülür,
+// GitHub API kaydıyla (--pr-json | GUARD_PR_JSON) doğrulanır ve o dalın kuralıyla (int/* → birleştirilmiş kartlar + SUPERVISOR_PATHS; feat|fix/T-xxx → tek kart)
+// `HEAD^1..HEAD` farkı denetlenir. Çözülemezse FAIL (atla/geç yok); PR'sız commit FAIL (G-08).
 // Kart listesi dalda değiştiyse `WARN SCOPE_CARD_CHANGED` (Supervisor §2 adım 4'te okur).
+import { readFileSync } from "node:fs";
 import path from "node:path";
-import { CardError, mergedWorkBranches, parseCardFiles, resolveCards } from "./lib/cards.mjs";
+import { CardError, cardIdFromBranch, isIntBranch, mergedWorkBranches, parseCardFiles, resolveCards } from "./lib/cards.mjs";
 import {
   branchPointsAt,
   changedFiles,
   currentBranch,
   DEFAULT_TARGET,
   fileAtRef,
+  git,
   GitError,
   indexEntries,
   isAncestor,
@@ -19,6 +26,7 @@ import {
   mergeHeads,
   mergeMsgSubject,
   mergeSubjects,
+  refExists,
   repoRoot,
   touchedPaths,
   treeEntries,
@@ -177,12 +185,171 @@ function checkCardChanged(out, root, base, card) {
   out.warn("SCOPE_CARD_CHANGED", card.path, `kartın dosya listesi dalda değişti (${parts.join("; ")})`);
 }
 
+/** `main` dalı adı: main-push kipi yalnızca `push` olayında ve bu dal adıyla açılır. */
+export const MAIN_BRANCH = "main";
+
+/**
+ * GitHub PR birleştirme konusu. Dal adı boşluksuz tek simge; ardındaki isteğe bağlı serbest metin
+ * (Supervisor'ın verdiği başlık eki) dal çözümüne katılmaz.
+ */
+const PR_MERGE_SUBJECT = /^Merge pull request #([1-9]\d{0,8}) from ([A-Za-z0-9][A-Za-z0-9-]*)\/(\S+)(?:\s.*)?$/;
+
+/** @typedef {{ event: string | null, pushBefore: string | null, prJson: string | null, rest: string[] }} MainArgs */
+
+/**
+ * main-push kipine özgü argümanları ayıklar; kalanı `parseScopeArgs`'a gider. Her biri verilmezse
+ * ortamdan okunur (`all` bekçiye argüman geçirmez): `GITHUB_EVENT_NAME`, `GUARD_PUSH_BEFORE`,
+ * `GUARD_PR_JSON`. Argüman ortamı ezer.
+ * @param {string[]} argv
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {MainArgs}
+ */
+export function parseMainArgs(argv, env = process.env) {
+  /** @type {Record<string, string | null>} */
+  const got = { event: null, "push-before": null, "pr-json": null };
+  /** @type {string[]} */
+  const rest = [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i] ?? "";
+    const m = /^--(event|push-before|pr-json)(?:=(.*))?$/.exec(a);
+    if (m === null) {
+      rest.push(a);
+      continue;
+    }
+    const key = /** @type {string} */ (m[1]);
+    const v = m[2] ?? argv[++i];
+    if (v === undefined || v === "") throw new UsageError(`--${key} bir değer ister`);
+    if (got[key] !== null) throw new UsageError(`--${key} birden fazla verildi`);
+    got[key] = v;
+  }
+  const envOr = (/** @type {string | null} */ v, /** @type {string} */ name) => v ?? (env[name] === undefined || env[name] === "" ? null : env[name] ?? null);
+  return {
+    event: envOr(got.event ?? null, "GITHUB_EVENT_NAME"),
+    pushBefore: envOr(got["push-before"] ?? null, "GUARD_PUSH_BEFORE"),
+    prJson: envOr(got["pr-json"] ?? null, "GUARD_PR_JSON"),
+    rest,
+  };
+}
+
+/** main-push kipinde PR dalının çözülememesi/doğrulanamaması (kod + ileti; her biri FAIL). */
+class MainPushError extends Error {
+  /**
+   * @param {string} code
+   * @param {string} message
+   */
+  constructor(code, message) {
+    super(message);
+    this.name = "MainPushError";
+    this.code = code;
+  }
+}
+
+/**
+ * @param {unknown} o
+ * @param {...string} keys
+ * @returns {unknown}
+ */
+function dig(o, ...keys) {
+  let cur = o;
+  for (const k of keys) {
+    if (typeof cur !== "object" || cur === null) return undefined;
+    cur = /** @type {Record<string, unknown>} */ (cur)[k];
+  }
+  return cur;
+}
+
+/**
+ * Workflow'un `GET /repos/{repo}/pulls/N` yanıtından yazdığı JSON'a karşı PR birleştirme
+ * kanıtı. Hepsi zorunlu; dosya yok/okunamıyor/biçim bozuk = FAIL (fail-closed).
+ * @param {string | null} file
+ * @param {{ number: string, owner: string, prBranch: string, head: string, tip: string }} want
+ */
+function verifyPrJson(file, want) {
+  const fail = (/** @type {string} */ m) => new MainPushError("MAIN_PR_API", m);
+  if (file === null) throw fail("PR API kaydı verilmedi (--pr-json / GUARD_PR_JSON); PR doğrulanamadı");
+  /** @type {unknown} */
+  let j;
+  try {
+    j = JSON.parse(readFileSync(file, "utf8"));
+  } catch (e) {
+    throw fail(`PR API kaydı okunamadı/ayrıştırılamadı: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  const n = `PR #${want.number}`;
+  if (dig(j, "number") !== Number(want.number)) throw fail(`${n}: API kaydındaki numara farklı`);
+  if (typeof dig(j, "merged_at") !== "string" || dig(j, "merged_at") === "") throw fail(`${n} birleştirilmemiş (merged_at boş)`);
+  if (dig(j, "merge_commit_sha") !== want.head) throw fail(`${n}: merge_commit_sha HEAD (${want.head.slice(0, 7)}) değil`);
+  if (dig(j, "base", "ref") !== MAIN_BRANCH) throw fail(`${n}: taban dal "${String(dig(j, "base", "ref"))}", main bekleniyor`);
+  if (dig(j, "head", "ref") !== want.prBranch) throw fail(`${n}: PR dalı "${String(dig(j, "head", "ref"))}", konudaki "${want.prBranch}" ile aynı değil`);
+  if (dig(j, "head", "sha") !== want.tip) throw fail(`${n}: head.sha ikinci ebeveyn (${want.tip.slice(0, 7)}) değil`);
+  const baseRepo = dig(j, "base", "repo", "full_name");
+  const headRepo = dig(j, "head", "repo", "full_name");
+  if (typeof baseRepo !== "string" || baseRepo === "" || headRepo !== baseRepo) {
+    throw fail(`${n}: PR aynı depodan değil (head.repo=${String(headRepo)}, base.repo=${String(baseRepo)}); fork kabul edilmez`);
+  }
+  const repoOwner = baseRepo.split("/")[0] ?? "";
+  if (repoOwner.toLowerCase() !== want.owner.toLowerCase()) {
+    throw fail(`${n}: konudaki sahip "${want.owner}", depo sahibi "${repoOwner}"`);
+  }
+}
+
+/**
+ * main'e push edilen HEAD'in tek bir PR birleştirmesi olduğunu doğrular, PR dalını çözer.
+ * Kanıt zinciri (konuya tek başına güvenilmez):
+ *  1. HEAD tam 2 ebeveynli ve `HEAD^1 == push öncesi uç` (push'ta başka commit yok; aksi hâlde
+ *     `before..HEAD^1` denetimsiz kalırdı).
+ *  2. Konu biçimi + dal kalıbı (feat|fix/T-xxx, int/*).
+ *  3. GitHub API kaydı: birleştirilmiş, merge_commit_sha == HEAD, taban main, head.ref == konudaki
+ *     dal, head.sha == HEAD^2, fork değil, sahip eşleşmesi.
+ *  4. `origin/<dal>` hâlâ varsa HEAD^2 onun atası.
+ * @param {string} root
+ * @param {{ pushBefore: string | null, prJson: string | null }} o
+ * @returns {{ prBranch: string, number: string, base: string, tip: string }}
+ */
+function resolveMainPush(root, o) {
+  const head = git(root, ["rev-parse", "HEAD"]).trim();
+  const parents = git(root, ["rev-list", "--parents", "-n", "1", "HEAD"]).trim().split(" ").slice(1);
+  if (parents.length !== 2) {
+    throw new MainPushError(
+      "MAIN_DIRECT_PUSH",
+      `HEAD bir PR birleştirme commit'i değil (${parents.length} ebeveyn; 2 beklenir) — main'e doğrudan/squash/rebase ile giriş yasak (G-08)`,
+    );
+  }
+  const [base, tip] = /** @type {[string, string]} */ (parents);
+  if (o.pushBefore === null || !/^[0-9a-f]{40}$/.test(o.pushBefore) || /^0{40}$/.test(o.pushBefore)) {
+    throw new MainPushError("MAIN_PUSH_RANGE", "push öncesi uç (--push-before / GUARD_PUSH_BEFORE) eksik ya da geçersiz; push aralığı doğrulanamadı");
+  }
+  if (o.pushBefore !== base) {
+    throw new MainPushError(
+      "MAIN_PUSH_RANGE",
+      `HEAD^1 (${base.slice(0, 7)}) push öncesi uç (${o.pushBefore.slice(0, 7)}) değil: push birden çok commit içeriyor; ara commit'ler denetimsiz kalır`,
+    );
+  }
+  const subject = git(root, ["log", "-1", "--format=%s", "HEAD"]).trim();
+  const m = PR_MERGE_SUBJECT.exec(subject);
+  if (m === null) {
+    throw new MainPushError("MAIN_PR_SUBJECT", `birleştirme konusu "Merge pull request #N from <sahip>/<dal>" biçiminde değil: "${subject}"`);
+  }
+  const number = /** @type {string} */ (m[1]);
+  const owner = /** @type {string} */ (m[2]);
+  const prBranch = /** @type {string} */ (m[3]);
+  if (cardIdFromBranch(prBranch) === null && !isIntBranch(prBranch)) {
+    throw new MainPushError("MAIN_PR_SUBJECT", `PR dalı "${prBranch}" kart kalıbına uymuyor (feat|fix/T-xxx[a-z]?-… veya int/…)`);
+  }
+  verifyPrJson(o.prJson, { number, owner, prBranch, head, tip });
+  const branchRef = `refs/remotes/origin/${prBranch}`;
+  if (refExists(root, branchRef) && !isAncestor(root, tip, branchRef)) {
+    throw new MainPushError("MAIN_PR_UNVERIFIED", `ikinci ebeveyn ${tip.slice(0, 7)}, origin/${prBranch} dalının commit'i değil`);
+  }
+  return { prBranch, number, base, tip };
+}
+
 /**
  * @param {{ root: string, argv: string[], out: Reporter }} ctx
  */
 export function run(ctx) {
   const { out } = ctx;
-  const args = parseScopeArgs(ctx.argv);
+  const mainArgs = parseMainArgs(ctx.argv);
+  const args = parseScopeArgs(mainArgs.rest);
   try {
     const root = repoRoot(ctx.root);
     const branch = args.branch ?? currentBranch(root);
@@ -190,17 +357,38 @@ export function run(ctx) {
 
     /** @type {{ kind: "work" | "int", cards: Card[] }} */
     let scope;
+    /** @type {string} */
+    let target;
+    /** @type {string} */
+    let base;
     try {
-      scope = resolveCards(root, branch, () => [...mergeSubjects(root, mergeBase(root, args.base ?? DEFAULT_TARGET)), ...pendingMergeSubjects(root)]);
+      // Kip dal adına değil olaya bağlı: yalnız `push` olayında ve dal `main` iken (dal adı main olan
+      // bir fork PR'ı PR kuralıyla denetlenir → kart kalıbına uymadığı için FAIL).
+      if (mainArgs.event === "push" && branch === MAIN_BRANCH) {
+        if (args.base !== null) throw new UsageError("--base main kipinde (dal adı main) verilemez; taban HEAD^1'dir");
+        const pr = resolveMainPush(root, mainArgs);
+        out.detail("prMerge", { number: pr.number, branch: pr.prBranch, base: pr.base, tip: pr.tip });
+        const { base: b, tip } = pr;
+        scope = resolveCards(root, pr.prBranch, () =>
+          git(root, ["log", "--first-parent", "--merges", "--format=%s", `${b}..${tip}`]).split("\n").filter((l) => l !== ""),
+        );
+        target = b;
+        base = b;
+      } else {
+        scope = resolveCards(root, branch, () => [...mergeSubjects(root, mergeBase(root, args.base ?? DEFAULT_TARGET)), ...pendingMergeSubjects(root)]);
+        const first = scope.cards[0];
+        target = args.base ?? (scope.kind === "work" && first?.intTarget ? `origin/${first.intTarget}` : DEFAULT_TARGET);
+        base = mergeBase(root, target);
+      }
     } catch (e) {
+      if (e instanceof MainPushError) {
+        out.fail(e.code, NO_FILE, e.message);
+        return;
+      }
       if (!(e instanceof CardError)) throw e;
       out.fail(e.code, e.file, e.message);
       return;
     }
-    const first = scope.cards[0];
-    const target =
-      args.base ?? (scope.kind === "work" && first?.intTarget ? `origin/${first.intTarget}` : DEFAULT_TARGET);
-    const base = mergeBase(root, target);
     out.detail("target", target);
     out.detail("mergeBase", base);
     out.detail("cards", scope.cards.map((c) => ({ id: c.id, path: c.path, globs: c.globs })));
