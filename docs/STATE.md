@@ -1,8 +1,8 @@
 # STATE (≤80 satır — her görev sonunda Supervisor günceller)
 
-**Oturum kilidi:** session_01C59FRaUynaDdhNGZoRbKsY · 2026-10-11T21:50Z (zamanlanmış oturum: kilit 3 saatten yeniyse ve başka oturumunsa hiçbir şey yapmadan çık; değilse kendi kimliğinle yenile, her push'ta zamanı güncelle)
+**Oturum kilidi:** session_01C59FRaUynaDdhNGZoRbKsY · 2026-10-11T22:45Z (zamanlanmış oturum: kilit 3 saatten yeniyse ve başka oturumunsa hiçbir şey yapmadan çık; değilse kendi kimliğinle yenile, her push'ta zamanı güncelle)
 **Faz:** 2 stok çekirdeği TAMAM (main) + Faz 3A (int/faz3a: …T-222/253/256/258/259/270/271/272/273/274/304/305/306; tam test:int EXIT=0 82/82 1612+). Kullanıcı UTC+3: saat `date -u` ile. Kota kesintisinde sıfırlanma saatine send_later ZORUNLU.
-**Aktif görev:** PR #85 (paket #5a: T-286 kamera + T-298 I-09; int/faz3a b9d47bb) CI e2e kırmızı → T-286 tarama düşme yarışı düzeltmesi (useScanner kalıcı abonelik) → delta SR → int → push. T-289 tur 3 SR + tasarım yeniden inceleme (@9f658e9). T-309 SR 0·0·3 @e848d65 hazır (paket #5b).
+**Aktif görev:** PR #85 (paket #5a T-286+T-298) — T-286 yarış + RATE_LIMITED düzeltmesi b784106 + Supervisor dar düzeltme (auth sayaç sıfırlama kaldırıldı); taze DB e2e koşuyor → int/faz3a → tam doğrulama → push. Paket #5b hazır: T-289 (SR 0·0·6, tasarım 30/30+14/14, ekran görüntüleri kullanıcıda) + T-309 (SR 0·0·3).
 **Son tamamlanan:** #84 T-299 main kapsam bekçisi (93a95e5, 2026-10-11 21:00Z; ilk main koşusu taban bekçisi eski olduğundan beklenen FAIL — sonraki birleştirme gerçek sınama) · #83 paket 4 (fcdc6cb; e2e-staging yeşil) · #82 · önceki: JOURNAL
 **Sonraki adım:** (21:50Z) PR #85 yeşil → birleştir → deploy-staging + e2e-staging → kullanıcıya T-286 gerçek cihaz rehberi (wt-286/.artifacts/t286-cihaz-rehberi.md). Guards main koşusunu doğrula (T-299 ilk gerçek sınama). Paket #5b: T-289 (SR+tasarım geçerse kullanıcıya ekran görüntüsü) + T-309. Sonra T-287c (t287c-todo) → T-293 ön yüz → T-295 → T-294 → T-287d/T-314 → T-296/T-297; T-277 kartı (t277-items). Kullanıcı işi: main ruleset, Q-12, Q-102, Q-103, Q-07, sıfır-durum A/B, Android kamera geri bildirimi, iPhone denemesi.
 
