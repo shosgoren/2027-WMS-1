@@ -23,7 +23,8 @@
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "tailwindcss": "4.3.3",
-    "zod": "4.6.5"
+    "zod": "4.6.5",
+    "zxing-wasm": "3.1.5"
   },
   "devDependencies": {
     "@next/eslint-plugin-next": "16.3.8",

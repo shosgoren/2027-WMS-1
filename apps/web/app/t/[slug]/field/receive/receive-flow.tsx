@@ -7,8 +7,10 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useId, useRef, useState, useTransition } from "react";
 import { useTranslations } from "next-intl";
 import { Banner, ChevronDown, CircleAlert, CircleCheck, PackagePlus, ScanField, ScanLine } from "@wms/ui";
-import { ScannerService, type ScanSource, type ScannerSource } from "../../../../../lib/scanner/scanner-core.ts";
+import { ScannerService, gateScan, type ScanSource, type ScannerSource } from "../../../../../lib/scanner/scanner-core.ts";
 import { createKeystrokeSource } from "../../../../../lib/scanner/keystroke-source.ts";
+import { cameraFeedback, classifyCameraError, createFrameDecoder, iosShareLocation, openCamera, platformOf, startScanLoop } from "../../../../../lib/scanner/camera-source.ts";
+import type { CameraFailure, CameraSession, FrameDecoder, RejectReason } from "../../../../../lib/scanner/camera-source.ts";
 import { ErrorNotice, LineStatus, errorKeyOf, intOf, scanMismatch, submitWithKey, useKeyHolder, type ErrorInfo, type ReceiptDetail, type ReceiptLineView } from "../../receipts/receipt-form.tsx";
 import { receiveGoodsAction, resolveItemScanAction } from "../../receipts/actions.ts";
 
@@ -230,8 +232,18 @@ export function useScanner(handler: (value: string, source: ScanSource) => void,
     s.registerSource(cam);
     setService(s);
   }, []);
-  const stable = useCallback((v: string, src: ScanSource) => ref.current(v, src), []);
-  useEffect(() => (service !== null && enabled ? service.onScan(stable) : undefined), [service, enabled, stable]);
+  // Abonelik `enabled`'a BAĞLI DEĞİL: servis hazır olunca bir kez kurulur, söküm/yeniden takma penceresi yoktur (T-286 düşme yarışı).
+  // `enabled` her taramada `enabledRef` ile (render sırasında güncel) kapıda denetlenir; kapalıyken gelen okuma (klavye kaması dahil) SESSİZCE düşmez: bildirilir.
+  useEffect(() => {
+    if (service === null) return undefined;
+    return service.onScan(
+      gateScan(
+        () => enabledRef.current,
+        (v, src) => ref.current(v, src),
+        () => setDropped(true),
+      ),
+    );
+  }, [service]);
   // Okuma kapalıyken (işlem sürüyor ya da uyarı açık) gelen kamera kodu SESSİZCE düşmez: kullanıcıya bildirilir (T-313 güvenlik MINOR).
   const camera = useCallback((code: string) => {
     if (!enabledRef.current) {
@@ -244,75 +256,233 @@ export function useScanner(handler: (value: string, source: ScanSource) => void,
   return { service, camera, dropped, clearDropped };
 }
 
-interface BarcodeDetectorLike {
-  detect(source: HTMLVideoElement): Promise<readonly { rawValue: string }[]>;
-}
-type BarcodeDetectorCtor = new (options?: { formats?: string[] }) => BarcodeDetectorLike;
-const cameraCtor = (): BarcodeDetectorCtor | null =>
-  typeof window === "undefined" || typeof navigator === "undefined" || navigator.mediaDevices?.getUserMedia === undefined
-    ? null
-    : ((window as unknown as { BarcodeDetector?: BarcodeDetectorCtor }).BarcodeDetector ?? null);
+type CamPhase =
+  | { readonly phase: "starting" }
+  | { readonly phase: "scanning" }
+  | { readonly phase: "rejected"; readonly reason: RejectReason }
+  | { readonly phase: "accepted"; readonly value: string }
+  | { readonly phase: "failed"; readonly failure: CameraFailure | "decoder" };
 
-/** Kamera taraması (tarayıcı `BarcodeDetector` + `getUserMedia`); desteklenmeyen cihazda (el terminali) donanım tetiği kullanılır. */
-export function CameraOverlay({ onCode, onClose }: { onCode: (code: string) => void; onClose: () => void }) {
+/** Kamera yolu kurulabilir mi: `getUserMedia` var ya da güvenli olmayan bağlam (o durumda katman HTTPS rehberini gösterir). Yoksa donanım tetiği (el terminali). */
+const cameraPossible = (): boolean => typeof window !== "undefined" && typeof navigator !== "undefined" && (navigator.mediaDevices?.getUserMedia !== undefined || !window.isSecureContext);
+
+/** Okumadan sonra katmanın açık kalma süreleri (ms): çözüm sürerken üst sınır, çözüldükten sonra, hiçbir şey olmuyorsa. */
+const ACCEPT_MAX_MS = 10_000;
+const ACCEPT_IDLE_MS = 1500;
+const ACCEPT_AFTER_RESOLVE_MS = 700;
+
+/**
+ * Kamera katmanı (T-286): arka kamera + çözücü (yerleşik API ya da uygulama içi WASM, `camera-source.ts`). Yanlış okuma SATIR İÇİ gösterilir, katman ve kamera açık kalır;
+ * doğru okuma yeşil onay + okunan kod (çözülmüşse ürün adı) + kısa bip + titreşimle bildirilir. Hata mesajı neden + sonraki eylemi söyler; "Elle gir" her durumda görünür
+ * (kamera yoksa/izin yoksa birincil). Klavye kaması (el terminali) katman açıkken de çalışır: katman klavye kaynağını engellemez.
+ */
+export function CameraOverlay({ onCode, onClose, onManual, resolvedName }: { onCode: (code: string) => void; onClose: () => void; onManual: () => void; resolvedName?: string | undefined }) {
   const t = useTranslations("receiving");
   const video = useRef<HTMLVideoElement>(null);
-  const [failed, setFailed] = useState(false);
+  const onCodeRef = useRef(onCode);
+  onCodeRef.current = onCode;
+  const session = useRef<CameraSession | null>(null);
+  const [state, setState] = useState<CamPhase>({ phase: "starting" });
+  const [attempt, setAttempt] = useState(0);
+  const [torch, setTorch] = useState<{ supported: boolean; on: boolean; failed: boolean }>({ supported: false, on: false, failed: false });
+  const [decoderKind, setDecoderKind] = useState<"native" | "wasm" | "">("");
   useEffect(() => {
-    const Ctor = cameraCtor();
-    if (Ctor === null) {
-      setFailed(true);
-      return undefined;
-    }
-    let stream: MediaStream | null = null;
-    let timer: ReturnType<typeof setInterval> | null = null;
-    let stopped = false;
-    let sent = false;
-    const detector = new Ctor({ formats: ["ean_13", "ean_8", "code_128", "code_39", "qr_code", "data_matrix", "upc_a"] });
-    navigator.mediaDevices
-      .getUserMedia({ video: { facingMode: "environment" }, audio: false })
-      .then((st) => {
-        if (stopped) {
-          for (const tr of st.getTracks()) tr.stop();
-          return;
-        }
-        stream = st;
-        const v = video.current;
-        if (v === null) return;
-        v.srcObject = st;
-        void v.play().catch(() => undefined);
-        timer = setInterval(() => {
-          void detector
-            .detect(v)
-            .then((found) => {
-              const raw = found[0]?.rawValue;
-              // Tek uçuş kilidi: ilk okumadan sonra akış ve zamanlayıcı DURDURULUR; aynı kod ikinci kez gönderilemez (250 ms aralıklı çift okuma kapalı).
-              if (raw === undefined || raw === "" || stopped || sent) return;
-              sent = true;
-              stopped = true;
-              if (timer !== null) clearInterval(timer);
-              if (stream !== null) for (const tr of stream.getTracks()) tr.stop();
-              onCode(raw);
-            })
-            .catch(() => undefined);
-        }, 250);
-      })
-      .catch(() => setFailed(true));
+    let cancelled = false;
+    let stopLoop: (() => void) | null = null;
+    let cam: CameraSession | null = null;
+    setState({ phase: "starting" });
+    setTorch({ supported: false, on: false, failed: false });
+    void (async () => {
+      try {
+        cam = await openCamera();
+      } catch (e) {
+        if (!cancelled) setState({ phase: "failed", failure: classifyCameraError(e) });
+        return;
+      }
+      if (cancelled) {
+        cam.stop();
+        return;
+      }
+      session.current = cam;
+      const v = video.current;
+      if (v === null) {
+        // Katman yokken akış açık KALMAZ (MINOR-4): kamera hemen durdurulur.
+        cam.stop();
+        session.current = null;
+        setState({ phase: "failed", failure: "failed" });
+        return;
+      }
+      v.srcObject = cam.stream;
+      void v.play().catch(() => undefined);
+      setTorch({ supported: cam.torchSupported, on: false, failed: false });
+      let decoder: FrameDecoder;
+      try {
+        decoder = await createFrameDecoder(); // WASM yolunda çözücü burada tembel yüklenir (yalnızca tarama ekranında)
+      } catch {
+        cam.stop();
+        if (!cancelled) setState({ phase: "failed", failure: "decoder" });
+        return;
+      }
+      if (cancelled) {
+        cam.stop();
+        return;
+      }
+      setDecoderKind(decoder.kind);
+      setState({ phase: "scanning" });
+      const opened = cam;
+      stopLoop = startScanLoop({
+        decoder,
+        video: v,
+        onRejected: (reason) => {
+          cameraFeedback("bad");
+          setState({ phase: "rejected", reason });
+        },
+        onAccepted: (value) => {
+          // Tek kabul: döngü kendini durdurdu; akış da hemen kapanır (aynı kod ikinci kez gönderilemez). Katmanı kapatma kararı üsttedir (ürün çözülünce).
+          v.pause(); // son kare pencerede kalır (okunan barkod görünür)
+          opened.stop();
+          cameraFeedback("ok");
+          setState({ phase: "accepted", value });
+          onCodeRef.current(value);
+        },
+      });
+    })();
     return () => {
-      stopped = true;
-      if (timer !== null) clearInterval(timer);
-      if (stream !== null) for (const tr of stream.getTracks()) tr.stop();
+      cancelled = true;
+      if (stopLoop !== null) stopLoop();
+      cam?.stop();
+      session.current = null;
     };
-  }, [onCode]);
+  }, [attempt]);
+
+  const toggleTorch = (): void => {
+    const s = session.current;
+    if (s === null) return;
+    const next = !torch.on;
+    void s.setTorch(next).then((ok) => setTorch((p) => ({ ...p, on: ok ? next : p.on, failed: !ok })));
+  };
+  const failed = state.phase === "failed";
+  const live = state.phase === "starting" || state.phase === "scanning" || state.phase === "rejected";
+  const platform = typeof navigator === "undefined" ? "other" : platformOf(navigator.userAgent, navigator.maxTouchPoints);
+  const failureKey = state.phase !== "failed" ? "" : state.failure === "denied" ? `denied_${platform}` : state.failure;
+  const message = ((): { key: string; role: "status" | "alert"; tone: "plain" | "bad" | "good" } => {
+    switch (state.phase) {
+      case "starting":
+        return { key: "camera.hint", role: "status", tone: "plain" };
+      case "scanning":
+        return { key: torch.failed ? "camera.torchFailed" : "camera.hint", role: torch.failed ? "alert" : "status", tone: "plain" };
+      case "rejected":
+        return { key: `camera.rejected.${state.reason}`, role: "alert", tone: "bad" };
+      case "accepted":
+        return { key: "camera.accepted", role: "status", tone: "good" };
+      case "failed":
+        return { key: `camera.error.${failureKey}`, role: "alert", tone: "bad" };
+    }
+  })();
+  const TONE = { plain: "text-on-accent", bad: "rounded-card bg-danger-bg px-3 py-2 text-danger-ink", good: "rounded-card bg-success-bg px-3 py-2 text-success-ink" } as const;
+  const text = (
+    <p role={message.role} data-testid="camera-status" data-tone={message.tone} className={`flex min-w-0 items-start gap-2 break-words text-lg font-bold ${TONE[message.tone]}`}>
+      {message.tone === "bad" ? <CircleAlert aria-hidden="true" className="mt-0.5 size-6 shrink-0" strokeWidth={2.25} /> : null}
+      {message.tone === "good" ? <CircleCheck aria-hidden="true" className="mt-0.5 size-6 shrink-0" strokeWidth={2.25} /> : null}
+      <span className="min-w-0 flex-1">
+        {t(message.key)}
+        {state.phase === "accepted" ? (
+          <span data-testid="camera-accepted-value" className="block truncate">
+            {resolvedName ?? state.value}
+          </span>
+        ) : null}
+      </span>
+    </p>
+  );
+  const btn = `flex min-h-12 min-w-12 flex-1 items-center justify-center whitespace-nowrap rounded-control border-2 border-on-accent bg-transparent px-3 text-base font-bold text-on-accent ${FOCUS}`;
+  // İzin/kamera yokken "Elle gir" birincil (dolu), "Tekrar dene" ikincil (çerçeveli).
+  const primaryBtn = `flex min-h-12 min-w-12 basis-full items-center justify-center whitespace-nowrap rounded-control border-2 border-on-accent bg-on-accent px-3 text-base font-bold text-ink landscape:basis-auto ${FOCUS}`;
   return (
-    <div role="dialog" aria-modal="true" aria-label={t("camera.title")} data-testid="camera-overlay" className="fixed inset-0 z-40 flex flex-col gap-3 bg-ink p-4 text-on-accent">
-      <p className="text-center text-xl font-bold">{failed ? t("camera.failed") : t("camera.hint")}</p>
-      <video ref={video} muted playsInline className="min-h-0 w-full flex-1 rounded-card bg-ink object-cover" />
-      <button type="button" onClick={onClose} className={`flex min-h-14 w-full items-center justify-center rounded-control border-2 border-on-accent bg-transparent px-4 text-lg font-bold text-on-accent ${FOCUS}`}>
-        {t("cancel")}
-      </button>
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={t("camera.title")}
+      data-testid="camera-overlay"
+      data-phase={state.phase}
+      data-decoder={decoderKind}
+      className="fixed inset-0 z-40 grid grid-rows-[auto_minmax(0,1fr)_auto] gap-3 overflow-hidden bg-ink p-3 text-on-accent landscape:grid-cols-[minmax(0,1fr)_20rem] landscape:grid-rows-[minmax(0,1fr)_auto]"
+    >
+      <div className="row-start-1 landscape:col-start-2 landscape:self-center">{text}</div>
+      <div data-testid="camera-viewport" className="relative row-start-2 min-h-0 min-w-0 overflow-hidden rounded-card bg-ink landscape:col-start-1 landscape:row-span-2 landscape:row-start-1">
+        <video ref={video} muted playsInline data-testid="camera-video" className={`size-full object-cover ${failed ? "invisible" : ""}`} />
+        {live ? <div aria-hidden="true" data-testid="camera-reticle" className="pointer-events-none absolute inset-x-[10%] inset-y-[25%] rounded-card border-4 border-success" /> : null}
+        {state.phase === "starting" ? (
+          <p role="status" data-testid="camera-opening" className="absolute inset-x-0 top-1/2 mx-auto w-fit max-w-[90%] -translate-y-1/2 rounded-control bg-ink px-4 py-2 text-center text-lg font-bold text-on-accent">
+            {t("camera.starting")}
+          </p>
+        ) : null}
+        {failed ? (
+          <div data-testid="camera-off" className="absolute inset-0 flex flex-col items-center justify-center gap-2 p-2 text-center text-on-accent">
+            <ScanLine aria-hidden="true" className="size-14 text-border-strong" strokeWidth={1.75} />
+            <p className="text-lg font-bold">{t("camera.off")}</p>
+          </div>
+        ) : null}
+      </div>
+      <div className="row-start-3 flex min-w-0 flex-wrap gap-2 landscape:col-start-2 landscape:row-start-2 landscape:flex-col landscape:flex-nowrap">
+        {failed ? (
+          <button type="button" onClick={onManual} className={primaryBtn}>
+            {t("flow.manual")}
+          </button>
+        ) : null}
+        {failed && state.failure !== "none" && state.failure !== "insecure" ? (
+          <button type="button" onClick={() => setAttempt((n) => n + 1)} className={btn}>
+            {t("camera.retry")}
+          </button>
+        ) : null}
+        {torch.supported && !failed && state.phase !== "accepted" ? (
+          <button type="button" aria-pressed={torch.on} onClick={toggleTorch} className={btn}>
+            {torch.on ? t("camera.torchOff") : t("camera.torchOn")}
+          </button>
+        ) : null}
+        {failed ? null : (
+          <button type="button" onClick={onManual} className={btn}>
+            {t("flow.manual")}
+          </button>
+        )}
+        <button type="button" onClick={onClose} className={btn}>
+          {t("cancel")}
+        </button>
+      </div>
     </div>
   );
+}
+
+
+const INSTALL_HINT_KEY = "wms.installHint.dismissed";
+
+/**
+ * iPhone'da (tüm tarayıcılar WebKit) uygulama henüz ana ekrana eklenmemişse tek satır rehber: "Paylaş > Ana Ekrana Ekle". Kapatılınca (Tamam) bir daha gösterilmez.
+ * Android'de tarayıcı kendi "Ana ekrana ekle" yolunu sunar (manifest, `app/manifest.ts`); rehber yalnızca iPhone içindir.
+ */
+function useInstallHint(): { show: boolean; where: "bottom" | "address"; dismiss: () => void } {
+  const [show, setShow] = useState(false);
+  const [where, setWhere] = useState<"bottom" | "address">("bottom");
+  useEffect(() => {
+    if (platformOf(navigator.userAgent, navigator.maxTouchPoints) !== "ios") return;
+    const standalone = (navigator as unknown as { standalone?: boolean }).standalone === true || window.matchMedia("(display-mode: standalone)").matches;
+    let dismissed = false;
+    try {
+      dismissed = window.localStorage.getItem(INSTALL_HINT_KEY) === "1";
+    } catch {
+      dismissed = false; // depolama kapalı (gizli sekme): rehber her açılışta görünür, hata değildir
+    }
+    setWhere(iosShareLocation(navigator.userAgent));
+    setShow(!standalone && !dismissed);
+  }, []);
+  const dismiss = useCallback(() => {
+    setShow(false);
+    try {
+      window.localStorage.setItem(INSTALL_HINT_KEY, "1");
+    } catch {
+      // depolama kapalı: bu oturumda gizlenir
+    }
+  }, []);
+  return { show, where, dismiss };
 }
 
 /**
@@ -322,6 +492,7 @@ export function CameraOverlay({ onCode, onClose }: { onCode: (code: string) => v
 export function ScanPanel({ service, prompt, last, lastName, ready, hue }: { service: ScannerService | null; prompt: string; last: string; lastName?: string; ready: boolean; hue: FlowHue }) {
   const t = useTranslations("receiving");
   const wrap = useRef<HTMLDivElement>(null);
+  const install = useInstallHint();
   return (
     <section
       data-testid="scan-panel"
@@ -355,37 +526,80 @@ export function ScanPanel({ service, prompt, last, lastName, ready, hue }: { ser
       >
         {t("flow.manual")}
       </button>
+      {install.show ? (
+        <div data-testid="install-hint" className="flex w-full min-w-0 items-center gap-2 border-t-2 border-border pt-2 text-left">
+          <p className="min-w-0 flex-1 break-words text-base font-semibold text-ink">{t(install.where === "address" ? "camera.installHintChrome" : "camera.installHintSafari")}</p>
+          <button type="button" onClick={install.dismiss} className={`flex min-h-12 min-w-12 shrink-0 items-center justify-center rounded-control border-2 border-border-strong px-3 text-base font-bold text-ink ${FOCUS}`}>
+            {t("camera.ok")}
+          </button>
+        </div>
+      ) : null}
     </section>
   );
 }
 
-/** Tarama adımının birincil düğmesi: kamera varsa kamerayı açar; yoksa okuyucuyu (el terminali tetiği) hazırlar ve yönerge gösterir. */
-export function useScanPrimary(camera: (code: string) => void): { ready: boolean; press: () => void; overlay: React.ReactNode } {
+/** Okuma sonucu (üst akıştan): kamera katmanı okunan kod çözülene kadar açık kalır ve ürün/lokasyon adını gösterir. */
+export interface ScanOutcome {
+  readonly busy: boolean;
+  readonly name: string | undefined;
+  readonly alerting: boolean;
+}
+
+/**
+ * Tarama adımının birincil düğmesi: kamera yolu kurulabiliyorsa kamera katmanını açar (telefon; T-286); kurulamıyorsa okuyucuyu (el terminali tetiği) hazırlar.
+ * El terminali (klavye kaması) kamera katmanı açıkken de açıkken de çalışır: kaynak servistedir, katmana bağlı değildir.
+ */
+export function useScanPrimary(camera: (code: string) => void, outcome: ScanOutcome): { ready: boolean; press: () => void; overlay: React.ReactNode } {
   const [cam, setCam] = useState(false);
   const [ready, setReady] = useState(false);
+  const [accepted, setAccepted] = useState(false);
+  const wantManual = useRef(false);
   const onCode = useCallback(
     (code: string) => {
-      setCam(false);
+      setAccepted(true);
       camera(code);
     },
     [camera],
   );
+  const close = useCallback(() => {
+    setCam(false);
+    setAccepted(false);
+  }, []);
+  const onManual = useCallback(() => {
+    wantManual.current = true;
+    close();
+  }, [close]);
+  // Okuma kabul edildi: çözüm sürerken (busy) katman açık kalır (üst sınır ACCEPT_MAX_MS); çözülünce (ad geldi ya da hata uyarısı açıldı) kısa süre sonra,
+  // hiçbir şey olmuyorsa (okuma kapalı vb.) ACCEPT_IDLE_MS sonra kapanır.
+  useEffect(() => {
+    if (!accepted) return undefined;
+    const resolved = outcome.name !== undefined || outcome.alerting;
+    const ms = outcome.busy ? ACCEPT_MAX_MS : resolved ? ACCEPT_AFTER_RESOLVE_MS : ACCEPT_IDLE_MS;
+    const timer = setTimeout(close, ms);
+    return () => clearTimeout(timer);
+  }, [accepted, outcome.busy, outcome.name, outcome.alerting, close]);
+  // "Elle gir": katman kapanınca tarama panelindeki ScanField elle giriş kipine geçer (aynı bileşen, ikinci bir giriş yolu yok).
+  useEffect(() => {
+    if (cam || !wantManual.current) return;
+    wantManual.current = false;
+    document.querySelector<HTMLButtonElement>('[data-testid="scan-panel"] [data-mode="scan"] > button')?.click();
+  }, [cam]);
   const press = (): void => {
-    if (cameraCtor() !== null) setCam(true);
+    if (cameraPossible()) setCam(true);
     else {
       setReady(true);
       if (typeof navigator !== "undefined" && typeof navigator.vibrate === "function") navigator.vibrate(30);
     }
   };
-  return { ready, press, overlay: cam ? <CameraOverlay onCode={onCode} onClose={() => setCam(false)} /> : null };
+  return { ready, press, overlay: cam ? <CameraOverlay onCode={onCode} onClose={close} onManual={onManual} resolvedName={accepted ? outcome.name : undefined} /> : null };
 }
 
-/** Okuma kapalıyken gelen kod bildirimi (uyarı açıkken de görünür: üstte, `z-[60]`). */
+/** Okuma kapalıyken gelen kod bildirimi (kaynaktan bağımsız: kamera ya da klavye kaması). Uyarı açıkken de görünür: en üstte (`top-2`, `z-[60]`); tam ekran uyarının başlığı simgenin altında olduğundan başlığı örtmez. */
 export function DroppedNotice({ show, onClose }: { show: boolean; onClose: () => void }) {
   const t = useTranslations("receiving");
   if (!show) return null;
   return (
-    <div role="alert" data-testid="camera-dropped" className="fixed inset-x-4 top-16 z-[60] mx-auto flex max-w-md items-center gap-3 rounded-card border-2 border-warning bg-warning-bg px-4 py-3 text-warning-ink shadow-card">
+    <div role="alert" data-testid="camera-dropped" className="fixed inset-x-4 top-2 z-[60] mx-auto flex max-w-md items-center gap-3 rounded-card border-2 border-warning bg-warning-bg px-4 py-3 text-warning-ink shadow-card">
       <p className="min-w-0 flex-1 break-words text-base font-bold">{t("camera.dropped")}</p>
       <button type="button" onClick={onClose} className={`flex min-h-12 min-w-12 shrink-0 items-center justify-center rounded-control border-2 border-warning-ink px-3 text-base font-bold ${FOCUS}`}>
         {t("camera.ok")}
@@ -490,7 +704,7 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
     [busy, alert, slug, stage, picked, receipt],
   );
   const { service: scanner, camera, dropped, clearDropped } = useScanner((v) => void onScanned(v), stage !== "done" && alert === null && !busy);
-  const scanPrimary = useScanPrimary(camera);
+  const scanPrimary = useScanPrimary(camera, { busy, name: lastName, alerting: alert !== null });
 
   async function confirm() {
     if (picked === null || busy) return;
@@ -544,6 +758,13 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
 
   const icon = <PackagePlus aria-hidden="true" className="size-6" />;
 
+  // Kamera katmanı aşama değişse de aynı konumda (kök parça, 2. çocuk) kalır: okunan ürün adı katmanda görünür, kamera yeniden açılmaz.
+  const withOverlay = (node: React.ReactNode): React.ReactElement => (
+    <>
+      {node}
+      {scanPrimary.overlay}
+    </>
+  );
   if (receipt.receivingLocations.length === 0) {
     return (
       <FlowShell hue="green" icon={icon} step={2} total={4} title={t("flow.noLocationTitle")} backHref={base} footer={<PrimaryLink href={base}>{t("flow.otherReceipt")}</PrimaryLink>}>
@@ -556,7 +777,7 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
 
   if (stage === "done" && done !== null) {
     const finished = open.length === 0 || (done.remaining === 0 && open.length <= 1);
-    return (
+    return withOverlay(
       <>
         <FlowShell
           hue="green"
@@ -589,7 +810,7 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
 
   if (stage === "qty" && picked !== null) {
     const max = intOf(picked.line.open);
-    return (
+    return withOverlay(
       <>
         <FlowShell
           hue="green"
@@ -684,13 +905,13 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
 
   // Tarama adımı (ya da tüm satırlar tamamsa bitiş).
   if (open.length === 0) {
-    return (
+    return withOverlay(
       <FlowShell hue="green" icon={icon} step={4} total={4} title={t("flow.receiptDone")} footer={<PrimaryLink href={base}>{t("flow.otherReceipt")}</PrimaryLink>}>
         <p className="text-base text-ink">{t("flow.allDone")}</p>
       </FlowShell>
     );
   }
-  return (
+  return withOverlay(
     <>
       <FlowShell
         hue="green"
@@ -718,7 +939,6 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
           </ul>
         </section>
       </FlowShell>
-      {scanPrimary.overlay}
       {alertView}
     </>
   );

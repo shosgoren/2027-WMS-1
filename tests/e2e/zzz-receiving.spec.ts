@@ -109,6 +109,14 @@ async function cleanup(): Promise<void> {
   }
 }
 
+// Hız sınırı kovası yalıtımı (T-286): receiving-desktop ve receiving-mobile AYNI demo kullanıcısıyla (Yönetici) koşar; "web.user" kovası (120/dk, kullanıcı başına)
+// iki projenin ardışık trafiğini aynı dakikada toplar (yerelde tepe ~70/dk; CI'da pencere sınırına denk gelince aşılıp tam ekran RATE_LIMITED veriyordu).
+// Her test kendi kullanıcı kovasıyla başlar: yalnızca sayaç satırları temizlenir (yerel e2e DB'si, migration rolü); üretim eşiği/kuralı değişmez, test içi trafik hâlâ sınırlıdır.
+test.beforeEach(async () => {
+  // Giriş (`auth_rate_limits`) sayaçlarına dokunulmaz: proje başına ayrı IP ve test başına tek giriş bütçesi aşılırsa e2e kırmızı vermelidir.
+  await db("DELETE FROM public.request_rate_limits WHERE scope = 'web.user'");
+});
+
 test.afterAll(async () => {
   await cleanup();
 });
@@ -254,12 +262,16 @@ async function screens(page: Page, projectName: string): Promise<void> {
     await page.goto(`/t/demo/field/receive?receipt=${fx.receiptId}`);
     await page.waitForLoadState("networkidle");
     await shot("receive-scan");
-    // Tarama adımı: tek birincil "Barkodu okut" (Elle gir ikincil); okuyucu/kamera yoksa hazır vurgusu.
+    // Tarama adımı: tek birincil "Barkodu okut" (Elle gir ikincil).
     const primary = page.locator('[data-variant="primary"]:visible');
     await expect(primary).toHaveCount(1);
     await expect(primary).toHaveText("Barkodu okut");
     await primary.click();
-    await expect(page.getByTestId("scan-panel")).toHaveAttribute("data-ready", "true");
+    // T-286: kamera yolu telefonların hepsinde kurulabilir (uygulama içi çözücü); bu koşuda sahte kamera aygıtı yok → katman açılır ve kamera rehberini gösterir.
+    // Vazgeç ile ekrana dönülür; klavye kaması (aşağıdaki tarama) kamera katmanından bağımsız çalışır.
+    await expect(page.getByTestId("camera-overlay")).toBeVisible();
+    await page.getByRole("button", { name: "Vazgeç" }).click();
+    await expect(page.getByTestId("camera-overlay")).toHaveCount(0);
     await scan(page, "0000000000000");
     await expect(page.getByTestId("scan-alert")).toBeVisible();
     const a = await page.getByTestId("scan-alert").boundingBox();

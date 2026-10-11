@@ -5,6 +5,7 @@ import { createKeystrokeSource } from "./keystroke-source.ts";
 import type { KeyEventLike, KeyTargetLike } from "./keystroke-source.ts";
 import { SCANNER_CONFIG } from "./scanner-config.ts";
 import { ScannerService, parseScannedGs1 } from "./scanner-service.ts";
+import { gateScan } from "./scanner-core.ts";
 import type { ScanSource } from "./scanner-service.ts";
 
 const P = SCANNER_CONFIG.prefix;
@@ -137,5 +138,61 @@ describe("ScannerService keystroke", () => {
     expect(s.listeners.size).toBe(1);
     s.unsub();
     expect(s.listeners.size).toBe(0);
+  });
+});
+
+describe("gateScan (T-286 düşme yarışı)", () => {
+  function gated() {
+    const s = setup();
+    s.unsub();
+    let enabled = true;
+    const delivered: Array<[string, ScanSource]> = [];
+    let dropped = 0;
+    s.service.onScan(
+      gateScan(
+        () => enabled,
+        (v, src) => delivered.push([v, src]),
+        () => dropped++,
+      ),
+    );
+    return { ...s, delivered, setEnabled: (v: boolean) => void (enabled = v), dropped: () => dropped };
+  }
+
+  it("kapalı → açık geçişinin hemen ardından (aynı tik) gelen klavye taraması işlenir; abonelik sökülmediği için dinleyici sayısı değişmez", () => {
+    const g = gated();
+    g.setEnabled(false);
+    expect(g.listeners.size).toBe(1);
+    g.setEnabled(true);
+    g.scan("BARCODE.koli");
+    expect(g.delivered).toEqual([["BARCODE.koli", "keystroke"]]);
+    expect(g.dropped()).toBe(0);
+    expect(g.listeners.size).toBe(1);
+  });
+
+  it("kapalıyken gelen klavye taraması iletilmez ama bildirilir (sessiz düşmez)", () => {
+    const g = gated();
+    g.setEnabled(false);
+    g.scan("A1");
+    expect(g.delivered).toEqual([]);
+    expect(g.dropped()).toBe(1);
+  });
+
+  it("kapalıyken elle giriş bildirim üretmez (donanım taraması değildir)", () => {
+    const g = gated();
+    g.setEnabled(false);
+    g.service.submitManual("A1");
+    expect(g.delivered).toEqual([]);
+    expect(g.dropped()).toBe(0);
+  });
+
+  it("kapalıyken insan yazımı (önek yok; yavaş ya da hızlı) yakalanmaz, bildirilmez ve olay engellenmez", () => {
+    const g = gated();
+    g.setEnabled(false);
+    for (const ch of "12 34") g.press(ch, 120);
+    for (const ch of "99") g.press(ch, 1);
+    g.press("Enter", 1);
+    expect(g.dropped()).toBe(0);
+    expect(g.delivered).toEqual([]);
+    expect(g.prevented).toEqual([]);
   });
 });

@@ -121,7 +121,7 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
   );
   const scanning = stage === "source" || stage === "item" || stage === "target";
   const { service: scanner, camera, dropped, clearDropped } = useScanner((v) => void onScanned(v), scanning && alert === null && !busy);
-  const scanPrimary = useScanPrimary(camera);
+  const scanPrimary = useScanPrimary(camera, { busy, name: lastName, alerting: alert !== null });
 
   async function confirm() {
     if (busy || source === null || item === null || target === null) return;
@@ -185,8 +185,15 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
   };
   const backProps = prev[stage] === undefined ? { backHref: task === null ? fieldHome : tasksHref } : { onBack: back };
 
+  // Kamera katmanı aşama değişse de aynı konumda (kök parça, 2. çocuk) kalır: okunan ürün adı katmanda görünür, kamera yeniden açılmaz.
+  const withOverlay = (node: React.ReactNode): React.ReactElement => (
+    <>
+      {node}
+      {scanPrimary.overlay}
+    </>
+  );
   if (stage === "done" && donePair !== null) {
-    return (
+    return withOverlay(
       <>
         <FlowShell
           hue="teal"
@@ -227,7 +234,7 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
   }
 
   if (stage === "confirm" && source !== null && item !== null && target !== null) {
-    return (
+    return withOverlay(
       <>
         <FlowShell
           hue="teal"
@@ -275,7 +282,7 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
   }
 
   const titleKey = stage === "source" ? "putaway.sourceTitle" : stage === "item" ? "putaway.itemTitle" : "putaway.targetTitle";
-  return (
+  return withOverlay(
     <>
       <FlowShell
         hue="teal"
@@ -301,7 +308,6 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
         ) : null}
         <ScanPanel service={scanner} prompt={busy ? t("flow.checking") : t(stage === "item" ? "putaway.itemPrompt" : stage === "source" ? "putaway.sourcePrompt" : "putaway.targetPrompt")} last={last} {...(lastName === undefined ? {} : { lastName })} ready={scanPrimary.ready && last === ""} hue="teal" />
       </FlowShell>
-      {scanPrimary.overlay}
       {alertView}
     </>
   );

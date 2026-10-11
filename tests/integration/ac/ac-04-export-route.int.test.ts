@@ -290,7 +290,8 @@ describe("güvenlik (AC-04 değil): T-127 hız sınırı eşiği ve CSP", () => 
     const script = csp(r1).split("; ").find((d) => d.startsWith("script-src ")) ?? "";
     expect(script).not.toContain("'unsafe-inline'");
     for (const directive of ["default-src 'self'", "frame-ancestors 'none'", "object-src 'none'", "base-uri 'none'", "form-action 'self'"]) expect(csp(r1)).toContain(directive);
-    expect(buildCsp("n", false)).not.toContain("unsafe-eval");
+    // `wasm-unsafe-eval` (T-286) yalnızca WASM derlemesine izin verir; JS `unsafe-eval` yasak sürer.
+    expect(buildCsp("n", false)).not.toMatch(/(?<!wasm-)unsafe-eval/);
     const redirect = proxy(req(`/t/${B.slug}/audit`));
     expect(redirect.status).toBe(307);
     expect(csp(redirect)).toContain("nonce-");

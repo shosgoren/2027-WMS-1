@@ -56,6 +56,7 @@ Kaynak sözdizimi: `<dosya>#<json.yolu>` (package.json alanı) veya `docker-comp
 | Tailwind PostCSS eklentisi | @tailwindcss/postcss | 4.3.3 | apps/web/package.json#dependencies.@tailwindcss/postcss | T-109 |
 | Shadcn/Radix | — | — ilk kullanan kart | | |
 | Lucide | lucide-react | 1.52.0 | packages/ui/package.json#dependencies.lucide-react | T-110 |
+| Uygulama içi barkod çözücü (zxing-cpp WASM; MIT, zxing-cpp Apache-2.0; yalnızca tarama ekranında tembel yüklenir; WASM `locateFile` ile kendi kaynağımızdan sunulur, varsayılan jsDelivr adresi KULLANILMAZ; CSP `'wasm-unsafe-eval'`) | zxing-wasm | 3.1.5 | apps/web/package.json#dependencies.zxing-wasm | T-286, A-29 |
 | next-intl | next-intl | 4.14.9 | apps/web/package.json#dependencies.next-intl | T-109, ADR-002 |
 
 Sürüm notları (kaynak: kurulu `package.json`/`pnpm-lock.yaml`, 2026-10-05):

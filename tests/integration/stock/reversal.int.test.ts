@@ -575,11 +575,44 @@ describe("M-2 / m-2 / m-3: satır bağı, denetim, I-09 miktarı, kapasite", () 
     const c = await reverse(g.id, "ALL"); // kalan 41: 41/3 tam değil → temel birim
     expect(await rows(c.documentId)).toEqual([{ unit_id: A.unitId, quantity: "41.000000", conversion_factor: "1.000000", base_quantity: "41.000000" }]);
     expect(await lineRow(lid)).toMatchObject({ reversed_quantity: "102.000000", reversal_status: "FULL" });
-    // tüm ters satırlarda base = round(quantity × katsayı, 6) (I-09)
+    // tüm ters satırlarda base = quantity × katsayı KESİN çarpım (I-09; numeric çarpımı yuvarlamaz)
     const bad = await q<{ n: string }>(
       `SELECT count(*)::text AS n FROM public.document_lines l JOIN public.documents d ON d.tenant_id = l.tenant_id AND d.id = l.document_id
-        WHERE d.reversal_of_document_id = $1 AND round(l.quantity * l.conversion_factor, 6) <> l.base_quantity`, [g.id]);
+        WHERE d.reversal_of_document_id = $1 AND l.quantity * l.conversion_factor <> l.base_quantity`, [g.id]);
     expect(bad[0]?.n).toBe("0");
+  });
+
+  it("T-298: katsayı 0,333333, temel 1 → eski yuvarlama 3,000003 (kesin çarpım 0,999999999999) yazardı; yeni: temel birim, katsayı 1", async () => {
+    const x = await mkItem("NONE", 6);
+    const loc = await mkLoc();
+    const g = await mkPosted("STOCK_IN", [ln(x, { targetLocationId: loc, unitId: A.boxUnitId, quantity: "1000000", conversionFactor: "0.333333", baseQuantity: "333333" })]);
+    const r = await reverse(g.id, [{ lineId: g.lineIds[0] as string, quantity: "1" }]);
+    const rows = await q<{ unit_id: string; quantity: string; conversion_factor: string; base_quantity: string }>(
+      "SELECT unit_id, quantity::text AS quantity, conversion_factor::text AS conversion_factor, base_quantity::text AS base_quantity FROM public.document_lines WHERE document_id = $1", [r.documentId]);
+    expect(rows).toEqual([{ unit_id: A.unitId, quantity: "1.000000", conversion_factor: "1.000000", base_quantity: "1.000000" }]);
+  });
+
+  it("T-298: T-287/T-290 öncesi yuvarlamayla yazılmış eski satır (3 × 0,333333 ≠ 1) ters kayıtta reddedilmez; tam ve kısmi ters temel birime düşer", async () => {
+    const x = await mkItem("NONE", 6);
+    const loc = await mkLoc();
+    const g = await mkPosted("STOCK_IN", [ln(x, { targetLocationId: loc, unitId: A.boxUnitId, quantity: "1", conversionFactor: "1", baseQuantity: "1" })]);
+    // Eski kural satırı: miktar 3, katsayı 0,333333, temel 1 (round(0,999999)=1). İşlenmiş satır değişmezdir; fikstür tetikleyiciyi yalnızca bu oturumda atlar.
+    await adm.query("BEGIN");
+    try {
+      await adm.query("SET LOCAL session_replication_role = replica");
+      await adm.query("UPDATE public.document_lines SET quantity = 3, conversion_factor = 0.333333 WHERE id = $1", [g.lineIds[0]]);
+      await adm.query("COMMIT");
+    } catch (e) {
+      await adm.query("ROLLBACK");
+      throw e;
+    }
+    const rows = async (docId: unknown) =>
+      q<{ unit_id: string; quantity: string; conversion_factor: string; base_quantity: string }>(
+        "SELECT unit_id, quantity::text AS quantity, conversion_factor::text AS conversion_factor, base_quantity::text AS base_quantity FROM public.document_lines WHERE document_id = $1", [docId]);
+    const part = await reverse(g.id, [{ lineId: g.lineIds[0] as string, quantity: "0.5" }]);
+    expect(await rows(part.documentId)).toEqual([{ unit_id: A.unitId, quantity: "0.500000", conversion_factor: "1.000000", base_quantity: "0.500000" }]);
+    const rest = await reverse(g.id, "ALL");
+    expect(await rows(rest.documentId)).toEqual([{ unit_id: A.unitId, quantity: "0.500000", conversion_factor: "1.000000", base_quantity: "0.500000" }]);
   });
 
   it("kapasite aynı boyutu paylaşan satırları birlikte hesaplar (toplam kullanılabilir iki satıra tekrar sayılmaz)", async () => {
