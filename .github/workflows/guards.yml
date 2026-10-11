@@ -43,9 +43,11 @@ on:
       - main
 
 concurrency:
-  group: guards-${{ github.event.pull_request.number || github.ref }}
-  # main push koşuları iptal edilmez: her push kendi aralığını doğrular; iptal edilen koşu
-  # iki push'a bölünmüş kapsam dışı commit'i gizleyebilir (T-299 SR @1e53492 MAJOR).
+  # main push koşuları ne çalışırken ne beklerken iptal edilir: her push yalnız kendi
+  # before..sha aralığını doğrular; iptal edilen (çalışan ya da kuyrukta bekleyen) koşu
+  # bölünmüş push'larla kapsam dışı commit'i gizleyebilir (T-299 SR @1e53492, @3b33440).
+  # Push'ta grup koşu başına benzersizdir; PR'da PR numarası (yeni push eskisini iptal eder).
+  group: guards-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name != 'push' }}
 
 permissions:

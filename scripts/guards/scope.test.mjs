@@ -1000,12 +1000,16 @@ describe("T-299 main push kipi: PR birleştirme commit'inden dal çözümü", ()
   });
 });
 
-describe("guards.yml eşzamanlılık (T-299 SR @1e53492 MAJOR)", () => {
-  it("push olayında koşu iptal edilmez; PR olayında edilir", () => {
+describe("guards.yml eşzamanlılık (T-299 SR @1e53492, @3b33440 MAJOR)", () => {
+  it("push koşusu çalışırken/beklerken iptal edilmez; PR olayında edilir", () => {
     const yml = readFileSync(path.join(import.meta.dirname, "../../.github/workflows/guards.yml"), "utf8");
     const block = yml.match(/^concurrency:\n((?: {2}.*\n)+)/m);
     expect(block).not.toBeNull();
     const cancel = (block?.[1] ?? "").match(/^ {2}cancel-in-progress: (.+)$/m);
     expect(cancel?.[1]).toBe("${{ github.event_name != 'push' }}");
+    // Bekleyen koşu da iptal edilebildiğinden push grubu koşu başına benzersiz olmalı (@3b33440 MAJOR).
+    // Koruma çizgisi: metin eşleşmesidir, GitHub'ın kuyruk davranışını kanıtlamaz.
+    const group = (block?.[1] ?? "").match(/^ {2}group: (.+)$/m);
+    expect(group?.[1]).toBe("guards-${{ github.event.pull_request.number || github.run_id }}");
   });
 });
