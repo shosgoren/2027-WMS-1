@@ -999,3 +999,13 @@ describe("T-299 main push kipi: PR birleştirme commit'inden dal çözümü", ()
     expect((await check(r.dir, ["--push-before=a", "--push-before=b"])).code).toBe(2);
   });
 });
+
+describe("guards.yml eşzamanlılık (T-299 SR @1e53492 MAJOR)", () => {
+  it("push olayında koşu iptal edilmez; PR olayında edilir", () => {
+    const yml = readFileSync(path.join(import.meta.dirname, "../../.github/workflows/guards.yml"), "utf8");
+    const block = yml.match(/^concurrency:\n((?: {2}.*\n)+)/m);
+    expect(block).not.toBeNull();
+    const cancel = (block?.[1] ?? "").match(/^ {2}cancel-in-progress: (.+)$/m);
+    expect(cancel?.[1]).toBe("${{ github.event_name != 'push' }}");
+  });
+});

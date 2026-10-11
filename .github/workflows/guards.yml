@@ -44,7 +44,9 @@ on:
 
 concurrency:
   group: guards-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # main push koşuları iptal edilmez: her push kendi aralığını doğrular; iptal edilen koşu
+  # iki push'a bölünmüş kapsam dışı commit'i gizleyebilir (T-299 SR @1e53492 MAJOR).
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 permissions:
   contents: read
