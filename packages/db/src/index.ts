@@ -156,8 +156,8 @@ export { sameConnectionTarget } from "./connection-target.ts";
 // Demo tenant kimliği (T-123): slug'tan türetilen sabit; worker ve domain aynı sabiti kullanır. `ensureDemoTenant` yalnızca migrate.ts'tedir.
 export { DEMO_TENANT_ID, DEMO_TENANT_NAME, DEMO_TENANT_NAMESPACE, DEMO_TENANT_SLUG, demoModeEnabled, uuidV5 } from "./demo-tenant.ts";
 // Sağlık yoklamaları (T-129): `/api/health` DB ve kuyruk şeması erişimi (satır okumaz).
-export { createHealthProbe, getHealthProbe } from "./health.ts";
-export type { HealthProbe, HealthProbeOptions, HealthSnapshot, ProbeResult } from "./health.ts";
+export { WORKER_HEALTH_THRESHOLDS, WORKER_HEARTBEAT_INTERVAL_MS, createHealthProbe, evaluateWorkerMetrics, getHealthProbe, recordWorkerHeartbeat } from "./health.ts";
+export type { HealthProbe, HealthProbeOptions, HealthSnapshot, ProbeResult, WorkerHeartbeatInput, WorkerMetrics } from "./health.ts";
 // Stok çekirdeği tabloları (T-232): yalnızca TİPLER; tablo nesneleri `@wms/db/internal/schema` alt yolundadır.
 export type {
   NewReservation,

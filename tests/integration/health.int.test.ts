@@ -34,7 +34,9 @@ async function freePort(): Promise<number> {
 
 describe("health probe (wms_app, gerçek DB)", () => {
   it("DB ve kuyruk şeması erişilebilir → ok", async () => {
-    expect(await open(env.databaseUrl).check()).toEqual({ db: { ok: true }, queue: { ok: true } });
+    // db/queue alanları sıkı karşılaştırılır; worker/progress T-282'dir (heartbeat durumuna bağlı) ve tests/integration/health/worker-health.int.test.ts'te sınanır.
+    const r = await open(env.databaseUrl).check();
+    expect({ db: r.db, queue: r.queue }).toEqual({ db: { ok: true }, queue: { ok: true } });
   });
 
   it("ulaşılamayan DB → ok:false/error (ayrıntı yok: yalnızca sınıf adı)", async () => {

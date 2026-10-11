@@ -4,6 +4,7 @@
 // üretilemez; bu testte davetin reddi doğrulanır (rapor: "kart eki gerekli").
 import { expect, test } from "@playwright/test";
 import type { Page, TestInfo } from "@playwright/test";
+import { enterDemoReal } from "./support/demo-session.ts";
 
 const DEMO_BANNER = "Demo ortamı — gerçek kişisel veri girmeyin";
 
@@ -134,7 +135,7 @@ test.describe("demo akışı", () => {
     await expectNoHorizontalOverflow(page, "landing");
 
     // Demo girişi → /t/demo.
-    await enter.click();
+    await enterDemoReal(page, "Yönetici");
     await expect(page).toHaveURL(/\/t\/demo$/);
     await expect(page.getByRole("heading", { level: 1, name: "Ne yapmak istiyorsun?" })).toBeVisible();
 
@@ -211,7 +212,7 @@ test.describe("demo akışı", () => {
 
   test("salt okunur demo kullanıcısı: üye eylemleri kilitli + açıklama", async ({ page }) => {
     await page.goto("/");
-    await page.getByRole("button", { name: "Salt okunur olarak gir" }).click();
+    await enterDemoReal(page, "Salt okunur");
     await expect(page).toHaveURL(/\/t\/demo$/);
     await expect(page.getByRole("heading", { level: 1, name: "Ne yapmak istiyorsun?" })).toBeVisible();
 

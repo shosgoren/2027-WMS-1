@@ -1,5 +1,6 @@
-// Derin sağlık uç noktası (T-129, A-44): `{ status, db, queue, version }`. `db`: `wms_app` ile `SELECT 1`; `queue`: pg-boss şeması
-// erişimi (`pgboss.version`; iş satırı okunmaz). Biri başarısızsa HTTP 503 + `status:"degraded"`; gövdede hata metni YOK
+// Derin sağlık uç noktası (T-129, A-44; T-282): `{ status, db, queue, worker, metrics, version }`. `db`: `wms_app` ile `SELECT 1`; `queue`: pg-boss şeması
+// erişimi (`pgboss.version`) VE kuyruk ilerlemesi eşik içinde (en eski bekleyen iş, süresi dolmuş `active`, son `failed`; sayaçları worker yazar);
+// `worker`: son heartbeat yaşı ≤ eşik. `metrics` yalnızca sayılardır (iş yükü/tenant yok, G-09). Biri başarısızsa HTTP 503 + `status:"degraded"`; gövdede hata metni YOK
 // (ayrıntı yalnızca log'da, G-09). Yoklama ayrı tek bağlantıyla, 2 sn sunucu tarafı iptaliyle ve 5 sn önbellek/tek-uçuşla yapılır
 // (uygulama havuzunu tüketmez; bkz. packages/db/src/health.ts). Fly makine denetimi bu uca BAĞLANMAZ: sığ `/api/health/live`. Route Handler ince giriş katmanıdır (ADR-001).
 import { getHealthProbe, type HealthSnapshot, type ProbeResult } from "@wms/db";
@@ -17,7 +18,7 @@ function versionOf(env: NodeJS.ProcessEnv): string {
   return "unknown";
 }
 
-function report(name: "db" | "queue", requestId: string | undefined, result: ProbeResult): "ok" | "fail" {
+function report(name: "db" | "queue" | "worker" | "queue-progress", requestId: string | undefined, result: ProbeResult): "ok" | "fail" {
   if (result.ok) return "ok";
   logger.error("health check failed", { check: name, reason: result.reason, errorName: result.errorName, requestId });
   return "fail";
@@ -31,13 +32,16 @@ export async function GET(request: Request): Promise<Response> {
   } catch (err) {
     // Yapılandırma hatası (DATABASE_URL yok) vb.: yalnızca sınıf adı.
     const failed: ProbeResult = { ok: false, reason: "error", errorName: err instanceof Error ? err.name : "unknown" };
-    snapshot = { db: failed, queue: failed };
+    snapshot = { db: failed, queue: failed, worker: failed, progress: failed };
   }
   const db = report("db", requestId, snapshot.db);
-  const queue = report("queue", requestId, snapshot.queue);
-  const healthy = db === "ok" && queue === "ok";
+  const schema = report("queue", requestId, snapshot.queue);
+  const progress = report("queue-progress", requestId, snapshot.progress);
+  const worker = report("worker", requestId, snapshot.worker);
+  const queue = schema === "ok" && progress === "ok" ? "ok" : "fail";
+  const healthy = db === "ok" && queue === "ok" && worker === "ok";
   return Response.json(
-    { status: healthy ? "ok" : "degraded", db, queue, version: versionOf(process.env) },
+    { status: healthy ? "ok" : "degraded", db, queue, worker, ...(snapshot.metrics === undefined ? {} : { metrics: snapshot.metrics }), version: versionOf(process.env) },
     { status: healthy ? 200 : 503, headers: { "cache-control": "no-store" } },
   );
 }

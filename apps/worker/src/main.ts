@@ -1,4 +1,5 @@
 // Worker giriş noktası: `node dist/main.js`. Web'den bağımsız, uzun ömürlü süreç (ADR-001).
+import { hostname } from "node:os";
 import { DEMO_TENANT_ID, createDbClient, withSystemTenant, withUser } from "@wms/db";
 import { consumeOnce, createJobQueue } from "@wms/queue-adapter";
 import type { ConsumeOnceFn } from "@wms/domain/stock/jobs";
@@ -9,6 +10,7 @@ import { createDeliverInvitationHandler } from "./jobs/deliver-invitation.js";
 import { DEMO_RESEED_SINGLETON_KEY, registerDemoReseed } from "./jobs/demo-reseed.js";
 import { createPostStockDocumentHandler } from "./jobs/post-stock-document.js";
 import { startQueueMaintenance } from "./jobs/queue-maintenance.js";
+import { startWorkerHeartbeat, workerInstanceId, workerVersion } from "./jobs/worker-heartbeat.js";
 import { consistencySingletonKey, createStockConsistencyHandler, startConsistencySchedule } from "./jobs/stock-consistency.js";
 import { createMailer, createSendEmailHandler } from "./jobs/send-email.js";
 import { createJsonLogger, createLifecycle, EXIT_FAILURE, parseShutdownTimeoutMs } from "./lifecycle.js";
@@ -144,6 +146,15 @@ logger.info("queue started", {
 const workerDb = createDbClient({ url: workerDatabaseUrl, poolMax: 1, prepare: false });
 const queueMaintenance = startQueueMaintenance({ workerDb, db, logger });
 
+// Heartbeat (T-282): `/api/health` worker yaşını ve kuyruk ilerleme sayaçlarını buradan okur. Yalnızca tüketicisi olan türler sayılır (ertelenmiş `demo.reseed` bekleyen işi alarm değildir).
+const workerHeartbeat = startWorkerHeartbeat({
+  workerDb,
+  logger,
+  jobNames: JOB_TYPES.filter((t) => HANDLERS[t] !== undefined),
+  instanceId: workerInstanceId(process.env, hostname(), process.pid),
+  version: workerVersion(process.env),
+});
+
 // Demo yeniden tohumlama zamanlaması: açılışta bir kez + günlük 03:00 UTC; `singletonKey` ile tek iş.
 const demoSchedule = demo.startSchedule(() =>
   // Tenant kimliği sabittir (iş yükünde yok); bağlam withSystemTenant ile kurulur (gerekçe üyelik/rol yazmaz).
@@ -164,6 +175,7 @@ const consistencySchedule = startConsistencySchedule({
 
 // Kapanış sırası: önce zamanlayıcı, sonra kuyruk (çalışan işler biter), sonra DB havuzu.
 lifecycle.register({ name: "demo-schedule", run: () => demoSchedule?.stop() });
+lifecycle.register({ name: "worker-heartbeat", run: () => workerHeartbeat.stop() });
 lifecycle.register({ name: "queue-maintenance", run: () => queueMaintenance.stop() });
 lifecycle.register({ name: "consistency-schedule", run: () => consistencySchedule.stop() });
 lifecycle.register({ name: "job-queue", run: () => queue.stop() });

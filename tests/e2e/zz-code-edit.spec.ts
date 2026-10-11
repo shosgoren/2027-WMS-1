@@ -8,6 +8,7 @@
 import { randomBytes } from "node:crypto";
 import { expect, test } from "@playwright/test";
 import type { Locator, Page } from "@playwright/test";
+import { enterDemoShared } from "./support/demo-session.ts";
 
 const OUT = ".artifacts/t-257";
 const rnd = (): string => randomBytes(3).toString("hex").toUpperCase();
@@ -53,7 +54,7 @@ async function measureDialog(page: Page, dialog: Locator, where: string, shot: s
 
 async function login(page: Page): Promise<void> {
   await page.goto("/");
-  await page.getByRole("button", { name: "Yönetici olarak gir" }).click();
+  await enterDemoShared(page, "Yönetici");
   await expect(page).toHaveURL(/\/t\/demo$/);
 }
 

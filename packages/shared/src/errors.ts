@@ -48,6 +48,8 @@ export const ERROR_DETAILS = [
   "TOO_MANY_LINES",
   "SOURCE_LINKED",
   "STATUS_CHANGE",
+  // T-308: müşteri iadesi, sevk edilen miktarın (önceki iadeler düşülmüş) üstünde (A-135).
+  "RETURN_EXCEEDS_SHIPPED",
 ] as const;
 export type ErrorDetail = (typeof ERROR_DETAILS)[number];
 
@@ -77,6 +79,7 @@ export const ERROR_DETAIL_CODE: Readonly<Record<ErrorDetail, ErrorCode>> = {
   TOO_MANY_LINES: "VALIDATION_FAILED",
   SOURCE_LINKED: "REVERSAL_BLOCKED",
   STATUS_CHANGE: "REVERSAL_BLOCKED",
+  RETURN_EXCEEDS_SHIPPED: "VALIDATION_FAILED",
 };
 
 export const HTTP_STATUS: Readonly<Record<ErrorCode, number>> = {

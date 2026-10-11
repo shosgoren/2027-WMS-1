@@ -92,3 +92,26 @@ export {
   type PickNotFound,
   type PickReallocation,
 } from "./picking.ts";
+// Kısmi sevk ve müşteri iadesi (T-308). `planShipment`/`isShippableReservation` (shipping.ts) ve iade saf yardımcıları iç/test amaçlıdır: burada YOKTUR.
+export { shipOrder, type ShipLineInput, type ShipOrderInput } from "./shipping.ts";
+export { createCustomerReturn, type CreateCustomerReturnInput } from "./returns.ts";
+// Rehberli saha akışı: görev adım ilerlemesi (T-293; ADR-025). Stok değiştirmez; Kaydet `putaway`'i aynı istemci anahtarıyla çağırır. `parseRecordStepInput`/`plainDecimal` saf yardımcılardır (birim testi) ve burada YOKTUR.
+export {
+  GUIDED_TASK_KINDS,
+  RECORDABLE_STEPS,
+  SCAN_CODE_MAX,
+  TASK_PROGRESS_STEPS,
+  beginSave,
+  getTaskProgress,
+  nextTaskFor,
+  recordTaskStep,
+  resetTaskProgress,
+  savePutawayTask,
+  type NextTask,
+  type RecordStepResult,
+  type RecordableStep,
+  type StepRejectionReason,
+  type TaskProgressCallParams,
+  type TaskProgressStep,
+  type TaskProgressView,
+} from "./task-progress.ts";

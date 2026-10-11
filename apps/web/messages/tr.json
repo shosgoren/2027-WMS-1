@@ -329,6 +329,8 @@
     "validation_failed_document_stateAction": "Sayfayı yenileyip belgenin güncel durumunu kontrol et.",
     "validation_failed_scan_mismatch": "Okutulan lokasyon veya ürün görevle eşleşmiyor.",
     "validation_failed_scan_mismatchAction": "Görevde yazan lokasyonu ve ürünü okutup yeniden dene.",
+    "validation_failed_return_exceeds_shipped": "İade miktarı, sevk edilen ve henüz iade edilmemiş miktarı aşıyor.",
+    "validation_failed_return_exceeds_shippedAction": "Sevk edilen miktardan önceki iadeler düşülmüş değere kadar bir miktar gir.",
     "validation_failed_idempotency_key_required": "İstek anahtarı eksik.",
     "validation_failed_idempotency_key_requiredAction": "Sayfayı yenileyip işlemi yeniden gönder.",
     "reversal_blocked_exceeds_remaining": "İstenen miktar, bu satırdan ters çevrilebilecek kalan miktardan fazla.",

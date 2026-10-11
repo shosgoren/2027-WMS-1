@@ -53,6 +53,7 @@ import {
   fromMicro,
   reservedExcluding,
   toMicro,
+  type LedgerReason,
   type PostingKind,
   type PostingLine,
   type PostingPlan,
@@ -63,6 +64,7 @@ import {
   closeReservations,
   moveReservations,
   planReservationEffects,
+  type ReservationConsumeInput,
   type ReservationMoveInput,
 } from "./reservations.ts";
 import {
@@ -368,6 +370,10 @@ export function registerTxCreatedDocument(tx: AccessTx, documentId: string): voi
 export interface PostInTxOptions {
   /** Yalnızca `STOCK_MOVE`: satır → taşınacak rezervasyonlar (normalize edilmiş). */
   readonly moves?: readonly ReservationMoveInput[] | undefined;
+  /** Yalnızca `STOCK_OUT` (T-308 sevk): satır → tüketilecek SİPARİŞ satırı rezervasyonları. Genel `postDocument` yolu bu alanı taşıyamaz. */
+  readonly consumes?: readonly ReservationConsumeInput[] | undefined;
+  /** Yalnızca `STOCK_IN` + `RETURN` (T-308 müşteri iadesi): defter nedeni geçersiz kılma. */
+  readonly ledgerReason?: LedgerReason | undefined;
   readonly requestId: string | null;
 }
 
@@ -396,7 +402,7 @@ export function postApprovedDocumentInTx(
   opts: PostInTxOptions,
 ): Promise<StockCommandApplied> {
   // Yalnızca genel alanlar taşınır: çağıran `worker`/`defer` uydurup işleme kilidini atlayamaz.
-  return postCore(tx, locked, ctx, documentId, { moves: opts.moves, requestId: opts.requestId });
+  return postCore(tx, locked, ctx, documentId, { moves: opts.moves, consumes: opts.consumes, ledgerReason: opts.ledgerReason, requestId: opts.requestId });
 }
 
 async function postCore(
@@ -424,7 +430,7 @@ async function postCore(
     if (opts.defer === undefined) throw documentState(); // kuyruksuz çağıran: açık hata (sahte başarı yok)
     return opts.defer(header);
   }
-  const built = buildPostingPlan(kind, lines);
+  const built = buildPostingPlan(kind, lines, opts.ledgerReason);
   assertCovered(built, locked);
 
   // Kilitten SONRA: lokasyon ve ürün FOR SHARE + ACTIVE (T-243 MAJOR; arşivle çakışır).
@@ -439,7 +445,7 @@ async function postCore(
   const dimIdByIdentity = new Map(locked.dimensions.map((d) => [dimensionIdentity(d.key), d.id]));
   const balanceByDim = new Map(locked.balances.map((b) => [b.stockDimensionId, b]));
   // Rezervasyon etkisi (T-221): kilitli görüntüden; yeterlilikte işlenen satırın KENDİ rezervasyonu rezerveden düşülür.
-  const fx = planReservationEffects({ kind, entries: built.entries, locked, dimIdByIdentity, moves });
+  const fx = planReservationEffects({ kind, entries: built.entries, locked, dimIdByIdentity, moves, consumes: opts.consumes });
   const balances = new Map<string, BalanceView>();
   for (const [identity, dimId] of dimIdByIdentity) {
     const b = balanceByDim.get(dimId);
