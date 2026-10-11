@@ -79,7 +79,7 @@ export interface FieldLine {
   readonly sourceLineId: string | null;
 }
 
-export type FieldSourceKind = "INBOUND_RECEIPT" | "TASK" | "SALES_ORDER";
+export type FieldSourceKind = "INBOUND_RECEIPT" | "TASK" | "COUNT_SESSION" | "SALES_ORDER";
 
 /** T-308 sevk: `lines[lineIndex]` çıkış satırının tüketeceği sipariş satırı rezervasyonları (stok çekirdeği `consumes`; yalnız `STOCK_OUT`). */
 export interface FieldConsume {
@@ -89,7 +89,8 @@ export interface FieldConsume {
 }
 
 export interface FieldPostSpec {
-  readonly kind: Extract<PostingKind, "STOCK_IN" | "STOCK_OUT" | "STOCK_MOVE">;
+  /** `COUNT_ADJUSTMENT` (T-309): satır başına tek uç (`−` kaynak, `+` hedef); plan `countSessionId` taşımalıdır (çağıran komutun planı). */
+  readonly kind: Extract<PostingKind, "STOCK_IN" | "STOCK_OUT" | "STOCK_MOVE" | "COUNT_ADJUSTMENT">;
   readonly warehouseId: string;
   readonly sourceKind: FieldSourceKind | null;
   readonly sourceId: string | null;

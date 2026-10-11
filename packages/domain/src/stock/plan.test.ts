@@ -95,6 +95,28 @@ describe("buildPostingPlan", () => {
   });
 });
 
+describe("buildPostingPlan — COUNT_ADJUSTMENT (T-309; 16 Senaryo A adım 11, Senaryo D adım 10)", () => {
+  it("eksik sayım yalnız kaynakla −, fazla sayım yalnız hedefle +; neden COUNT_DIFF; durum değişmez", () => {
+    const p = buildPostingPlan("COUNT_ADJUSTMENT", [
+      line(1, { sourceLocationId: L1, baseQuantity: "3", quantity: "3" }),
+      line(2, { targetLocationId: L2, baseQuantity: "1.5", quantity: "1.5" }),
+    ]);
+    expect(p.entries.map((e) => [e.delta, e.reason])).toEqual([[-3_000_000n, "COUNT_DIFF"], [1_500_000n, "COUNT_DIFF"]]);
+    expect(p.locationIds).toEqual([L1, L2]);
+    expect([...p.outTotals.values()]).toEqual([3_000_000n]);
+  });
+  it.each([
+    ["hem kaynak hem hedef", { sourceLocationId: L1, targetLocationId: L2 }],
+    ["ne kaynak ne hedef", {}],
+    ["kaynak ≠ hedef durum", { sourceLocationId: L1, targetStatus: "QUARANTINE" as const }],
+  ])("biçim ihlali: %s → VALIDATION_FAILED", (_n, over) => {
+    expect(() => buildPostingPlan("COUNT_ADJUSTMENT", [line(1, over)])).toThrow(AppError);
+  });
+  it("sıfır miktar satırı reddedilir (fark yoksa satır yazılmaz)", () => {
+    expect(() => buildPostingPlan("COUNT_ADJUSTMENT", [line(1, { sourceLocationId: L1, baseQuantity: "0" })])).toThrow(AppError);
+  });
+});
+
 describe("decimal yardımcıları (I-09)", () => {
   it("toMicro/fromMicro gidiş dönüş; geçersiz biçim reddedilir", () => {
     expect(toMicro("12.5")).toBe(12_500_000n);

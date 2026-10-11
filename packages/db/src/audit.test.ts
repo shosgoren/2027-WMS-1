@@ -37,7 +37,7 @@ function fakeTx() {
 }
 
 describe("eylem listesi", () => {
-  it("kayıtlı eylemleri içerir (T-305: inbound_receipt.*, T-306: sales_order.*, T-307: pick_assignment.*/pick.* dahil)", () => {
+  it("kayıtlı eylemleri içerir (T-305: inbound_receipt.*, T-306: sales_order.*, T-307: pick_assignment.*/pick.*, T-309: count.* dahil)", () => {
     expect([...AUDIT_ACTIONS].sort()).toEqual(
       [
         "member.invited", "member.removed", "member.role_changed", "member.left", "ownership.transferred",
@@ -55,6 +55,7 @@ describe("eylem listesi", () => {
         "inbound_receipt.created", "inbound_receipt.opened", "inbound_receipt.cancelled", "inbound_receipt.received",
         "sales_order.created", "sales_order.updated", "sales_order.cancelled", "sales_order.line_cancelled",
         "pick_assignment.created", "pick.not_found",
+        "count.started", "count.recorded", "count.submitted", "count.approved", "count.posted", "count.cancelled",
       ].sort(),
     );
   });
