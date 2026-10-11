@@ -20,13 +20,16 @@ function localClient(ip: string): { extraHTTPHeaders?: Record<string, string> } 
 // T-279: boş tenant fikstürü yalnızca yerel yığında (global-setup) kurulur; uzak hedefte (E2E_BASE_URL) o fikstüre bağlı spec dosyaları dışlanır
 // (atlama/skip değil: bu koşuda fikstür kavramı yoktur; demo kapsamı diğer spec dosyalarında sürer).
 const EMPTY_TENANT_SPECS = ["**/empty-tenant.spec.ts", "**/z-easy-setup.spec.ts"];
-// Proje düzeyindeki testIgnore üst düzey ayarın YERİNE geçer (birleşmez); ana projeler bu yüzden ikisini birlikte içerir.
-const MAIN_PROJECT_IGNORE = ["**/zzz-receiving.spec.ts", ...(remoteBaseURL ? EMPTY_TENANT_SPECS : [])];
+// T-289: içe aktarma spec'leri demo tenant'a KALICI veri yazar (ürün + açılış stoku) ve yarım kalma senaryosu yerel veritabanına `psql` ile test-yalnız
+// tetikleyici kurar; ikisi de uzak hedefte (staging) çalışmamalı. Yalnız yerel koşuda koşarlar (atlama değil: uzak koşuda bu fikstür/veritabanı yoktur).
+const LOCAL_ONLY_SPECS = ["**/import.spec.ts", "**/zzz-import-partial.spec.ts"];
+// Proje düzeyindeki testIgnore üst düzey ayarın YERİNE geçer (birleşmez); ana projeler bu yüzden hepsini birlikte içerir.
+const MAIN_PROJECT_IGNORE = ["**/zzz-receiving.spec.ts", ...(remoteBaseURL ? [...EMPTY_TENANT_SPECS, ...LOCAL_ONLY_SPECS] : [])];
 
 export default defineConfig({
   testDir: "tests/e2e",
   testMatch: "**/*.spec.ts",
-  testIgnore: remoteBaseURL ? EMPTY_TENANT_SPECS : [],
+  testIgnore: remoteBaseURL ? [...EMPTY_TENANT_SPECS, ...LOCAL_ONLY_SPECS] : [],
   globalSetup: "./tests/e2e/global-setup.ts",
   outputDir: ".artifacts/e2e/test-results",
   reporter: [["list"], ["html", { outputFolder: ".artifacts/e2e/report", open: "never" }]],

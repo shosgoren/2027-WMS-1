@@ -95,7 +95,7 @@ export interface FieldPostSpec {
   readonly sourceKind: FieldSourceKind | null;
   readonly sourceId: string | null;
   readonly lines: readonly FieldLine[];
-  /** Belge nedeni (`documents.reason`, ≤ 500; T-308 iade nedeni). */
+  /** Belge nedeni (`documents.reason`, ≤ 500; T-308 iade nedeni, T-289 açılış stoku `import.opening_stock`); yoksa `NULL`. */
   readonly reason?: string | null;
   /** Yalnız `STOCK_OUT` (T-308 sevk). */
   readonly consumes?: readonly FieldConsume[];

@@ -728,7 +728,8 @@
     "addressNote": "Çalışma alanı adresi (slug) ad değişince değişmez: {slug}",
     "locked": "Bu ayarları değiştirme yetkin yok.",
     "lockedAction": "Değişiklik gerekiyorsa çalışma alanı yöneticine (sorumlun) sor.",
-    "back": "Ana ekrana dön"
+    "back": "Ana ekrana dön",
+    "importLink": "Ürün ve stoku Excel'den içe aktar"
   },
   "items": {
     "title": "Ürünler",
@@ -1519,5 +1520,323 @@
         "failed": "Kamera açılamadı. Tekrar dene ya da barkodu elle gir."
       }
     }
+  },
+  "import": {
+    "title": "Ürün ve stok içe aktar",
+    "intro": "Excel dosyandaki ürünleri ve ilk stoku buradan al. Önce kontrol edilir, onay vermeden hiçbir şey kaydedilmez.",
+    "back": "Geri dön",
+    "locked": "Bu ekranı kullanmak için ürün ve ayar yetkisi gerekir.",
+    "lockedAction": "Çalışma alanı yöneticine sor.",
+    "kind": {
+      "products": "Ürünler dosyası",
+      "stock": "Açılış stoku dosyası"
+    },
+    "step1": {
+      "title": "Şablonu indir",
+      "hint": "Excel'de doldur, sonra “CSV UTF-8” olarak kaydet. Önce ürünleri, sonra stoku al.",
+      "products": "Ürünler şablonu",
+      "stock": "Açılış stoku şablonu",
+      "columnsProducts": "Ürünler: {cols}. Zorunlu: kod ve ad. Koli içi adet: bir kolide kaç adet var (12 gibi).",
+      "columnsStock": "Açılış stoku: {cols}. Miktar adet cinsindendir. Raf kodu, depo ekranındakiyle aynı olmalı."
+    },
+    "step2": {
+      "title": "Dosyayı seç",
+      "label": "Dosya seç",
+      "hint": "En çok {kb} KB ve {rows} satır. Dosya cihazından çıkmadan önce kontrol edilir.",
+      "none": "Henüz dosya seçmedin",
+      "chosen": "Seçilen: {name}"
+    },
+    "clientErrors": {
+      "tooBig": "Dosya çok büyük. En çok {kb} KB olabilir. Dosyayı ikiye bölüp tekrar seç.",
+      "readFailed": "Dosya okunamadı. Dosyayı Excel'den yeniden kaydedip tekrar seç."
+    },
+    "step3": {
+      "title": "Önizle",
+      "checking": "Dosya kontrol ediliyor…"
+    },
+    "summary": {
+      "items": "Ürün",
+      "stockLines": "Satır",
+      "errorRows": "Hatalı satır",
+      "lineProducts": "{total} satır: {ok} hazır, {bad} hatalı",
+      "lineStock": "{total} satır: {ok} hazır, {bad} hatalı",
+      "rows": "Satır"
+    },
+    "detail": {
+      "packUnit": "Koli birimi de oluşturulacak.",
+      "stock": "{warehouses} depoya toplam {total} adet girilecek.",
+      "stockExists": "Sistemde zaten stok var. Bu dosyadaki miktarlar mevcut stokun üstüne eklenir. Aynı dosyayı daha önce aldıysan ikinci kez eklenmez.",
+      "stockNothing": "Yazılacak yeni satır yok.",
+      "stockSkipped": "{n} satır daha önce işlenmiş, atlanacak.",
+      "create": "{n} yeni ürün eklenecek",
+      "existing": "{n} ürün zaten var",
+      "packs": "{n} koli tanımı",
+      "barcodes": "{n} barkod"
+    },
+    "blocked": "{n} hata var. Dosyayı düzeltip yeniden seç.",
+    "clean": "Hata yok. İçe aktarabilirsin.",
+    "issues": {
+      "all": "Hataların hepsi ({total}):",
+      "truncated": "İlk {shown} hata gösteriliyor, toplam {total} hata var. Bunları düzeltince kalanlar görünür.",
+      "file": "Dosya",
+      "row": "Satır {row}",
+      "fixPrefix": "Nasıl düzeltilir:",
+      "more": "Tümünü göster ({n} satır)",
+      "less": "Daha az göster",
+      "pickFixed": "Düzeltilmiş dosyayı seç",
+      "partial": "{total} hata var: ilk {rows} satır gösteriliyor"
+    },
+    "step4": {
+      "title": "İçe aktar",
+      "apply": "İçe aktar",
+      "note": "Aynı dosyayı tekrar yüklersen ikinci kez eklenmez.",
+      "blocked": "Önce {n} hatayı düzelt. Hata varken içe aktarılamaz.",
+      "progress": "{done} / {total} satır",
+      "done": "Tamamlandı",
+      "partial": "Yarım kaldı",
+      "noRows": "Önce şablona en az bir satır ekle.",
+      "failed": "Kaydedilemedi"
+    },
+    "step5": {
+      "title": "Sonuç"
+    },
+    "result": {
+      "partial": "İşlem yarım kaldı.",
+      "failedRow": "Satır {row} · {code}",
+      "nextStock": "Şimdi açılış stoku dosyasını yükleyebilirsin.",
+      "again": "Dosyayı yeniden seç",
+      "another": "Başka dosya yükle",
+      "toItems": "Ürünlere git",
+      "okLead": "Tamam.",
+      "created": "{n} ürün eklendi.",
+      "updated": "{n} ürünün koli ya da barkod bilgisi tamamlandı.",
+      "stockApplied": "{n} stok satırı eklendi.",
+      "retryProducts": "Sorunu giderip aynı dosyayı tekrar yükle. Tamamlanan ürünler ikinci kez eklenmez, kalanlar tamamlanır.",
+      "retryStock": "Tamamlanan satırların miktarını değiştirme. Yalnız hatalı satırı düzeltip dosyayı tekrar yükle; tamamlanan satırlar “daha önce işlenmiş” diye atlanır, kalanlar yazılır.",
+      "stat": {
+        "failed": "{n} satır hatalı",
+        "skipped": "{n} satır denenmedi",
+        "existing": "{n} satır zaten vardı",
+        "added": "{n} satır eklendi",
+        "updated": "{n} satır için koli ya da barkod bilgisi tamamlandı"
+      },
+      "toStock": "Ürünlerde stoğu gör",
+      "none": "Yeni kayıt yok.",
+      "moreFailed": "ve {n} satır daha hatalı.",
+      "reason": {
+        "PAIR_HAS_STOCK": "Bu ürün bu rafta başka bir işlemle stoğa girdi. Açılış stoku yalnız boş raflar içindir; düzeltme için stok belgesi kullan.",
+        "PAIR_PENDING": "Bu ürün ve raf için tamamlanmamış bir açılış belgesi var. Aynı dosyayı yeniden yükleyerek sürdür."
+      },
+      "failedGeneric": "Sistem bu satırları kaydedemedi.",
+      "failedTitle": "Kaydedilemedi.",
+      "retryNone": "Hiçbir satır yazılmadı. Sorunu giderip aynı dosyayı tekrar yükle."
+    },
+    "column": {
+      "code": "Kod",
+      "name": "Ad",
+      "baseUnit": "Temel birim",
+      "packQty": "Koli içi adet",
+      "unitBarcode": "Adet barkodu",
+      "packBarcode": "Koli barkodu",
+      "itemCode": "Ürün kodu",
+      "shelfCode": "Raf kodu",
+      "quantity": "Miktar",
+      "file": "Dosya"
+    },
+    "issue": {
+      "FILE_EMPTY": {
+        "reason": "Dosya boş.",
+        "fix": "Şablonu indirip doldur, sonra yeniden seç."
+      },
+      "FILE_TOO_LARGE": {
+        "reason": "Dosya çok büyük.",
+        "fix": "En çok {maxKb} KB olabilir. Dosyayı ikiye böl."
+      },
+      "FILE_ENCODING": {
+        "reason": "Dosyadaki Türkçe harfler okunamadı.",
+        "fix": "Excel'de “CSV UTF-8” olarak kaydedip yeniden seç."
+      },
+      "TOO_MANY_ROWS": {
+        "reason": "Dosyada {count} satır var; en çok {max} olabilir.",
+        "fix": "Dosyayı parçalara böl, sırayla yükle."
+      },
+      "CSV_UNTERMINATED_QUOTE": {
+        "reason": "Bir tırnak işareti kapatılmamış.",
+        "fix": "Tırnakları kontrol et ya da dosyayı Excel'den yeniden kaydet."
+      },
+      "FORMAT_UNKNOWN": {
+        "reason": "İlk satırdaki sütun adları tanınmadı.",
+        "fix": "İndirdiğin şablonu kullan; ilk satırı değiştirme."
+      },
+      "COLUMN_MISSING": {
+        "reason": "Bu sütun dosyada yok.",
+        "fix": "Şablondaki sütun adını ilk satıra ekle."
+      },
+      "COLUMN_DUPLICATE": {
+        "reason": "Bu sütun iki kez yazılmış.",
+        "fix": "Birini sil."
+      },
+      "NO_ROWS": {
+        "reason": "Dosyada veri satırı yok.",
+        "fix": "Başlık satırından sonra en az bir satır ekle."
+      },
+      "ROW_TOO_MANY_CELLS": {
+        "reason": "Satırda başlıktan fazla hücre var.",
+        "fix": "Fazla hücreleri sil. Yazıda noktalı virgül varsa yazıyı tırnak içine al."
+      },
+      "CODE_MISSING": {
+        "reason": "Kod boş.",
+        "fix": "Bu satıra bir kod yaz."
+      },
+      "CODE_INVALID": {
+        "reason": "Kod geçersiz.",
+        "fix": "En çok {max} karakter olsun, özel karakter kullanma."
+      },
+      "CODE_DUPLICATE_FILE": {
+        "reason": "{code} kodu {firstRow}. satırda da var.",
+        "fix": "Her kod bir kez yazılmalı. Birini değiştir ya da sil."
+      },
+      "NAME_MISSING": {
+        "reason": "Ad boş.",
+        "fix": "Ürünün adını yaz."
+      },
+      "NAME_INVALID": {
+        "reason": "Ad geçersiz.",
+        "fix": "En çok {max} karakter olsun."
+      },
+      "UNIT_UNKNOWN": {
+        "reason": "{unit} diye bir birim yok.",
+        "fix": "Birim kodunu ADET gibi yaz ya da boş bırak."
+      },
+      "ITEM_UNIT_MISMATCH": {
+        "reason": "{code} sistemde {unit} birimiyle kayıtlı.",
+        "fix": "Birimi aynı yaz. Kayıtlı ürünün birimi değişmez."
+      },
+      "ITEM_ARCHIVED": {
+        "reason": "{code} arşivde.",
+        "fix": "Başka bir kod kullan ya da satırı sil."
+      },
+      "ITEM_UNKNOWN": {
+        "reason": "{code} diye bir ürün yok.",
+        "fix": "Önce ürünler dosyasını içe aktar ya da kodu düzelt."
+      },
+      "ITEM_TRACKED": {
+        "reason": "{code} lot ya da seri takipli.",
+        "fix": "Takipli ürünün açılış stoku bu ekrandan alınamaz. Satırı sil."
+      },
+      "PACK_QTY_INVALID": {
+        "reason": "{value} bir sayı değil.",
+        "fix": "Koli içi adedi 12 gibi tam sayı yaz."
+      },
+      "PACK_QTY_FRACTIONAL": {
+        "reason": "Koli içi adet kesirli olamaz ({value}).",
+        "fix": "Tam sayı yaz (12 gibi). Yarım koli tanımlanmaz."
+      },
+      "PACK_QTY_TOO_SMALL": {
+        "reason": "Koli içi adet en az 2 olmalı.",
+        "fix": "Koli yoksa bu hücreyi boş bırak."
+      },
+      "PACK_QTY_TOO_LARGE": {
+        "reason": "Koli içi adet çok büyük.",
+        "fix": "{max} ya da daha küçük bir sayı yaz."
+      },
+      "PACK_QTY_CONFLICT": {
+        "reason": "Sistemde bu ürünün koli içi adedi {system}, dosyada {file}.",
+        "fix": "Aynı sayıyı yaz ya da hücreyi boş bırak."
+      },
+      "PACK_BASE_UNIT": {
+        "reason": "Temel birimi koli olan üründe koli içi adet olmaz.",
+        "fix": "Temel birimi ADET yap ya da hücreyi boş bırak."
+      },
+      "PACK_BARCODE_NEEDS_QTY": {
+        "reason": "Koli barkodu var ama koli içi adet yok.",
+        "fix": "Koli içi adedi yaz. Koli okutulunca adet buradan gelir."
+      },
+      "BARCODE_INVALID": {
+        "reason": "Bu barkod kullanılamaz ({value}).",
+        "fix": "Yalnızca barkodu yaz; uzun karekod metni ya da özel karakter olmasın."
+      },
+      "BARCODE_SAME_ROW": {
+        "reason": "Adet ve koli barkodu aynı.",
+        "fix": "İkisi farklı olmalı."
+      },
+      "BARCODE_DUPLICATE_FILE": {
+        "reason": "{value} barkodu {firstRow}. satırda da var.",
+        "fix": "Her barkod tek ürüne ait olmalı. Birini düzelt."
+      },
+      "BARCODE_TAKEN": {
+        "reason": "{value} barkodu sistemde {item} ürününde kayıtlı.",
+        "fix": "Barkodu düzelt ya da hücreyi boş bırak."
+      },
+      "SHELF_MISSING": {
+        "reason": "Raf kodu boş.",
+        "fix": "Stokun duracağı rafın kodunu yaz."
+      },
+      "SHELF_UNKNOWN": {
+        "reason": "{code} diye bir raf yok.",
+        "fix": "Kodu depo ekranındakiyle aynı yaz ya da önce rafı ekle."
+      },
+      "SHELF_ARCHIVED": {
+        "reason": "{code} rafı arşivde.",
+        "fix": "Başka bir raf yaz."
+      },
+      "SHELF_AMBIGUOUS": {
+        "reason": "{code} kodu birden çok depoda var ({warehouses}).",
+        "fix": "Raf kodlarını depolar arasında farklı yap."
+      },
+      "SHELF_KIND": {
+        "reason": "{code} bir taşıma rafı.",
+        "fix": "Stok koymak için depolama rafı seç."
+      },
+      "QTY_MISSING": {
+        "reason": "Miktar boş.",
+        "fix": "Adet sayısını yaz."
+      },
+      "QTY_INVALID": {
+        "reason": "{value} bir sayı değil.",
+        "fix": "Yalnızca rakam yaz (24 gibi)."
+      },
+      "QTY_NEGATIVE": {
+        "reason": "Miktar eksi olamaz ({value}).",
+        "fix": "Pozitif bir sayı yaz."
+      },
+      "QTY_ZERO": {
+        "reason": "Miktar sıfır.",
+        "fix": "Stok yoksa satırı sil."
+      },
+      "QTY_AMBIGUOUS": {
+        "reason": "{value} binlik mi ondalık mı belli değil.",
+        "fix": "Noktasız yaz (1250 gibi)."
+      },
+      "QTY_FRACTIONAL": {
+        "reason": "{decimals, plural, =0 {Adet kesirli olamaz ({value}).} other {Bu ürün en çok {decimals} ondalık basamak alır ({value}).}}",
+        "fix": "{decimals, plural, =0 {Tam sayı yaz (24 gibi).} other {Basamak sayısını azalt.}}"
+      },
+      "QTY_TOO_LARGE": {
+        "reason": "Miktar çok büyük ya da çok basamaklı ({value}).",
+        "fix": "En çok 14 tam, 6 ondalık basamak yaz."
+      },
+      "PAIR_DUPLICATE_FILE": {
+        "reason": "Bu ürün ve raf {firstRow}. satırda da var.",
+        "fix": "İki satırı birleştirip toplam miktarı tek satıra yaz."
+      },
+      "PAIR_HAS_STOCK": {
+        "reason": "{code} ürünü {shelf} rafında zaten stokta.",
+        "fix": "Açılış stoku yalnız boş raflar içindir. Düzeltme için stok belgesi kullan ya da satırı sil."
+      },
+      "CELL_TOO_LONG": {
+        "reason": "Bir hücre çok uzun.",
+        "fix": "Hücreyi en çok {max} karaktere indir ya da dosyayı Excel'den yeniden kaydet."
+      },
+      "TOO_MANY_COLUMNS": {
+        "reason": "Satırda çok fazla sütun var.",
+        "fix": "En çok {max} sütun olabilir. Fazla sütunları sil."
+      },
+      "PAIR_PENDING": {
+        "reason": "{code} ürünü {shelf} rafı için tamamlanmamış bir açılış belgesi var (başka miktarla).",
+        "fix": "Yarım kalan işlemi sürdürmek için önceki dosyayla AYNI miktarı yaz ya da satırı sil."
+      }
+    },
+    "noRows": "Dosyada henüz veri satırı yok. Şablona en az bir satır ekle, sonra dosyayı yeniden seç."
   }
 }
