@@ -8,7 +8,7 @@ import { describe, expect, it } from "vitest";
 import { AppError } from "@wms/shared/errors";
 import { NUMBER_PREFIX, formatDocumentNumber, type StockDocCallParams } from "../stock/index.ts";
 import { baseQuantityOf, decimalToMicro, microToDecimal } from "./field-posting.ts";
-import { approveQuality, cancelInboundReceipt, createInboundReceipt, openInboundReceipt, receiveGoods } from "./receiving.ts";
+import { approvalBaseOf, approveQuality, cancelInboundReceipt, createInboundReceipt, openInboundReceipt, receiveGoods } from "./receiving.ts";
 import { putaway } from "./putaway.ts";
 
 const params = (): StockDocCallParams => ({ db: undefined as never, principal: null, tenantSlug: "t", clientKey: randomUUID() });
@@ -102,6 +102,29 @@ describe("ondalık yardımcıları (I-09: float yok)", () => {
   });
   it("baseQuantityOf: 6 ondalıkta tam çıkan kesirli koli bu katmanda geçer (ürün ölçeği 0 denetimi posting çekirdeğinde QUANTITY_SCALE verir)", () => {
     expect(baseQuantityOf("0.416667", "12")).toBe("5.000004");
+  });
+});
+
+describe("approvalBaseOf (I-09, T-298): kesin çarpım, kırpma yok", () => {
+  const code = (f: () => unknown): string | undefined => {
+    try {
+      f();
+    } catch (e) {
+      return e instanceof AppError ? e.code : "other";
+    }
+    return undefined;
+  };
+  it("bekleyene eşit ya da altındaki istek kesin çarpımla döner", () => {
+    expect(approvalBaseOf("6", "1", 6_000_000n)).toBe(6_000_000n);
+    expect(approvalBaseOf("2", "2.5", 6_000_000n)).toBe(5_000_000n);
+  });
+  it("bekleyeni 1 mikro aşan istek bekleyene kırpılmaz: VALIDATION_FAILED (eskiden 6000000n dönerdi)", () => {
+    expect(code(() => approvalBaseOf("6.000001", "1", 6_000_000n))).toBe("VALIDATION_FAILED");
+    expect(code(() => approvalBaseOf("3.000001", "2", 6_000_000n))).toBe("VALIDATION_FAILED");
+    expect(code(() => approvalBaseOf("1", "1", 0n))).toBe("VALIDATION_FAILED");
+  });
+  it("6 ondalığa inmeyen çarpım QUANTITY_SCALE ile reddedilir (yuvarlama yok)", () => {
+    expect(code(() => approvalBaseOf("0.000001", "0.5", 6_000_000n))).toBe("VALIDATION_FAILED");
   });
 });
 

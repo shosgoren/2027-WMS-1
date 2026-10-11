@@ -331,7 +331,6 @@ type ReceiptLineRow = {
   id: string;
   item_id: string;
   unit_id: string;
-  base_unit_id: string;
   conversion_factor: string;
   expected_quantity: string;
   received_quantity: string;
@@ -339,7 +338,7 @@ type ReceiptLineRow = {
 }
 const readReceiptLines = (tx: AccessTx, tenantId: string, receiptId: string): Promise<ReceiptLineRow[]> =>
   tx.execute<ReceiptLineRow>(
-    sql`SELECT l.id, l.item_id, l.unit_id, i.base_unit_id, l.conversion_factor::text AS conversion_factor, l.expected_quantity::text AS expected_quantity,
+    sql`SELECT l.id, l.item_id, l.unit_id, l.conversion_factor::text AS conversion_factor, l.expected_quantity::text AS expected_quantity,
                l.received_quantity::text AS received_quantity, l.damaged_quantity::text AS damaged_quantity
           FROM public.inbound_receipt_lines l JOIN public.items i ON i.tenant_id = l.tenant_id AND i.id = l.item_id
          WHERE l.tenant_id = ${tenantId}::uuid AND l.receipt_id = ${receiptId}::uuid ORDER BY l.line_no`,
@@ -386,8 +385,8 @@ function parseReceive(input: ReceiveGoodsInput): { receiptId: string; lines: Par
 }
 
 /**
- * Kabulün temel birim bölünmesi (tek yer): toplam = `round(received × factor)`, hasarlı = `round(damaged × factor)` (≤ toplam: yuvarlama monoton),
- * iyi = toplam − hasarlı. Mikro (1e-6) tamsayı.
+ * Kabulün temel birim bölünmesi (tek yer): toplam = `received × factor`, hasarlı = `damaged × factor` (ikisi de KESİN çarpım: `toBase`; 6 ondalığa inmeyen sonuç
+ * `QUANTITY_SCALE` ile reddedilir, I-09), iyi = toplam − hasarlı (kesin). Mikro (1e-6) tamsayı.
  */
 export function splitReceivedBase(received: string, damaged: string, factor: string): { readonly total: bigint; readonly good: bigint; readonly damaged: bigint } {
   const total = decimalToMicro(baseQuantityOf(received, factor));
@@ -397,15 +396,14 @@ export function splitReceivedBase(received: string, damaged: string, factor: str
 }
 
 /**
- * Kısmi onay miktarının (kabul birimi) temel birime tek dönüşümü (T-305 MINOR-2/3): `round(q × factor)`; ama istenen miktarın TAM çarpımı (`q × factor`,
- * yuvarlamasız) kabul satırının kalan bekleyenini en çok 1 temel mikro (0,000001; toplam + hasarlı yuvarlamalarının en çok kayması) aşıyorsa istek
- * "kalanın tamamı"dır → `kalan = toplam − dağıtılan` (bekleyen) onaylanır. Daha fazlası bekleyeni aşar (çağıran reddeder). Sınır (A-305-11): katsayı < 2 iken
- * bir mikro-birimlik fazla istek de bu paya sığabilir ve bekleyene kırpılır (bekleyen asla aşılmaz).
+ * Kısmi onay miktarının (kabul birimi) temel birime dönüşümü: `q × factor` KESİN çarpım (I-09; `toBase`, yuvarlama yok). İstek bekleyeni (kalan
+ * karantina) aşıyorsa — 1 mikro de olsa — sessizce kırpılmaz, `VALIDATION_FAILED` ile reddedilir (T-298; A-298-1). Eskiden ≤ 1 mikro fazla istek
+ * bekleyene kırpılırdı (A-305-11): bu pay yalnızca iki ayrı yuvarlamanın (toplam, hasarlı) kaymasını emerdi; kabul artık kesin çarpımla bölündüğünden kayma yoktur.
  */
 export function approvalBaseOf(quantity: string, factor: string, pending: bigint): bigint {
-  const raw = decimalToMicro(baseQuantityOf(quantity, factor));
-  const excessExact = decimalToMicro(quantity) * decimalToMicro(factor) - pending * 1_000_000n; // 1e-12 ölçeği
-  return raw > pending && excessExact <= 1_000_000n ? pending : raw;
+  const base = decimalToMicro(baseQuantityOf(quantity, factor));
+  if (base > pending) throw new AppError("VALIDATION_FAILED");
+  return base;
 }
 
 /** Kabul satırlarından primitif `STOCK_IN` spesifikasyonu. Kural denetimleri (fazla kabul, lokasyon türü) çağıranındır. */
@@ -415,32 +413,27 @@ function receiveSpec(warehouseId: string, receiptId: string, qc: boolean, lines:
   for (const l of lines) {
     const row = byId.get(l.lineId);
     if (row === undefined) throw new AppError("NOT_FOUND"); // A-152: satır bu belgeye ait değil (varlık sızdırılmaz)
-    // Temel birime TEK yerden (T-305 MINOR-2): satır toplamı bir kez dönüştürülür; hasarlı ayrıca dönüştürülür ve iyi = toplam − hasarlı.
-    // Böylece iyi + hasarlı temel miktarı HER ZAMAN toplamın temel miktarına eşittir (iki ayrı yuvarlamanın kayması olmaz). Çekirdek kuralı (I-09,
-    // rules.ts) her satırda `base = round(quantity × factor)` ister: parça kabul biriminde bu eşitliği sağlıyorsa satır biriminde/katsayısıyla yazılır; sağlamıyorsa
-    // (yuvarlama payı) parça ürünün TEMEL biriminde, katsayı 1 yazılır (onay satırlarıyla aynı biçim). Temel miktarı 0 olan parça satır oluşturmaz
-    // (document_lines.base_quantity > 0; ör. toplamın tamamı hasarlıya yuvarlanırsa iyi satır yok).
+    // Temel birime TEK yerden (T-305 MINOR-2): satır toplamı ve hasarlı KESİN çarpımla dönüştürülür (I-09, `toBase`; yuvarlama yok), iyi = toplam − hasarlı.
+    // Böylece iyi + hasarlı temel miktarı HER ZAMAN toplamın temel miktarına eşittir ve her parça satırı `base = quantity × factor` eşitliğini kabul biriminde
+    // sağlar. Temel miktarı 0 olan parça satır oluşturmaz (document_lines.base_quantity > 0; ör. toplamın tamamı hasarlıysa iyi satır yok).
     const damagedUnits = decimalToMicro(l.damaged);
     const goodUnits = decimalToMicro(l.received) - damagedUnits;
     const split = splitReceivedBase(l.received, l.damaged, row.conversion_factor);
-    // Hasarlı miktar > 0 ama temel birimde 0'a yuvarlanıyorsa kabul REDDEDİLİR: aksi halde hasarlı mal sessizce iyi stok sayılırdı (hasarlı hiçbir zaman
-    // kullanılabilir olmaz). Kullanıcı hasarlıyı daha büyük (temel birimde en az 0,000001 eden) bir miktar olarak girmelidir ya da hasarlı ayrı satır/birimle kabul edilmelidir.
+    // Savunma: hasarlı miktar > 0 iken temel karşılığı 0 çıkamaz (kesin çarpım; 6 ondalığa inmeyen sonuç zaten `QUANTITY_SCALE` ile reddedilir); çıkarsa
+    // hasarlı mal sessizce iyi stok sayılmasın diye kabul REDDEDİLİR (hasarlı hiçbir zaman kullanılabilir olmaz).
     if (damagedUnits > 0n && split.damaged === 0n) throw new AppError("VALIDATION_FAILED");
-    const base = (units: bigint, baseQuantity: bigint, status: "AVAILABLE" | "QUARANTINE" | "DAMAGED"): FieldLine => {
-      const exact = decimalToMicro(baseQuantityOf(microToDecimal(units), row.conversion_factor)) === baseQuantity;
-      return {
-        itemId: row.item_id,
-        unitId: exact ? row.unit_id : row.base_unit_id,
-        quantity: microToDecimal(exact ? units : baseQuantity),
-        conversionFactor: exact ? row.conversion_factor : "1.000000",
-        baseQuantity: microToDecimal(baseQuantity),
-        sourceLocationId: null,
-        targetLocationId: l.locationId,
-        stockStatus: status,
-        targetStockStatus: null,
-        sourceLineId: row.id,
-      };
-    };
+    const base = (units: bigint, baseQuantity: bigint, status: "AVAILABLE" | "QUARANTINE" | "DAMAGED"): FieldLine => ({
+      itemId: row.item_id,
+      unitId: row.unit_id,
+      quantity: microToDecimal(units),
+      conversionFactor: row.conversion_factor,
+      baseQuantity: microToDecimal(baseQuantity),
+      sourceLocationId: null,
+      targetLocationId: l.locationId,
+      stockStatus: status,
+      targetStockStatus: null,
+      sourceLineId: row.id,
+    });
     if (goodUnits > 0n && split.good > 0n) out.push(base(goodUnits, split.good, qc ? "QUARANTINE" : "AVAILABLE"));
     if (damagedUnits > 0n && split.damaged > 0n) out.push(base(damagedUnits, split.damaged, "DAMAGED")); // hasarlı hiçbir zaman kullanılabilir sayılmaz
   }
