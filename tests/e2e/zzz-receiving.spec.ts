@@ -113,9 +113,8 @@ async function cleanup(): Promise<void> {
 // iki projenin ardışık trafiğini aynı dakikada toplar (yerelde tepe ~70/dk; CI'da pencere sınırına denk gelince aşılıp tam ekran RATE_LIMITED veriyordu).
 // Her test kendi kullanıcı kovasıyla başlar: yalnızca sayaç satırları temizlenir (yerel e2e DB'si, migration rolü); üretim eşiği/kuralı değişmez, test içi trafik hâlâ sınırlıdır.
 test.beforeEach(async () => {
+  // Giriş (`auth_rate_limits`) sayaçlarına dokunulmaz: proje başına ayrı IP ve test başına tek giriş bütçesi aşılırsa e2e kırmızı vermelidir.
   await db("DELETE FROM public.request_rate_limits WHERE scope = 'web.user'");
-  // Demo girişi (Better Auth `/sign-in/email`, IP başına 10/10 dk) da proje başına ayrı IP'de test başına en çok bir kez kullanılır; tekrarlı koşuda (`--repeat-each`) birikmesin.
-  await db("DELETE FROM public.auth_rate_limits");
 });
 
 test.afterAll(async () => {
