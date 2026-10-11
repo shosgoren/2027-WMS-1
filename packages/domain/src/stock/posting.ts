@@ -428,8 +428,19 @@ async function postCore(
   const kind = header.kind as PostingKind;
   // T-309 (06 §Kontrollü istisna): sayım farkı YALNIZCA sayım oturumuna kilitli lokasyonlara yazar. `acquireStockLocks` `countSessionId` planıyla bu
   // kilidi zaten zorlar; plan o alanı unutursa IDLE lokasyona sayım farkı yazılmasın diye kilitli görüntüde de denetlenir (üretim kodu hatası → INTERNAL).
-  if (kind === "COUNT_ADJUSTMENT" && (locked.locations.length === 0 || locked.locations.some((l) => l.status !== "COUNTING" || l.countSessionId === null))) {
-    throw new AppError("INTERNAL");
+  if (kind === "COUNT_ADJUSTMENT") {
+    // MINOR-3: kilitler belgenin KAYNAK oturumuna ait olmalı (başka oturumun COUNTING kilidine yazılamaz). Başlık `acquireStockLocks` ile kilitlidir.
+    const src = await tx.execute<{ source_kind: string | null; source_id: string | null }>(
+      sql`SELECT source_kind, source_id FROM public.documents WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${documentId}::uuid`,
+    );
+    const sourceId = src[0]?.source_kind === "COUNT_SESSION" ? src[0].source_id?.toLowerCase() : undefined;
+    if (
+      sourceId === undefined ||
+      locked.locations.length === 0 ||
+      locked.locations.some((l) => l.status !== "COUNTING" || l.countSessionId === null || l.countSessionId.toLowerCase() !== sourceId)
+    ) {
+      throw new AppError("INTERNAL");
+    }
   }
   const lines = await loadLines(tx, ctx.tenantId, documentId);
   if (lines.length < 1) throw new AppError("VALIDATION_FAILED");

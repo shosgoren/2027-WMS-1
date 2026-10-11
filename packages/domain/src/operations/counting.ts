@@ -26,7 +26,6 @@ import { runTenantCommand, type AccessTx, type Membership, type TenantAccessPara
 import { assertWarehouseVisible, pgUuidArray } from "../warehouse/scope.ts";
 import {
   EMPTY_LOCK_PLAN,
-  MAX_DOCUMENT_LINES,
   SYNC_POST_MAX_LINES,
   assertLocationsActiveInWarehouse,
   executeStockCommand,
@@ -136,12 +135,12 @@ function reasonOf(raw: unknown): string {
   return v;
 }
 
-async function itemScales(tx: AccessTx, tenantId: string, itemIds: readonly string[]): Promise<Map<string, { scale: number; baseUnitId: string }>> {
+async function itemScales(tx: AccessTx, tenantId: string, itemIds: readonly string[]): Promise<Map<string, { scale: number; baseUnitId: string; tracked: boolean; active: boolean }>> {
   if (itemIds.length === 0) return new Map();
-  const rows = await tx.execute<{ id: string; quantity_scale: number; base_unit_id: string }>(
-    sql`SELECT id, quantity_scale, base_unit_id FROM public.items WHERE tenant_id = ${tenantId}::uuid AND id = ANY(${pgUuidArray(itemIds)}::uuid[])`,
+  const rows = await tx.execute<{ id: string; quantity_scale: number; base_unit_id: string; tracking_mode: string; status: string }>(
+    sql`SELECT id, quantity_scale, base_unit_id, tracking_mode, status FROM public.items WHERE tenant_id = ${tenantId}::uuid AND id = ANY(${pgUuidArray(itemIds)}::uuid[])`,
   );
-  return new Map(rows.map((r) => [r.id.toLowerCase(), { scale: Number(r.quantity_scale), baseUnitId: r.base_unit_id }]));
+  return new Map(rows.map((r) => [r.id.toLowerCase(), { scale: Number(r.quantity_scale), baseUnitId: r.base_unit_id, tracked: r.tracking_mode !== "NONE", active: r.status === "ACTIVE" }]));
 }
 
 /** `toBase(q, "1", ürün ölçeği)` — tek kural (I-09): yuvarlama yok, ölçeğe inmiyorsa `QUANTITY_SCALE`. Kanonik 6 ondalıklı dizgi döner. */
@@ -214,7 +213,8 @@ export async function startCount(params: StockDocCallParams, input: StartCountIn
                WHERE d.tenant_id = ${ctx.tenantId}::uuid AND d.location_id = ANY(${pgUuidArray(locationIds)}::uuid[]) AND b.quantity > 0
                ORDER BY d.location_id, d.item_id, d.id`,
         );
-        if (stock.length > MAX_DOCUMENT_LINES) throw tooLarge();
+        // A-309-10: fark fişi eşzamanlı işlenir (SYNC_POST_MAX_LINES); fark satırı sayısı başlangıç satırlarını aşamaz → sığmayacak oturum baştan reddedilir.
+        if (stock.length > SYNC_POST_MAX_LINES) throw tooLarge();
         if (stock.some((r) => r.tracked)) throw new AppError("VALIDATION_FAILED"); // A-309-2
         if (stock.length > 0) {
           const json = JSON.stringify(
@@ -311,6 +311,9 @@ export async function recordCount(params: CountCallParams, input: RecordCountInp
       let lineId = hit?.id;
       if (lineId === undefined) {
         if (p.stockStatus !== "AVAILABLE") throw new AppError("VALIDATION_FAILED"); // A-309-4
+        // Bulgu satırı fark fişinde bakiyeye + yazar: takipli (lot/seri) ürün lot/seri taşıyamaz (A-309-2 ile aynı fail-closed) ve pasif ürüne stok girilemez → girişte reddedilir.
+        if (item.tracked) throw new AppError("VALIDATION_FAILED");
+        if (!item.active) throw new AppError("VALIDATION_FAILED", { detail: "IN_USE" });
         lineId = randomUUID();
         // Sistemde olmayan bulgu: boyutsuz satır, referans 0 (0017 reference_chk). Sayılan değer ayrı UPDATE'te (INSERT listesinde yok).
         await tx.execute(

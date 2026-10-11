@@ -23,6 +23,7 @@ import {
 } from "../../../packages/domain/src/operations/index.ts";
 import * as stockApi from "../../../packages/domain/src/stock/index.ts";
 import { approveDocument, createStockDocument, postDocument, reverseDocument, type DocumentLineInput, type StockDocCallParams } from "../../../packages/domain/src/stock/index.ts";
+import { postFieldDocument } from "../../../packages/domain/src/operations/field-posting.ts";
 import { archiveLocation } from "../../../packages/domain/src/warehouse/index.ts";
 import { mkMembership, mkUser, newRegistry, seedWorld, type TenantWorld } from "../fixtures/tenants.ts";
 import { readIntEnv } from "../harness/env.ts";
@@ -33,6 +34,8 @@ let app: DbClient;
 let adm: pg.Client;
 /** Ayrı bağlantı: açık tutulan fikstür transaction'ı (süren stok işlemi / arşiv yarışı); `adm` sorguları aynı transaction'a girmesin. */
 let hold: pg.Client;
+/** wms_app (DATABASE_URL) ile doğrudan SQL denemeleri (DB kuralı: tetikleyici/kısıt); daima ROLLBACK. */
+let appPg: pg.Client;
 let A: TenantWorld;
 let MGR: { userId: string; membershipId: string };
 let COUNTER: { userId: string; membershipId: string };
@@ -59,6 +62,19 @@ const pickerP = (extra: Partial<StockDocCallParams> = {}): StockDocCallParams =>
 
 async function q<T extends pg.QueryResultRow = pg.QueryResultRow>(text: string, params: unknown[] = []): Promise<T[]> {
   return (await adm.query<T>(text, params)).rows;
+}
+/** wms_app olarak tek UPDATE dener (tenant bağlamı transaction-local); sonuç ne olursa ROLLBACK. SQLSTATE döner (başarıda null). */
+async function appUpdateCode(text: string, params: unknown[]): Promise<string | null> {
+  await appPg.query("BEGIN");
+  try {
+    await appPg.query("SELECT set_config('app.current_tenant_id', $1, true)", [A.tenantId]);
+    const r = await appPg.query(text, params);
+    return r.rowCount === 0 ? "NO_ROWS" : null;
+  } catch (e) {
+    return (e as { code?: string }).code ?? "UNKNOWN";
+  } finally {
+    await appPg.query("ROLLBACK");
+  }
 }
 async function failure(p: Promise<unknown>): Promise<AppError> {
   try {
@@ -209,6 +225,9 @@ beforeAll(async () => {
   hold = new pg.Client({ connectionString: env.databaseUrlDirect });
   hold.on("error", () => undefined);
   await hold.connect();
+  appPg = new pg.Client({ connectionString: env.databaseUrl });
+  appPg.on("error", () => undefined);
+  await appPg.connect();
   A = await seedWorld(adm, reg, "A309");
   const m = await mkUser(adm, reg, "A309 manager");
   MGR = { userId: m, membershipId: await mkMembership(adm, A.tenantId, m, { roles: ["WAREHOUSE_MANAGER"] }) };
@@ -219,6 +238,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await hold.query("ROLLBACK").catch(() => undefined);
   await hold.end();
+  await appPg.end();
   await adm.end();
   await app.close();
 }, 60_000);
@@ -598,7 +618,10 @@ describe("sayım kuralları", () => {
     expect(codeOf(await failure(approveCount(mgrP(), { sessionId: sid })))).toBe("VALIDATION_FAILED/DOCUMENT_STATE");
     expect(codeOf(await failure(rec(sid, [{ loc: L, item: X, qty: "1" }])))).toBe("VALIDATION_FAILED/DOCUMENT_STATE");
     expect(codeOf(await failure(submitCount(counterP(), { sessionId: sid })))).toBe("VALIDATION_FAILED/DOCUMENT_STATE");
-    // approved_by başka onaylayıcıyla ezilmez (komut düzeyi; DB tetikleyicisi önerisi Q-121).
+    // approved_by başka onaylayıcıyla ezilmez: DB kuralı (0027, Q-121) — wms_app'in GERÇEK UPDATE denemesi 23514 alır; ardından değer değişmemiştir.
+    expect(await appUpdateCode("UPDATE public.count_sessions SET approved_by = $2 WHERE id = $1", [sid, COUNTER.membershipId])).toBe("23514");
+    expect(await appUpdateCode("UPDATE public.count_sessions SET approved_by = NULL WHERE id = $1", [sid])).toBe("23514"); // NULL'a çekme de reddedilir
+    expect((await sessOf(sid)).approved_by).toBe(MGR.membershipId);
     await postCountAdjustment(ownerP(), { sessionId: sid });
     expect((await sessOf(sid)).approved_by).toBe(MGR.membershipId);
   });
@@ -728,6 +751,100 @@ describe("sayım kuralları", () => {
     const open = await startOn([L], { blind: false });
     expect((await sessOf(open)).blind).toBe(false);
     await cancelCount(ownerP(), { sessionId: open, reason: "T309 temizlik" });
+  });
+
+  it("satır sınırı uyumu (A-309-10): başlatma SYNC_POST_MAX_LINES (200) satırı aşan oturumu baştan DOCUMENT_TOO_LARGE ile reddeder; tam 200 kabul edilir; hiçbir şey yazılmaz", async () => {
+    const L = await mkLoc();
+    const items: string[] = [];
+    for (let i = 0; i < 200; i += 1) items.push(await mkItem());
+    for (let i = 0; i < 200; i += 100) await postDoc("STOCK_IN", items.slice(i, i + 100).map((it) => ln(it, "1", { targetLocationId: L, stockStatus: "AVAILABLE" })));
+    // Sınırda: tam 200 satır kabul edilir.
+    const ok = await startOn([L]);
+    expect(await linesOf(ok)).toHaveLength(200);
+    await cancelCount(ownerP(), { sessionId: ok, reason: "T309 sinir" });
+    // 201. boyut: başlatma reddedilir; oturum ve kilit oluşmaz.
+    const extra = await mkItem();
+    await stockIn(extra, L, "1");
+    const sessions = await sessionCount();
+    expect(codeOf(await failure(startCount(ownerP(), { warehouseId: A.warehouseId, locationIds: [L] })))).toBe("VALIDATION_FAILED/DOCUMENT_TOO_LARGE");
+    expect(await sessionCount()).toBe(sessions);
+    expect((await lockOf(L)).status).toBe("IDLE");
+  }, 120_000);
+
+  it("sayım girişi bulgu satırı (MINOR-1): takipli (LOT/SERIAL) ve pasif ürün girişte reddedilir; hiçbir satır yazılmaz; etkin takipsiz ürün kabul edilir", async () => {
+    const L = await mkLoc();
+    const base = await mkItem();
+    await stockIn(base, L, "1");
+    const sid = await startOn([L]);
+    const lineCount = async (): Promise<number> => (await linesOf(sid)).length;
+    const before = await lineCount();
+    for (const mode of ["LOT", "SERIAL"] as const) {
+      const tracked = uuid();
+      await q("INSERT INTO public.items (tenant_id, id, code, name, base_unit_id, tracking_mode, quantity_scale) VALUES ($1,$2,$3,'T309 takipli',$4,$5,0)", [A.tenantId, tracked, `I-${hex(10)}`, A.unitId, mode]);
+      expect(codeOf(await failure(rec(sid, [{ loc: L, item: tracked, qty: "1" }]))), mode).toBe("VALIDATION_FAILED");
+    }
+    const passive = await mkItem();
+    await q("UPDATE public.items SET status = 'ARCHIVED', archived_at = now() WHERE id = $1", [passive]);
+    expect(codeOf(await failure(rec(sid, [{ loc: L, item: passive, qty: "1" }])))).toBe("VALIDATION_FAILED/IN_USE");
+    expect(await lineCount()).toBe(before);
+    const fresh = await mkItem();
+    await rec(sid, [{ loc: L, item: fresh, qty: "1" }]);
+    expect(await lineCount()).toBe(before + 1);
+    await cancelCount(ownerP(), { sessionId: sid, reason: "T309 temizlik" });
+  });
+
+  it("COUNT_ADJUSTMENT koruması (MINOR-3): kilit belgenin KAYNAK oturumuna ait değilse INTERNAL; defter/bakiye değişmez; kaynak oturum eşleşince işlenir", async () => {
+    const X = await mkItem();
+    const L1 = await mkLoc();
+    const L2 = await mkLoc();
+    await stockIn(X, L1, "5");
+    await stockIn(X, L2, "5");
+    const sidA = await startOn([L1]);
+    const sidB = await startOn([L2]);
+    const call = (sourceId: string) =>
+      stockApi.executeStockCommand({
+        db: app,
+        principal: { userId: A.ownerUserId, mfaVerified: true },
+        tenantSlug: A.slug,
+        clientKey: uuid(),
+        retry: NO_WAIT,
+        commandType: "stock.test.count_source",
+        permission: "count_diff.approve",
+        input: { sourceId },
+        plan: async () => ({
+          warehouseIds: [A.warehouseId],
+          locks: {
+            ...stockApi.EMPTY_LOCK_PLAN,
+            locationIds: [L2],
+            dimensions: [{ itemId: X, locationId: L2, lotId: null, serialId: null, stockStatus: "AVAILABLE" as const, inventoryOwnerId: null, handlingUnitId: null }],
+            countSessionId: sidB, // kilitler B'ye ait
+          },
+        }),
+        apply: (tx, locked, ctx) =>
+          postFieldDocument(
+            tx,
+            locked,
+            ctx,
+            {
+              kind: "COUNT_ADJUSTMENT",
+              warehouseId: A.warehouseId,
+              sourceKind: "COUNT_SESSION",
+              sourceId,
+              lines: [{ itemId: X, unitId: A.unitId, quantity: "1", conversionFactor: "1", baseQuantity: "1", sourceLocationId: L2, targetLocationId: null, stockStatus: "AVAILABLE", targetStockStatus: null, sourceLineId: null }],
+            },
+            null,
+          ),
+      });
+    const ledgerBefore = await ledgerCount(X);
+    expect(codeOf(await failure(call(sidA)))).toBe("INTERNAL"); // belge A'nın, kilit B'nin
+    expect(await ledgerCount(X)).toBe(ledgerBefore);
+    expect(await physical(X)).toBe(n(10));
+    expect((await lockOf(L2)).status).toBe("COUNTING");
+    await call(sidB); // kontrol: kaynak oturum = kilit oturumu → işlenir
+    expect(await physical(X)).toBe(n(9));
+    expect(await ledgerCount(X)).toBe(ledgerBefore + 1);
+    await cancelCount(ownerP(), { sessionId: sidA, reason: "T309 temizlik" });
+    await cancelCount(ownerP(), { sessionId: sidB, reason: "T309 temizlik" });
   });
 
   it("başka tenant'ın oturumu NOT_FOUND (varlık sızmaz)", async () => {
