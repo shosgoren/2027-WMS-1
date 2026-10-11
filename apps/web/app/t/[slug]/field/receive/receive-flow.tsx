@@ -7,7 +7,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useId, useRef, useState, useTransition } from "react";
 import { useTranslations } from "next-intl";
 import { Banner, ChevronDown, CircleAlert, CircleCheck, PackagePlus, ScanField, ScanLine } from "@wms/ui";
-import { ScannerService, type ScanSource, type ScannerSource } from "../../../../../lib/scanner/scanner-core.ts";
+import { ScannerService, gateScan, type ScanSource, type ScannerSource } from "../../../../../lib/scanner/scanner-core.ts";
 import { createKeystrokeSource } from "../../../../../lib/scanner/keystroke-source.ts";
 import { cameraFeedback, classifyCameraError, createFrameDecoder, iosShareLocation, openCamera, platformOf, startScanLoop } from "../../../../../lib/scanner/camera-source.ts";
 import type { CameraFailure, CameraSession, FrameDecoder, RejectReason } from "../../../../../lib/scanner/camera-source.ts";
@@ -232,8 +232,18 @@ export function useScanner(handler: (value: string, source: ScanSource) => void,
     s.registerSource(cam);
     setService(s);
   }, []);
-  const stable = useCallback((v: string, src: ScanSource) => ref.current(v, src), []);
-  useEffect(() => (service !== null && enabled ? service.onScan(stable) : undefined), [service, enabled, stable]);
+  // Abonelik `enabled`'a BAĞLI DEĞİL: servis hazır olunca bir kez kurulur, söküm/yeniden takma penceresi yoktur (T-286 düşme yarışı).
+  // `enabled` her taramada `enabledRef` ile (render sırasında güncel) kapıda denetlenir; kapalıyken gelen okuma (klavye kaması dahil) SESSİZCE düşmez: bildirilir.
+  useEffect(() => {
+    if (service === null) return undefined;
+    return service.onScan(
+      gateScan(
+        () => enabledRef.current,
+        (v, src) => ref.current(v, src),
+        () => setDropped(true),
+      ),
+    );
+  }, [service]);
   // Okuma kapalıyken (işlem sürüyor ya da uyarı açık) gelen kamera kodu SESSİZCE düşmez: kullanıcıya bildirilir (T-313 güvenlik MINOR).
   const camera = useCallback((code: string) => {
     if (!enabledRef.current) {
@@ -584,12 +594,12 @@ export function useScanPrimary(camera: (code: string) => void, outcome: ScanOutc
   return { ready, press, overlay: cam ? <CameraOverlay onCode={onCode} onClose={close} onManual={onManual} resolvedName={accepted ? outcome.name : undefined} /> : null };
 }
 
-/** Okuma kapalıyken gelen kod bildirimi (uyarı açıkken de görünür: üstte, `z-[60]`). */
+/** Okuma kapalıyken gelen kod bildirimi (kaynaktan bağımsız: kamera ya da klavye kaması). Uyarı açıkken de görünür: en üstte (`top-2`, `z-[60]`); tam ekran uyarının başlığı simgenin altında olduğundan başlığı örtmez. */
 export function DroppedNotice({ show, onClose }: { show: boolean; onClose: () => void }) {
   const t = useTranslations("receiving");
   if (!show) return null;
   return (
-    <div role="alert" data-testid="camera-dropped" className="fixed inset-x-4 top-16 z-[60] mx-auto flex max-w-md items-center gap-3 rounded-card border-2 border-warning bg-warning-bg px-4 py-3 text-warning-ink shadow-card">
+    <div role="alert" data-testid="camera-dropped" className="fixed inset-x-4 top-2 z-[60] mx-auto flex max-w-md items-center gap-3 rounded-card border-2 border-warning bg-warning-bg px-4 py-3 text-warning-ink shadow-card">
       <p className="min-w-0 flex-1 break-words text-base font-bold">{t("camera.dropped")}</p>
       <button type="button" onClick={onClose} className={`flex min-h-12 min-w-12 shrink-0 items-center justify-center rounded-control border-2 border-warning-ink px-3 text-base font-bold ${FOCUS}`}>
         {t("camera.ok")}
