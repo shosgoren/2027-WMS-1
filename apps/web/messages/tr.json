@@ -1267,18 +1267,22 @@
     },
     "summary": {
       "items": "Ürün",
-      "stockLines": "Stok satırı",
+      "stockLines": "Satır",
       "errorRows": "Hatalı satır",
-      "lineProducts": "{total} ürün: {ok} hazır, {bad} hatalı",
-      "lineStock": "{total} stok satırı: {ok} hazır, {bad} hatalı"
+      "lineProducts": "{total} satır: {ok} hazır, {bad} hatalı",
+      "lineStock": "{total} satır: {ok} hazır, {bad} hatalı",
+      "rows": "Satır"
     },
     "detail": {
-      "products": "{create} yeni ürün eklenecek, {existing} ürün zaten var. {packs} koli tanımı, {barcodes} barkod.",
       "packUnit": "Koli birimi de oluşturulacak.",
       "stock": "{warehouses} depoya toplam {total} adet girilecek.",
       "stockExists": "Sistemde zaten stok var. Bu dosyadaki miktarlar mevcut stokun üstüne eklenir. Aynı dosyayı daha önce aldıysan ikinci kez eklenmez.",
       "stockNothing": "Yazılacak yeni satır yok.",
-      "stockSkipped": "{n} satır daha önce işlenmiş, atlanacak."
+      "stockSkipped": "{n} satır daha önce işlenmiş, atlanacak.",
+      "create": "{n} yeni ürün eklenecek",
+      "existing": "{n} ürün zaten var",
+      "packs": "{n} koli tanımı",
+      "barcodes": "{n} barkod"
     },
     "blocked": "{n} hata var. Dosyayı düzeltip yeniden seç.",
     "clean": "Hata yok. İçe aktarabilirsin.",
@@ -1290,7 +1294,8 @@
       "fixPrefix": "Nasıl düzeltilir:",
       "more": "Tümünü göster ({n} satır)",
       "less": "Daha az göster",
-      "pickFixed": "Yeni dosya seç"
+      "pickFixed": "Düzeltilmiş dosyayı seç",
+      "partial": "{total} hata var: ilk {rows} satır gösteriliyor"
     },
     "step4": {
       "title": "İçe aktar",
@@ -1300,14 +1305,15 @@
       "progress": "{done} / {total} satır",
       "done": "Tamamlandı",
       "partial": "Yarım kaldı",
-      "noRows": "Önce şablona en az bir satır ekle."
+      "noRows": "Önce şablona en az bir satır ekle.",
+      "failed": "Kaydedilemedi"
     },
     "step5": {
       "title": "Sonuç"
     },
     "result": {
-      "partial": "İşlem yarım kaldı. {n} satır eklendi.",
-      "failedRow": "Satır {row} ({code}):",
+      "partial": "İşlem yarım kaldı.",
+      "failedRow": "Satır {row} · {code}",
       "nextStock": "Şimdi açılış stoku dosyasını yükleyebilirsin.",
       "again": "Dosyayı yeniden seç",
       "another": "Başka dosya yükle",
@@ -1321,7 +1327,9 @@
       "stat": {
         "failed": "{n} satır hatalı",
         "skipped": "{n} satır denenmedi",
-        "existing": "{n} satır zaten vardı"
+        "existing": "{n} satır zaten vardı",
+        "added": "{n} satır eklendi",
+        "updated": "{n} satır için koli ya da barkod bilgisi tamamlandı"
       },
       "toStock": "Ürünlerde stoğu gör",
       "none": "Yeni kayıt yok.",
@@ -1330,7 +1338,9 @@
         "PAIR_HAS_STOCK": "Bu ürün bu rafta başka bir işlemle stoğa girdi. Açılış stoku yalnız boş raflar içindir; düzeltme için stok belgesi kullan.",
         "PAIR_PENDING": "Bu ürün ve raf için tamamlanmamış bir açılış belgesi var. Aynı dosyayı yeniden yükleyerek sürdür."
       },
-      "failedGeneric": "Kaydedilemedi. Biraz sonra aynı dosyayı yeniden yükle."
+      "failedGeneric": "Sistem bu satırları kaydedemedi.",
+      "failedTitle": "Kaydedilemedi.",
+      "retryNone": "Hiçbir satır yazılmadı. Sorunu giderip aynı dosyayı tekrar yükle."
     },
     "column": {
       "code": "Kod",

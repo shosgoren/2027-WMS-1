@@ -3,7 +3,7 @@ import path from "node:path";
 import { expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
-export const OUT = path.resolve(import.meta.dirname, "../../.artifacts/t-289");
+export const OUT = path.resolve(import.meta.dirname, "../../../.artifacts/t-289");
 export const PHONE_SIZES = [
   { width: 360, height: 740 },
   { width: 390, height: 844 },

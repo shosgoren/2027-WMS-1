@@ -113,7 +113,7 @@ export function ImportView({ slug, templates, columns, limits }: ImportViewProps
   }, []);
   // Önizleme hazır olunca özet görünür alana gelir (telefonda adım 1-2 uzundur).
   useEffect(() => {
-    if (preview !== null) summaryRef.current?.scrollIntoView({ block: "start" });
+    if (preview !== null) document.querySelector("[data-step=\"3\"]")?.scrollIntoView({ block: "start" }); // "3 Önizle" başlığı da görünür kalsın
   }, [preview]);
   useEffect(() => {
     if (stage === "done") resultRef.current?.scrollIntoView({ block: "start" });
@@ -207,11 +207,19 @@ export function ImportView({ slug, templates, columns, limits }: ImportViewProps
   const failedRows = applied.filter((r) => r.status === "FAILED");
   const count = (s: string): number => applied.filter((r) => r.status === s).length;
   const existingCount = count("UNCHANGED") + count("REPLAYED"); // "zaten vardı": yeni yazılmadı
-  const addedCount = count("CREATED") + count("UPDATED") + count("APPLIED");
+  const addedCount = count("CREATED") + count("APPLIED");
   // Denenmeyen = rapor edilen NOT_ATTEMPTED satırları + hiç rapor edilmeyen satırlar (durdurulan/erişilemeyen parçalar).
   const notTried = preview === null ? 0 : count("NOT_ATTEMPTED") + Math.max(0, preview.rowCount - applied.length);
   const failedCount = failedRows.length + (fatal === null ? 0 : 1);
   const incomplete = fatal !== null || failedRows.length > 0 || notTried > 0;
+  const nothingWritten = addedCount + count("UPDATED") === 0; // hiçbir satır yazılmadı/tamamlanmadı: "yarım kaldı" değil "kaydedilemedi"
+  // Neden metinleri BİR kez (satır başına tekrar yok): satırlardaki farklı nedenler + varsa sunucu eylem hatası.
+  const causes = [
+    ...new Set([
+      ...failedRows.map((r) => (r.reason !== undefined ? t(`result.reason.${r.reason}`) : rowErrorText(te, t, r.errorCode ?? "unknown"))),
+      ...(fatal === null ? [] : [`${te(errorKey(fatal.code))} ${te(`${errorKey(fatal.code)}Action`)}`]),
+    ]),
+  ];
   const kindKey = preview?.kind === "STOCK" ? "stock" : "products";
   const isStock = preview?.kind === "STOCK";
   const pickFixed = (): void => inputRef.current?.click();
@@ -301,16 +309,23 @@ export function ImportView({ slug, templates, columns, limits }: ImportViewProps
                       {t(isStock ? "summary.lineStock" : "summary.lineProducts", { total: preview.rowCount, ok: preview.rowCount - preview.summary.errorRows, bad: preview.summary.errorRows })}
                     </p>
                     <div className="flex min-w-0 gap-2">
-                      <Stat value={preview.summary.items} label={t("summary.items")} />
-                      {isStock ? <Stat value={preview.summary.stockLines} label={t("summary.stockLines")} /> : null}
-                      <Stat value={preview.summary.errorRows} label={t("summary.errorRows")} tone={preview.summary.errorRows > 0 ? "bad" : undefined} />
+                      {isStock ? <Stat value={preview.summary.items} label={t("summary.items")} /> : null}
+                      <Stat value={preview.rowCount} label={t("summary.rows")} />
+                      {preview.summary.errorRows > 0 || stage !== "done" ? <Stat value={preview.summary.errorRows} label={t("summary.errorRows")} tone={preview.summary.errorRows > 0 ? "bad" : undefined} /> : null}
                     </div>
                   </>
                 )}
                 {!blocked && preview.products !== undefined ? (
                   <p className="break-words text-base text-ink">
-                    {t("detail.products", { create: preview.products.create, existing: preview.products.existing, packs: preview.products.packs, barcodes: preview.products.barcodes })}
-                    {preview.products.willCreatePackUnit ? ` ${t("detail.packUnit")}` : ""}
+                    {[
+                      preview.products.create > 0 ? t("detail.create", { n: preview.products.create }) : null,
+                      preview.products.existing > 0 ? t("detail.existing", { n: preview.products.existing }) : null,
+                      preview.products.packs > 0 ? t("detail.packs", { n: preview.products.packs }) : null,
+                      preview.products.barcodes > 0 ? t("detail.barcodes", { n: preview.products.barcodes }) : null,
+                    ]
+                      .filter((x): x is string => x !== null)
+                      .join(", ")}
+                    .{preview.products.willCreatePackUnit ? ` ${t("detail.packUnit")}` : ""}
                   </p>
                 ) : null}
                 {!blocked && preview.stock !== undefined ? (
@@ -334,12 +349,15 @@ export function ImportView({ slug, templates, columns, limits }: ImportViewProps
                     </button>
                   </Banner>
                 ) : blocked ? (
-                  <Banner kind="error">
-                    <p>{t("blocked", { n: preview.issueTotal })}</p>
-                    <button type="button" className={`${SECONDARY} mt-2 w-full`} onClick={pickFixed} disabled={busy}>
+                  <div role="alert" data-kind="error" className="flex min-w-0 flex-col gap-2 rounded-card bg-danger-bg px-4 py-3 text-danger-ink">
+                    <p className="flex items-start gap-3 break-words text-base font-medium">
+                      <CircleAlert aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-danger" />
+                      <span className="min-w-0">{t("blocked", { n: preview.issueTotal })}</span>
+                    </p>
+                    <button type="button" className={`${SECONDARY.replace("px-5", "px-2")} w-full text-ink`} onClick={pickFixed} disabled={busy}>
                       {t("issues.pickFixed")}
                     </button>
-                  </Banner>
+                  </div>
                 ) : stage === "done" ? null : (
                   <Banner kind="success">
                     <p>{t("clean")}</p>
@@ -353,7 +371,7 @@ export function ImportView({ slug, templates, columns, limits }: ImportViewProps
               {stage === "done" ? (
                 <p className={`flex items-start gap-2 break-words text-base font-semibold ${incomplete ? "text-danger-ink" : "text-success-ink"}`} data-testid="import-step4-status">
                   {incomplete ? <CircleAlert aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-danger" /> : <CircleCheck aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-success" />}
-                  <span className="min-w-0">{incomplete ? t("step4.partial") : t("step4.done")}</span>
+                  <span className="min-w-0">{incomplete ? (nothingWritten ? t("step4.failed") : t("step4.partial")) : t("step4.done")}</span>
                 </p>
               ) : (
                 <div className="flex min-w-0 flex-col gap-2">
@@ -385,46 +403,58 @@ export function ImportView({ slug, templates, columns, limits }: ImportViewProps
               <Step n={5} title={t("step5.title")} current>
                 <div ref={resultRef} data-testid="import-result" className="flex scroll-mt-2 min-w-0 flex-col gap-2">
                   <Banner kind={incomplete ? "error" : "success"}>
-                    <p>{incomplete ? t("result.partial", { n: addedCount }) : resultSummary(t, preview.kind, count)}</p>
-                    {incomplete ? <p className="mt-1">{t(isStock ? "result.retryStock" : "result.retryProducts")}</p> : null}
+                    {incomplete ? (
+                      <>
+                        <p className="font-bold">{nothingWritten ? t("result.failedTitle") : t("result.partial")}</p>
+                        {causes.map((c) => (
+                          <p key={c} className="mt-1">
+                            {c}
+                          </p>
+                        ))}
+                        <p className="mt-1">{nothingWritten ? t("result.retryNone") : t(isStock ? "result.retryStock" : "result.retryProducts")}</p>
+                      </>
+                    ) : (
+                      <p>{addedCount + count("UPDATED") > 0 ? t("result.okLead") : `${t("result.okLead")} ${t("result.none")}`}</p>
+                    )}
                   </Banner>
                   <ul className="m-0 flex min-w-0 list-none flex-col gap-1 p-0" data-testid="import-counts">
+                    {addedCount > 0 ? (
+                      <li className="flex items-start gap-2 text-base font-semibold text-success-ink">
+                        <CircleCheck aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-success" />
+                        <span className="min-w-0">{t("result.stat.added", { n: addedCount })}</span>
+                      </li>
+                    ) : null}
+                    {count("UPDATED") > 0 ? (
+                      <li className="flex items-start gap-2 text-base font-semibold text-success-ink">
+                        <CircleCheck aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-success" />
+                        <span className="min-w-0">{t("result.stat.updated", { n: count("UPDATED") })}</span>
+                      </li>
+                    ) : null}
                     {existingCount > 0 ? (
                       <li className="flex items-start gap-2 text-base font-semibold text-info-ink">
                         <Info aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-info" />
                         <span className="min-w-0">{t("result.stat.existing", { n: existingCount })}</span>
                       </li>
                     ) : null}
-                    {incomplete || failedCount > 0 ? (
+                    {failedCount > 0 ? (
                       <li className="flex items-start gap-2 text-base font-semibold text-danger-ink">
                         <CircleAlert aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-danger" />
                         <span className="min-w-0">{t("result.stat.failed", { n: failedCount })}</span>
                       </li>
                     ) : null}
-                    {incomplete || notTried > 0 ? (
+                    {notTried > 0 ? (
                       <li className="flex items-start gap-2 text-base font-semibold text-warning-ink">
                         <TriangleAlert aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-warning" />
                         <span className="min-w-0">{t("result.stat.skipped", { n: notTried })}</span>
                       </li>
                     ) : null}
                   </ul>
-                  {fatal === null ? null : (
-                    <p className="flex items-start gap-2 break-words text-base text-danger-ink">
-                      <CircleAlert aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-danger" />
-                      <span className="min-w-0">
-                        {te(errorKey(fatal.code))} {te(`${errorKey(fatal.code)}Action`)}
-                      </span>
-                    </p>
-                  )}
                   {failedRows.length === 0 ? null : (
                     <ul className="m-0 flex min-w-0 list-none flex-col gap-1 p-0" data-testid="import-failed-rows">
                       {failedRows.slice(0, FAILED_SHOWN).map((r) => (
                         <li key={r.row} className="flex min-w-0 items-start gap-2 break-words text-base text-ink">
-                          <TriangleAlert aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-warning" />
-                          <span className="min-w-0">
-                            {t("result.failedRow", { row: r.row, code: r.code })}{" "}
-                            {r.reason !== undefined ? t(`result.reason.${r.reason}`) : rowErrorText(te, t, r.errorCode ?? "unknown")}
-                          </span>
+                          <CircleAlert aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-danger" />
+                          <span className="min-w-0">{t("result.failedRow", { row: r.row, code: r.code })}</span>
                         </li>
                       ))}
                       {failedRows.length > FAILED_SHOWN ? (
@@ -464,19 +494,6 @@ function rowErrorText(te: Translate, t: Translate, code: string): string {
   return ["forbidden", "unauthenticated", "rate_limited", "tenant_suspended", "tenant_closing"].includes(k) ? `${te(k)} ${te(`${k}Action`)}` : t("result.failedGeneric");
 }
 
-/** Başarılı sonuç özeti: yalnız sıfırdan büyük sayılar yazılır; "zaten vardı" sayısı ayrı satırda (ikon + renk) gösterilir, burada tekrarlanmaz. */
-function resultSummary(t: Translate, kind: "PRODUCTS" | "STOCK", count: (s: string) => number): string {
-  const parts = [t("result.okLead")];
-  if (kind === "STOCK") {
-    if (count("APPLIED") > 0) parts.push(t("result.stockApplied", { n: count("APPLIED") }));
-  } else {
-    if (count("CREATED") > 0) parts.push(t("result.created", { n: count("CREATED") }));
-    if (count("UPDATED") > 0) parts.push(t("result.updated", { n: count("UPDATED") }));
-  }
-  if (parts.length === 1) parts.push(t("result.none"));
-  return parts.join(" ");
-}
-
 function IssueList({ issues, total }: { issues: readonly ImportIssue[]; total: number }) {
   const t = useTranslations("import");
   const [all, setAll] = useState(false);
@@ -490,7 +507,13 @@ function IssueList({ issues, total }: { issues: readonly ImportIssue[]; total: n
   const shown = all ? groups : groups.slice(0, FIRST_CARDS);
   return (
     <div className="flex min-w-0 flex-col gap-2">
-      <p className="break-words text-base font-semibold text-ink">{total > issues.length ? t("issues.truncated", { shown: issues.length, total }) : t("issues.all", { total })}</p>
+      <p className="break-words text-base font-semibold text-ink" data-testid="issues-heading">
+        {total > issues.length
+          ? t("issues.truncated", { shown: issues.length, total })
+          : groups.length > FIRST_CARDS && !all
+            ? t("issues.partial", { total: issues.length, rows: FIRST_CARDS })
+            : t("issues.all", { total })}
+      </p>
       <ul className="m-0 flex min-w-0 list-none flex-col gap-2 p-0" data-testid="import-issues">
         {shown.map((g) => (
           <li key={g.row} data-testid="import-issue" className="flex min-w-0 flex-col gap-2 rounded-card bg-surface p-3 shadow-card">

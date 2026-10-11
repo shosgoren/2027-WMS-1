@@ -8,7 +8,8 @@ import { createDbClient } from "../../../packages/db/src/index.ts";
 import { DB_CLIENT_SETTINGS, type DbClient } from "../../../packages/db/src/client.ts";
 import { AppError } from "../../../packages/shared/src/errors.ts";
 import { createLocation, createWarehouse } from "../../../packages/domain/src/warehouse/index.ts";
-import { IMPORT_CHUNK_SIZE, applyImportChunk, previewImport, linesDigestOf, stockClientKey, type ChunkReport, type ImportCallParams } from "../../../packages/domain/src/onboarding/index.ts";
+import { IMPORT_CHUNK_SIZE, applyImportChunk, previewImport, linesDigestOf, type ChunkReport, type ImportCallParams } from "../../../packages/domain/src/onboarding/index.ts";
+import { approveDocument, createStockDocument, postDocument } from "../../../packages/domain/src/stock/index.ts";
 import { newRegistry, seedWorld, type TenantWorld } from "../fixtures/tenants.ts";
 import { readIntEnv } from "../harness/env.ts";
 
@@ -21,6 +22,20 @@ let B: TenantWorld;
 
 const asAdmin = (w: TenantWorld): ImportCallParams => ({ db: app, principal: { userId: w.ownerUserId, mfaVerified: true }, tenantSlug: w.slug, requestId: randomUUID() });
 const asPicker = (w: TenantWorld): ImportCallParams => ({ db: app, principal: { userId: w.memberUserId, mfaVerified: true }, tenantSlug: w.slug });
+type Settled = { kind: "APPLIED" } | { kind: "ROW_FAILED"; reason: string | undefined } | { kind: "REJECTED" };
+/** Eşzamanlı uygulamanın üç güvenli sonucu: yazıldı; kilit altında yeniden denetimde satır hatası (reason); ya da başlangıç denetiminde reddedildi (hiçbir şey yazılmadı). */
+async function settle(p: Promise<ChunkReport>): Promise<Settled> {
+  try {
+    const r = await p;
+    const row = r.rows[0];
+    if (row?.status === "APPLIED") return { kind: "APPLIED" };
+    return { kind: "ROW_FAILED", reason: row?.reason };
+  } catch (e) {
+    expect(e).toBeInstanceOf(AppError);
+    expect((e as AppError).code).toBe("VALIDATION_FAILED");
+    return { kind: "REJECTED" };
+  }
+}
 const NO_DIGEST = "0".repeat(64);
 const pfx = (): string => `Z${randomUUID().replace(/-/g, "").slice(0, 8).toUpperCase()}`;
 
@@ -209,16 +224,83 @@ describe("açılış stoku", () => {
     expect(await num("SELECT count(*) AS n FROM public.stock_dimensions d JOIN public.items i ON i.tenant_id = d.tenant_id AND i.id = d.item_id WHERE d.tenant_id = $1 AND i.code LIKE $2", [A.tenantId, `${p}%`])).toBe(0);
   });
 
-  it("anahtar satır İÇERİĞİNDEN türer: sıra değişimi aynı anahtar; farklı içerik/depo/adım farklı", () => {
+  it("satır kümesi özeti sıradan bağımsızdır; içerik değişince değişir", () => {
     const l1 = { itemId: "i1", locationId: "l1", quantity: "5" };
     const l2 = { itemId: "i2", locationId: "l2", quantity: "7" };
-    const d = linesDigestOf([l1, l2]);
-    expect(linesDigestOf([l2, l1])).toBe(d);
-    const k = stockClientKey(d, A.warehouseId, "post");
-    expect(k).toBe(stockClientKey(linesDigestOf([l2, l1]), A.warehouseId, "post"));
-    expect(k).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}$/);
-    expect(new Set([k, stockClientKey(linesDigestOf([l1, { ...l2, quantity: "8" }]), A.warehouseId, "post"), stockClientKey(d, B.warehouseId, "post"), stockClientKey(d, A.warehouseId, "create")]).size).toBe(4);
+    expect(linesDigestOf([l2, l1])).toBe(linesDigestOf([l1, l2]));
+    expect(linesDigestOf([l1, { ...l2, quantity: "8" }])).not.toBe(linesDigestOf([l1, l2]));
   });
+
+  it("bitmemiş (DRAFT) belge aynı çifti 'dolu' sayar: miktardan bağımsız PAIR_PENDING; önizleme de uygulama da yazmaz (m-1)", async () => {
+    const p = pfx();
+    await applyAll(() => asAdmin(A), `kod;ad\n${p}-1;Bir`);
+    const shelf = `${p}-R`;
+    const loc = await newShelf(A, shelf);
+    const item = (await adm.query<{ id: string; base_unit_id: string }>("SELECT id, base_unit_id FROM public.items WHERE tenant_id = $1 AND code = $2", [A.tenantId, `${p}-1`])).rows[0] as { id: string; base_unit_id: string };
+    const access = { db: app, principal: { userId: A.ownerUserId, mfaVerified: true }, tenantSlug: A.slug };
+    await createStockDocument({ ...access, clientKey: randomUUID() }, { kind: "STOCK_IN", warehouseId: A.warehouseId, lines: [{ itemId: item.id, unitId: item.base_unit_id, quantity: "5", conversionFactor: "1", baseQuantity: "5", targetLocationId: loc }] });
+    for (const qty of ["5", "9"]) {
+      const csv = `ürün kodu;raf kodu;miktar\n${p}-1;${shelf};${qty}`;
+      const pv = await previewImport(asAdmin(A), csv);
+      expect(pv.issues.map((i) => i.code)).toEqual(["PAIR_PENDING"]);
+      expect((await failure(applyImportChunk(asAdmin(A), { text: csv, chunk: 0, digest: NO_DIGEST }))).code).toBe("VALIDATION_FAILED");
+    }
+    expect(await countLedger(A, p)).toBe(0);
+  });
+
+  it("içe aktarma ile NORMAL STOCK_IN aynı anda (aynı ürün+raf): ikisi araya girmez; içe aktarma yazdıysa önce yazmıştır, yazmadıysa PAIR_HAS_STOCK (MINOR-3)", async () => {
+    for (let round = 0; round < 3; round++) {
+      const p = pfx();
+      await applyAll(() => asAdmin(A), `kod;ad\n${p}-1;Bir`);
+      const shelf = `${p}-R`;
+      const loc = await newShelf(A, shelf);
+      const item = (await adm.query<{ id: string; base_unit_id: string }>("SELECT id, base_unit_id FROM public.items WHERE tenant_id = $1 AND code = $2", [A.tenantId, `${p}-1`])).rows[0] as { id: string; base_unit_id: string };
+      const access = { db: app, principal: { userId: A.ownerUserId, mfaVerified: true }, tenantSlug: A.slug };
+      const csv = `ürün kodu;raf kodu;miktar\n${p}-1;${shelf};5`;
+      const pv = await previewImport(asAdmin(A), csv);
+      expect(pv.issueTotal).toBe(0);
+      const normal = async (): Promise<void> => {
+        const doc = await createStockDocument({ ...access, clientKey: randomUUID() }, { kind: "STOCK_IN", warehouseId: A.warehouseId, lines: [{ itemId: item.id, unitId: item.base_unit_id, quantity: "7", conversionFactor: "1", baseQuantity: "7", targetLocationId: loc }] });
+        const id = doc.documentId as string;
+        await approveDocument({ ...access, clientKey: randomUUID() }, { documentId: id, expectedVersion: 1 });
+        await postDocument({ ...access, clientKey: randomUUID() }, { documentId: id, expectedVersion: 2 });
+      };
+      const [rep] = await Promise.all([settle(applyImportChunk(asAdmin(A), { text: csv, chunk: 0, digest: pv.digest })), normal()]);
+      const rows = await adm.query<{ q: string; reason: string | null }>(
+        "SELECT l.quantity::text AS q, d.reason FROM public.stock_ledger l JOIN public.documents d ON d.tenant_id = l.tenant_id AND d.id = l.document_id WHERE l.tenant_id = $1 AND l.item_id = $2 ORDER BY l.created_xid, l.occurred_at",
+        [A.tenantId, item.id],
+      );
+      if (rep.kind === "APPLIED") {
+        // İçe aktarma önce yazdı; normal belge sonra eklendi. Defter: [5 (açılış), 7].
+        expect(rows.rows.map((r) => [Number(r.q), r.reason])).toEqual([[5, "import.opening_stock"], [7, null]]);
+      } else {
+        if (rep.kind === "ROW_FAILED") expect(["PAIR_HAS_STOCK", "PAIR_PENDING"]).toContain(rep.reason); // normal belge ya işlendi ya da taslak/onaylı bekliyor
+        expect(rows.rows.map((r) => Number(r.q))).toEqual([7]); // yalnız normal belge
+      }
+    }
+  });
+
+  it("12 EŞZAMANLI içe aktarma (farklı depo/çiftler): havuz tükenmez, hepsi biter (süre sınırlı), her çift tam bir kez yazılır", async () => {
+    const p = pfx();
+    const names = Array.from({ length: 12 }, (_, i) => `${p}-${i}`);
+    await applyAll(() => asAdmin(A), ["kod;ad", ...names.map((n) => `${n};Ürün`)].join("\n"));
+    const access = { db: app, principal: { userId: A.ownerUserId, mfaVerified: true }, tenantSlug: A.slug };
+    const files: string[] = [];
+    for (let i = 0; i < 12; i++) {
+      const wh = (await createWarehouse(access, { code: `${p}-W${i}`.slice(0, 40), name: `Depo ${i}` })).warehouseId;
+      const code = `${p}-R${i}`;
+      await createLocation(access, { warehouseId: wh, code, name: code, kind: "STORAGE" });
+      files.push(`ürün kodu;raf kodu;miktar\n${names[i]};${code};${i + 1}`);
+    }
+    const previews = await Promise.all(files.map((f) => previewImport(asAdmin(A), f)));
+    expect(previews.map((x) => x.issueTotal)).toEqual(Array(12).fill(0));
+    const t0 = Date.now();
+    const reps = await Promise.all(files.map((f, i) => applyImportChunk(asAdmin(A), { text: f, chunk: 0, digest: (previews[i] as { digest: string }).digest })));
+    const ms = Date.now() - t0;
+    expect(reps.every((r) => r.complete && r.rows[0]?.status === "APPLIED")).toBe(true);
+    expect(ms, `12 eşzamanlı içe aktarma ${ms} ms`).toBeLessThan(30_000);
+    expect(await countLedger(A, p)).toBe(12);
+  }, 60_000);
 
   it("çiftte stok varsa satır hatası (M-1); dosyayı sıralamak ya da satır eklemek önceden yazılmış satırı iki kez yazmaz (M-2)", async () => {
     const p = pfx();
@@ -262,14 +344,14 @@ describe("açılış stoku", () => {
     const [pa, pb] = [await previewImport(asAdmin(A), a), await previewImport(asAdmin(A), b)];
     expect([pa.issueTotal, pb.issueTotal]).toEqual([0, 0]);
     const [ra, rb] = await Promise.all([
-      applyImportChunk(asAdmin(A), { text: a, chunk: 0, digest: pa.digest }),
-      applyImportChunk(asAdmin(A), { text: b, chunk: 0, digest: pb.digest }),
+      settle(applyImportChunk(asAdmin(A), { text: a, chunk: 0, digest: pa.digest })),
+      settle(applyImportChunk(asAdmin(A), { text: b, chunk: 0, digest: pb.digest })),
     ]);
-    const statuses = [ra.rows[0]?.status, rb.rows[0]?.status].sort();
-    expect(statuses).toEqual(["APPLIED", "FAILED"]);
-    const loser = ra.rows[0]?.status === "FAILED" ? ra : rb;
-    expect(loser.rows[0]).toMatchObject({ status: "FAILED", reason: "PAIR_HAS_STOCK" });
-    expect(loser.complete).toBe(false);
+    // Biri yazar; diğeri yazmaz: kilit altında yeniden denetimde PAIR_HAS_STOCK satır hatası ya da (kilit öncesi denetimde) reddedilir.
+    expect([ra.kind, rb.kind].filter((k) => k === "APPLIED")).toHaveLength(1);
+    const loser = ra.kind === "APPLIED" ? rb : ra;
+    expect(["ROW_FAILED", "REJECTED"]).toContain(loser.kind);
+    if (loser.kind === "ROW_FAILED") expect(loser.reason).toBe("PAIR_HAS_STOCK");
     expect(await countLedger(A, p)).toBe(1);
     const q = await adm.query<{ q: string }>("SELECT sum(b.quantity)::text AS q FROM public.stock_balances b JOIN public.stock_dimensions d ON d.tenant_id = b.tenant_id AND d.id = b.stock_dimension_id JOIN public.items i ON i.tenant_id = d.tenant_id AND i.id = d.item_id WHERE i.tenant_id = $1 AND i.code = $2", [A.tenantId, `${p}-1`]);
     expect([5, 9]).toContain(Number(q.rows[0]?.q));
@@ -365,7 +447,7 @@ describe("kısmi başarısızlık ve yeniden deneme (M-3)", () => {
       [w.tenantId, `${p}%`],
     );
 
-  it("stok: belge oluşur ama onayda kalır → ilk grup FAILED, sonrakiler NOT_ATTEMPTED, defter boş; yeniden denemede aynı belge sürdürülür (çift belge yok)", async () => {
+  it("stok: onay adımı başarısız → tek transaction GERİ ALINIR (taslak kalmaz); ilk grup FAILED, sonrakiler NOT_ATTEMPTED; yeniden denemede yazılır", async () => {
     const p = pfx();
     await applyAll(() => asAdmin(A), `kod;ad\n${p}-1;Bir\n${p}-2;İki\n${p}-3;Üç`);
     const w2 = (await createWarehouse({ db: app, principal: { userId: A.ownerUserId, mfaVerified: true }, tenantSlug: A.slug }, { code: pfx(), name: "İkinci depo" })).warehouseId;
@@ -382,19 +464,14 @@ describe("kısmi başarısızlık ve yeniden deneme (M-3)", () => {
     expect(r.rows.map((x) => [x.row, x.status, x.errorCode])).toEqual([[2, "FAILED", "INTERNAL"], [3, "FAILED", "INTERNAL"], [4, "NOT_ATTEMPTED", undefined]]);
     expect(r.counts).toMatchObject({ FAILED: 2, NOT_ATTEMPTED: 1, APPLIED: 0 });
     expect(await countLedger(A, p)).toBe(0); // sahte başarı yok: hiçbir stok yazılmadı
-    expect(await importDocs(A, p)).toBe(1); // yalnız ilk grubun taslağı
-
-    // m-1: bitmemiş (taslak) açılış belgesi çifti "dolu" sayar: FARKLI miktarlı dosya reddedilir, AYNI içerik sürdürülebilir.
-    const changed = csv.replace(`${p}-1;${s1};5`, `${p}-1;${s1};50`);
-    expect((await previewImport(asAdmin(A), changed)).issues.map((i) => `${i.row}:${i.code}`)).toEqual(["2:PAIR_PENDING"]);
-    expect((await previewImport(asAdmin(A), csv)).issueTotal).toBe(0);
+    expect(await importDocs(A, p)).toBe(0); // tek transaction: oluşturulan belge de geri alındı, yarım taslak kalmadı
 
     await clear(A);
     const again = await applyImportChunk(asAdmin(A), { text: csv, chunk: 0, digest: pv.digest });
     expect(again.complete).toBe(true);
     expect(again.counts).toMatchObject({ APPLIED: 3, FAILED: 0, NOT_ATTEMPTED: 0 });
     expect(await countLedger(A, p)).toBe(3);
-    expect(await importDocs(A, p)).toBe(2); // ilk grubun taslağı SÜRDÜRÜLDÜ (aynı içerik anahtarı), ikinci depo için yeni belge
+    expect(await importDocs(A, p)).toBe(2); // iki depo grubu = iki belge, çift belge yok
   });
 
   it("ürün: satır hatası ilk başarısız satırda durur (önceki CREATED, sonrakiler NOT_ATTEMPTED); yeniden denemede kalanlar tamamlanır", async () => {

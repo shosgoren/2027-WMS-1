@@ -87,6 +87,9 @@ test.describe("açılış verisi içe aktarma (T-289)", () => {
     );
     const issues = page.getByTestId("import-issue");
     await expect(issues).toHaveCount(4);
+    // Önizleme sonrası "3 Önizle" adım başlığı görünür alanda (360 px dahil; kabuk kaydırıcısı başlığı üstte bırakmaz).
+    const headingOk = await page.evaluate<boolean>(`(() => { const h = document.querySelector('[data-step="3"] h2'); const r = h.getBoundingClientRect(); return r.top >= 0 && r.bottom <= window.innerHeight; })()`);
+    expect(headingOk, "3 Önizle başlığı görünür").toBe(true);
     for (let i = 0; i < 4; i++) {
       const item = issues.nth(i);
       await expect(item.getByTestId("issue-row")).toHaveText(/^Satır \d+$/);
@@ -99,22 +102,22 @@ test.describe("açılış verisi içe aktarma (T-289)", () => {
     await expect(issues.nth(1).getByTestId("issue-reason")).toContainText("kesirli olamaz");
     const summary = page.getByTestId("import-summary");
     await expect(summary).toContainText("Ürünler dosyası");
-    await expect(page.getByTestId("import-summary-line")).toHaveText("5 ürün: 1 hazır, 4 hatalı");
+    await expect(page.getByTestId("import-summary-line")).toHaveText("5 satır: 1 hazır, 4 hatalı");
     await expect(summary.getByText("Hatalı satır")).toBeVisible();
-    await expect(summary.getByText("Stok satırı")).toHaveCount(0); // ürün dosyasında stok kutusu yok
+    await expect(summary.getByText("Ürün", { exact: true })).toHaveCount(0); // ürün dosyasında "Ürün/stok" kutusu yok (yalnız Satır ve Hatalı satır)
     const apply = page.getByRole("button", { name: "İçe aktar" });
     await expect(apply).toBeDisabled();
     await expect(page.getByText("Önce 4 hatayı düzelt", { exact: false })).toBeVisible();
-    await expect(summary.getByRole("button", { name: "Yeni dosya seç" })).toBeVisible();
+    await expect(summary.getByRole("button", { name: "Düzeltilmiş dosyayı seç" })).toBeVisible();
     const disabledBg = await page.evaluate<string>(`getComputedStyle([...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'İçe aktar')).backgroundColor`);
     const accentBg = await page.evaluate<string>(`(() => { const d = document.createElement('div'); d.className = 'bg-accent'; document.body.appendChild(d); const c = getComputedStyle(d).backgroundColor; d.remove(); return c; })()`);
     expect(disabledBg, "kapalı düğme dolu mavi değil").not.toBe(accentBg);
     await capture("b-hatali", "import-summary");
 
-    // "Yeni dosya seç" tek satır (≤ 50 px) 3 telefon boyutunda ve masaüstünde.
+    // "Düzeltilmiş dosyayı seç" tek satır (≤ 50 px) 3 telefon boyutunda ve masaüstünde.
     for (const size of sizes) {
       await page.setViewportSize(size);
-      const bb = await summary.getByRole("button", { name: "Yeni dosya seç" }).boundingBox();
+      const bb = await summary.getByRole("button", { name: "Düzeltilmiş dosyayı seç" }).boundingBox();
       expect(bb?.height ?? 0, `${size.width}: düğme tek satır`).toBeLessThanOrEqual(50);
     }
     await page.setViewportSize(sizes[0]);
@@ -128,8 +131,8 @@ test.describe("açılış verisi içe aktarma (T-289)", () => {
     }
     await page.setViewportSize(sizes[0]);
 
-    // "Yeni dosya seç" düğmesi dosya seçiciyi açar.
-    const [chooser] = await Promise.all([page.waitForEvent("filechooser"), summary.getByRole("button", { name: "Yeni dosya seç" }).click()]);
+    // "Düzeltilmiş dosyayı seç" düğmesi dosya seçiciyi açar.
+    const [chooser] = await Promise.all([page.waitForEvent("filechooser"), summary.getByRole("button", { name: "Düzeltilmiş dosyayı seç" }).click()]);
     await chooser.setFiles(csv([PRODUCT_HEADER, `${p}-9;Geçici;;;;`]));
     await expect(page.getByText("Seçilen: dosya.csv")).toBeVisible();
 
@@ -145,18 +148,20 @@ test.describe("açılış verisi içe aktarma (T-289)", () => {
     const toggle = page.getByTestId("issues-toggle");
     await expect(toggle).toHaveText("Tümünü göster (12 satır)");
     await expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await expect(page.getByTestId("issues-heading")).toHaveText("24 hata var: ilk 10 satır gösteriliyor"); // kapalıyken "hepsi" yazmaz
     await capture("b2a-uzun-kapali", "issues-toggle");
     await toggle.click();
     await expect(issues).toHaveCount(12);
     await expect(toggle).toHaveAttribute("aria-expanded", "true");
+    await expect(page.getByTestId("issues-heading")).toHaveText("Hataların hepsi (24):");
     await capture("b2-uzun-liste", "issues-toggle");
 
     // (c) Düzeltilmiş ürün dosyası → temiz önizleme → içe aktar → sonuç.
     const products = csv([PRODUCT_HEADER, `${p}-1;Vida M6;;12;${p}B1;${p}K1`, `${p}-2;Somun M6;adet;;${p}B2;`, `${p}-3;Pul;;24;;${p}K3`]);
     await page.locator("#import-file").setInputFiles(products);
     await expect(summary).toContainText("Hata yok. İçe aktarabilirsin.");
-    await expect(summary).toContainText("3 yeni ürün eklenecek, 0 ürün zaten var. 2 koli tanımı, 4 barkod.");
-    await expect(page.getByTestId("import-summary-line")).toHaveText("3 ürün: 3 hazır, 0 hatalı");
+    await expect(summary).toContainText("3 yeni ürün eklenecek, 2 koli tanımı, 4 barkod.");
+    await expect(page.getByTestId("import-summary-line")).toHaveText("3 satır: 3 hazır, 0 hatalı");
     await expect(apply).toBeEnabled();
     await capture("c-temiz", "import-summary");
 
@@ -175,12 +180,15 @@ test.describe("açılış verisi içe aktarma (T-289)", () => {
     await page.keyboard.press("Enter");
 
     const result = page.getByTestId("import-result");
-    await expect(result).toContainText("Tamam. 3 ürün eklendi.");
+    await expect(result).toContainText("Tamam.");
+    await expect(page.getByTestId("import-counts")).toContainText("3 satır eklendi");
     await expect(result).not.toContainText("güncellendi"); // 0 olan sayı yazılmaz
     await expect(summary).not.toContainText("Hata yok. İçe aktarabilirsin.");
     await expect(page.getByTestId("import-step4-status")).toHaveText("Tamamlandı");
-    await expect(page.getByTestId("import-counts")).toHaveCount(1); // "zaten vardı" yok: yalnız boş liste (ikinci "tamam" sayısı yok)
-    await expect(page.getByTestId("import-counts").locator("li")).toHaveCount(0);
+    await expect(page.getByTestId("import-counts").locator("li")).toHaveCount(1); // yalnız "eklendi" (0 olanlar gösterilmez)
+    await expect(result).not.toContainText("0 satır");
+    await expect(summary).not.toContainText("0 koli"); // önizleme özetinden kalan sıfırlar sonuç ekranında yok
+    await expect(summary).not.toContainText("0 Hatalı");
     await expect(result).toContainText("Şimdi açılış stoku dosyasını yükleyebilirsin.");
     await expect(page.getByRole("link", { name: "Ürünlere git" })).toBeVisible();
     await capture("d-sonuc-urun", "import-result");
@@ -188,7 +196,7 @@ test.describe("açılış verisi içe aktarma (T-289)", () => {
     // Aynı ürün dosyası ikinci kez: hiçbir ürün yeniden oluşturulmaz.
     await result.getByRole("button", { name: "Başka dosya yükle" }).click();
     await page.locator("#import-file").setInputFiles(products);
-    await expect(summary).toContainText("0 yeni ürün eklenecek, 3 ürün zaten var.");
+    await expect(summary).toContainText("3 ürün zaten var.");
     await page.getByRole("button", { name: "İçe aktar" }).click();
     await expect(page.getByTestId("import-result")).toContainText("Tamam. Yeni kayıt yok.");
     await expect(page.getByTestId("import-counts")).toContainText("3 satır zaten vardı");
@@ -201,8 +209,8 @@ test.describe("açılış verisi içe aktarma (T-289)", () => {
     await expect(issues.first().getByTestId("issue-item")).toHaveCount(2);
     await expect(page.getByTestId("issue-reason").nth(0)).toContainText("diye bir raf yok");
     await expect(page.getByTestId("issue-reason").nth(1)).toContainText("Adet kesirli olamaz");
-    await expect(page.getByTestId("import-summary-line")).toHaveText("2 stok satırı: 1 hazır, 1 hatalı");
-    await expect(summary.getByText("Stok satırı", { exact: true })).toBeVisible();
+    await expect(page.getByTestId("import-summary-line")).toHaveText("2 satır: 1 hazır, 1 hatalı");
+    await expect(summary.getByText("Ürün", { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "İçe aktar" })).toBeDisabled();
     await capture("e-stok-hatali", "import-summary");
 
@@ -211,7 +219,8 @@ test.describe("açılış verisi içe aktarma (T-289)", () => {
     await expect(summary).toContainText("Açılış stoku dosyası");
     await expect(summary).toContainText("toplam 1297 adet");
     await page.getByRole("button", { name: "İçe aktar" }).click();
-    await expect(page.getByTestId("import-result")).toContainText("Tamam. 3 stok satırı eklendi.");
+    await expect(page.getByTestId("import-result")).toContainText("Tamam.");
+    await expect(page.getByTestId("import-counts")).toContainText("3 satır eklendi");
     await expect(page.getByRole("link", { name: "Ürünlerde stoğu gör" })).toBeVisible();
     await capture("f-sonuc-stok", "import-result");
 

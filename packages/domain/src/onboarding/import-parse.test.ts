@@ -313,9 +313,9 @@ describe("açılış stoku: stoğu olan (ürün, raf) çifti", () => {
     const r = run(["A1;A-01;10", "A1;A-01;12"], new Map());
     expect(r.issues.map((i) => i.code)).toEqual(["PAIR_DUPLICATE_FILE"]);
   });
-  it("bitmemiş (pending) belge: aynı miktar sürdürülür, farklı miktar PAIR_PENDING", () => {
+  it("bitmemiş (pending) belge: miktardan bağımsız PAIR_PENDING", () => {
     const pairs = new Map([["i-A1|l-A-01-w1", { hasStock: false, applied: new Set<string>(), pending: new Set(["10"]) }]]);
-    expect(run(["A1;A-01;10"], pairs).issues).toEqual([]);
+    expect(run(["A1;A-01;10"], pairs).issues.map((i) => i.code)).toEqual(["PAIR_PENDING"]);
     expect(run(["A1;A-01;12"], pairs).issues.map((i) => i.code)).toEqual(["PAIR_PENDING"]);
   });
   it("uygulanmış satır planda alreadyApplied işaretli; satır sırası sonucu değiştirmez", () => {

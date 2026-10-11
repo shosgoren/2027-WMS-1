@@ -10,7 +10,11 @@ import { DESKTOP_SIZES, OUT, PHONE_SIZES, PRODUCT_HEADER, STOCK_HEADER, captureS
 
 /** Yerel veritabanında SQL çalıştırır (`psql`; bağlantı dizgisi argv'de değil ortam değişkeninden okunur). Lint: `pg` sürücüsü e2e'de yasak. */
 function runSql(script: string): void {
-  if (!process.env.DATABASE_URL_DIRECT) throw new Error("e2e: DATABASE_URL_DIRECT yok (kısmi başarısızlık senaryosu yerel yığın ister)");
+  const url = process.env.DATABASE_URL_DIRECT;
+  if (!url) throw new Error("e2e: DATABASE_URL_DIRECT yok (kısmi başarısızlık senaryosu yerel yığın ister)");
+  // Yalnız loopback: tetikleyici kuran bu betik uzak/paylaşılan bir veritabanına ASLA gitmez (global-setup ile aynı kural).
+  const host = new URL(url).hostname;
+  if (host !== "localhost" && host !== "127.0.0.1") throw new Error("e2e: DATABASE_URL_DIRECT loopback değil; enjeksiyon yalnız yerel veritabanında çalışır");
   execFileSync("sh", ["-c", 'psql "$DATABASE_URL_DIRECT" -X -q -v ON_ERROR_STOP=1'], { input: script, env: process.env, stdio: ["pipe", "ignore", "pipe"] });
 }
 
@@ -19,6 +23,7 @@ async function withInjection<T>(what: string, fn: () => Promise<T>): Promise<T> 
   if (!/^[A-Za-z0-9:_-]+$/.test(what)) throw new Error("e2e: enjeksiyon anahtarı geçersiz");
   const cleanup = `DROP TRIGGER IF EXISTS t289_inject_docs ON public.documents; DROP TRIGGER IF EXISTS t289_inject_items ON public.items;
     DROP FUNCTION IF EXISTS public.t289_inject_fn(); DROP TABLE IF EXISTS public.t289_inject;`;
+  try {
   runSql(`${cleanup}
     CREATE TABLE public.t289_inject (tenant_id uuid NOT NULL, what text NOT NULL, PRIMARY KEY (tenant_id, what));
     CREATE FUNCTION public.t289_inject_fn() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
@@ -38,7 +43,6 @@ async function withInjection<T>(what: string, fn: () => Promise<T>): Promise<T> 
     CREATE TRIGGER t289_inject_docs BEFORE UPDATE ON public.documents FOR EACH ROW EXECUTE FUNCTION public.t289_inject_fn();
     CREATE TRIGGER t289_inject_items BEFORE INSERT ON public.items FOR EACH ROW EXECUTE FUNCTION public.t289_inject_fn();
     INSERT INTO public.t289_inject (tenant_id, what) SELECT id, '${what}' FROM public.tenants WHERE slug = 'demo';`);
-  try {
     return await fn();
   } finally {
     runSql(cleanup);
@@ -70,11 +74,13 @@ test.describe("açılış verisi içe aktarma — yarım kalan (T-289, yerel)", 
       await upload(products);
       await page.getByRole("button", { name: "İçe aktar" }).click();
       const result = page.getByTestId("import-result");
-      await expect(result).toContainText("İşlem yarım kaldı. 1 satır eklendi.");
+      await expect(result).toContainText("İşlem yarım kaldı.");
+      await expect(page.getByTestId("import-counts")).toContainText("1 satır eklendi");
       await expect(page.getByTestId("import-step4-status")).toHaveText("Yarım kaldı");
       await expect(page.getByTestId("import-counts")).toContainText("1 satır hatalı");
       await expect(page.getByTestId("import-counts")).toContainText("1 satır denenmedi");
-      await expect(page.getByTestId("import-failed-rows")).toContainText(`Satır 3 (${p}-2)`);
+      await expect(page.getByTestId("import-failed-rows")).toContainText(`Satır 3 · ${p}-2`);
+      expect(((await result.innerText()).match(/kaydedemedi/g) ?? []).length, "neden metni bir kez").toBe(1);
       await expect(page.getByTestId("import-result")).not.toContainText("INTERNAL");
       await capture("g-yarim-urun", "import-result");
     });
@@ -82,7 +88,8 @@ test.describe("açılış verisi içe aktarma — yarım kalan (T-289, yerel)", 
     await page.getByTestId("import-result").getByRole("button", { name: "Dosyayı yeniden seç" }).click();
     await upload(products);
     await page.getByRole("button", { name: "İçe aktar" }).click();
-    await expect(page.getByTestId("import-result")).toContainText("Tamam. 2 ürün eklendi.");
+    await expect(page.getByTestId("import-result")).toContainText("Tamam.");
+    await expect(page.getByTestId("import-counts")).toContainText("2 satır eklendi");
     await expect(page.getByTestId("import-counts")).toContainText("1 satır zaten vardı");
     await capture("h-devam-urun", "import-result");
 
@@ -91,15 +98,18 @@ test.describe("açılış verisi içe aktarma — yarım kalan (T-289, yerel)", 
     const many = Array.from({ length: 25 }, (_, i) => `${p}-m${i}`);
     await upload([PRODUCT_HEADER, ...many.map((c) => `${c};Ürün;;;;`)]);
     await page.getByRole("button", { name: "İçe aktar" }).click();
-    await expect(page.getByTestId("import-result")).toContainText("Tamam. 25 ürün eklendi.");
+    await expect(page.getByTestId("import-counts")).toContainText("25 satır eklendi");
     await page.getByTestId("import-result").getByRole("button", { name: "Başka dosya yükle" }).click();
     const stockRows = [STOCK_HEADER, ...many.map((c) => `${c};A3-G04;5`)];
     await withInjection("approve", async () => {
       await upload(stockRows);
       await page.getByRole("button", { name: "İçe aktar" }).click();
       const result = page.getByTestId("import-result");
-      await expect(result).toContainText("İşlem yarım kaldı.");
+      await expect(result).toContainText("Kaydedilemedi."); // hiçbir satır yazılmadı: "yarım kaldı" değil
+      await expect(page.getByTestId("import-step4-status")).toHaveText("Kaydedilemedi");
       await expect(page.getByTestId("import-counts")).toContainText("25 satır hatalı");
+      await expect(page.getByTestId("import-counts")).not.toContainText("0 satır");
+      expect(((await result.innerText()).match(/kaydedemedi/g) ?? []).length, "neden metni bir kez").toBe(1);
       await expect(page.getByTestId("import-failed-rows").locator("li")).toHaveCount(21); // 20 satır + "ve 5 satır daha hatalı."
       await expect(page.getByTestId("import-failed-more")).toHaveText("ve 5 satır daha hatalı.");
       await capture("i-yarim-stok", "import-result");
@@ -108,7 +118,7 @@ test.describe("açılış verisi içe aktarma — yarım kalan (T-289, yerel)", 
     await page.getByTestId("import-result").getByRole("button", { name: "Dosyayı yeniden seç" }).click();
     await upload(stockRows);
     await page.getByRole("button", { name: "İçe aktar" }).click();
-    await expect(page.getByTestId("import-result")).toContainText("Tamam. 25 stok satırı eklendi.");
+    await expect(page.getByTestId("import-counts")).toContainText("25 satır eklendi");
     writeFileSync(path.join(OUT, `metrics-${project}-yarim.json`), JSON.stringify({ project, sizes, metrics }, null, 2));
   });
 

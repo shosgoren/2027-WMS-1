@@ -397,7 +397,7 @@ export interface ProductContext {
 export interface PairState {
   readonly hasStock: boolean;
   readonly applied: ReadonlySet<string>;
-  /** Aynı çifte yazılmak üzere olan, BİTMEMİŞ (DRAFT/APPROVED/PROCESSING) içe aktarma belgelerinin miktarları. */
+  /** Aynı çifti hedefleyen BİTMEMİŞ (DRAFT/APPROVED) belgelerin miktarları (kümenin boş olmaması yeter; miktar önemsizdir). */
   readonly pending: ReadonlySet<string>;
 }
 export interface StockContext {
@@ -661,8 +661,9 @@ export function validateStock(records: Records, ctx: StockContext): PreviewResul
       if (st !== undefined && st.hasStock) {
         if (st.applied.has(quantity)) alreadyApplied = true;
         else issues.push(issue(row, "raf kodu", "PAIR_HAS_STOCK", { code: clip(itemCode), shelf: clip(shelfCode) }));
-      } else if (st !== undefined && st.pending.size > 0 && !st.pending.has(quantity)) {
-        // Bitmemiş açılış belgesi var ve miktarı farklı: çift "dolu" sayılır (yarım kalan işlemi sürdürmek için AYNI miktar gerekir).
+      } else if (st !== undefined && st.pending.size > 0) {
+        // Aynı çifte yazılacak BİTMEMİŞ (DRAFT/APPROVED) bir belge var: çift miktardan bağımsız "dolu" sayılır (en güvenli taraf; açılış stoku kendi belgesini
+        // bırakmaz, tek transaction'da oluşur ve işlenir; bekleyen belge başka bir akıştandır ve önce tamamlanmalı ya da iptal edilmelidir).
         issues.push(issue(row, "raf kodu", "PAIR_PENDING", { code: clip(itemCode), shelf: clip(shelfCode) }));
       }
     }

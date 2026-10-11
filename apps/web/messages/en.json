@@ -1267,18 +1267,22 @@
     },
     "summary": {
       "items": "Products",
-      "stockLines": "Stock lines",
+      "stockLines": "Rows",
       "errorRows": "Rows with errors",
-      "lineProducts": "{total} products: {ok} ready, {bad} with errors",
-      "lineStock": "{total} stock lines: {ok} ready, {bad} with errors"
+      "lineProducts": "{total} rows: {ok} ready, {bad} with errors",
+      "lineStock": "{total} rows: {ok} ready, {bad} with errors",
+      "rows": "Rows"
     },
     "detail": {
-      "products": "{create} new products will be added, {existing} products already exist. {packs} carton definitions, {barcodes} barcodes.",
       "packUnit": "The carton unit will be created too.",
       "stock": "A total of {total} pieces will be added to {warehouses} warehouses.",
       "stockExists": "There is already stock in the system. These quantities are added on top of it. If you imported this same file before, it is not added twice.",
       "stockNothing": "There are no new lines to write.",
-      "stockSkipped": "{n} lines were processed before and will be skipped."
+      "stockSkipped": "{n} lines were processed before and will be skipped.",
+      "create": "{n} new products will be added",
+      "existing": "{n} products already exist",
+      "packs": "{n} carton definitions",
+      "barcodes": "{n} barcodes"
     },
     "blocked": "There are {n} errors. Fix the file and choose it again.",
     "clean": "No errors. You can import.",
@@ -1290,7 +1294,8 @@
       "fixPrefix": "How to fix:",
       "more": "Show all ({n} rows)",
       "less": "Show less",
-      "pickFixed": "Choose new file"
+      "pickFixed": "Choose the fixed file",
+      "partial": "{total} errors: showing the first {rows} rows"
     },
     "step4": {
       "title": "Import",
@@ -1300,14 +1305,15 @@
       "progress": "{done} / {total} rows",
       "done": "Finished",
       "partial": "Stopped halfway",
-      "noRows": "First add at least one row to the template."
+      "noRows": "First add at least one row to the template.",
+      "failed": "Could not be saved"
     },
     "step5": {
       "title": "Result"
     },
     "result": {
-      "partial": "The import stopped halfway. {n} rows were added.",
-      "failedRow": "Row {row} ({code}):",
+      "partial": "The import stopped halfway.",
+      "failedRow": "Row {row} · {code}",
       "nextStock": "Now you can upload the opening stock file.",
       "again": "Choose the file again",
       "another": "Upload another file",
@@ -1321,7 +1327,9 @@
       "stat": {
         "failed": "{n} rows failed",
         "skipped": "{n} rows not tried",
-        "existing": "{n} rows already existed"
+        "existing": "{n} rows already existed",
+        "added": "{n} rows added",
+        "updated": "Carton or barcode details completed for {n} rows"
       },
       "toStock": "See stock in products",
       "none": "No new records.",
@@ -1330,7 +1338,9 @@
         "PAIR_HAS_STOCK": "This product got stock on this shelf from another action. Opening stock is only for empty shelves; use a stock document to correct it.",
         "PAIR_PENDING": "There is an unfinished opening document for this product and shelf. Upload the same file again to continue it."
       },
-      "failedGeneric": "Could not be saved. Upload the same file again in a moment."
+      "failedGeneric": "The system could not save these rows.",
+      "failedTitle": "Could not be saved.",
+      "retryNone": "No rows were written. Fix the problem and upload the same file again."
     },
     "column": {
       "code": "Code",

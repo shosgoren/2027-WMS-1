@@ -83,6 +83,8 @@ export interface FieldPostSpec {
   readonly warehouseId: string;
   readonly sourceKind: FieldSourceKind | null;
   readonly sourceId: string | null;
+  /** İsteğe bağlı belge nedeni (ör. açılış stoku içe aktarma `import.opening_stock`); yoksa `NULL`. */
+  readonly reason?: string | null;
   readonly lines: readonly FieldLine[];
 }
 
@@ -201,9 +203,9 @@ export async function postFieldDocument(
   const documentId = randomUUID();
   registerTxCreatedDocument(tx, documentId); // çekirdek: bu belge bu transaction'da doğdu (kilit planında belge yok)
   await tx.execute(
-    sql`INSERT INTO public.documents (tenant_id, id, kind, type_version_id, warehouse_id, business_date, created_by, source_kind, source_id)
+    sql`INSERT INTO public.documents (tenant_id, id, kind, type_version_id, warehouse_id, business_date, created_by, source_kind, source_id, reason)
         VALUES (${ctx.tenantId}::uuid, ${documentId}::uuid, ${spec.kind}, ${typeVersionId}::uuid, ${spec.warehouseId}::uuid, ${date}::date,
-                ${ctx.userId}::uuid, ${spec.sourceKind}, ${spec.sourceId}::uuid)`,
+                ${ctx.userId}::uuid, ${spec.sourceKind}, ${spec.sourceId}::uuid, ${spec.reason ?? null})`,
   );
   const json = JSON.stringify(
     spec.lines.map((l, i) => ({
