@@ -168,6 +168,7 @@ let receiptActions: Actions;
 let orderActions: Actions;
 /** T-314: B tenant'ının GERÇEK siparişi ve satırı (sipariş eylemleri bu kimliklerle çağrılır). */
 let bOrder: { order: string; line: string };
+let lookupActions: Actions;
 /** T-313: B tenant'ının GERÇEK kabul belgesi/satırı ve lokasyonları (yazma eylemleri bu kimliklerle çağrılır; rastgele kimlik "yok" olduğundan tek başına yalıtımı kanıtlamaz). */
 let bRcpt: { receipt: string; line: string; kabul: string; raf: string };
 /** T-304: B tenant'ının sentetik görevi (eylem tablosu bu kimlikle çağırır). */
@@ -220,6 +221,7 @@ beforeAll(async () => {
   taskActions = (await load("app/t/[slug]/tasks/actions.ts")) as Actions;
   receiptActions = (await load("app/t/[slug]/receipts/actions.ts")) as Actions;
   orderActions = (await load("app/t/[slug]/orders/actions.ts")) as Actions;
+  lookupActions = (await load("app/t/[slug]/field/lookup/actions.ts")) as Actions;
   bTask = (await adm.query<{ id: string }>("INSERT INTO public.warehouse_tasks (tenant_id, warehouse_id, kind) VALUES ($1, $2, 'PICK') RETURNING id", [B.tenant, B.warehouse])).rows[0]!.id;
   const mkFx = async (t: Fx): Promise<ItemFx> => {
     const unit = (await adm.query<{ id: string }>("INSERT INTO public.units (tenant_id, id, code, name) VALUES ($1, gen_random_uuid(), $2, 'Birim') RETURNING id", [t.tenant, `U${rnd()}`])).rows[0]!.id;
@@ -307,6 +309,8 @@ const LOADERS = [
   "field/count/page.tsx",
   // T-314: sipariş listesi; üyelik özeti + `listSalesOrders`/`listMembers` ile sayfanın kendisinde çözülür.
   "orders/page.tsx",
+  // T-332b: stok sorgu sayfası; üyelik özeti sayfada çözülür, okuma domain `stock.view` ile.
+  "field/lookup/page.tsx",
 ] as const;
 /**
  * T-304: tenant verisi çizmeyen saha kabuğu sayfaları. Üyelik kararı üst `layout.tsx`'tedir (yukarıdaki LOADERS satırı çapraz tenant
@@ -783,6 +787,12 @@ const ORDER_ACTIONS: Record<string, Call> = {
     orderActions.createPickAssignmentAction!({ slug, clientKey: randomUUID(), orderIds: [bOrder.order], assigneeMembershipId: v.membership }),
   lineStockAction: (slug) => orderActions.lineStockAction!({ slug, itemId: fx.B.item }),
 };
+/** T-332b: stok sorgu eylemleri (salt okuma); B'nin GERÇEK ürün/lokasyon kimlikleriyle çağrılır. A'nın kendi slug'ında B kimlikleri NOT_FOUND verir. */
+const LOOKUP_ACTIONS: Record<string, Call> = {
+  lookupScanAction: (slug) => lookupActions.lookupScanAction!({ slug, code: "8000000000000" }),
+  lookupItemAction: (slug) => lookupActions.lookupItemAction!({ slug, itemId: fx.B.item }),
+  lookupLocationAction: (slug) => lookupActions.lookupLocationAction!({ slug, locationId: bRcpt.kabul }),
+};
 
 describe("Server Action'lar", () => {
   it("@AC-04 kapsam: members/actions.ts dışa aktarımlarının tamamı tabloda; ayarlar eylemi ayrıca sınanır", () => {
@@ -791,11 +801,12 @@ describe("Server Action'lar", () => {
     expect(Object.keys(taskActions).sort()).toEqual(Object.keys(TASK_ACTIONS).sort());
     expect(Object.keys(receiptActions).sort()).toEqual(Object.keys(RECEIPT_ACTIONS).sort());
     expect(Object.keys(orderActions).sort()).toEqual(Object.keys(ORDER_ACTIONS).sort());
+    expect(Object.keys(lookupActions).sort()).toEqual(Object.keys(LOOKUP_ACTIONS).sort());
     expect(Object.keys(settings)).toEqual(["saveSettingsAction"]);
     expect(Object.keys(inviteAccept)).toEqual(["acceptInvitationAction"]);
   });
 
-  for (const [name, call] of Object.entries({ ...ACTIONS, ...ITEM_ACTIONS, ...TASK_ACTIONS, ...RECEIPT_ACTIONS, ...ORDER_ACTIONS })) {
+  for (const [name, call] of Object.entries({ ...ACTIONS, ...ITEM_ACTIONS, ...TASK_ACTIONS, ...RECEIPT_ACTIONS, ...ORDER_ACTIONS, ...LOOKUP_ACTIONS })) {
     it(`@AC-04 ${name}: A yöneticisi B'nin slug'ıyla -> NOT_FOUND (var olmayan slug ile aynı yanıt); B'de hiçbir değişiklik yok`, async () => {
       const victim = { membership: B.managerMembership, invitation: bInvite.invitationId };
       const beforeB = await snapshot(B);
@@ -828,7 +839,7 @@ describe("Server Action'lar", () => {
     });
   }
 
-  for (const [name, call] of Object.entries(RECEIPT_ACTIONS)) {
+  for (const [name, call] of Object.entries({ ...RECEIPT_ACTIONS, ...LOOKUP_ACTIONS })) {
     it(`@AC-04 ${name}: A yöneticisi KENDİ slug'ında B'nin GERÇEK kimlikleriyle -> NOT_FOUND (var olmayan kimlikle aynı yanıt); A ve B'de etki yok`, async () => {
       const victim = { membership: B.managerMembership, invitation: bInvite.invitationId };
       const beforeA = await snapshot(A);
