@@ -11,6 +11,7 @@ import path from "node:path";
 import { expect, test } from "@playwright/test";
 import type { BrowserContext, Page, TestInfo } from "@playwright/test";
 import { ean13CheckDigit, writeBarcodeY4m } from "./support/barcode-y4m.ts";
+import { enterDemoShared, isRemote } from "./support/demo-session.ts";
 
 // Her yüklemede (işçi başına) rastgele geçerli EAN-13 (mağaza içi "2" öneki): fikstür barkodu arşivlenen ürüne bağlı kalsa da yeniden koşuda çakışmaz.
 const BODY = "2" + String(randomInt(0, 1e11)).padStart(11, "0");
@@ -75,12 +76,20 @@ const NATIVE_STUB = `
   };
 `;
 
+// T-286b: uzak koşuda (E2E_BASE_URL) bu dosya HİÇ giriş yapmaz: T-300'ün global-setup'ta bir kez açtığı yönetici oturumunu `enterDemoShared` ile benimser
+// (tek runner IP'si 10 giriş / 10 dk sınırını aşmasın; sınır değişmez). Aşağıdaki yerel yol eskisi gibidir.
 // Demo girişi hız sınırlıdır (10 deneme/10 dk/istemci adresi) ve diğer spec dosyaları proje kovasını sonuna kadar kullanır: bu dosyanın tek girişi proje kovasını
 // TÜKETMEZ; yalnızca giriş adımı boyunca ayrı bir TEST-NET-2 adresi (yerel TLS vekilinin okuduğu başlık) gönderilir, sonra proje başlığı geri konur. Oturum çerezleri sonraki testlerde yeniden kullanılır.
 const LOGIN_IP = "198.51.100.60";
 let session: Parameters<BrowserContext["addCookies"]>[0] | null = null;
 
 async function login(page: Page, testInfo: TestInfo): Promise<void> {
+  if (isRemote()) {
+    await enterDemoShared(page, "Yönetici");
+    await expect(page).toHaveURL(/\/t\/demo$/);
+    session = await page.context().cookies(); // iPhone ipucu testi çerezleri yeni bağlamlarda yeniden kullanır
+    return;
+  }
   if (session !== null) {
     await page.context().addCookies(session);
     await page.goto("/t/demo");
@@ -97,8 +106,21 @@ async function login(page: Page, testInfo: TestInfo): Promise<void> {
   session = await page.context().cookies();
 }
 
-async function openCamera(page: Page): Promise<void> {
+/**
+ * Yerleştirme ekranını açar. Kiracıda birden çok depo varsa (staging) "Hangi depo?" seçicisi çıkar: ilk depo seçilir (sabit kimlik yok);
+ * tek depoda (yerel) seçici yoktur ve hiçbir şey değişmez. Sayfa sunucuda çizilir: yükleme bitince ya seçici ya akış vardır.
+ */
+async function gotoPutaway(page: Page): Promise<void> {
   await page.goto("/t/demo/field/putaway");
+  const picker = page.getByRole("list", { name: "Hangi depo?" });
+  if ((await picker.count()) > 0) {
+    await picker.getByRole("link").first().click();
+    await expect(page).toHaveURL(/[?&]wh=/);
+  }
+}
+
+async function openCamera(page: Page): Promise<void> {
+  await gotoPutaway(page);
   await page.waitForLoadState("networkidle");
   await page.getByRole("button", { name: "Barkodu okut" }).click();
   await expect(page.getByTestId("camera-overlay")).toBeVisible();
@@ -171,7 +193,7 @@ test("uygulama içi çözücü yolu: BarcodeDetector yok; WASM yalnızca tarama 
   await login(page, testInfo);
   const requests: string[] = [];
   page.on("request", (r) => requests.push(r.url()));
-  await page.goto("/t/demo/field/putaway");
+  await gotoPutaway(page);
   await page.waitForLoadState("networkidle");
   // Tembel yükleme: tarama ekranı açıkken bile kamera düğmesine basılana kadar ne WASM ne çözücü parçası indirilir.
   expect(requests.filter((u) => /\.wasm(\?|$)/.test(u)), "kamera açılmadan WASM istenmez").toEqual([]);
@@ -199,7 +221,7 @@ test("uygulama içi çözücü yolu: BarcodeDetector yok; WASM yalnızca tarama 
   const overlay = page.getByTestId("camera-overlay");
   for (const size of SIZES) {
     await page.setViewportSize({ width: size.width, height: size.height });
-    await page.goto("/t/demo/field/putaway");
+    await gotoPutaway(page);
     await page.waitForLoadState("networkidle");
     await page.getByRole("button", { name: "Barkodu okut" }).click();
     await expect(overlay).toHaveAttribute("data-phase", "accepted", { timeout: 30_000 });
@@ -398,7 +420,7 @@ test("kamera açılış ekranı: çerçeve (nişangâh) ve 'Kamera açılıyor�
   mkdirSync(SHOTS, { recursive: true });
   await page.addInitScript(`${NATIVE_STUB} ${FEEDBACK_STUBS} ${GUM_WRAP}`);
   await login(page, testInfo);
-  await page.goto("/t/demo/field/putaway");
+  await gotoPutaway(page);
   await page.waitForLoadState("networkidle");
   await page.evaluate("(() => { window.__hold = new Promise((r) => { window.__release = r; }); })()");
   await page.getByRole("button", { name: "Barkodu okut" }).click();
@@ -470,7 +492,7 @@ test("iPhone ana ekrana ekleme ipucu: Safari'de alt çubuk, iPhone Chrome'da adr
       const p = await ctx.newPage();
       for (const size of c.sizes) {
         await p.setViewportSize({ width: size.width, height: size.height });
-        await p.goto("/t/demo/field/putaway");
+        await gotoPutaway(p);
         await p.waitForLoadState("networkidle");
         const hint = p.getByTestId("install-hint");
         await expect(hint).toBeVisible();
@@ -492,7 +514,7 @@ test("iPhone ana ekrana ekleme ipucu: Safari'de alt çubuk, iPhone Chrome'da adr
     }
   }
   // iPhone dışı cihazda ipucu görünmez (mevcut sayfa: masaüstü/Android profili).
-  await page.goto("/t/demo/field/putaway");
+  await gotoPutaway(page);
   await page.waitForLoadState("networkidle");
   await expect(page.getByTestId("install-hint")).toHaveCount(0);
 });
