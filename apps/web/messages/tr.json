@@ -1565,7 +1565,7 @@
     "detail": {
       "packUnit": "Koli birimi de oluşturulacak.",
       "stock": "{warehouses} depoya toplam {total} adet girilecek.",
-      "stockExists": "Sistemde zaten stok var. Bu dosyadaki miktarlar mevcut stokun üstüne eklenir. Aynı dosyayı daha önce aldıysan ikinci kez eklenmez.",
+      "stockExists": "Sistemde zaten stok var. Açılış stoku yalnız stoğu olmayan raflara yazılır; stoklu bir raf varsa o satır hata verir. Aynı dosyayı daha önce aldıysan ikinci kez eklenmez.",
       "stockNothing": "Yazılacak yeni satır yok.",
       "stockSkipped": "{n} satır daha önce işlenmiş, atlanacak.",
       "create": "{n} yeni ürün eklenecek",
@@ -1582,7 +1582,7 @@
       "row": "Satır {row}",
       "fixPrefix": "Nasıl düzeltilir:",
       "more": "Tümünü göster ({n} satır)",
-        "moreTruncated": "İlk {shown} hatayı göster ({n} satır)",
+      "moreTruncated": "İlk {shown} hatayı göster ({n} satır)",
       "less": "Daha az göster",
       "pickFixed": "Düzeltilmiş dosyayı seç",
       "partial": "{total} hata var: ilk {rows} satır gösteriliyor"
@@ -1625,8 +1625,8 @@
       "none": "Yeni kayıt yok.",
       "moreFailed": "ve {n} satır daha hatalı.",
       "reason": {
-        "PAIR_HAS_STOCK": "Bu ürün bu rafta başka bir işlemle stoğa girdi. Açılış stoku yalnız boş raflar içindir; düzeltme için stok belgesi kullan.",
-        "PAIR_REVERSED": "Bu ürünün bu raftaki açılış stoku sonradan ters kaydedilmiş. Yeniden yazılmaz; stoğu geri vermek için stok belgesi kullan.",
+        "PAIR_HAS_STOCK": "Bu ürün bu rafta başka bir işlemle stoğa girdi. Açılış stoku yalnız boş raflar içindir; bu satır yazılmadı. Gerekirse yöneticine sor.",
+        "PAIR_REVERSED": "Bu ürünün bu raftaki açılış stoku sonradan geri alınmış. Aynı rafa yeniden yazılmaz; gerekirse yöneticine sor.",
         "PAIR_PENDING": "Bu ürün ve raf için tamamlanmamış bir açılış belgesi var. Aynı dosyayı yeniden yükleyerek sürdür."
       },
       "failedGeneric": "{n, plural, one {Sistem bu satırı kaydedemedi.} other {Sistem bu satırları kaydedemedi.}}",
@@ -1824,7 +1824,7 @@
       },
       "PAIR_HAS_STOCK": {
         "reason": "{code} ürünü {shelf} rafında zaten stokta.",
-        "fix": "Açılış stoku yalnız boş raflar içindir. Düzeltme için stok belgesi kullan ya da satırı sil."
+        "fix": "Açılış stoku yalnız boş raflar içindir. Bu satırı dosyadan sil, gerekirse yöneticine sor."
       },
       "CELL_TOO_LONG": {
         "reason": "Bir hücre çok uzun.",
@@ -1835,8 +1835,8 @@
         "fix": "En çok {max} sütun olabilir. Fazla sütunları sil."
       },
       "PAIR_REVERSED": {
-        "reason": "{code} ürünü için {shelf} rafındaki açılış stoku daha önce ters kaydedilmiş.",
-        "fix": "Açılış stoku ters kaydedilen rafa yeniden yazılmaz. Stoğu geri vermek için stok belgesi kullan ya da satırı sil."
+        "reason": "{code} ürünü için {shelf} rafındaki açılış stoku daha önce geri alınmış.",
+        "fix": "Geri alınan açılış stoku aynı rafa yeniden yazılmaz. Bu satırı dosyadan sil, gerekirse yöneticine sor."
       },
       "PAIR_PENDING": {
         "reason": "{code} ürünü {shelf} rafı için tamamlanmamış bir açılış belgesi var (başka miktarla).",

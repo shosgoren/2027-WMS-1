@@ -1565,7 +1565,7 @@
     "detail": {
       "packUnit": "The carton unit will be created too.",
       "stock": "A total of {total} pieces will be added to {warehouses} warehouses.",
-      "stockExists": "There is already stock in the system. These quantities are added on top of it. If you imported this same file before, it is not added twice.",
+      "stockExists": "There is already stock in the system. Opening stock is only written to shelves without stock; a row for a shelf that has stock is an error. If you imported this same file before, it is not added twice.",
       "stockNothing": "There are no new lines to write.",
       "stockSkipped": "{n} lines were processed before and will be skipped.",
       "create": "{n} new products will be added",
@@ -1582,7 +1582,7 @@
       "row": "Row {row}",
       "fixPrefix": "How to fix:",
       "more": "Show all ({n} rows)",
-        "moreTruncated": "Show the first {shown} errors ({n} rows)",
+      "moreTruncated": "Show the first {shown} errors ({n} rows)",
       "less": "Show less",
       "pickFixed": "Choose the fixed file",
       "partial": "{total} errors: showing the first {rows} rows"
@@ -1625,8 +1625,8 @@
       "none": "No new records.",
       "moreFailed": "and {n} more failed rows.",
       "reason": {
-        "PAIR_HAS_STOCK": "This product got stock on this shelf from another action. Opening stock is only for empty shelves; use a stock document to correct it.",
-        "PAIR_REVERSED": "The opening stock of this product on this shelf was reversed later. It is not written again; use a stock document to put the stock back.",
+        "PAIR_HAS_STOCK": "This product got stock on this shelf from another action. Opening stock is only for empty shelves; this row was not written. Ask your manager if needed.",
+        "PAIR_REVERSED": "The opening stock of this product on this shelf was undone later. It is not written to the same shelf again; ask your manager if needed.",
         "PAIR_PENDING": "There is an unfinished opening document for this product and shelf. Upload the same file again to continue it."
       },
       "failedGeneric": "{n, plural, one {The system could not save this row.} other {The system could not save these rows.}}",
@@ -1824,7 +1824,7 @@
       },
       "PAIR_HAS_STOCK": {
         "reason": "Product {code} already has stock on shelf {shelf}.",
-        "fix": "Opening stock is only for empty shelves. Use a stock document to correct it, or delete the row."
+        "fix": "Opening stock is only for empty shelves. Delete this row from the file and ask your manager if needed."
       },
       "CELL_TOO_LONG": {
         "reason": "A cell is too long.",
@@ -1835,8 +1835,8 @@
         "fix": "At most {max} columns are allowed. Delete the extra columns."
       },
       "PAIR_REVERSED": {
-        "reason": "The opening stock of product {code} on shelf {shelf} was reversed earlier.",
-        "fix": "Opening stock is not written again to a shelf where it was reversed. Use a stock document to put the stock back, or delete the row."
+        "reason": "The opening stock of product {code} on shelf {shelf} was undone earlier.",
+        "fix": "Undone opening stock is not written to the same shelf again. Delete this row from the file and ask your manager if needed."
       },
       "PAIR_PENDING": {
         "reason": "Product {code} has an unfinished opening document for shelf {shelf} (with another quantity).",

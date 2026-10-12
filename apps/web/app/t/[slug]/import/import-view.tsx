@@ -91,12 +91,27 @@ function Stat({ value, label, tone }: { value: number; label: string; tone?: "ba
 }
 
 /**
+ * Next, sayfa geçişinde yeni sayfanın ilk öğesini `scrollIntoView()` ile getirir; bu, kullanıcının kaydıramadığı (`overflow: hidden`) kabuğu ve belge
+ * kökünü de kaydırır (telefon yatayında: üst çubuk kesik, sekme çubuğunun altında boşluk). Kayan ata dışındaki kırpılmış atalar geri sıfırlanır; masaüstünde
+ * sayfa gövdesi kaydığı için (`overflow: visible`) dokunulmaz.
+ */
+function undoClippedScroll(el: Element): void {
+  const clipped = (n: Element): boolean => getComputedStyle(n).overflowY === "hidden";
+  for (let n: Element | null = el.parentElement; n !== null; n = n.parentElement) {
+    if (n.scrollTop !== 0 && clipped(n)) n.scrollTop = 0;
+  }
+  const root = document.scrollingElement;
+  if (root !== null && root.scrollTop !== 0 && (clipped(document.documentElement) || clipped(document.body))) root.scrollTop = 0;
+}
+
+/**
  * Öğeyi YALNIZ en yakın kayan atası içinde görünür yapar. `scrollIntoView` tüm atalara taşar: telefon yatayında (844x390) içerik alanı sonuna
  * vardığında kalan kaydırma `overflow: hidden` kabuğa (`.tenant-shell`) uygulanır, üst çubuk kesilir ve sekme çubuğunun altında boşluk kalır.
  * Kayan ata yoksa (masaüstü: sayfa gövdesi kayar) olağan `scrollIntoView` kullanılır.
  */
 function reveal(el: Element | null | undefined, block: "start" | "nearest"): void {
   if (el === null || el === undefined) return;
+  undoClippedScroll(el);
   let box: HTMLElement | null = el.parentElement;
   while (box !== null && !/^(auto|scroll)$/.test(getComputedStyle(box).overflowY)) box = box.parentElement;
   if (box === null || box === document.body || box === document.documentElement) {

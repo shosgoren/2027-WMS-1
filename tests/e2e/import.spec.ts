@@ -260,6 +260,32 @@ test.describe("açılış verisi içe aktarma (T-289)", () => {
     const p = `T289L-${Date.now()}${project === "desktop" ? "D" : "M"}`;
     await loginAdmin(page);
     await page.setViewportSize({ width: 844, height: 390 });
+    // Ayarlar sayfasından bağlantıyla (tıklama ve dokunma) gelince de kabuk kaymaz: Next sayfa geçişinde yeni sayfanın ilk öğesini scrollIntoView ile
+    // getirir; bu `overflow: hidden` kabuğu da kaydırıyordu (üst çubuk kesik, sekme altında boşluk).
+    const shellState = (): Promise<{ shell: number; doc: number; barTop: number | null; navBottom: number | null; innerH: number }> =>
+      page.evaluate(`(() => {
+        const shell = document.querySelector('.tenant-shell'); const bar = document.querySelector('[data-testid=app-bar]'); const nav = document.querySelector('[data-testid=bottom-nav]');
+        const vis = (e) => e && e.getBoundingClientRect().height > 0;
+        return { shell: shell.scrollTop, doc: document.scrollingElement.scrollTop, barTop: vis(bar) ? bar.getBoundingClientRect().top : null, navBottom: vis(nav) ? nav.getBoundingClientRect().bottom : null, innerH: innerHeight };
+      })()`);
+    for (const how of project === "mobile" ? (["click", "tap"] as const) : (["click"] as const)) {
+      await page.goto("/t/demo/settings");
+      const link = page.getByRole("link", { name: "Ürün ve stoku Excel'den içe aktar" });
+      await link.scrollIntoViewIfNeeded();
+      if (how === "click") await link.click();
+      else await link.tap();
+      await expect(page).toHaveURL(/\/t\/demo\/import$/);
+      await expect(page.getByRole("heading", { level: 1, name: "Ürün ve stok içe aktar" })).toBeVisible();
+      await page.waitForTimeout(500);
+      const st = await shellState();
+      await page.screenshot({ path: path.join(dir, `${project}-844x390-ayarlardan-${how}.png`) });
+      if (project === "mobile") {
+        expect(st.shell, `ayarlardan ${how}: kabuk kaymadı`).toBe(0);
+        expect(st.doc, `ayarlardan ${how}: sayfa kaymadı`).toBe(0);
+        expect(st.barTop, `ayarlardan ${how}: üst çubuk tepesi 0`).toBe(0);
+        expect(Math.round(st.navBottom ?? -1), `ayarlardan ${how}: sekme altında boşluk yok`).toBe(st.innerH);
+      }
+    }
     await page.goto("/t/demo/import");
     await expect(page.getByRole("heading", { level: 1, name: "Ürün ve stok içe aktar" })).toBeVisible();
     // Hatalı dosya: uzun önizleme (içerik alanı sonuna kadar kayabilir); sonra temiz dosya.
