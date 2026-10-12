@@ -1299,6 +1299,7 @@
     "scanAgain": "Anladım, tekrar okut",
     "alert": {
       "scanTitle": "Kod bulunamadı",
+      "unitTitle": "Adet alınamadı",
       "mismatchTitle": "Yanlış ürün",
       "networkTitle": "Bağlantı yok",
       "putawayTitle": "Rafa konamadı"
@@ -1431,6 +1432,7 @@
       "qtyTitle": "Kaç adet geldi?",
       "qtyInstruction": "Sayıyı kontrol et, gerekirse değiştir.",
       "verify": "Okuttuğun ürün:",
+      "scanMore": "Bir koli daha okut",
       "compound": "{text} · toplam {total} {unit}",
       "compoundFailed": "Koli gösterimi alınamadı. Adet doğru; devam edebilirsin.",
       "received": "Gelen ({unit})",
@@ -1497,7 +1499,7 @@
       "hint": "Barkodu çerçeveye getir.",
       "starting": "Kamera açılıyor…",
       "accepted": "Okundu.",
-      "dropped": "Bir kod okundu ama okuma şu an kapalıydı. Kodu yeniden okut.",
+      "dropped": "Bir kod okundu ama işlenmedi: okuma şu an kapalıydı. Adet eklenmedi.",
       "ok": "Tamam",
       "retry": "Tekrar dene",
       "notTaken": "Kod işlenmedi: okuma şu an kapalıydı.",

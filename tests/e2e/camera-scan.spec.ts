@@ -639,6 +639,7 @@ function writeMeasures(data: Record<string, unknown>, tag: string, project: stri
 }
 
 test("okuma kapalıyken (uyarı açık) gelen klavye kaması taraması bildirilir ve başlığı örtmez; normal klavye girişi etkilenmez", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 390, height: 664 }); // kısa ekran: bildirim başlığı, Geri düğmesini ve uyarı düğmesini örtmemeli
   await page.addInitScript(`${NATIVE_STUB} ${FEEDBACK_STUBS}`);
   await login(page, testInfo);
   await openCamera(page);
@@ -656,7 +657,13 @@ test("okuma kapalıyken (uyarı açık) gelen klavye kaması taraması bildirili
   await expect(notice).toBeVisible();
   const n = await notice.boundingBox();
   const h = await page.locator("#scan-alert-title").boundingBox();
-  expect(n !== null && h !== null && n.y + n.height <= h.y, "bildirim ana uyarı başlığını örtmez").toBe(true);
-  await notice.getByRole("button").click();
+  const closeBtn = await page.getByRole("button", { name: "Anladım, tekrar okut" }).boundingBox();
+  const hit = (a: { y: number; height: number }, b: { y: number; height: number }): boolean => a.y < b.y + b.height && b.y < a.y + a.height;
+  expect(n !== null && h !== null && !hit(n, h), "bildirim ana uyarı başlığını örtmez").toBe(true);
+  expect(n !== null && closeBtn !== null && !hit(n, closeBtn), "bildirim uyarının düğmesini örtmez").toBe(true);
+  // Uyarı açıkken tek onay düğmesi vardır (uyarınki); bildirim kendi düğmesini göstermez ve uyarı kapanınca kendiliğinden kalkar.
+  await expect(notice.getByRole("button")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Anladım, tekrar okut" })).toHaveCount(1);
+  await page.getByRole("button", { name: "Anladım, tekrar okut" }).click();
   await expect(notice).toHaveCount(0);
 });

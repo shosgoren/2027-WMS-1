@@ -1299,6 +1299,7 @@
     "scanAgain": "Got it, scan again",
     "alert": {
       "scanTitle": "Code not found",
+      "unitTitle": "Quantity not taken",
       "mismatchTitle": "Wrong item",
       "networkTitle": "No connection",
       "putawayTitle": "Could not put on rack"
@@ -1431,6 +1432,7 @@
       "qtyTitle": "How many arrived?",
       "qtyInstruction": "Check the number and change it if needed.",
       "verify": "Item you scanned:",
+      "scanMore": "Scan one more case",
       "compound": "{text} · total {total} {unit}",
       "compoundFailed": "Could not show the case breakdown. The count is correct; you can continue.",
       "received": "Arrived ({unit})",
@@ -1497,7 +1499,7 @@
       "hint": "Bring the barcode into the frame.",
       "starting": "Opening the camera…",
       "accepted": "Scanned.",
-      "dropped": "A code was read but reading was off. Scan the code again.",
+      "dropped": "A code was read but not processed: reading was off at that moment. Nothing was added.",
       "ok": "OK",
       "retry": "Try again",
       "notTaken": "Code not processed: scanning was off just now.",

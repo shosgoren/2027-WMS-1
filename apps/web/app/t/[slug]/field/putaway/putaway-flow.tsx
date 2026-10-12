@@ -98,7 +98,7 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
           const stepOf1 = (): number | null => {
             const r = scanStepOf(res.data, res.data.baseUnitId);
             if (r.ok) return r.step;
-            showAlert("alert.scanTitle", r.reason === "unit" ? "unit_mismatch" : "qty_fractional", r.reason === "unit" ? "UNIT_MISMATCH" : "QUANTITY_NOT_WHOLE");
+            showAlert("alert.unitTitle", r.reason === "unit" ? "unit_mismatch" : "qty_fractional", r.reason === "unit" ? "UNIT_MISMATCH" : "QUANTITY_NOT_WHOLE");
             return null;
           };
           const current = itemRef.current;
@@ -197,10 +197,11 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
       setStage(alert.back);
     }
     setAlert(null);
+    clearDropped();
   };
   const alertView = (
     <>
-      <DroppedNotice show={dropped} onClose={clearDropped} />
+      <DroppedNotice show={dropped} alerting={alert !== null} onClose={clearDropped} />
       {alert === null ? null : (
         <ScanAlert
           title={t(alert.titleKey)}
@@ -304,6 +305,7 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
           ) : (
             <QtyStepper
               label={t("putaway.qtyLabel")}
+              scan={{ label: t("flow.scanMore"), onClick: scanPrimary.press }}
               value={qty}
               min={1}
               max={avail}

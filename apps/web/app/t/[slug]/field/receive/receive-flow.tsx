@@ -172,7 +172,7 @@ export function ScanAlert({ title, reason, action, code, onClose }: { title: str
 }
 
 /** Miktar: 48 px (burada 56 px) eksi/artı + sayı alanı; `inputmode="numeric"` yalnızca bu alanda; tam sayı; sınır sunucudan gelen kalan miktardır. */
-export function QtyStepper({ label, value, min, max, onChange }: { label: string; value: number; min: number; max: number | null; onChange: (n: number) => void }) {
+export function QtyStepper({ label, value, min, max, onChange, scan }: { label: string; value: number; min: number; max: number | null; onChange: (n: number) => void; scan?: { label: string; onClick: () => void } }) {
   const inputId = useId();
   const clamp = (n: number): number => Math.min(max ?? 999_999_999, Math.max(min, n));
   const btn = `flex size-12 shrink-0 items-center justify-center rounded-control border-2 border-border-strong bg-surface text-3xl font-bold text-ink disabled:opacity-40 ${FOCUS}`;
@@ -200,6 +200,11 @@ export function QtyStepper({ label, value, min, max, onChange }: { label: string
         <button type="button" aria-label={`${label} +`} disabled={max !== null && value >= max} onClick={() => onChange(clamp(value + 1))} className={btn}>
           <span aria-hidden="true">+</span>
         </button>
+        {scan === undefined ? null : (
+          <button type="button" aria-label={scan.label} title={scan.label} data-testid="scan-more" onClick={scan.onClick} className={`flex size-12 shrink-0 items-center justify-center rounded-control border-2 border-border-strong bg-surface text-ink ${FOCUS}`}>
+            <ScanLine aria-hidden="true" className="size-6" strokeWidth={2} />
+          </button>
+        )}
       </div>
     </div>
   );
@@ -650,15 +655,19 @@ export function useScanPrimary(camera: (code: string) => boolean, outcome: ScanO
 }
 
 /** Okuma kapalıyken gelen kod bildirimi (kaynaktan bağımsız: kamera ya da klavye kaması). Uyarı açıkken de görünür: en üstte (`top-2`, `z-[60]`); tam ekran uyarının başlığı simgenin altında olduğundan başlığı örtmez. */
-export function DroppedNotice({ show, onClose }: { show: boolean; onClose: () => void }) {
+export function DroppedNotice({ show, alerting, onClose }: { show: boolean; alerting: boolean; onClose: () => void }) {
   const t = useTranslations("receiving");
   if (!show) return null;
+  // Altta (başlığı ve Geri düğmesini örtmez); tam ekran uyarı açıkken ikinci onay düğmesi YOKTUR: uyarı kapanınca bildirim kendiliğinden kalkar.
+  // Metin davranışla tutarlıdır: düşen kod işlenmez ve adet eklenmez; yeni okutma yalnız kullanıcının açık eylemiyle olur.
   return (
-    <div role="alert" data-testid="camera-dropped" className="fixed inset-x-4 top-2 z-[60] mx-auto flex max-w-md items-center gap-3 rounded-card border-2 border-warning bg-warning-bg px-4 py-3 text-warning-ink shadow-card">
+    <div role="alert" data-testid="camera-dropped" className="fixed inset-x-4 bottom-40 z-[60] mx-auto flex max-w-md items-center gap-3 rounded-card border-2 border-warning bg-warning-bg px-4 py-3 text-warning-ink shadow-card">
       <p className="min-w-0 flex-1 break-words text-base font-bold">{t("camera.dropped")}</p>
-      <button type="button" onClick={onClose} className={`flex min-h-12 min-w-12 shrink-0 items-center justify-center rounded-control border-2 border-warning-ink px-3 text-base font-bold ${FOCUS}`}>
-        {t("camera.ok")}
-      </button>
+      {alerting ? null : (
+        <button type="button" onClick={onClose} className={`flex min-h-12 min-w-12 shrink-0 items-center justify-center rounded-control border-2 border-warning-ink px-3 text-base font-bold ${FOCUS}`}>
+          {t("camera.ok")}
+        </button>
+      )}
     </div>
   );
 }
@@ -820,7 +829,7 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
         // Okutma başına adım (K-1): satır temel birimdeyse `baseQuantity` (koli okutunca koli içi adet), satır birimi barkod birimiyse okutma başına miktar; kesirli ise uyarı.
         const stepRes = scanStepOf(res.data, line.unitId);
         if (!stepRes.ok) {
-          setAlert(stepRes.reason === "unit" ? { titleKey: "alert.scanTitle", reasonKey: "unit_mismatch", code: "UNIT_MISMATCH" } : { titleKey: "alert.scanTitle", reasonKey: "qty_fractional", code: "QUANTITY_NOT_WHOLE" });
+          setAlert(stepRes.reason === "unit" ? { titleKey: "alert.unitTitle", reasonKey: "unit_mismatch", code: "UNIT_MISMATCH" } : { titleKey: "alert.unitTitle", reasonKey: "qty_fractional", code: "QUANTITY_NOT_WHOLE" });
           return;
         }
         const step = stepRes.step;
@@ -888,14 +897,17 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
 
   const alertView = (
     <>
-      <DroppedNotice show={dropped} onClose={clearDropped} />
+      <DroppedNotice show={dropped} alerting={alert !== null} onClose={clearDropped} />
       {alert === null ? null : (
       <ScanAlert
         title={t(alert.titleKey)}
         reason={t(`errors.${alert.reasonKey}`, { remaining: "-" })}
         action={t(`errors.${alert.reasonKey}Action`)}
         {...(alert.code === undefined ? {} : { code: alert.code })}
-        onClose={() => setAlert(null)}
+        onClose={() => {
+          setAlert(null);
+          clearDropped();
+        }}
       />
       )}
     </>
@@ -1013,6 +1025,7 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
           </section>
           <QtyStepper
             label={t("flow.received", { unit: picked.line.unitName })}
+            scan={{ label: t("flow.scanMore"), onClick: scanPrimary.press }}
             value={picked.received}
             min={1}
             max={max}

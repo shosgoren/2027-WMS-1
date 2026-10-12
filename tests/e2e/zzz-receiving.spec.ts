@@ -886,9 +886,70 @@ test("kamera taraması: Barkodu okut kamerayı açar; kod TEK kez işlenir (çif
   await page.evaluate(`window.__fakeCode = ${JSON.stringify(BARCODE.koli)}`);
   await expect(page.getByTestId("camera-dropped")).toBeVisible();
   await expect(page.getByTestId("camera-dropped")).toContainText("okuma şu an kapalıydı");
+  await expect(page.getByTestId("camera-dropped").getByRole("button")).toHaveCount(0); // uyarı açıkken ikinci onay düğmesi yok
   await page.getByRole("button", { name: "Anladım, tekrar okut" }).click();
-  await page.getByRole("button", { name: "Tamam" }).click();
+  await expect(page.getByTestId("camera-dropped")).toHaveCount(0); // uyarı kapanınca bildirim kendiliğinden kalkar
   await expect(page.getByTestId("flow-step")).toHaveAttribute("data-step", "2"); // kod işlenmedi: yine tarama adımı
+});
+
+test("telefonda kamera ile iki koli: kabul ve yerleştirmede miktar/onay ekranından 'Bir koli daha okut' (açık eylem), tek birincil düğme", async ({ page }) => {
+  const fx = await seed();
+  await db("UPDATE public.tenant_settings SET receiving_qc_enabled = false WHERE tenant_id = $1", [fx.tenantId]);
+  const receipt3 = randomUUID();
+  await db("INSERT INTO public.inbound_receipts (tenant_id, id, warehouse_id, number, supplier_ref, created_by, status) VALUES ($1,$2,$3,$4,'E2E-IRS-C',(SELECT user_id FROM public.tenant_memberships WHERE id = $5),'OPEN')", [
+    fx.tenantId, receipt3, fx.warehouseId, `KBL-E2EC-${run}`, fx.membershipId,
+  ]);
+  await db("INSERT INTO public.inbound_receipt_lines (tenant_id, id, receipt_id, line_no, item_id, unit_id, conversion_factor, expected_quantity) VALUES ($1, gen_random_uuid(), $2, 1, $3, $4, 1, 48)", [fx.tenantId, receipt3, fx.itemId, fx.unitId]);
+  await page.addInitScript(`
+    window.__fakeCode = "";
+    navigator.mediaDevices.getUserMedia = async () => { const c = document.createElement("canvas"); c.width = 64; c.height = 64; c.getContext("2d").fillRect(0, 0, 64, 64); return c.captureStream(5); };
+  `);
+  await login(page, "Yönetici");
+  await page.addInitScript(`window.BarcodeDetector = class { async detect() { return window.__fakeCode ? [{ rawValue: window.__fakeCode }] : []; } };`);
+  await page.setViewportSize({ width: 390, height: 844 });
+  const qty = page.getByRole("textbox", { name: /^Gelen \(/ });
+  const readWithCamera = async (button: string): Promise<void> => {
+    await page.evaluate(`window.__fakeCode = ""`);
+    await page.getByRole("button", { name: button }).click();
+    await expect(page.getByTestId("camera-overlay")).toBeVisible();
+    await page.evaluate(`window.__fakeCode = ${JSON.stringify(BARCODE.koli)}`);
+    await expect(page.getByTestId("camera-overlay")).toHaveCount(0);
+    await page.evaluate(`window.__fakeCode = ""`);
+  };
+  // Kabul: ilk okuma 12, miktar ekranındaki ikincil düğme ikinci koliyi ekler (24); tek birincil düğme (Kabul et) kalır.
+  await page.goto(`/t/demo/field/receive?receipt=${receipt3}`);
+  await page.waitForLoadState("networkidle");
+  await readWithCamera("Barkodu okut");
+  await expect(qty).toHaveValue("12");
+  await expect(page.locator('[data-variant="primary"]:visible')).toHaveCount(1);
+  await readWithCamera("Bir koli daha okut");
+  await expect(qty).toHaveValue("24");
+  // Kiracıda birden çok kabul rafı olabilir: bu çalışmanın rafı seçilir (stok yerleştirmede bu raftan alınır).
+  if ((await page.getByTestId("rack-chips").count()) > 0) await page.getByTestId("rack-chips").getByRole("button", { name: `E2E ${CODES.kabul}` }).click();
+  await expect(page.getByTestId("compound-qty")).toHaveText("2 E2E koli · toplam 24 E2E adet");
+  const m = await measure(page);
+  expect(m.primaries).toBe(1);
+  expect(m.small, "48 px altı hedef").toEqual([]);
+  expect(m.scrollWidth).toBeLessThanOrEqual(m.clientWidth);
+  await page.getByRole("button", { name: "Kabul et" }).click();
+  await expect(page.getByTestId("saved-summary")).toContainText("24 adet kabul edildi");
+  // Yerleştirme (serbest): kaynak ve hedef klavye kamasıyla, ürün ve ikinci koli kamerayla.
+  await page.goto(`/t/demo/field/putaway?wh=${fx.warehouseId}`);
+  await page.waitForLoadState("networkidle");
+  await scan(page, CODES.kabul);
+  await expect(page.getByTestId("flow-step")).toHaveAttribute("data-step", "2");
+  await readWithCamera("Barkodu okut");
+  await expect(page.getByTestId("flow-step")).toHaveAttribute("data-step", "3");
+  await scan(page, CODES.raf1);
+  await expect(page.getByTestId("flow-step")).toHaveAttribute("data-step", "4");
+  const putQty = page.getByRole("textbox", { name: "Kaç adet?" });
+  await expect(putQty).toHaveValue("12");
+  await expect(page.locator('[data-variant="primary"]:visible')).toHaveCount(1);
+  await readWithCamera("Bir koli daha okut");
+  await expect(putQty).toHaveValue("24");
+  await expect(page.getByTestId("compound-qty")).toHaveText("2 E2E koli · toplam 24 E2E adet");
+  await page.getByRole("button", { name: "Rafa koy" }).click();
+  await expect(page.getByTestId("saved-summary")).toContainText(CODES.raf1);
 });
 
 test("yetkisiz kullanıcı: kilit ekranı gerekçe + Yardım çağır yolu; tek birincil", async ({ page }, testInfo) => {
