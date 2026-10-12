@@ -11,7 +11,7 @@ import { AppError } from "../../../packages/shared/src/errors.ts";
 import { runTenantQuery } from "../../../packages/domain/src/identity/access.ts";
 import { resolveWarehouseScope } from "../../../packages/domain/src/warehouse/scope.ts";
 import { createWarehouse, setMembershipWarehouseScopes } from "../../../packages/domain/src/warehouse/index.ts";
-import { approveQuality, createInboundReceipt, openInboundReceipt, putaway, receiveGoods } from "../../../packages/domain/src/operations/index.ts";
+import { approveCount, approveQuality, cancelCount, createInboundReceipt, openInboundReceipt, postCountAdjustment, putaway, receiveGoods, recordCount, startCount, submitCount } from "../../../packages/domain/src/operations/index.ts";
 import {
   STOCK_QUERY_LIMIT_MAX,
   approveDocument,
@@ -22,7 +22,7 @@ import {
   stockByLocation,
   type StockDocCallParams,
 } from "../../../packages/domain/src/stock/index.ts";
-import { newRegistry, seedWorld, type TenantWorld } from "../fixtures/tenants.ts";
+import { mkMembership, mkUser, newRegistry, seedWorld, type TenantWorld } from "../fixtures/tenants.ts";
 import { readIntEnv } from "../harness/env.ts";
 
 const env = readIntEnv(process.env);
@@ -150,7 +150,7 @@ describe("kabul + kalite + yerleştirme + rezervasyon sonrası değerler (gerçe
     expect(s1.rows[0]).toMatchObject({ warehouseId: A.warehouseId, locationCode: expect.stringMatching(/^KB-/), locationKind: "RECEIVING", pickBlocked: false, lot: null, serial: null, owner: null, handlingUnit: null });
     expect(s1.totals).toEqual({
       physical: "10.000000", reserved: "0.000000", available: "0.000000",
-      physicalByStatus: { AVAILABLE: "0.000000", QUARANTINE: "8.000000", DAMAGED: "2.000000", BLOCKED: "0.000000" },
+      physicalByStatus: { AVAILABLE: "0.000000", QUARANTINE: "8.000000", DAMAGED: "2.000000", BLOCKED: "0.000000" }, countLockedExcluded: false,
     });
 
     // 2) Kalite onayı: 8 → AVAILABLE (KABUL türü RECEIVING olduğundan hâlâ kullanılabilir değil).
@@ -182,7 +182,7 @@ describe("kabul + kalite + yerleştirme + rezervasyon sonrası değerler (gerçe
     expect(at(s4.rows, raf, "AVAILABLE")).toMatchObject({ physical: "5.000000", reserved: "2.000000", available: "3.000000" });
     expect(s4.totals).toEqual({
       physical: "10.000000", reserved: "2.000000", available: "3.000000",
-      physicalByStatus: { AVAILABLE: "8.000000", QUARANTINE: "0.000000", DAMAGED: "2.000000", BLOCKED: "0.000000" },
+      physicalByStatus: { AVAILABLE: "8.000000", QUARANTINE: "0.000000", DAMAGED: "2.000000", BLOCKED: "0.000000" }, countLockedExcluded: false,
     });
     // Sıra: depo kodu, lokasyon kodu (KB- < RF-), boyut kimliği.
     expect(s4.rows.map((r) => r.locationCode.slice(0, 3))).toEqual(["KB-", "KB-", "RF-"]);
@@ -222,7 +222,7 @@ describe("boyutlar, sıfır bakiye, bloke lokasyon", () => {
     expect(r.rows.some((x) => x.stockStatus === "DAMAGED")).toBe(false);
     expect(r.totals).toEqual({
       physical: "22.000000", reserved: "1.000000", available: "9.000000",
-      physicalByStatus: { AVAILABLE: "17.000000", QUARANTINE: "3.000000", DAMAGED: "0.000000", BLOCKED: "2.000000" },
+      physicalByStatus: { AVAILABLE: "17.000000", QUARANTINE: "3.000000", DAMAGED: "0.000000", BLOCKED: "2.000000" }, countLockedExcluded: false,
     });
     const byLoc = await stockByLocation(owner(A), { locationId: blocked });
     expect(byLoc.location.pickBlocked).toBe(true);
@@ -367,5 +367,73 @@ describe("depo kapsamı (A-46)", () => {
       );
     });
     expect(mutated.map((r) => r.location_id)).toContain(outLoc);
+  });
+});
+
+// T-334 (A-334-1): COUNTING kilidindeki lokasyonun miktarı count_diff.approve sahibi olmayana hiçbir stok okumasında görünmez.
+describe("kör sayım stok okumalarında (T-334)", () => {
+  const ROLES = { COUNTER: ["COUNTER"], PICKER: ["PICKER"] } as const;
+  async function who(w: TenantWorld, roles: readonly string[]) {
+    const u = await mkUser(adm, reg, `T334 ${roles.join("+")}`);
+    await mkMembership(adm, w.tenantId, u, { roles: [...roles] });
+    return { db: app, principal: { userId: u, mfaVerified: true }, tenantSlug: w.slug };
+  }
+  async function setup() {
+    const item = await mkItem(A);
+    const locked = await mkLoc(A, A.warehouseId, "STORAGE", `KL-${hex(6)}`);
+    const free = await mkLoc(A, A.warehouseId, "STORAGE", `SB-${hex(6)}`);
+    await putStock(A, item, locked, "7", "2");
+    await putStock(A, item, free, "3");
+    const sid = (await startCount(cmd(A), { warehouseId: A.warehouseId, locationIds: [locked] })).sessionId;
+    return { item, locked, free, sid };
+  }
+  const NULLS = { physical: null, reserved: null, available: null, countLocked: true };
+
+  it("aktif sayımda COUNTER/PICKER: kilitli lokasyon miktarı null + countLocked; kilitsiz lokasyon ve yönetici etkilenmez", async () => {
+    const { item, locked, free } = await setup();
+    const mgr = await who(A, ["WAREHOUSE_MANAGER"]);
+    for (const r of [ROLES.COUNTER, ROLES.PICKER]) {
+      const p = await who(A, r);
+      const byLoc = await stockByLocation(p, { locationId: locked });
+      expect(byLoc.rows).toHaveLength(1);
+      expect(byLoc.rows[0]).toMatchObject(NULLS);
+      const free1 = await stockByLocation(p, { locationId: free });
+      expect(free1.rows[0]).toMatchObject({ physical: "3.000000", reserved: "0.000000", available: "3.000000", countLocked: false });
+      const byItem = await stockByItem(p, { itemId: item });
+      expect(byItem.rows).toHaveLength(2);
+      expect(byItem.rows.find((x) => x.locationId === locked)).toMatchObject(NULLS);
+      expect(byItem.rows.find((x) => x.locationId === free)).toMatchObject({ physical: "3.000000", countLocked: false });
+      // Toplamlar kilitli lokasyonu dışlar (aksi halde toplam − görünen satırlar = gizli miktar olurdu).
+      expect(byItem.totals).toMatchObject({ physical: "3.000000", reserved: "0.000000", available: "3.000000", countLockedExcluded: true });
+      expect(byItem.totals.physicalByStatus.AVAILABLE).toBe("3.000000");
+      expect(JSON.stringify([byLoc, byItem])).not.toMatch(/7\.000000|10\.000000|"2\.000000"/);
+    }
+    for (const p of [mgr, owner(A)]) {
+      const byLoc = await stockByLocation(p, { locationId: locked });
+      expect(byLoc.rows[0]).toMatchObject({ physical: "7.000000", reserved: "2.000000", available: "5.000000", countLocked: true });
+      const byItem = await stockByItem(p, { itemId: item });
+      expect(byItem.rows.find((x) => x.locationId === locked)).toMatchObject({ physical: "7.000000", countLocked: true });
+      expect(byItem.totals).toMatchObject({ physical: "10.000000", reserved: "2.000000", available: "8.000000", countLockedExcluded: false });
+    }
+  });
+
+  it("sayım iptalinde ve fark fişi işlenince COUNTER miktarı yeniden görür", async () => {
+    const a = await setup();
+    const counter = await who(A, ["COUNTER"]);
+    expect((await stockByLocation(counter, { locationId: a.locked })).rows[0]).toMatchObject(NULLS);
+    await cancelCount(cmd(A), { sessionId: a.sid, reason: "T334 iptal" });
+    expect((await stockByLocation(counter, { locationId: a.locked })).rows[0]).toMatchObject({ physical: "7.000000", countLocked: false });
+    const itemTotals = (await stockByItem(counter, { itemId: a.item })).totals;
+    expect(itemTotals).toMatchObject({ physical: "10.000000", countLockedExcluded: false });
+
+    const b = await setup();
+    expect((await stockByItem(counter, { itemId: b.item })).rows.find((x) => x.locationId === b.locked)).toMatchObject(NULLS);
+    await recordCount(cmd(A), { sessionId: b.sid, lines: [{ locationId: b.locked, itemId: b.item, countedQuantity: "7" }] });
+    await submitCount(cmd(A), { sessionId: b.sid });
+    await approveCount(cmd(A), { sessionId: b.sid });
+    // Onaylı ama fark fişi işlenmemiş: kilit sürer, hâlâ gizli.
+    expect((await stockByLocation(counter, { locationId: b.locked })).rows[0]).toMatchObject(NULLS);
+    await postCountAdjustment(cmd(A), { sessionId: b.sid });
+    expect((await stockByItem(counter, { itemId: b.item })).rows.find((x) => x.locationId === b.locked)).toMatchObject({ physical: "7.000000", countLocked: false });
   });
 });
