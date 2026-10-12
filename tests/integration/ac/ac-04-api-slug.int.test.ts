@@ -166,6 +166,7 @@ let itemActions: Actions;
 let taskActions: Actions;
 let receiptActions: Actions;
 let orderActions: Actions;
+let shippingActions: Actions;
 /** T-314: B tenant'ının GERÇEK siparişi ve satırı (sipariş eylemleri bu kimliklerle çağrılır). */
 let bOrder: { order: string; line: string };
 let lookupActions: Actions;
@@ -221,6 +222,7 @@ beforeAll(async () => {
   taskActions = (await load("app/t/[slug]/tasks/actions.ts")) as Actions;
   receiptActions = (await load("app/t/[slug]/receipts/actions.ts")) as Actions;
   orderActions = (await load("app/t/[slug]/orders/actions.ts")) as Actions;
+  shippingActions = (await load("app/t/[slug]/orders/shipping-actions.ts")) as Actions;
   lookupActions = (await load("app/t/[slug]/field/lookup/actions.ts")) as Actions;
   bTask = (await adm.query<{ id: string }>("INSERT INTO public.warehouse_tasks (tenant_id, warehouse_id, kind) VALUES ($1, $2, 'PICK') RETURNING id", [B.tenant, B.warehouse])).rows[0]!.id;
   const mkFx = async (t: Fx): Promise<ItemFx> => {
@@ -313,6 +315,9 @@ const LOADERS = [
   "field/lookup/page.tsx",
   // T-333: "Yanlış bir şey yaptım"; üyelik özeti + `listMyRecentDocuments` ile sayfanın kendisinde çözülür.
   "field/undo/page.tsx",
+  // T-315: saha sevk ve müşteri iadesi; üyelik özeti + `listSalesOrders`/`getSalesOrder` ile sayfanın kendisinde çözülür.
+  "field/ship/page.tsx",
+  "field/return/page.tsx",
 ] as const;
 /**
  * T-304: tenant verisi çizmeyen saha kabuğu sayfaları. Üyelik kararı üst `layout.tsx`'tedir (yukarıdaki LOADERS satırı çapraz tenant
@@ -789,6 +794,17 @@ const ORDER_ACTIONS: Record<string, Call> = {
     orderActions.createPickAssignmentAction!({ slug, clientKey: randomUUID(), orderIds: [bOrder.order], assigneeMembershipId: v.membership }),
   lineStockAction: (slug) => orderActions.lineStockAction!({ slug, itemId: fx.B.item }),
 };
+/**
+ * T-315: sevk ve müşteri iadesi eylemleri (2 yazma + 1 okuma); hepsi B'nin GERÇEK sipariş/satır/kabul rafı kimlikleriyle çağrılır. A'nın slug'ında B kimlikleri
+ * etkisizdir (domain NOT_FOUND) ve yanıtta B verisi yoktur; B'de defter, bakiye, rezervasyon ve belge değişmez (snapshot).
+ */
+const SHIPPING_ACTIONS: Record<string, Call> = {
+  shipOrderAction: (slug) => shippingActions.shipOrderAction!({ slug, clientKey: randomUUID(), orderId: bOrder.order, lines: [{ orderLineId: bOrder.line, quantity: "1" }] }),
+  createCustomerReturnAction: (slug) =>
+    shippingActions.createCustomerReturnAction!({ slug, clientKey: randomUUID(), orderLineId: bOrder.line, quantity: "1", locationId: bRcpt.kabul, reason: "Ele geçirme" }),
+  returnLocationAction: async (slug) =>
+    shippingActions.returnLocationAction!({ slug, code: (await adm.query<{ code: string }>("SELECT code FROM public.locations WHERE id = $1", [bRcpt.kabul])).rows[0]!.code }),
+};
 /** T-332b: stok sorgu eylemleri (salt okuma); B'nin GERÇEK ürün/lokasyon kimlikleriyle çağrılır. A'nın kendi slug'ında B kimlikleri NOT_FOUND verir. */
 const LOOKUP_ACTIONS: Record<string, Call> = {
   lookupScanAction: (slug) => lookupActions.lookupScanAction!({ slug, code: "8000000000000" }),
@@ -803,12 +819,13 @@ describe("Server Action'lar", () => {
     expect(Object.keys(taskActions).sort()).toEqual(Object.keys(TASK_ACTIONS).sort());
     expect(Object.keys(receiptActions).sort()).toEqual(Object.keys(RECEIPT_ACTIONS).sort());
     expect(Object.keys(orderActions).sort()).toEqual(Object.keys(ORDER_ACTIONS).sort());
+    expect(Object.keys(shippingActions).sort()).toEqual(Object.keys(SHIPPING_ACTIONS).sort());
     expect(Object.keys(lookupActions).sort()).toEqual(Object.keys(LOOKUP_ACTIONS).sort());
     expect(Object.keys(settings)).toEqual(["saveSettingsAction"]);
     expect(Object.keys(inviteAccept)).toEqual(["acceptInvitationAction"]);
   });
 
-  for (const [name, call] of Object.entries({ ...ACTIONS, ...ITEM_ACTIONS, ...TASK_ACTIONS, ...RECEIPT_ACTIONS, ...ORDER_ACTIONS, ...LOOKUP_ACTIONS })) {
+  for (const [name, call] of Object.entries({ ...ACTIONS, ...ITEM_ACTIONS, ...TASK_ACTIONS, ...RECEIPT_ACTIONS, ...ORDER_ACTIONS, ...SHIPPING_ACTIONS, ...LOOKUP_ACTIONS })) {
     it(`@AC-04 ${name}: A yöneticisi B'nin slug'ıyla -> NOT_FOUND (var olmayan slug ile aynı yanıt); B'de hiçbir değişiklik yok`, async () => {
       const victim = { membership: B.managerMembership, invitation: bInvite.invitationId };
       const beforeB = await snapshot(B);
@@ -857,7 +874,7 @@ describe("Server Action'lar", () => {
     });
   }
 
-  for (const [name, call] of Object.entries(ORDER_ACTIONS)) {
+  for (const [name, call] of Object.entries({ ...ORDER_ACTIONS, ...SHIPPING_ACTIONS })) {
     it(`@AC-04 ${name}: A yöneticisi KENDİ slug'ında B'nin GERÇEK sipariş/satır/ürün/üye kimlikleriyle -> NOT_FOUND (rastgele kimlikle aynı yanıt); B verisi yanıtta yok; A ve B'de etki yok`, async () => {
       const victim = { membership: B.managerMembership, invitation: bInvite.invitationId };
       const beforeA = await snapshot(A);
