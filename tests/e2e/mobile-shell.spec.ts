@@ -18,6 +18,52 @@ const PHONES = [
 ] as const;
 
 
+// T-331: ana ekran döşeme KÜMESİ rol başına (sayı bu kümelerden türer; sabit sayı yazılmaz). Her döşeme ya etkin bağlantı (href) ya kilit + gerekçe ya "hazırlanıyor".
+// İzinler hedef sayfanın sunucu denetimiyle aynıdır: orders/lookup `stock.view`, receive `stock.post`, count `document.create`, undo `reversal.create`.
+const HOME_TITLES = {
+  receive: "Depoya mal geldi",
+  issue: "Depodan mal çıkacak",
+  transfer: "Malı başka depoya taşıyacağım",
+  count: "Rafı sayacağım",
+  lookup: "Bir ürün nerede, kaç tane var?",
+  undo: "Yanlış bir şey yaptım",
+  audit: "Kim ne yaptı?",
+  members: "Ekibimi yönet",
+  settings: "Ayarlar",
+  warehouses: "Depo ve raflar",
+  items: "Ürünlerim",
+} as const;
+const HOME_HREFS = {
+  receive: "/t/demo/field/receive",
+  issue: "/t/demo/orders",
+  count: "/t/demo/field/count",
+  lookup: "/t/demo/field/lookup",
+  undo: "/t/demo/field/undo",
+  warehouses: "/t/demo/warehouses",
+  items: "/t/demo/items",
+  audit: "/t/demo/audit",
+  members: "/t/demo/members",
+  settings: "/t/demo/settings",
+} as const;
+/** Ekranı henüz olmayan işler: kilit değil, "Yakında" etiketi + "Bu ekran hazırlanıyor." */
+const HOME_SOON: readonly string[] = [HOME_TITLES.transfer];
+const HOME_ADMIN_ACTIVE: readonly string[] = Object.values(HOME_HREFS);
+// T-331 (DESIGN_REVIEW §7.4.3): telefonda yönetim işleri ızgaradan çıkar, "Daha fazla" alt sayfasında listelenir; masaüstünde ızgarada kalır.
+// Ölçüm sonucu kurulum işi (Ürünlerim) de oradadır; yönetim işleri (Kim ne yaptı?, Ekibimi yönet, Ayarlar) yetkiye göre etkin ya da kilitli.
+const HOME_SETUP_HREFS: readonly string[] = [HOME_HREFS.items];
+const HOME_PICKER_OVERFLOW_HREFS: readonly string[] = [HOME_HREFS.warehouses]; // özet kartlı rolde ızgaraya sığmayan saha işi (DESIGN_REVIEW §7.4.3 c)
+const HOME_SETUP_TITLES: readonly string[] = [HOME_TITLES.items];
+const HOME_MGMT_TITLES: readonly string[] = [HOME_TITLES.audit, HOME_TITLES.members, HOME_TITLES.settings];
+const HOME_MORE_TITLES: readonly string[] = [...HOME_SETUP_TITLES, ...HOME_MGMT_TITLES];
+// "Yakında" (hazırlanan) işler telefonda ayrı düğme değil, "Daha fazla" içinde etiketli satırdır (DESIGN_REVIEW §7.4.3): toplam satır = bağlantı/kilit satırları + HOME_SOON.
+const HOME_MORE_ROWS_ADMIN = HOME_MORE_TITLES.length + HOME_SOON.length;
+const HOME_MORE_NOTE = "Yönetim, kurulum ve hazırlanan işler";
+const HOME_MORE_HREFS: readonly string[] = [...HOME_SETUP_HREFS, HOME_HREFS.audit, HOME_HREFS.members, HOME_HREFS.settings];
+const HOME_ADMIN_PHONE_ACTIVE: readonly string[] = HOME_ADMIN_ACTIVE.filter((h) => !HOME_MORE_HREFS.includes(h));
+const HOME_PICKER_ACTIVE: readonly string[] = [HOME_HREFS.receive, HOME_HREFS.issue, HOME_HREFS.lookup]; // özet kartlı saha rolü: en çok 3 saha işi; Depo ve raflar ile Ürünlerim "Daha fazla" içinde etkin // telefon ızgarası (saha); kurulum işleri "Daha fazla" içinde etkin
+const HOME_PICKER_LOCKED: readonly string[] = [HOME_TITLES.count, HOME_TITLES.undo]; // "Yetkin olmayan işler" alt sayfası; yönetim işleri "Daha fazla" içinde kilitli görünür
+
+
 async function height(locator: Locator): Promise<number> {
   const box = await locator.boundingBox();
   expect(box, "boundingBox").not.toBeNull();
@@ -39,8 +85,12 @@ test("telefon kabuğu: ana ekran tek ekran, menü, alt sekme; masaüstü korunur
     await page.setViewportSize({ width: size.width, height: size.height });
     await page.goto("/t/demo");
     const tasks = page.getByRole("list", { name: "İşler" });
-    await expect(tasks.locator('[data-state="active"]')).toHaveCount(6);
-    await expect(tasks.locator('[data-state="soon"]')).toHaveCount(5);
+    // Telefonda görünen etkin döşemeler yalnız saha kümesidir; yönetim bağlantıları DOM'da var ama masaüstüne özgüdür (gizli) ve "Daha fazla" içinde listelenir.
+    await expect(tasks.locator('[data-state="active"]:visible')).toHaveCount(HOME_ADMIN_PHONE_ACTIVE.length);
+    expect(await tasks.locator('a[data-state="active"]:visible').evaluateAll((els) => els.map((e) => e.getAttribute("href")).sort()), `${size.name}: telefonda etkin döşeme bağlantıları`).toEqual([...HOME_ADMIN_PHONE_ACTIVE].sort());
+    expect(await tasks.locator('a[data-state="active"]').evaluateAll((els) => els.map((e) => e.getAttribute("href")).sort()), `${size.name}: DOM'daki tüm etkin bağlantılar`).toEqual([...HOME_ADMIN_ACTIVE].sort());
+    await expect(tasks.locator('[data-state="soon"]')).toHaveCount(HOME_SOON.length);
+    await expect(tasks.locator('[data-state="locked"]')).toHaveCount(0);
     await page.screenshot({ path: path.join(OUT, `${tag}-${size.name}-ana-ekran.png`) });
 
     // Kaydırmasız: sayfa yüksekliği = görünür yükseklik, yatay taşma yok.
@@ -57,36 +107,43 @@ test("telefon kabuğu: ana ekran tek ekran, menü, alt sekme; masaüstü korunur
     await expect(page.getByRole("button", { name: "Çıkış yap" })).toHaveCount(0); // menüde (kapalı)
     await expect(page.getByTestId("bottom-nav")).toBeVisible();
 
-    // T-270 (Supervisor kararı: kasıtlı şartname değişikliği): 6 etkin döşeme (T-313: "Depoya mal geldi" etkinleşti) kaydırmadan görünür alanda, üst çubuk ile alt sekme
-    // çubuğu arasında (kutu sınırı assertion'ları aynı). 6 "Yakında" iş ızgarada döşeme değil, tek satırlık düğmenin arkasındadır:
-    // düğme görünür alanda; dokununca tam 6 iş adı + "Yakında" listelenir (toplam 11 iş erişilebilir).
+    // T-270 (Supervisor kararı: kasıtlı şartname değişikliği): etkin döşemeler (T-331: sipariş, sayım, stok sorgusu, hata düzeltme bağlandı) kaydırmadan görünür alanda, üst çubuk ile alt sekme
+    // çubuğu arasında (kutu sınırı assertion'ları aynı). "Yakında" (hazırlanıyor) işler ızgarada döşeme değil, tek satırlık düğmenin arkasındadır:
+    // düğme görünür alanda; dokununca her iş adı + "Yakında" listelenir (küme HOME_SOON).
     const barBottom = (await bar.boundingBox())?.y ?? 0;
     const navTop = (await page.getByTestId("bottom-nav").boundingBox())?.y ?? 0;
-    const cards = tasks.locator('[data-state="active"]');
-    expect(await cards.count()).toBe(6);
-    for (let i = 0; i < 6; i++) {
+    const cards = tasks.locator('[data-state="active"]:visible');
+    expect(await cards.count()).toBe(HOME_ADMIN_PHONE_ACTIVE.length);
+    for (let i = 0; i < HOME_ADMIN_PHONE_ACTIVE.length; i++) {
       const box = await cards.nth(i).boundingBox();
       expect(box, `${size.name}: kart ${i}`).not.toBeNull();
       expect((box?.y ?? 0) + (box?.height ?? 0), `${size.name}: kart ${i} alt sekmenin üstünde`).toBeLessThanOrEqual(navTop + 0.5);
       expect(box?.y ?? 0, `${size.name}: kart ${i} üst çubuğun altında`).toBeGreaterThanOrEqual(barBottom);
       expect((box?.x ?? 0) + (box?.width ?? 0), `${size.name}: kart ${i} sağ kenar`).toBeLessThanOrEqual(size.width);
     }
-    const soonRow = page.locator(".soon-toggle");
-    const soonBox = await soonRow.boundingBox();
-    expect(soonBox, `${size.name}: Yakında satırı görünür`).not.toBeNull();
-    expect((soonBox?.y ?? 0) + (soonBox?.height ?? 0), `${size.name}: Yakında satırı alt sekmenin üstünde`).toBeLessThanOrEqual(navTop + 0.5);
-    expect(soonBox?.y ?? 0, `${size.name}: Yakında satırı üst çubuğun altında`).toBeGreaterThanOrEqual(barBottom);
-    await expect(soonRow).toContainText("Yakında gelecekler (5)");
-    await soonRow.click();
-    // T-274: açık liste alt sayfadır (diyalog); aynı 6 iş ve aynı içerik.
+    // "Daha fazla" (T-331, §7.4.3): kurulum + yönetim işleri bağlantı olarak (yönetici hepsine yetkili → etkin) VE hazırlanan ("Yakında") işler etiketli satır olarak; ayrı "Yakında" düğmesi yok.
+    const moreRow = page.locator(".more-toggle");
+    await expect(page.locator(".soon-toggle")).toHaveCount(0);
+    const moreBox = await moreRow.boundingBox();
+    expect(moreBox, `${size.name}: Daha fazla satırı görünür`).not.toBeNull();
+    expect((moreBox?.y ?? 0) + (moreBox?.height ?? 0), `${size.name}: Daha fazla satırı alt sekmenin üstünde`).toBeLessThanOrEqual(navTop + 0.5);
+    expect(moreBox?.y ?? 0, `${size.name}: Daha fazla satırı üst çubuğun altında`).toBeGreaterThanOrEqual(barBottom);
+    await expect(moreRow).toContainText(`Daha fazla (${HOME_MORE_ROWS_ADMIN})`);
+    await moreRow.click();
+    // T-274: açık liste alt sayfadır (diyalog).
+    const moreLinks = page.getByRole("dialog").locator('a[data-state="active"]');
+    expect(await moreLinks.evaluateAll((els) => els.map((e) => e.getAttribute("href")).sort()), `${size.name}: Daha fazla bağlantıları`).toEqual([...HOME_MORE_HREFS].sort());
+    for (const name of HOME_MORE_TITLES) await expect(moreLinks.filter({ hasText: name }), `${size.name}: ${name}`).toHaveCount(1);
     const soonCards = page.getByRole("dialog").locator('[data-state="soon"]');
-    await expect(soonCards).toHaveCount(5);
-    for (const name of ["Depodan mal çıkacak", "Malı başka depoya taşıyacağım", "Rafı sayacağım", "Bir ürün nerede, kaç tane var?", "Yanlış bir şey yaptım"]) {
+    await expect(soonCards).toHaveCount(HOME_SOON.length);
+    for (const name of HOME_SOON) {
       const card = soonCards.filter({ hasText: name });
       await expect(card, `${size.name}: ${name}`).toHaveCount(1);
       await expect(card).toBeVisible();
       await expect(card).toContainText("Yakında");
+      await expect(card, `${size.name}: ${name} dürüst gerekçe`).toContainText("Bu ekran hazırlanıyor.");
     }
+    expect(await smallTargets(page, '[data-testid="more-sheet"]'), `${size.name}: Daha fazla alt sayfası 48 px altı hedef`).toEqual([]);
     await page.getByRole("dialog").getByRole("button", { name: "İşlere dön" }).click();
     await expect(page.getByRole("dialog")).toBeHidden();
     await expect(cards.first()).toBeVisible();
@@ -156,6 +213,10 @@ test("telefon kabuğu: ana ekran tek ekran, menü, alt sekme; masaüstü korunur
   await expect(page.getByRole("button", { name: "Çıkış yap" })).toBeVisible();
   await expect(page.getByRole("heading", { level: 1, name: "Ne yapmak istiyorsun?" })).toBeVisible();
   await expect(page.getByText("Yapmak istediğin işe dokun.")).toBeVisible();
+  // T-331: masaüstünde yönetim işleri ızgarada döşeme (etkin bağlantı), "Daha fazla" düğmesi yok; tüm etkin işler görünür.
+  const deskTasks = page.getByRole("list", { name: "İşler" });
+  expect(await deskTasks.locator('a[data-state="active"]:visible').evaluateAll((els) => els.map((e) => e.getAttribute("href")).sort()), "masaüstü: ızgaradaki etkin bağlantılar").toEqual([...HOME_ADMIN_ACTIVE].sort());
+  await expect(page.locator(".more-toggle")).toBeHidden();
   await page.screenshot({ path: path.join(OUT, `${tag}-masaustu-ana-ekran.png`) });
 
   // T-292: aynı oturumla yatay telefon (844x390, dokunmatik) ve karşılaştırma boyutları.
@@ -276,8 +337,9 @@ test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş al
     await expect(page).toHaveURL(/\/t\/demo$/);
     const tasks = page.getByRole("list", { name: "İşler" });
     const isAdmin = role.shot === "admin";
-    const activeCount = isAdmin ? 6 : 3; // toplayıcı: Depoya mal geldi (stock.post, T-313) + Depo ve raflar + Ürünlerim izinli; 3 yönetim işi yetkisiz
-    const soonRow = page.locator(".soon-toggle");
+    const moreRows = HOME_MORE_ROWS_ADMIN + (isAdmin ? 0 : HOME_PICKER_OVERFLOW_HREFS.length); // özet kartlı rolde ızgaraya sığmayan saha işi de listede
+    const activeCount = isAdmin ? HOME_ADMIN_PHONE_ACTIVE.length : HOME_PICKER_ACTIVE.length; // toplayıcı (stock.view + stock.post): küme HOME_PICKER_ACTIVE; sayım/hata düzeltme ve 3 yönetim işi yetkisiz
+    const moreRow = page.locator(".more-toggle");
     const lockedRow = page.locator(".locked-toggle");
 
     for (const size of T270_SIZES) {
@@ -287,6 +349,7 @@ test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş al
       const L = await homeLayout(page, ".task-grid > .task-item > [data-state]");
       const where = `${role.shot} ${size.width}x${size.height}`;
       expect(L.tiles.length, `${where}: görünür döşeme sayısı (izinli işler)`).toBe(activeCount);
+      expect(L.tiles.map((t) => t.href).sort(), `${where}: etkin döşeme bağlantıları (rolün izin kümesi)`).toEqual([...(isAdmin ? HOME_ADMIN_PHONE_ACTIVE : HOME_PICKER_ACTIVE)].sort());
 
       // Eşit ızgara: tüm genişlik ve yükseklikler ±2 px; yükseklik 88-140 px (her rol).
       // T-313 (DESIGN_REVIEW §7.4): ≤5 izinli iş tek sütun, ≥6 eşit 2 sütun; tek sayıda iş varsa en üstteki son döşeme tam genişlik (yetim değil).
@@ -348,10 +411,11 @@ test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş al
       // Sıra: saha işleri (depo, ürün) yönetim işlerinden önce; ilk döşeme saha işi.
       const hrefs = L.tiles.map((t) => t.href);
       const idx = (suffix: string) => hrefs.findIndex((h) => h.endsWith(suffix));
-      const field = [idx("/warehouses"), idx("/items")].filter((i) => i >= 0);
+      const field = [idx("/items")].filter((i) => i >= 0);
+      expect(field, `${where}: Ürünlerim telefon ızgarasında değil ("Daha fazla" içinde)`).toHaveLength(0);
       const admin = [idx("/audit"), idx("/members"), idx("/settings")].filter((i) => i >= 0);
-      expect(field.length, `${where}: saha işleri görünür`).toBe(2);
-      if (admin.length > 0) expect(Math.max(...field), `${where}: saha işleri yönetimden önce`).toBeLessThan(Math.min(...admin));
+      expect(admin, `${where}: yönetim işleri telefon ızgarasında değil`).toHaveLength(0);
+      expect(hrefs.length, `${where}: ızgarada yalnız saha işleri`).toBe(activeCount);
       expect(hrefs[0], `${where}: ilk döşeme saha işi`).toMatch(/\/(warehouses|items|field\/receive)$/); // T-313: "Depoya mal geldi" (saha işi, TASKS sırasında ilk) etkinleşti; niyet aynı: ilk döşeme saha işi
 
       // Kategori rengi yalnız ikon dairesinde: döşeme zemini beyaz (yüzey), ikon dairesi zemini döşemeden farklı.
@@ -383,17 +447,18 @@ test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş al
       }
 
       // Üst düğmeler: kapalı, görünür alanda; toplayıcıda yetkisiz işler tek satırda (varsayılan kapalı); alt sayfa kapalı.
-      await expect(soonRow).toContainText("Yakında gelecekler (5)");
+      await expect(page.locator(".soon-toggle"), `${where}: ayrı Yakında düğmesi yok`).toHaveCount(0);
+      await expect(moreRow).toContainText(`Daha fazla (${moreRows})`);
       if (isAdmin) await expect(lockedRow).toHaveCount(0);
       else {
-        await expect(lockedRow).toContainText("Yetkin olmayan işler (3)");
+        await expect(lockedRow).toContainText(`Yetkin olmayan işler (${HOME_PICKER_LOCKED.length})`);
         await expect(tasks.locator('[data-state="locked"]').first()).toBeHidden();
       }
       await expect(page.getByRole("dialog")).toBeHidden();
       // B-02 (kapalı ana ekran): en büyük boş dikey bant ≤ 120 px; B-04: şevron sağda, ≥ 48 px, kapalıyken dönmemiş.
       await expectBand(page, `${where}: kapalı ana ekran`, null, !honestEmpty);
-      const sc = await chevronInfo(page, ".soon-toggle");
-      expect(sc.h, `${where}: Yakında düğmesi yüksekliği (B-04)`).toBeGreaterThanOrEqual(48);
+      const sc = await chevronInfo(page, ".more-toggle");
+      expect(sc.h, `${where}: Daha fazla düğmesi yüksekliği (B-04)`).toBeGreaterThanOrEqual(48);
       expect(sc.rightGap, `${where}: şevron sağda (B-04)`).toBeLessThanOrEqual(16);
       expect(sc.rotated, `${where}: şevron kapalıyken dönmemiş`).toBe(false);
 
@@ -404,18 +469,20 @@ test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş al
       expect(m.scrollHeight, `${where}: sayfa gövdesi kaymaz`).toBeLessThanOrEqual(m.innerHeight);
       await page.screenshot({ path: path.join(OUT_T270, `final-${tag}-${role.shot}-${size.width}.png`) });
 
-      // "Yakında" açık (B-01/B-02): kararmış ana ekran üzerinde alt sayfa; 6 iş, tek kompakt başlık satırı, kapatma altta.
-      await soonRow.click();
-      await expect(soonRow).toHaveAttribute("aria-expanded", "true");
-      const soonIcon = await expectSheet(page, `${where}: Yakında`, 5);
+      // "Daha fazla" açık (B-01/B-02): kararmış ana ekran üzerinde alt sayfa; kurulum + yönetim + hazırlanan işler, tek kompakt başlık satırı, kapatma altta.
+      await moreRow.click();
+      await expect(moreRow).toHaveAttribute("aria-expanded", "true");
+      const soonIcon = await expectSheet(page, `${where}: Daha fazla`, moreRows);
       clockSizes.push(soonIcon);
-      expect((await chevronInfo(page, ".soon-toggle")).rotated, `${where}: şevron açılınca döner (B-04)`).toBe(true);
+      expect((await chevronInfo(page, ".more-toggle")).rotated, `${where}: şevron açılınca döner (B-04)`).toBe(true);
       const dlg = page.getByRole("dialog");
       for (const card of await dlg.locator('[data-state="soon"]').all()) {
         await expect(card).toBeVisible();
         await expect(card).toContainText("Yakında");
+        await expect(card).toContainText("Bu ekran hazırlanıyor."); // T-331: "depo kurulumundan sonra" ifadesi kalktı
       }
-      await expect(dlg.getByTestId("sheet-header")).toContainText("Bu işler depo kurulumundan sonra açılacak."); // çoğul (T-01)
+      await expect(dlg.getByTestId("sheet-header")).toHaveText(HOME_MORE_NOTE);
+      await expect(dlg.getByTestId("sheet-header")).not.toContainText("depo kurulumu");
       for (const t of await dlg.locator('[data-state="soon"]').all()) {
         const hh = (await t.boundingBox())?.height ?? 0;
         expect(hh, `${where}: alt sayfa satır yüksekliği`).toBeGreaterThanOrEqual(56);
@@ -427,18 +494,32 @@ test("ana ekran düzeni (T-270): eşit döşemeler, başparmak bölgesi, boş al
       for (const lines of titles) expect(lines, `${where}: Yakında başlığı en çok 2 satır`).toBeLessThanOrEqual(2);
       expect(await smallTargets(page, '[data-testid="more-sheet"]'), `${where}: Yakında alt sayfası 48 px altı hedef`).toEqual([]);
       await page.screenshot({ path: path.join(OUT_T270, `final-${tag}-${role.shot}-${size.width}-yakinda-acik.png`) });
-      await expectSheetCloses(page, `${where}: Yakında`, soonRow, size.width);
+      await expectSheetCloses(page, `${where}: Daha fazla`, moreRow, size.width);
       await expect(tasks.locator('a[data-state="active"]').first()).toBeVisible();
 
-      // Toplayıcı: yetkisiz işler alt sayfası: tek başlık satırı + 3 kompakt iş; kapatma altta.
+      // "Daha fazla" içeriği (T-331, §7.4.3): kurulum + yönetim işleri; yetkiliyse etkin bağlantı, değilse kilit + gerekçe. Ana ızgarada bu işler görünmez.
+      for (const href of HOME_MORE_HREFS) await expect(tasks.locator(`a[href="${href}"]`), `${where}: ${href} ızgarada görünmez`).toBeHidden();
+      await moreRow.click();
+      await expectSheet(page, `${where}: Daha fazla (içerik)`, moreRows);
+      const mdlg = page.getByRole("dialog");
+      await expect(mdlg.getByTestId("sheet-header")).toHaveText(HOME_MORE_NOTE);
+      // Yönetici: hepsi etkin bağlantı. Toplayıcı: kurulum işleri (stock.view) etkin, 3 yönetim işi kilitli + gerekçe.
+      expect(await mdlg.locator('a[data-state="active"]').evaluateAll((els) => els.map((e) => e.getAttribute("href")).sort()), `${where}: Daha fazla etkin bağlantıları`).toEqual([...(isAdmin ? HOME_MORE_HREFS : [...HOME_SETUP_HREFS, ...HOME_PICKER_OVERFLOW_HREFS])].sort());
+      const lockedMore = mdlg.locator('[data-state="locked"]');
+      await expect(lockedMore).toHaveCount(isAdmin ? 0 : HOME_MGMT_TITLES.length);
+      if (!isAdmin) for (const name of HOME_MGMT_TITLES) await expect(lockedMore.filter({ hasText: name })).toContainText("Bu iş için yetkin yok. Sorumluna sorabilirsin.");
+      expect(await smallTargets(page, '[data-testid="more-sheet"]'), `${where}: Daha fazla alt sayfası 48 px altı hedef`).toEqual([]);
+      await expectSheetCloses(page, `${where}: Daha fazla`, moreRow, size.width);
+
+      // Toplayıcı: yetkisiz işler alt sayfası: tek başlık satırı + yetkisiz işlerin kompakt satırları; kapatma altta.
       if (!isAdmin) {
         await lockedRow.click();
-        await expectSheet(page, `${where}: yetkisiz`, 3);
+        await expectSheet(page, `${where}: yetkisiz`, HOME_PICKER_LOCKED.length);
         const ldlg = page.getByRole("dialog");
         await expect(ldlg.getByTestId("sheet-header")).toHaveText("Bu işler için yetkin yok. Sorumluna sorabilirsin.");
         const lockedCards = ldlg.locator('[data-state="locked"]');
-        await expect(lockedCards).toHaveCount(3);
-        for (const name of ["Ekibimi yönet", "Ayarlar", "Kim ne yaptı?"]) await expect(lockedCards.filter({ hasText: name })).toBeVisible();
+        await expect(lockedCards).toHaveCount(HOME_PICKER_LOCKED.length);
+        for (const name of HOME_PICKER_LOCKED) await expect(lockedCards.filter({ hasText: name })).toBeVisible();
         for (const t of await lockedCards.all()) {
           const hh = (await t.boundingBox())?.height ?? 0;
           expect(hh, `${where}: yetkisiz satır yüksekliği`).toBeGreaterThanOrEqual(56);

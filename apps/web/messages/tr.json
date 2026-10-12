@@ -450,16 +450,20 @@
     "intro": "Yapmak istediğin işe dokun. Seni adım adım götüreceğim; yanlış bir şey yapmana izin vermem.",
     "tasksLabel": "İşler",
     "lockedReason": "Bu iş için yetkin yok. Sorumluna sorabilirsin.",
-    "soonListNote": "Bu işler depo kurulumundan sonra açılacak.",
+    "soonListNote": "Bu ekranlar hazırlanıyor.",
     "lockedListNote": "Bu işler için yetkin yok. Sorumluna sorabilirsin.",
     "soonLabel": "Yakında",
-    "soonWarehouse": "Bu iş depo kurulumundan sonra açılacak.",
+    "soonWarehouse": "Bu ekran hazırlanıyor.",
     "soonScreen": "Bu ekran yakında açılacak.",
     "myTasks": {
       "title": "Görevlerim",
       "assigned": "Sana atanmış {count} iş",
       "empty": "Şu an sana atanmış iş yok.",
       "start": "Tara ile başla"
+    },
+    "moreList": {
+      "toggle": "Daha fazla ({count})",
+      "note": "Yönetim, kurulum ve hazırlanan işler"
     },
     "lockedList": {
       "toggle": "Yetkin olmayan işler ({count})"
@@ -498,7 +502,8 @@
       "issue": {
         "title": "Depodan mal çıkacak",
         "description": "Çıkan malı kaydet",
-        "short": "Çıkan ürünü yaz"
+        "short": "Çıkan ürünü yaz",
+        "tile": "Mal çıkışı"
       },
       "transfer": {
         "title": "Malı başka depoya taşıyacağım",
@@ -508,17 +513,20 @@
       "count": {
         "title": "Rafı sayacağım",
         "description": "Raftaki ürünleri tek tek say",
-        "short": "Raftakini say"
+        "short": "Raftakini say",
+        "tile": "Raf sayımı"
       },
       "lookup": {
         "title": "Bir ürün nerede, kaç tane var?",
         "description": "Stok ve raf bilgisini gör",
-        "short": "Stok ve raf bak"
+        "short": "Stok ve raf bak",
+        "tile": "Stok nerede?"
       },
       "undo": {
         "title": "Yanlış bir şey yaptım",
         "description": "Hatalı kaydı birlikte düzeltelim",
-        "short": "Hatayı düzelt"
+        "short": "Hatayı düzelt",
+        "tile": "Yanlış yaptım"
       },
       "warehouses": {
         "title": "Depo ve raflar",

@@ -450,16 +450,20 @@
     "intro": "Tap the task you want. I will guide you step by step and will not let you do something wrong.",
     "tasksLabel": "Tasks",
     "lockedReason": "You are not allowed to do this. Ask your manager.",
-    "soonListNote": "These tasks will open after warehouse setup.",
+    "soonListNote": "These screens are being prepared.",
     "lockedListNote": "You are not allowed to do these tasks. Ask your manager.",
     "soonLabel": "Coming soon",
-    "soonWarehouse": "This task will open after warehouse setup.",
+    "soonWarehouse": "This screen is being prepared.",
     "soonScreen": "This screen will open soon.",
     "myTasks": {
       "title": "My tasks",
       "assigned": "{count} tasks assigned to you",
       "empty": "No tasks are assigned to you right now.",
       "start": "Start with Scan"
+    },
+    "moreList": {
+      "toggle": "More ({count})",
+      "note": "Management, setup and upcoming tasks"
     },
     "lockedList": {
       "toggle": "Tasks you cannot use ({count})"
@@ -498,7 +502,8 @@
       "issue": {
         "title": "Goods are going out",
         "description": "Record outgoing goods",
-        "short": "Record outgoing"
+        "short": "Record outgoing",
+        "tile": "Issue stock"
       },
       "transfer": {
         "title": "Move goods to another warehouse",
@@ -508,17 +513,20 @@
       "count": {
         "title": "Count a shelf",
         "description": "Count the items on a shelf one by one",
-        "short": "Count a rack"
+        "short": "Count a rack",
+        "tile": "Count shelf"
       },
       "lookup": {
         "title": "Where is a product, how many?",
         "description": "See stock and shelf information",
-        "short": "Check stock"
+        "short": "Check stock",
+        "tile": "Find stock"
       },
       "undo": {
         "title": "I made a mistake",
         "description": "Let's fix the wrong record together",
-        "short": "Fix a mistake"
+        "short": "Fix a mistake",
+        "tile": "I erred"
       },
       "warehouses": {
         "title": "Warehouses and racks",
@@ -2360,6 +2368,76 @@
       "finish_firstAction": "Scan the same item or press Save.",
       "flow_closed": "The count closed or the shelf lock was released.",
       "flow_closedAction": "Press OK; the screen updates."
+    }
+  },
+  "undo": {
+    "title": "I made a mistake",
+    "pickInstruction": "Pick the record you want to correct.",
+    "emptyTitle": "Nothing to correct",
+    "emptyBody": "Your latest actions show up here.",
+    "lockedTitle": "You cannot do this task",
+    "lockedReason": "You do not have permission to correct records. Tell your manager.",
+    "toField": "Back to field",
+    "toList": "Back to list",
+    "back": "Back",
+    "lines": "{count} lines",
+    "kind": {
+      "STOCK_IN": "Receipt",
+      "STOCK_OUT": "Issue",
+      "STOCK_MOVE": "Move"
+    },
+    "blocked": {
+      "SOURCE_LINKED": "Cannot be corrected - tell your manager",
+      "STATUS_CHANGE": "Cannot be corrected - tell your manager",
+      "FULLY_REVERSED": "Already fully reversed"
+    },
+    "notFoundTitle": "Record not found",
+    "notFound": "This record is not in your list.",
+    "howTitle": "How much should we reverse?",
+    "howInstruction": "You can reverse everything or only some lines.",
+    "modeAll": "Everything",
+    "modeSome": "Line / quantity",
+    "allNote": "The remaining quantity of every line is reversed.",
+    "lineRemaining": "Remaining: {remaining} {unit}",
+    "qtyLabel": "Quantity to reverse ({unit})",
+    "qtyHelp": "If you leave it empty, this line is not reversed.",
+    "pickAtLeastOne": "Enter a quantity on at least one line.",
+    "badQuantity": "The quantity must be above zero and not exceed the remaining amount.",
+    "next": "Continue",
+    "reasonTitle": "Why are you reversing?",
+    "reasonInstruction": "Write a short reason. It is kept in the record.",
+    "reasonLabel": "Reason",
+    "reasonRequired": "You must write a reason.",
+    "summaryAll": "Everything will be reversed: {number}",
+    "summarySome": "{count} lines will be reversed: {number}",
+    "confirm": "Reverse",
+    "doneTitle": "Reversed",
+    "doneBody": "Correction record {number} was posted.",
+    "detail": "Details",
+    "errorCode": "Error code: {code}",
+    "errors": {
+      "network": { "msg": "The connection was lost.", "action": "Check your connection and try again. The same action is never posted twice." },
+      "forbidden": { "msg": "You cannot do this task.", "action": "Tell your manager." },
+      "not_found": { "msg": "Record not found.", "action": "Go back to the list and pick again." },
+      "version_conflict": { "msg": "The record just changed.", "action": "Try again." },
+      "idempotency_mismatch": { "msg": "This request was sent earlier with different content.", "action": "Go back to the list and start again." },
+      "insufficient_stock": { "msg": "Not enough stock on the shelf.", "action": "Tell your manager." },
+      "location_locked": { "msg": "The shelf is being counted right now.", "action": "Try again when the count is finished." },
+      "STOCK_USED": { "msg": "This stock was used later, so it cannot be reversed.", "action": "Tell your manager." },
+      "STOCK_RESERVED": { "msg": "This stock is reserved for another job, so it cannot be reversed.", "action": "Tell your manager." },
+      "SERIAL_IN_USE": { "msg": "The serial number is somewhere else, so it cannot be reversed.", "action": "Tell your manager." },
+      "SOURCE_LINKED": { "msg": "This record is linked to another job and cannot be corrected here.", "action": "Tell your manager." },
+      "STATUS_CHANGE": { "msg": "A move that changes status cannot be reversed here.", "action": "Tell your manager." },
+      "EXCEEDS_REMAINING": { "msg": "The quantity is more than what can be reversed.", "action": "Lower the quantity or go back to the list." },
+      "blocked": { "msg": "This record cannot be reversed.", "action": "Tell your manager." },
+      "document_state": { "msg": "This record can no longer be reversed.", "action": "Go back to the list and look again." },
+      "quantity_scale": { "msg": "The quantity must be a whole number for this product.", "action": "Fix the quantity." },
+      "validation_failed": { "msg": "The information entered is not valid.", "action": "Check the quantity and the reason." },
+      "rate_limited": { "msg": "You tried too often.", "action": "Wait a little, then try again." },
+      "unauthenticated": { "msg": "Your session has ended.", "action": "Sign in again." },
+      "tenant_suspended": { "msg": "The account is suspended right now.", "action": "Tell your manager." },
+      "tenant_closing": { "msg": "The account is being closed.", "action": "Tell your manager." },
+      "internal": { "msg": "Something went wrong.", "action": "Try again in a moment; if it continues, give the error code to support." }
     }
   }
 }

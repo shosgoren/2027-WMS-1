@@ -1,5 +1,5 @@
 "use client";
-// Ana ekran ikincil listeleri: "Yetkin olmayan işler" ve "Yakında gelecekler" (T-274, DESIGN_REVIEW §7.3 B-01).
+// Ana ekran ikincil listeleri: "Daha fazla" (telefonda yönetim işleri, T-331), "Yetkin olmayan işler" ve "Yakında gelecekler" (T-274, DESIGN_REVIEW §7.3 B-01).
 // Telefonda iki tek satırlık düğme (şevronlu) kararmış ana ekran üzerinde ALT SAYFA (bottom sheet) açar. Satırlar sunucuda üretilir
 // (`task-menu.tsx`, yetki gösterimi ve metinler sunucudan); bu dosya yalnız açma/kapama, odak ve hareketleri yönetir.
 // - Yerel `<dialog>` modal: odak tuzağı, Esc, kararmış arka plan ve odağın açan düğmeye dönmesi tarayıcıdadır.
@@ -8,7 +8,7 @@
 // - Yükseklik içeriğe uyar (en çok görünür yüksekliğin %85'i); kapatma düğmesi en altta (başparmak).
 import { useEffect, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, ReactNode } from "react";
-import { ChevronDown, Clock, Lock } from "@wms/ui";
+import { ChevronDown, Clock, Lock, Settings2 } from "@wms/ui";
 
 const SWIPE_CLOSE_PX = 80;
 const FOCUS = "focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus";
@@ -22,11 +22,18 @@ export interface MoreList {
   readonly preview?: ReactNode;
 }
 
-export function MoreToggles({ locked, soon, closeLabel }: { locked: MoreList | null; soon: MoreList | null; closeLabel: string }) {
-  const [open, setOpen] = useState<"locked" | "soon" | null>(null);
-  const list = open === "locked" ? locked : open === "soon" ? soon : null;
+export function MoreToggles({ more, locked, soon, closeLabel }: { more: MoreList | null; locked: MoreList | null; soon: MoreList | null; closeLabel: string }) {
+  const [open, setOpen] = useState<"more" | "locked" | "soon" | null>(null);
+  const list = open === "more" ? more : open === "locked" ? locked : open === "soon" ? soon : null;
   return (
     <>
+      {more === null ? null : (
+        <button type="button" className={`more-toggle ${ROW} w-full text-left`} aria-haspopup="dialog" aria-expanded={open === "more"} onClick={() => setOpen("more")}>
+          <Settings2 aria-hidden="true" className="size-5 shrink-0 text-ink-muted" />
+          <span className="when-closed min-w-0 flex-1 truncate">{more.toggle}</span>
+          <ChevronDown aria-hidden="true" className="row-chevron size-5 shrink-0" />
+        </button>
+      )}
       {locked === null ? null : (
         <button type="button" className={`locked-toggle ${ROW} w-full text-left`} aria-haspopup="dialog" aria-expanded={open === "locked"} onClick={() => setOpen("locked")}>
           <Lock aria-hidden="true" className="size-5 shrink-0 text-ink-muted" />
@@ -46,7 +53,7 @@ export function MoreToggles({ locked, soon, closeLabel }: { locked: MoreList | n
       <MoreSheet
         open={list !== null}
         label={list?.toggle ?? ""}
-        icon={open === "locked" ? <Lock aria-hidden="true" className="size-5 shrink-0 text-ink-muted" /> : <Clock aria-hidden="true" className="size-5 shrink-0 text-ink-muted" />}
+        icon={open === "more" ? <Settings2 aria-hidden="true" className="size-5 shrink-0 text-ink-muted" /> : open === "locked" ? <Lock aria-hidden="true" className="size-5 shrink-0 text-ink-muted" /> : <Clock aria-hidden="true" className="size-5 shrink-0 text-ink-muted" />}
         note={list?.note ?? ""}
         closeLabel={closeLabel}
         onClose={() => setOpen(null)}

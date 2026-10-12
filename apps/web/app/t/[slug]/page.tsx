@@ -135,6 +135,8 @@ export default async function TenantHomePage({ params }: { params: Promise<{ slu
           auditView: hasPermission(current.roles, "audit.view"),
           stockView: hasPermission(current.roles, "stock.view"),
           stockPost: hasPermission(current.roles, "stock.post"),
+          reversalCreate: hasPermission(current.roles, "reversal.create"),
+          documentCreate: hasPermission(current.roles, "document.create"),
         }}
       />
       {today === null ? (

@@ -23,7 +23,10 @@ vi.mock("../../../../lib/rate-limit.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../../lib/rate-limit.ts")>()),
   createProductionLimiter: () => ({ check: () => Promise.resolve() }),
 }));
-vi.mock("next-intl/server", () => ({ getTranslations: () => Promise.resolve((key: string) => key) }));
+vi.mock("next-intl/server", () => ({
+  // `has` 2 sütun yolunda (≥ 6 izinli iş) çağrılır; hiçbir `.tile` anahtarı yok sayılır → başlık anahtarı değişmez.
+  getTranslations: () => Promise.resolve(Object.assign((key: string) => key, { has: () => false })),
+}));
 vi.mock("@wms/domain/identity/access", () => ({ runTenantQuery: () => Promise.resolve("t1") }));
 
 import { addBarcodeAction, archiveItemAction, createItemAction, removeBarcodeAction, searchItemsAction, setConversionAction, updateItemAction } from "./actions.ts";
@@ -177,11 +180,15 @@ describe("errorKey eşlemesi ve mesaj anahtarları", () => {
 
 describe('"Ürünler" kartı izne bağlı (stock.view)', () => {
   interface El {
+    type?: unknown;
     props?: { children?: unknown; locked?: unknown; href?: unknown; title?: unknown };
   }
   /** Kart ızgarasındaki `items` kartının TaskCard özellikleri (başlık anahtarına göre bulunur). */
   async function itemsCard(stockView: boolean): Promise<NonNullable<El["props"]>> {
-    const ul = (await TaskMenu({ slug: "acme", allowed: { usersManage: true, settingsManage: true, auditView: true, stockView } })) as El;
+    const root = (await TaskMenu({ slug: "acme", allowed: { usersManage: true, settingsManage: true, auditView: true, stockView } })) as El;
+    // ≥ 6 izinli işte (stock.view ile 7) kök, [Şimdi kartı, ızgara] taşıyan 2 sütun sarmalayıcıdır; aksi halde doğrudan ızgaradır.
+    const ul = root.type === "div" ? ((root.props?.children as Array<El | null>).find((k) => k !== null && k.type === "ul") as El) : root;
+    expect(ul).toBeDefined();
     const lis = ul.props?.children as El[];
     const cards = lis.map((li) => li.props?.children as El);
     const found = cards.find((c) => c.props?.title === "tasks.items.title");

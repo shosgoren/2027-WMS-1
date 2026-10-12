@@ -54,7 +54,7 @@ export type NowSummary =
 
 export interface TaskMenuProps {
   readonly slug: string;
-  readonly allowed: { readonly usersManage: boolean; readonly settingsManage: boolean; readonly auditView: boolean; readonly stockView: boolean; readonly stockPost?: boolean; readonly reversalCreate?: boolean };
+  readonly allowed: { readonly usersManage: boolean; readonly settingsManage: boolean; readonly auditView: boolean; readonly stockView: boolean; readonly stockPost?: boolean; readonly reversalCreate?: boolean; readonly documentCreate?: boolean };
   /** Verilirse (yalnız saha rolleri) ızgaranın üstünde telefon özet kartı çizilir. */
   readonly myTasks?: MyTasksSummary;
   /** `stock.post` sahibi için gerçek bekleyen işler; 2 sütun kipinde (≥ 6 izinli iş) ızgara üstünde, saha rolünde (tek sütun) atanmış iş yoksa Görevlerim özetinin yerinde çizilir. */
@@ -86,6 +86,9 @@ export const TASKS: readonly TaskDef[] = [
   { key: "members", group: "admin", hue: "indigo" },
   { key: "settings", group: "admin", hue: "slate" },
 ];
+
+/** Telefonda ana ızgaradan çıkıp "Daha fazla" alt sayfasına giden kurulum işleri (yönetim grubuna ek; masaüstünde ızgarada kalır). */
+const SETUP: ReadonlySet<TaskKey> = new Set<TaskKey>(["items"]);
 
 const RANK: Record<TaskGroup, number> = { field: 0, admin: 1 };
 
@@ -155,10 +158,12 @@ export interface TaskTileProps {
   readonly locked?: { readonly reason: string };
   /** Kapalı özellik: kilitten ayrı görsel/metin; işlev yok (G-07). */
   readonly soon?: { readonly label: string };
+  /** Alt sayfa satırı (T-331): gölgesiz (kilit/Yakında satırlarıyla aynı düz görünüm, DESIGN_REVIEW §7.3 B-01). */
+  readonly flat?: boolean;
 }
 
 /** İş döşemesi. Durum `data-state`te (active | locked | soon); renk yalnız ikon dairesinde, ikon + metin her zaman var. */
-export function TaskTile({ name, hue, title, description, what, href, locked, soon }: TaskTileProps): ReactNode {
+export function TaskTile({ name, hue, title, description, what, href, locked, soon, flat }: TaskTileProps): ReactNode {
   const h = HUE[hue];
   const head = (extra: ReactNode, circle: string) => (
     <span className="tile-head flex items-start justify-between gap-2">
@@ -192,7 +197,7 @@ export function TaskTile({ name, hue, title, description, what, href, locked, so
     );
   }
   return (
-    <a href={href} data-state="active" data-hue={hue} className={`${TILE_BASE} ${FOCUS}`}>
+    <a href={href} data-state="active" data-hue={hue} style={flat === true ? { boxShadow: "none" } : undefined} className={`${TILE_BASE} ${FOCUS}`}>
       {head(null, h.circle)}
       {body(description)}
       <ChevronRight aria-hidden="true" className="tile-chevron size-6 shrink-0" />
@@ -203,6 +208,8 @@ export function TaskTile({ name, hue, title, description, what, href, locked, so
 /** Telefonda tek sütundan 2 sütuna geçiş eşiği (izinli iş sayısı) ve 2 sütunda alttan doldurmanın üst sınırı (DESIGN_REVIEW §7.4). */
 const TWO_COL_FROM = 6;
 const TWO_COL_MAX = 10;
+/** Özet kartlı (saha rolü) telefon ızgarasında en çok bu kadar saha işi döşeme olur (DESIGN_REVIEW §7.4.3). */
+const PHONE_CARD_MAX = 3;
 
 export async function TaskMenu({ slug, allowed, myTasks, now }: TaskMenuProps) {
   const t = await getTranslations("home");
@@ -220,6 +227,11 @@ export async function TaskMenu({ slug, allowed, myTasks, now }: TaskMenuProps) {
     // "Yanlış bir şey yaptım" (T-333): ters kayıt `reversal.create`; bayrak yalnızca gösterimdir (kilit + gerekçe), hedef sayfa/eylem yetkiyi sunucuda denetler.
     // Çağıran sayfa `reversalCreate` geçirene kadar döşeme kilitli kalır (aynı kural `receive` için de geçerli).
     undo: { allowed: allowed.reversalCreate === true, href: `${base}/field/undo` },
+    // Her döşemenin izni hedef sayfanın sunucu denetimiyle AYNIDIR (T-331): sipariş listesi `stock.view` (orders/page.tsx → listSalesOrders; oluşturma/görevlendirme düğmeleri sayfada ayrıca
+    // `document.create`/`document.approve`), saha sayımı `document.create` (field/count/page.tsx), stok sorgusu `stock.view` (field/lookup/page.tsx). Bayrak yalnızca gösterimdir.
+    issue: { allowed: allowed.stockView, href: `${base}/orders` },
+    count: { allowed: allowed.documentCreate === true, href: `${base}/field/count` },
+    lookup: { allowed: allowed.stockView, href: `${base}/field/lookup` },
   };
   const ordered = orderTasks(TASKS);
   const real = ordered.filter((d) => hrefs[d.key] !== undefined);
@@ -229,41 +241,57 @@ export async function TaskMenu({ slug, allowed, myTasks, now }: TaskMenuProps) {
   // Telefon yerleşimi izinli iş sayısına göre (DESIGN_REVIEW §7.4): ≤5 iş tek sütun eşit yükseklikli yatay satırlar; ≥6 iş eşit 2 sütunlu ızgara
   // (aynı döşeme biçemi, açıklama gizli; tek sayıda iş varsa en üstteki son döşeme tam genişlik). Her iki kipte ızgara alttan yukarı dolar
   // (CSS değişkenleri `--rows`, `--row`, `--col`); sınırı aşan iş sayısında doldurma kapanır ve içerik alanı kayar.
-  const twoCol = active.length >= TWO_COL_FROM;
-  const reverse = active.length >= 1 && active.length <= (twoCol ? TWO_COL_MAX : TWO_COL_FROM - 1);
-  const rowCount = twoCol ? Math.ceil(active.length / 2) : active.length;
+  // T-331 (DESIGN_REVIEW §7.4.3): telefonda yönetim işleri (`admin` grubu) ızgaradan çıkar ve "Daha fazla" alt sayfasında bağlantı/kilit olarak listelenir;
+  // yerleşim kararı (sütun, satır) yalnız telefonda görünen saha döşemelerinin sayısına göre verilir. Masaüstü/tablet ızgarası hepsini gösterir.
+  // Ölçüm (T-331): 7 saha döşemesi + "Daha fazla" düğmesi 390×664'e sığmaz; kurulum işleri (`items`, `warehouses`) de oraya gider (DESIGN_REVIEW §7.4.3).
+  // Görevlerim özeti olan saha rolünde (özet kartı + iki düğme satırı) tek sütunda en çok PHONE_CARD_MAX saha işi sığar (360×740'ta 4 döşeme 77.5 px < 88 ölçüldü); kalanlar "Daha fazla"da.
+  const gridField = active.filter((d) => d.group !== "admin" && !SETUP.has(d.key));
+  const overflow = new Set<TaskKey>(myTasks === undefined ? [] : gridField.slice(PHONE_CARD_MAX).map((d) => d.key));
+  const inMore = (d: TaskDef): boolean => d.group === "admin" || SETUP.has(d.key) || overflow.has(d.key);
+  const phoneActive = active.filter((d) => !inMore(d));
+  const moreTasks = real.filter(inMore);
+  const lockedPhone = locked.filter((d) => !inMore(d));
+  const twoCol = phoneActive.length >= TWO_COL_FROM;
+  const reverse = phoneActive.length >= 1 && phoneActive.length <= (twoCol ? TWO_COL_MAX : TWO_COL_FROM - 1);
+  const rowCount = twoCol ? Math.ceil(phoneActive.length / 2) : phoneActive.length;
   const hasCard = reverse && myTasks !== undefined;
   const gridStyle = reverse ? ({ "--rows": rowCount } as CSSProperties) : undefined;
   const items: ReactNode[] = [];
   let moreNode: ReactNode = null;
 
-  if (locked.length > 0 || soon.length > 0) {
+  if (lockedPhone.length > 0 || soon.length > 0 || moreTasks.length > 0) {
     // Satırlar sunucuda üretilir; açma/kapama durumu, alt sayfa ve hareketler istemci parçasındadır (`more-sheet.tsx`).
-    const lockedRows = locked.map((d) => (
+    const lockedRows = lockedPhone.map((d) => (
       <li key={d.key} className="flex min-w-0">
         <TaskTile name={d.key} hue={d.hue} title={t(`tasks.${d.key}.title`)} what={t(`tasks.${d.key}.description`)} locked={{ reason: t("lockedReason") }} />
       </li>
     ));
+    // "Yakında" (ekranı hazırlanan) işler telefonda ayrı düğme olmaz; "Daha fazla" alt sayfasında etiketli satırdır (DESIGN_REVIEW §7.4.3).
     const soonRows = soon.map((d) => (
       <li key={d.key} className="flex min-w-0">
         <TaskTile name={d.key} hue={d.hue} title={t(`tasks.${d.key}.title`)} description={t("soonWarehouse")} what={t(`tasks.${d.key}.description`)} soon={{ label: t("soonLabel") }} />
       </li>
     ));
+    // "Daha fazla": yetkiye göre etkin bağlantı ya da kilit + gerekçe (asıl yetki hedef sayfada sunucuda denetlenir).
+    const moreRows = moreTasks.map((d) => {
+      const h = hrefs[d.key];
+      return (
+        <li key={d.key} className="flex min-w-0">
+          {h?.allowed === true ? (
+            <TaskTile name={d.key} hue={d.hue} title={t(`tasks.${d.key}.title`)} description={t(`tasks.${d.key}.description`)} href={h.href} flat />
+          ) : (
+            <TaskTile name={d.key} hue={d.hue} title={t(`tasks.${d.key}.title`)} what={t(`tasks.${d.key}.description`)} locked={{ reason: t("lockedReason") }} />
+          )}
+        </li>
+      );
+    });
     moreNode = (
       <>
         <MoreToggles
           closeLabel={t("soonList.back")}
-          locked={locked.length === 0 ? null : { toggle: t("lockedList.toggle", { count: locked.length }), note: t("lockedListNote"), rows: lockedRows }}
-          soon={
-            soon.length === 0
-              ? null
-              : {
-                  toggle: t("soonList.toggle", { count: soon.length }),
-                  note: t("soonListNote"),
-                  rows: soonRows,
-                  preview: soon.map((d) => <TaskIcon key={d.key} name={d.key} className={`size-3.5 ${HUE[d.hue].icon}`} />),
-                }
-          }
+          more={moreTasks.length + soon.length === 0 ? null : { toggle: t("moreList.toggle", { count: moreTasks.length + soon.length }), note: t("moreList.note"), rows: [...moreRows, ...soonRows] }}
+          locked={lockedPhone.length === 0 ? null : { toggle: t("lockedList.toggle", { count: lockedPhone.length }), note: t("lockedListNote"), rows: lockedRows }}
+          soon={null}
         />
       </>
     );
@@ -377,10 +405,20 @@ export async function TaskMenu({ slug, allowed, myTasks, now }: TaskMenuProps) {
       </li>,
     );
   }
-  active.forEach((d, i) => {
+  active.forEach((d) => {
     const h = hrefs[d.key];
     if (h === undefined) return;
-    const lastOdd = twoCol && active.length % 2 === 1 && i === active.length - 1;
+    if (inMore(d)) {
+      // Telefonda gizli (`desk-only`), "Daha fazla" alt sayfasında listelenir; masaüstü/tablet ızgarasında döşeme olarak kalır.
+      items.push(
+        <li key={d.key} className="task-item desk-only flex min-w-0">
+          <TaskTile name={d.key} hue={d.hue} title={t(`tasks.${d.key}.title`)} description={t(`tasks.${d.key}.description`)} href={h.href} />
+        </li>,
+      );
+      return;
+    }
+    const i = phoneActive.indexOf(d);
+    const lastOdd = twoCol && phoneActive.length % 2 === 1 && i === phoneActive.length - 1;
     const row = reverse
       ? ({ "--row": rowCount + 1 - (twoCol ? Math.floor(i / 2) : i), ...(twoCol ? { "--col": lastOdd ? "1 / -1" : (i % 2) + 1 } : {}) } as CSSProperties)
       : undefined;

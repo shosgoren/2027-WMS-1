@@ -6,6 +6,18 @@ import { expect, test } from "@playwright/test";
 import type { Page, TestInfo } from "@playwright/test";
 import { enterDemoReal } from "./support/demo-session.ts";
 
+// T-331: ana ekran döşeme KÜMELERİ (sayı kümelerden türer). Her döşeme ya etkin bağlantı ya kilit + gerekçe ya "hazırlanıyor" (Yakında).
+// İzinler hedef sayfanın sunucu denetimiyle aynı: orders/lookup `stock.view`, receive `stock.post`, count `document.create`, undo `reversal.create`.
+const HOME_SOON_TITLES: readonly string[] = ["Malı başka depoya taşıyacağım"];
+const ADMIN_ACTIVE_HREFS: readonly string[] = [
+  "/t/demo/field/receive", "/t/demo/orders", "/t/demo/field/count", "/t/demo/field/lookup", "/t/demo/warehouses",
+  "/t/demo/items", "/t/demo/field/undo", "/t/demo/audit", "/t/demo/members", "/t/demo/settings",
+];
+// Telefonda yönetim işleri ızgaradan çıkar ("Daha fazla" alt sayfası, DESIGN_REVIEW §7.4.3); masaüstünde ızgarada kalır.
+const MORE_HREFS: readonly string[] = ["/t/demo/items", "/t/demo/audit", "/t/demo/members", "/t/demo/settings"]; // kurulum + yönetim
+const READONLY_ACTIVE_HREFS: readonly string[] = ["/t/demo/orders", "/t/demo/field/lookup", "/t/demo/warehouses", "/t/demo/items"];
+const READONLY_LOCKED_TITLES: readonly string[] = ["Depoya mal geldi", "Rafı sayacağım", "Yanlış bir şey yaptım", "Kim ne yaptı?", "Ekibimi yönet", "Ayarlar"];
+
 const DEMO_BANNER = "Demo ortamı — gerçek kişisel veri girmeyin";
 
 /** Sayfada yatay taşma yok. */
@@ -30,6 +42,21 @@ async function openMenuIfPhone(page: Page): Promise<boolean> {
   if (!(await menuButton.isVisible())) return false;
   await menuButton.click();
   return true;
+}
+
+/**
+ * T-331 (DESIGN_REVIEW §7.4.3): yönetim işi bağlantısına tıklar. Telefonda bağlantı "Daha fazla" alt sayfasındadır, masaüstünde ızgarada;
+ * hangisi olduğu görünürlükten anlaşılır ve ilgili yerde bağlantının varlığı doğrulanır.
+ */
+async function clickAdminLink(page: Page, name: RegExp): Promise<void> {
+  const more = page.locator(".more-toggle");
+  if (await more.isVisible()) {
+    await expect(page.getByRole("list", { name: "İşler" }).getByRole("link", { name }), "telefonda yönetim bağlantısı ızgarada görünmez").toHaveCount(0);
+    await more.click();
+    await page.getByRole("dialog").getByRole("link", { name }).click();
+    return;
+  }
+  await page.getByRole("list", { name: "İşler" }).getByRole("link", { name }).click();
 }
 
 /** CSP ihlali olaylarını sayfa ömrü boyunca toplar (konsol regex'i değil; securitypolicyviolation). */
@@ -139,10 +166,12 @@ test.describe("demo akışı", () => {
     await expect(page).toHaveURL(/\/t\/demo$/);
     await expect(page.getByRole("heading", { level: 1, name: "Ne yapmak istiyorsun?" })).toBeVisible();
 
-    // Kartlar: 6 etkin bağlantı (yönetici; "Depoya mal geldi" T-313 ile etkinleşti; "Ürünlerim" T-216 ve "Depo ve raflar" T-207 ile EKLENDİ, mevcut kartlar değişmedi), 5 "Yakında" kartı (depo işleri) tıklanamaz; kilitli kart yok.
+    // Kartlar (T-331): yönetici için etkin bağlantılar ADMIN_ACTIVE_HREFS kümesidir (sipariş, sayım, stok sorgusu, hata düzeltme dahil); ekranı olmayan işler "Yakında" (hazırlanıyor) ve tıklanamaz; kilitli kart yok.
     const tasks = page.getByRole("list", { name: "İşler" });
-    await expect(tasks.locator('a[data-state="active"]')).toHaveCount(6);
-    await expect(tasks.locator('[data-state="soon"]')).toHaveCount(5);
+    await expect(tasks.locator('a[data-state="active"]')).toHaveCount(ADMIN_ACTIVE_HREFS.length);
+    expect(await tasks.locator('a[data-state="active"]').evaluateAll((els) => els.map((e) => e.getAttribute("href")).sort()), "etkin döşeme bağlantıları").toEqual([...ADMIN_ACTIVE_HREFS].sort());
+    await expect(tasks.locator('[data-state="soon"]')).toHaveCount(HOME_SOON_TITLES.length);
+    for (const name of HOME_SOON_TITLES) await expect(tasks.locator('[data-state="soon"]').filter({ hasText: name })).toContainText("Bu ekran hazırlanıyor.");
     const warehousesCard = tasks.locator('a[data-state="active"]').filter({ hasText: "Depo ve raflar" });
     await expect(warehousesCard).toHaveCount(1);
     await expect(warehousesCard).toHaveAttribute("href", "/t/demo/warehouses");
@@ -159,7 +188,23 @@ test.describe("demo akışı", () => {
     }
 
     // Üyeler.
-    await tasks.getByRole("link", { name: /Ekibimi yönet/ }).click();
+    {
+      // Telefonda ızgarada saha bağlantıları, "Daha fazla" içinde 3 yönetim bağlantısı; masaüstünde hepsi ızgarada (DESIGN_REVIEW §7.4.3).
+      const more = page.locator(".more-toggle");
+      const visibleHrefs = await tasks.locator('a[data-state="active"]:visible').evaluateAll((els) => els.map((e) => e.getAttribute("href") ?? "").sort());
+      if (await more.isVisible()) {
+        expect(visibleHrefs, "telefon: ızgara bağlantıları").toEqual(ADMIN_ACTIVE_HREFS.filter((h) => !MORE_HREFS.includes(h)).sort());
+        await more.click();
+        const moreLinks = page.getByRole("dialog").locator('a[data-state="active"]');
+        expect(await moreLinks.evaluateAll((els) => els.map((e) => e.getAttribute("href") ?? "").sort()), "telefon: Daha fazla bağlantıları").toEqual([...MORE_HREFS].sort());
+        for (const l of await moreLinks.all()) await expectTouchTarget(page, l, "Daha fazla bağlantısı");
+        await page.keyboard.press("Escape");
+        await expect(page.getByRole("dialog")).toBeHidden();
+      } else {
+        expect(visibleHrefs, "masaüstü: ızgara bağlantıları").toEqual([...ADMIN_ACTIVE_HREFS].sort());
+      }
+    }
+    await clickAdminLink(page, /Ekibimi yönet/);
     await expect(page).toHaveURL(/\/t\/demo\/members$/);
     await expect(page.getByRole("heading", { level: 1, name: "Üyeler" })).toBeVisible();
     await expect(page.getByTestId("member-card")).toHaveCount(5);
@@ -193,7 +238,7 @@ test.describe("demo akışı", () => {
 
     // Denetim kaydı: sayfa açılır, davet eylemi kaydedilmemiştir.
     await page.goto("/t/demo");
-    await page.getByRole("list", { name: "İşler" }).getByRole("link", { name: /Kim ne yaptı\?/ }).click();
+    await clickAdminLink(page, /Kim ne yaptı\?/);
     await expect(page).toHaveURL(/\/t\/demo\/audit$/);
     await expect(page.getByRole("heading", { level: 1, name: "Kim ne yaptı?" })).toBeVisible();
     // Süzgeç seçeneği de aynı metni taşır; yalnızca kayıt satırları (tablo hücresi / mobil liste öğesi) sayılır.
@@ -218,14 +263,31 @@ test.describe("demo akışı", () => {
 
     // Yönetim, ayar ve denetim kartları kilitli (bağlantı değil) + gerekçe.
     const tasks = page.getByRole("list", { name: "İşler" });
-    // T-313: "Depoya mal geldi" `stock.post` ister; salt okunur kullanıcıda bağlantı değil kilitli kart (FORBIDDEN ekranına götürmez) → 3 yönetim işi + 1.
-    await expect(tasks.locator('[data-state="locked"]')).toHaveCount(4);
-    // Yalnızca "Ürünlerim" (T-216) ve "Depo ve raflar" (T-207) etkin (okuma `stock.view`; yazma kilidi hedef sayfada), hedef rotaları doğrulanır.
-    await expect(tasks.locator('a[data-state="active"]')).toHaveCount(2);
+    // T-313/T-331: yazma/yönetim işleri (kabul `stock.post`, sayım `document.create`, hata düzeltme `reversal.create`, 3 yönetim işi) salt okunur kullanıcıda bağlantı değil kilitli kart
+    // (FORBIDDEN ekranına götürmez); küme READONLY_LOCKED_TITLES.
+    await expect(tasks.locator('[data-state="locked"]')).toHaveCount(READONLY_LOCKED_TITLES.length);
+    for (const name of READONLY_LOCKED_TITLES) await expect(tasks.locator('[data-state="locked"]').filter({ hasText: name }), name).toHaveCount(1);
+    // Etkin olanlar yalnızca okuma (`stock.view`) işleri: sipariş listesi, stok sorgusu, ürünler, depolar; hedef rotaları doğrulanır.
+    await expect(tasks.locator('a[data-state="active"]')).toHaveCount(READONLY_ACTIVE_HREFS.length);
+    expect(await tasks.locator('a[data-state="active"]').evaluateAll((els) => els.map((e) => e.getAttribute("href")).sort()), "etkin döşeme bağlantıları (salt okunur)").toEqual([...READONLY_ACTIVE_HREFS].sort());
     await expect(tasks.locator('a[data-state="active"]').filter({ hasText: "Ürünlerim" })).toHaveAttribute("href", "/t/demo/items");
     await expect(tasks.locator('a[data-state="active"]').filter({ hasText: "Depo ve raflar" })).toHaveAttribute("href", "/t/demo/warehouses");
-    await expect(tasks.locator('[data-state="soon"]')).toHaveCount(5);
+    await expect(tasks.locator('[data-state="soon"]')).toHaveCount(HOME_SOON_TITLES.length);
     await expect(tasks.locator('[data-state="locked"]').first()).toContainText("Bu iş için yetkin yok. Sorumluna sorabilirsin.");
+    {
+      // Yönetim işleri kilitli: masaüstünde ızgarada, telefonda "Daha fazla" içinde (gerekçeyle); ikisinde de bağlantı değil.
+      const more = page.locator(".more-toggle");
+      const scope = (await more.isVisible()) ? (await more.click(), page.getByRole("dialog")) : tasks;
+      for (const name of ["Kim ne yaptı?", "Ekibimi yönet", "Ayarlar"]) {
+        const row = scope.locator('[data-state="locked"]:visible').filter({ hasText: name });
+        await expect(row, name).toHaveCount(1);
+        await expect(row).toContainText("Bu iş için yetkin yok. Sorumluna sorabilirsin.");
+      }
+      if (await more.isVisible()) {
+        await page.keyboard.press("Escape");
+        await expect(page.getByRole("dialog")).toBeHidden();
+      }
+    }
     await expectNoHorizontalOverflow(page, "salt okunur ana ekran");
 
     // Üyeler sayfası doğrudan adresle: liste görünür, davet ve işlemler kilitli + açıklama.
