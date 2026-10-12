@@ -6,8 +6,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDbClient } from "../../../packages/db/src/index.ts";
 import { DB_CLIENT_SETTINGS, type DbClient } from "../../../packages/db/src/client.ts";
 import { AppError } from "../../../packages/shared/src/errors.ts";
-import { addBarcode } from "../../../packages/domain/src/catalog/barcodes.ts";
-import { archiveItem, createItem } from "../../../packages/domain/src/catalog/items.ts";
+import { addBarcode, resolveBarcodeQuery } from "../../../packages/domain/src/catalog/barcodes.ts";
+import { archiveItem, createItem, getItem, listItems } from "../../../packages/domain/src/catalog/items.ts";
 import { itemInUse, listItemBarcodes, listItemConversions, searchItems } from "../../../packages/domain/src/catalog/reads.ts";
 import { setUnitConversion } from "../../../packages/domain/src/catalog/units.ts";
 import { mkMembership, mkUser, newRegistry, seedWorld, type TenantWorld } from "../fixtures/tenants.ts";
@@ -24,6 +24,7 @@ let B: TenantWorld;
 let readOnlyUserId: string;
 let noRoleUserId: string;
 let strangerUserId: string;
+let counterUserId: string;
 
 beforeAll(async () => {
   app = createDbClient({ url: env.databaseUrl, poolMax: DB_CLIENT_SETTINGS.poolMax, prepare: env.prepare ?? DB_CLIENT_SETTINGS.prepare });
@@ -41,6 +42,8 @@ beforeAll(async () => {
   noRoleUserId = await mkUser(adm, reg, "norole");
   await mkMembership(adm, A.tenantId, noRoleUserId, { roles: [] }); // üye ama hiçbir rolü yok → hiçbir izni yok
   strangerUserId = await mkUser(adm, reg, "stranger"); // A'da üyeliği yok
+  counterUserId = await mkUser(adm, reg, "counter");
+  await mkMembership(adm, A.tenantId, counterUserId, { roles: ["COUNTER"] }); // yalnız-COUNTER: tenant.access + catalog.view + count.perform
 }, 120_000);
 
 afterAll(async () => {
@@ -146,6 +149,30 @@ describe("searchItems", () => {
     await expectFail(searchItems(as(A, strangerUserId), { q: p }), "NOT_FOUND"); // üye olmayana tenant varlığı sızmaz
     await expectFail(searchItems(admin(A), { limit: 101 }), "VALIDATION_FAILED");
     await expectFail(searchItems(admin(A), { after: "bozuk" }), "VALIDATION_FAILED");
+  });
+});
+
+describe("yalnız-COUNTER katalog izni (T-335b, A-335-3)", () => {
+  it("getItem ve resolveBarcodeQuery catalog.view ile açık; liste/arama/alt listeler stock.view ister (FORBIDDEN); diğer roller etkilenmez", async () => {
+    const p = `C${rnd()}`;
+    const [itemId] = await mkItems(A, p, 1);
+    const bc = `CB${rnd()}`;
+    await addBarcode(admin(A), { itemId: itemId as string, barcode: bc });
+    const counter = as(A, counterUserId);
+    expect(await getItem(counter, { itemId: itemId as string })).toMatchObject({ id: itemId, code: `${p}-01` });
+    expect(await resolveBarcodeQuery(counter, bc)).toMatchObject({ itemId, quantity: "1" });
+    await expectFail(listItems(counter), "FORBIDDEN");
+    await expectFail(searchItems(counter, { q: p }), "FORBIDDEN");
+    await expectFail(listItemConversions(counter, itemId as string), "FORBIDDEN");
+    await expectFail(listItemBarcodes(counter, itemId as string), "FORBIDDEN");
+    await expectFail(getItem(as(A, noRoleUserId), { itemId: itemId as string }), "FORBIDDEN");
+    await expectFail(resolveBarcodeQuery(as(A, noRoleUserId), bc), "FORBIDDEN");
+    await expectFail(getItem(as(A, strangerUserId), { itemId: itemId as string }), "NOT_FOUND");
+    for (const who of [readOnly(), picker(A), admin(A)]) {
+      expect((await getItem(who, { itemId: itemId as string })).id).toBe(itemId);
+      expect((await resolveBarcodeQuery(who, bc)).itemId).toBe(itemId);
+      expect((await listItems(who)).some((i) => i.id === itemId)).toBe(true);
+    }
   });
 });
 
