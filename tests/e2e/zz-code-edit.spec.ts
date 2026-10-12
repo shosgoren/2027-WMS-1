@@ -53,6 +53,13 @@ async function measureDialog(page: Page, dialog: Locator, where: string, shot: s
   await page.screenshot({ path: `${OUT}/${shot}.png` });
 }
 
+/** Depo listesi kod sırasıyla 50'lik sayfalanır (`?after=` imleci, C sıralaması); ortak demo kiracısında biriken depolar yüzünden
+ * yeni depo ilk sayfaya düşmeyebilir. Kodun son karakteri atılmış öneki imleç olarak verilir: önek koddan önce sıralanır, böylece
+ * depo (ve `-B` ile yeniden adlandırılmış hali) gösterilen sayfanın başındadır (T-279c). */
+function warehousesAt(code: string): string {
+  return `/t/demo/warehouses?after=${encodeURIComponent(code.slice(0, -1))}`;
+}
+
 async function login(page: Page): Promise<void> {
   await page.goto("/");
   await enterDemoShared(page, "Yönetici");
@@ -96,7 +103,7 @@ test("kod değiştir: depo, lokasyon, ürün; eski kodla arama yeni karta yönle
     await create.locator('input[name="code"]').fill(whCode);
     await create.getByRole("button", { name: "Kaydet" }).click();
     await page.waitForLoadState("networkidle");
-    await page.goto("/t/demo/warehouses");
+    await page.goto(warehousesAt(whCode));
     const card = page.getByTestId("warehouse-card").filter({ hasText: whCode });
     await expect(card).toHaveCount(1);
     whUrl = new URL((await card.getByRole("link", { name: "Aç" }).getAttribute("href")) ?? "", page.url()).pathname;
@@ -225,13 +232,14 @@ test("kod değiştir: depo, lokasyon, ürün; eski kodla arama yeni karta yönle
         await page.getByRole("dialog").getByRole("button", { name: "Arşivle" }).click();
         await expect(page.getByText("Lokasyon arşivlendi.")).toBeVisible();
       }
-      await page.goto("/t/demo/warehouses");
+      // Depo oluşturuldu (whUrl dolu): kart, kod `whCode` ya da yarıda kalmış `whNew` olsa da (ikisi de `whCode` içerir) tam bir tanedir;
+      // bulunamazsa temizlik sessizce atlanmaz (T-279c — önceden `count > 0` ile aktif artık kalabiliyordu).
+      await page.goto(warehousesAt(whCode));
       const card = page.getByTestId("warehouse-card").filter({ hasText: whCode });
-      if ((await card.count()) > 0) {
-        await card.getByRole("button", { name: "Arşivle" }).click();
-        await page.getByRole("dialog").getByRole("button", { name: "Arşivle" }).click();
-        await expect(page.getByText("Depo arşivlendi.")).toBeVisible();
-      }
+      await expect(card).toHaveCount(1);
+      await card.getByRole("button", { name: "Arşivle" }).click();
+      await page.getByRole("dialog").getByRole("button", { name: "Arşivle" }).click();
+      await expect(page.getByText("Depo arşivlendi.")).toBeVisible();
     }
   }
 });

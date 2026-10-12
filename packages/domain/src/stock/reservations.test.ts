@@ -13,7 +13,7 @@ import {
   toMicro,
   type LedgerEntry,
 } from "./plan.ts";
-import { isReservationExpiryEnabled, planReservationEffects } from "./reservations.ts";
+import { closeReservations, isReservationExpiryEnabled, planReservationEffects } from "./reservations.ts";
 import { readCancellationLockSet, readReservationPlanRows, stagedAmong } from "./reservation-reads.ts";
 import type { AccessTx } from "../identity/access.ts";
 
@@ -316,5 +316,50 @@ describe("rezervasyon okuma kimlik doğrulaması (T-253)", () => {
       expect(await rejects(stagedAmong(neverTx, TENANT, [b]))).toBe("VALIDATION_FAILED");
       expect(await rejects(stagedAmong(neverTx, b, [U(1)]))).toBe("VALIDATION_FAILED");
     }
+  });
+});
+
+// T-308a (T-277a): tüketim/serbest bırakma yazıcısı, kapatılacak satırın GERÇEK kaynağını (order_line_id / document_line_id) talep kaynağıyla karşılaştırır;
+// bağdaşmayan kaynak (başka sipariş satırının rezervasyonu) hiçbir şey yazılmadan VALIDATION_FAILED. Sahte tx: ilk sorgu kaynak okuması, sonrası yazımdır.
+describe("closeReservations: rezervasyonun kaynağı talep kaynağıyla bağdaşmalı (T-308a)", () => {
+  const ORDER_LINE = U(800);
+  const OTHER_ORDER_LINE = U(801);
+  const fakeTx = (rows: { id: string; document_line_id: string | null; order_line_id: string | null }[]): { tx: AccessTx; sqls: string[] } => {
+    const sqls: string[] = [];
+    const tx = {
+      execute: (q: { queryChunks?: unknown[] }) => {
+        sqls.push(JSON.stringify(q.queryChunks ?? q).slice(0, 80));
+        return Promise.resolve(sqls.length === 1 ? rows : [{ id: U(10) }]);
+      },
+    } as unknown as AccessTx;
+    return { tx, sqls };
+  };
+  const op = (lineId: string) => ({ id: U(10), take: m(3), rest: 0n, dimensionId: DIM_SEVK, source: { kind: "ORDER_LINE" as const, lineId } });
+  const run = async (p: Promise<unknown>): Promise<string> => {
+    try {
+      await p;
+    } catch (e) {
+      return e instanceof AppError ? (e.detail === undefined ? e.code : `${e.code}/${e.detail}`) : `other:${String(e)}`;
+    }
+    return "no-throw";
+  };
+  it("başka sipariş satırının rezervasyonu ORDER_LINE kaynağıyla tüketilemez: VALIDATION_FAILED, kapatma yazımı yok", async () => {
+    const { tx, sqls } = fakeTx([{ id: U(10), document_line_id: null, order_line_id: OTHER_ORDER_LINE }]);
+    expect(await run(closeReservations(tx, U(900), "CONSUMED", [op(ORDER_LINE)]))).toBe("VALIDATION_FAILED");
+    expect(sqls).toHaveLength(1); // yalnız kaynak okuması; UPDATE/INSERT yok
+  });
+  it("belge satırı rezervasyonu ORDER_LINE kaynağıyla, sipariş satırı rezervasyonu DOCUMENT_LINE kaynağıyla kapatılamaz", async () => {
+    const doc = fakeTx([{ id: U(10), document_line_id: LINE_A, order_line_id: null }]);
+    expect(await run(closeReservations(doc.tx, U(900), "CONSUMED", [op(ORDER_LINE)]))).toBe("VALIDATION_FAILED");
+    const ord = fakeTx([{ id: U(10), document_line_id: null, order_line_id: ORDER_LINE }]);
+    expect(await run(closeReservations(ord.tx, U(900), "RELEASED", [{ ...op(ORDER_LINE), source: { kind: "DOCUMENT_LINE" as const, lineId: LINE_A } }]))).toBe("VALIDATION_FAILED");
+  });
+  it("satır okunamazsa (kilitli görüntüde yok) VALIDATION_FAILED", async () => {
+    expect(await run(closeReservations(fakeTx([]).tx, U(900), "CONSUMED", [op(ORDER_LINE)]))).toBe("VALIDATION_FAILED");
+  });
+  it("kaynak bağdaşıyorsa yazıma geçilir (tam pay: tek UPDATE)", async () => {
+    const { tx, sqls } = fakeTx([{ id: U(10), document_line_id: null, order_line_id: ORDER_LINE }]);
+    expect(await closeReservations(tx, U(900), "CONSUMED", [op(ORDER_LINE)])).toEqual([U(10)]);
+    expect(sqls).toHaveLength(2);
   });
 });

@@ -887,3 +887,85 @@ describe("terk edilmiş sayım alarmı (06; A-136 varsayılan 8 saat)", () => {
     expect((await check()).filter((a) => a.sessionId === sid)).toEqual([]);
   });
 });
+
+// T-277a / T-309a: recordCount/submitCount/approveCount idempotency anahtarı taşır (I-06): aynı anahtar + aynı girdi = önceki sonuç (ikinci yan etki/audit yok),
+// aynı anahtar + farklı girdi = IDEMPOTENCY_MISMATCH, anahtarsız çağrı VALIDATION_FAILED/IDEMPOTENCY_KEY_REQUIRED.
+describe("T-309a: sayım komutlarının idempotency'si", () => {
+  it("submitCount: aynı anahtar tekrarı aynı sonucu döner, ikinci audit/geçiş yok; yeni anahtarla tekrar DOCUMENT_STATE; aynı anahtar başka oturumla IDEMPOTENCY_MISMATCH", async () => {
+    const X = await mkItem();
+    const L = await mkLoc();
+    const L2 = await mkLoc();
+    await stockIn(X, L, "3");
+    await stockIn(X, L2, "2");
+    const sid = await startOn([L]);
+    const sid2 = await startOn([L2]);
+    await rec(sid, [{ loc: L, item: X, qty: "3" }]);
+    await rec(sid2, [{ loc: L2, item: X, qty: "2" }]);
+    const key = uuid();
+    const first = await submitCount(callP(COUNTER.userId, key), { sessionId: sid });
+    const again = await submitCount(callP(COUNTER.userId, key), { sessionId: sid });
+    expect(first).toEqual({ status: "SUBMITTED" });
+    expect(again).toEqual(first);
+    expect((await audits("count.submitted", sid)).length).toBe(1);
+    expect((await sessOf(sid)).status).toBe("SUBMITTED");
+    expect(codeOf(await failure(submitCount(counterP(), { sessionId: sid })))).toBe("VALIDATION_FAILED/DOCUMENT_STATE"); // yeni anahtar = yeni komut
+    expect(codeOf(await failure(submitCount(callP(COUNTER.userId, key), { sessionId: sid2 })))).toBe("IDEMPOTENCY_MISMATCH");
+    expect((await sessOf(sid2)).status).toBe("COUNTING");
+    expect(codeOf(await failure(submitCount(callP(COUNTER.userId, null), { sessionId: sid2 })))).toBe("VALIDATION_FAILED/IDEMPOTENCY_KEY_REQUIRED");
+    expect((await sessOf(sid2)).status).toBe("COUNTING");
+    await cancelCount(ownerP(), { sessionId: sid, reason: "T309a temizlik" });
+    await cancelCount(ownerP(), { sessionId: sid2, reason: "T309a temizlik" });
+  });
+
+  it("approveCount: aynı anahtar tekrarı aynı fark listesini döner; ikinci audit yok, approved_by değişmez; eşzamanlı aynı anahtar tek yan etki", async () => {
+    const X = await mkItem();
+    const Y = await mkItem();
+    const L = await mkLoc();
+    await stockIn(X, L, "5");
+    await stockIn(Y, L, "2");
+    const sid = await startOn([L]);
+    await rec(sid, [{ loc: L, item: X, qty: "4" }, { loc: L, item: Y, qty: "2" }]);
+    await submitCount(counterP(), { sessionId: sid });
+    const key = uuid();
+    const first = await approveCount(callP(MGR.userId, key), { sessionId: sid });
+    expect(first.differences).toHaveLength(1);
+    expect(first.differences[0]).toMatchObject({ itemId: X, difference: `-${n(1)}`, referenceQuantity: n(5), countedQuantity: n(4) });
+    const again = await approveCount(callP(MGR.userId, key), { sessionId: sid });
+    expect(again).toEqual(first);
+    expect((await audits("count.approved", sid)).length).toBe(1);
+    expect(await sessOf(sid)).toMatchObject({ status: "APPROVED", approved_by: MGR.membershipId });
+    expect(codeOf(await failure(approveCount(mgrP(), { sessionId: sid })))).toBe("VALIDATION_FAILED/DOCUMENT_STATE");
+    // eşzamanlı: aynı anahtar iki kez — oturum başlığı kilidi serileştirir, ikincisi saklı sonucu görür
+    const Z = await mkItem();
+    const L2 = await mkLoc();
+    await stockIn(Z, L2, "3");
+    const sid2 = await startOn([L2]);
+    await rec(sid2, [{ loc: L2, item: Z, qty: "3" }]);
+    const k2 = uuid();
+    const both = await Promise.all([approveCount(callP(MGR.userId, k2), { sessionId: sid2 }), approveCount(callP(MGR.userId, k2), { sessionId: sid2 })]);
+    expect(both[1]).toEqual(both[0]);
+    expect((await audits("count.approved", sid2)).length).toBe(1);
+    await postCountAdjustment(ownerP(), { sessionId: sid });
+    await postCountAdjustment(ownerP(), { sessionId: sid2 });
+  });
+
+  it("recordCount: aynı anahtar tekrarı yeniden yazmaz (sonradan düzeltilen değer ezilmez) ve çift audit yazmaz; farklı girdi IDEMPOTENCY_MISMATCH", async () => {
+    const X = await mkItem();
+    const L = await mkLoc();
+    await stockIn(X, L, "5");
+    const sid = await startOn([L]);
+    const key = uuid();
+    const line = (qty: string) => ({ locationId: L, itemId: X, countedQuantity: qty });
+    const first = await recordCount(callP(COUNTER.userId, key), { sessionId: sid, lines: [line("3")] });
+    expect(first).toEqual({ recorded: 1 });
+    await recordCount(callP(COUNTER.userId, uuid()), { sessionId: sid, lines: [line("4")] }); // düzeltme
+    const again = await recordCount(callP(COUNTER.userId, key), { sessionId: sid, lines: [line("3")] });
+    expect(again).toEqual(first);
+    expect((await linesOf(sid))[0]?.counted_quantity, "tekrar son değeri ezmedi").toBe(n(4));
+    expect((await audits("count.recorded", sid)).length, "tekrar çift audit yazmadı").toBe(2);
+    expect(codeOf(await failure(recordCount(callP(COUNTER.userId, key), { sessionId: sid, lines: [line("1")] })))).toBe("IDEMPOTENCY_MISMATCH");
+    expect(codeOf(await failure(recordCount(callP(COUNTER.userId, null), { sessionId: sid, lines: [line("1")] })))).toBe("VALIDATION_FAILED/IDEMPOTENCY_KEY_REQUIRED");
+    expect((await linesOf(sid))[0]?.counted_quantity).toBe(n(4));
+    await cancelCount(ownerP(), { sessionId: sid, reason: "T309a temizlik" });
+  });
+});
