@@ -237,11 +237,34 @@ export interface ReservationOp extends ReservationTake {
 }
 
 /**
+ * T-308a: kapatılacak her rezervasyonun GERÇEK kaynağı (`order_line_id` / `document_line_id`) işlemin talep kaynağıyla birebir aynı olmalı; aksi
+ * (başka sipariş satırının ya da belge satırının rezervasyonu, okunamayan satır) hiçbir şey yazılmadan `VALIDATION_FAILED`. Satırlar çağıranda kilitlidir
+ * (`acquireStockLocks`); kilitli görüntü kaynak sütunu taşımadığından kaynak burada okunur. Bölünen payın yeni satırı da bu kaynağa yazıldığından
+ * kaynak kayması, başka satırın talebini sessizce yeniden etiketlerdi.
+ */
+async function assertSourcesMatch(tx: AccessTx, tenantId: string, ops: readonly ReservationOp[]): Promise<void> {
+  const ids = [...new Set(ops.map((o) => o.id.toLowerCase()))];
+  const rows = await tx.execute<{ id: string; document_line_id: string | null; order_line_id: string | null }>(
+    sql`SELECT id, document_line_id, order_line_id FROM public.reservations
+         WHERE tenant_id = ${tenantId}::uuid AND id = ANY(${pgUuidArray(ids)}::uuid[])`,
+  );
+  const actual = new Map(rows.map((r) => [r.id.toLowerCase(), r]));
+  for (const o of ops) {
+    const r = actual.get(o.id.toLowerCase());
+    if (r === undefined) throw new AppError("VALIDATION_FAILED");
+    const have = o.source.kind === "ORDER_LINE" ? r.order_line_id : r.document_line_id;
+    const other = o.source.kind === "ORDER_LINE" ? r.document_line_id : r.order_line_id;
+    if (other !== null || have === null || have.toLowerCase() !== o.source.lineId.toLowerCase()) throw new AppError("VALIDATION_FAILED");
+  }
+}
+
+/**
  * Rezervasyonları kapatır (`CONSUMED`/`RELEASED`). Tam pay: satırın durumu değişir. Kısmi pay: kalan ACTIVE satırın miktarı azalır, kapanan pay
  * YENİ satırdır (önce ACTIVE eklenir, sonra durum değişir: `closed_at` sunucu değeridir, sonlanmış satır değişmez). Kapanan satır kimliklerini döndürür.
  */
 export async function closeReservations(tx: AccessTx, tenantId: string, status: "CONSUMED" | "RELEASED", ops: readonly ReservationOp[]): Promise<string[]> {
   if (ops.length === 0) return [];
+  await assertSourcesMatch(tx, tenantId, ops);
   const sorted = [...ops].sort((a, b) => cmp(a.id, b.id));
   const full = sorted.filter((o) => o.rest === 0n);
   const part = sorted.filter((o) => o.rest > 0n);

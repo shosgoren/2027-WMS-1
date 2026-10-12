@@ -4,6 +4,8 @@
 // `postCountAdjustment` `count_diff.approve`. Oturum durum makinesi 0017 tetikleyicisinde atlamasızdır: COUNTING → SUBMITTED → APPROVED → POSTED
 // (CANCELLED her açık durumdan); `approveCount` COUNTING'den çağrılırsa aynı transaction'da iki geçişi sırayla yapar.
 //
+// - Idempotency (T-309a, I-06): `recordCount`/`submitCount`/`approveCount` istemci anahtarı ister (aynı anahtar + aynı girdi = önceki sonuç, ikinci yazma/audit yok;
+//   farklı girdi = `IDEMPOTENCY_MISMATCH`); stok yazmadıkları için kilit planları boştur, oturum başlığı yine `plan` içinde kilitlenir.
 // - Stok kilitleri YALNIZCA `acquireStockLocks` ile (executeStockCommand): `startCount` `countStart` planıyla, `postCountAdjustment`/`cancelCount`
 //   `countSessionId` planıyla (A-111). Oturum başlığı `acquireStockLocks`'tan ÖNCE (`plan` içinde) `FOR NO KEY UPDATE` ile kilitlenir (I-15 "belge önce";
 //   Supervisor notu 3): satır yazan `recordCount`/`submitCount`/`approveCount` da aynı kilidi alır, 0017 `count_session_lines_guard_closed` başlığı `FOR SHARE`
@@ -22,7 +24,7 @@ import { sql } from "drizzle-orm";
 import { appendAudit } from "@wms/db";
 import { AppError } from "@wms/shared/errors";
 import { toBase } from "../catalog/quantity.ts";
-import { runTenantCommand, type AccessTx, type Membership, type TenantAccessParams } from "../identity/access.ts";
+import { runTenantQuery, type AccessTx, type Membership, type TenantAccessParams } from "../identity/access.ts";
 import { assertWarehouseVisible, pgUuidArray } from "../warehouse/scope.ts";
 import {
   EMPTY_LOCK_PLAN,
@@ -31,6 +33,7 @@ import {
   executeStockCommand,
   sqlstateOf,
   type StockCommandApplied,
+  type StockCommandContext,
   type StockCommandOutcome,
   type StockCommandResult,
   type StockDocCallParams,
@@ -76,6 +79,15 @@ async function lockSession(tx: AccessTx, m: Membership, sessionId: string): Prom
   if (r === undefined) throw new AppError("NOT_FOUND");
   await assertWarehouseVisible(tx, m, [r.warehouse_id]);
   return { id: r.id, warehouseId: r.warehouse_id, status: r.status, blind: r.blind };
+}
+
+/** Kilitsiz okuma: oturum bu tenant'ta var ve depo kapsamında olmalı; aksi `NOT_FOUND` (A-46). */
+async function assertSessionVisible(tx: AccessTx, m: Membership, sessionId: string): Promise<void> {
+  const rows = await tx.execute<{ warehouse_id: string }>(
+    sql`SELECT warehouse_id FROM public.count_sessions WHERE tenant_id = ${m.tenantId}::uuid AND id = ${sessionId}::uuid`,
+  );
+  if (rows[0] === undefined) throw new AppError("NOT_FOUND");
+  await assertWarehouseVisible(tx, m, [rows[0].warehouse_id]);
 }
 
 /** Oturuma kilitli lokasyonlar (salt okuma; başlık kilidi altında kümeyi yalnız bu oturumun komutları değiştirir). */
@@ -213,7 +225,9 @@ export async function startCount(params: StockDocCallParams, input: StartCountIn
                WHERE d.tenant_id = ${ctx.tenantId}::uuid AND d.location_id = ANY(${pgUuidArray(locationIds)}::uuid[]) AND b.quantity > 0
                ORDER BY d.location_id, d.item_id, d.id`,
         );
-        // A-309-10: fark fişi eşzamanlı işlenir (SYNC_POST_MAX_LINES); fark satırı sayısı başlangıç satırlarını aşamaz → sığmayacak oturum baştan reddedilir.
+        // A-309-10 / Q-125: fark fişi eşzamanlı işlenir (SYNC_POST_MAX_LINES). Başlangıç satırı sayısı bu sınırı aşan oturum baştan reddedilir; ancak `recordCount`
+        // bulgu satırları (sistemde olmayan ürün, A-309-4) başlangıçtan SONRA eklenebilir ve toplam satır sınırı bu eklemede denetlenmez: toplam, fark fişinde sınırı
+        // aşarsa `postCountAdjustment` `DOCUMENT_TOO_LARGE` verir (kilitler COUNTING kalır; çıkış yolu iptal). Bulgu satırı toplam sınırı Q-125'te açıktır, davranış değişmedi.
         if (stock.length > SYNC_POST_MAX_LINES) throw tooLarge();
         if (stock.some((r) => r.tracked)) throw new AppError("VALIDATION_FAILED"); // A-309-2
         if (stock.length > 0) {
@@ -263,6 +277,40 @@ export async function startCount(params: StockDocCallParams, input: StartCountIn
 
 // --- recordCount / submitCount / approveCount (stok yazmaz) --------------------------------------------------------------------
 
+/**
+ * T-309a: stok yazmayan oturum komutlarının ortak yürütücüsü (I-06 idempotency, audit, zaman aşımı `executeStockCommand`'dan). Oturum başlığı `plan` içinde
+ * `acquireStockLocks`'tan ÖNCE kilitlenir (I-15 "belge önce"; kilit planı boş → stok kilidi alınmaz) ve aynı anahtarın eşzamanlı tekrarını serileştirir:
+ * ikinci çağrı idempotency kaydında saklı sonucu görür. `body` kilit altında durumu yeniden okur ve audit'i döndürür (komut yazar). Tekrarda `replayed: true`.
+ */
+async function runSessionCommand<I>(
+  params: StockDocCallParams,
+  commandType: string,
+  permission: "document.create" | "count_diff.approve",
+  hashInput: I,
+  sessionId: string,
+  body: (tx: AccessTx, ctx: StockCommandContext, s: SessionRow) => Promise<StockCommandApplied>,
+): Promise<{ readonly replayed: boolean }> {
+  const outcome = await executeStockCommand<I, StockCommandResult>({
+    db: params.db,
+    principal: params.principal,
+    tenantSlug: params.tenantSlug,
+    clientKey: params.clientKey,
+    commandType,
+    permission,
+    input: hashInput,
+    ...(params.retry === undefined ? {} : { retry: params.retry }),
+    ...(params.timeouts === undefined ? {} : { timeouts: params.timeouts }),
+    ...(params.logger === undefined ? {} : { logger: params.logger }),
+    plan: async (tx, _i, m) => {
+      const s = await lockSession(tx, m, sessionId);
+      return { warehouseIds: [s.warehouseId], locks: EMPTY_LOCK_PLAN };
+    },
+    apply: async (tx, _locked, ctx) => body(tx, ctx, await lockSession(tx, ctx.membership, sessionId)), // başlık plan'da kilitli; durum kilit altında yeniden okunur
+  });
+  if (outcome.status !== "COMPLETED") throw new AppError("VERSION_CONFLICT", { retryable: true });
+  return { replayed: outcome.replayed };
+}
+
 export interface RecordCountLineInput {
   readonly locationId: string;
   readonly itemId: string;
@@ -280,8 +328,10 @@ export interface RecordCountInput {
 /**
  * `document.create`: sayım değerlerini yazar (stok YAZMAZ; kilitli lokasyonda serbest). Aynı (lokasyon, ürün, durum) tekrar yazılırsa son değer geçerlidir.
  * Oturum `COUNTING` ya da `SUBMITTED` olmalı (onaya kadar düzeltilebilir). Lokasyon oturuma kilitli olmalıdır; sayı ürün ölçeğine uymalıdır (`QUANTITY_SCALE`).
+ * T-309a (I-06): istemci anahtarı zorunludur; aynı anahtar + aynı girdi tekrarı yeniden yazmaz ve ikinci audit yazmaz (sonradan düzeltilen değer ezilmez),
+ * aynı anahtar + farklı girdi `IDEMPOTENCY_MISMATCH`. Kilit planı boştur (stok kilidi yok); oturum başlığı `plan` içinde kilitlenir.
  */
-export async function recordCount(params: CountCallParams, input: RecordCountInput): Promise<{ readonly recorded: number }> {
+export async function recordCount(params: StockDocCallParams, input: RecordCountInput): Promise<{ readonly recorded: number }> {
   const sessionId = uuidOf(input.sessionId);
   if (!Array.isArray(input.lines) || input.lines.length < 1) throw new AppError("VALIDATION_FAILED");
   if (input.lines.length > COUNT_MAX_INPUT_LINES) throw new AppError("VALIDATION_FAILED", { detail: "TOO_MANY_LINES" });
@@ -295,8 +345,12 @@ export async function recordCount(params: CountCallParams, input: RecordCountInp
     seen.add(k);
     return p;
   });
-  return runTenantCommand({ ...params, permission: "document.create" }, async (tx, m) => {
-    const s = await lockSession(tx, m, sessionId);
+  const hashInput = {
+    sessionId,
+    lines: parsed.map((p) => ({ locationId: p.locationId, itemId: p.itemId, stockStatus: p.stockStatus, countedQuantity: typeof p.raw === "string" ? p.raw : null })),
+  };
+  await runSessionCommand(params, "stock.count.record", "document.create", hashInput, sessionId, async (tx, ctx, s): Promise<StockCommandApplied> => {
+    const m = ctx.membership;
     if (s.status !== "COUNTING" && s.status !== "SUBMITTED") throw documentState();
     const locations = new Set(await sessionLocationIds(tx, m.tenantId, sessionId));
     if (parsed.some((p) => !locations.has(p.locationId))) throw new AppError("VALIDATION_FAILED");
@@ -328,16 +382,12 @@ export async function recordCount(params: CountCallParams, input: RecordCountInp
       if (upd[0] === undefined) throw new AppError("INTERNAL");
       written += 1;
     }
-    await appendAudit(tx, {
-      action: "count.recorded",
-      actorUserId: m.userId,
-      entityType: "count_session",
-      entityId: sessionId,
-      requestId: input.requestId ?? null,
-      changeSummary: { line_count: written },
-    });
-    return { recorded: written };
+    return {
+      result: { documentId: sessionId },
+      audit: { action: "count.recorded", entityType: "count_session", entityId: sessionId, requestId: input.requestId ?? null, changeSummary: { line_count: written } },
+    };
   });
+  return { recorded: parsed.length }; // tekrarda da aynı: girdi özeti aynı olduğundan satır sayısı girdinin satır sayısıdır
 }
 
 export interface CountTransitionInput {
@@ -349,27 +399,22 @@ function assertAllCounted(lines: readonly LineRow[]): void {
   if (lines.some((l) => l.counted === null)) throw new AppError("VALIDATION_FAILED"); // A-309-3
 }
 
-/** `document.create`: COUNTING → SUBMITTED. Tüm satırlar sayılmış olmalı (A-309-3). */
-export async function submitCount(params: CountCallParams, input: CountTransitionInput): Promise<{ readonly status: "SUBMITTED" }> {
+/** `document.create`: COUNTING → SUBMITTED. Tüm satırlar sayılmış olmalı (A-309-3). Idempotent (T-309a): aynı anahtar tekrarı aynı sonuç, ikinci geçiş/audit yok. */
+export async function submitCount(params: StockDocCallParams, input: CountTransitionInput): Promise<{ readonly status: "SUBMITTED" }> {
   const sessionId = uuidOf(input.sessionId);
-  return runTenantCommand({ ...params, permission: "document.create" }, async (tx, m) => {
-    const s = await lockSession(tx, m, sessionId);
+  await runSessionCommand(params, "stock.count.submit", "document.create", { sessionId }, sessionId, async (tx, ctx, s) => {
     if (s.status !== "COUNTING") throw documentState();
-    assertAllCounted(await readLines(tx, m.tenantId, sessionId));
+    assertAllCounted(await readLines(tx, ctx.tenantId, sessionId));
     const r = await tx.execute<{ id: string }>(
-      sql`UPDATE public.count_sessions SET status = 'SUBMITTED' WHERE tenant_id = ${m.tenantId}::uuid AND id = ${sessionId}::uuid AND status = 'COUNTING' RETURNING id`,
+      sql`UPDATE public.count_sessions SET status = 'SUBMITTED' WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${sessionId}::uuid AND status = 'COUNTING' RETURNING id`,
     );
     if (r[0] === undefined) throw new AppError("INTERNAL");
-    await appendAudit(tx, {
-      action: "count.submitted",
-      actorUserId: m.userId,
-      entityType: "count_session",
-      entityId: sessionId,
-      requestId: input.requestId ?? null,
-      changeSummary: { warehouse_id: s.warehouseId },
-    });
-    return { status: "SUBMITTED" } as const;
+    return {
+      result: { documentId: sessionId },
+      audit: { action: "count.submitted", entityType: "count_session", entityId: sessionId, requestId: input.requestId ?? null, changeSummary: { warehouse_id: s.warehouseId } },
+    };
   });
+  return { status: "SUBMITTED" };
 }
 
 export interface CountDifference {
@@ -382,17 +427,38 @@ export interface CountDifference {
   readonly difference: string;
 }
 
+/** Referansa göre bilgi amaçlı fark listesi (yalnız sayılmış satırlar; sıfır fark girmez). */
+function differencesOf(lines: readonly LineRow[]): CountDifference[] {
+  const differences: CountDifference[] = [];
+  for (const l of lines) {
+    const diff = decimalToMicro(l.counted as string) - decimalToMicro(l.reference);
+    if (diff === 0n) continue;
+    differences.push({
+      locationId: l.locationId,
+      itemId: l.itemId,
+      stockStatus: l.stockStatus,
+      referenceQuantity: l.reference,
+      countedQuantity: l.counted as string,
+      difference: `${diff < 0n ? "-" : ""}${microToDecimal(diff < 0n ? -diff : diff)}`,
+    });
+  }
+  return differences;
+}
+
 /**
  * `count_diff.approve`: COUNTING|SUBMITTED → APPROVED (COUNTING'den iki geçiş, atlamasız). `approved_by` YALNIZ bu geçişte ve aynı UPDATE'te yazılır
  * (Supervisor notu 5). Onaylanan oturumun satırları donar (0017). Dönen fark listesi referansa göre bilgi amaçlıdır (kör sayımda yalnız yetkiliye gösterilir).
+ * Idempotent (T-309a): aynı anahtar tekrarı ikinci geçiş/audit yazmaz; fark listesi idempotency sonucuna (beyaz liste) sığmadığından, onay sonrası donmuş
+ * satırlardan salt okunur yeniden hesaplanır (aynı liste).
  */
 export async function approveCount(
-  params: CountCallParams,
+  params: StockDocCallParams,
   input: CountTransitionInput,
 ): Promise<{ readonly status: "APPROVED"; readonly differences: readonly CountDifference[] }> {
   const sessionId = uuidOf(input.sessionId);
-  return runTenantCommand({ ...params, permission: "count_diff.approve" }, async (tx, m) => {
-    const s = await lockSession(tx, m, sessionId);
+  const done: { differences?: CountDifference[] } = {};
+  const { replayed } = await runSessionCommand(params, "stock.count.approve", "count_diff.approve", { sessionId }, sessionId, async (tx, ctx, s) => {
+    const m = ctx.membership;
     if (s.status !== "COUNTING" && s.status !== "SUBMITTED") throw documentState();
     const lines = await readLines(tx, m.tenantId, sessionId);
     assertAllCounted(lines);
@@ -407,29 +473,25 @@ export async function approveCount(
            WHERE tenant_id = ${m.tenantId}::uuid AND id = ${sessionId}::uuid AND status = 'SUBMITTED' RETURNING id`,
     );
     if (b[0] === undefined) throw new AppError("INTERNAL");
-    const differences: CountDifference[] = [];
-    for (const l of lines) {
-      const diff = decimalToMicro(l.counted as string) - decimalToMicro(l.reference);
-      if (diff === 0n) continue;
-      differences.push({
-        locationId: l.locationId,
-        itemId: l.itemId,
-        stockStatus: l.stockStatus,
-        referenceQuantity: l.reference,
-        countedQuantity: l.counted as string,
-        difference: `${diff < 0n ? "-" : ""}${microToDecimal(diff < 0n ? -diff : diff)}`,
-      });
-    }
-    await appendAudit(tx, {
-      action: "count.approved",
-      actorUserId: m.userId,
-      entityType: "count_session",
-      entityId: sessionId,
-      requestId: input.requestId ?? null,
-      changeSummary: { warehouse_id: s.warehouseId, line_count: lines.length, difference_line_count: differences.length, from_status: s.status },
-    });
-    return { status: "APPROVED", differences } as const;
+    done.differences = differencesOf(lines);
+    return {
+      result: { documentId: sessionId, status: "APPROVED" },
+      audit: {
+        action: "count.approved",
+        entityType: "count_session",
+        entityId: sessionId,
+        requestId: input.requestId ?? null,
+        changeSummary: { warehouse_id: s.warehouseId, line_count: lines.length, difference_line_count: done.differences.length, from_status: s.status },
+      },
+    };
   });
+  if (!replayed && done.differences !== undefined) return { status: "APPROVED", differences: done.differences };
+  // Tekrar: satırlar onaydan beri donmuştur (0017 guard); oturum başlığı okunur (kapsam dışı depo NOT_FOUND) ve fark listesi aynı kuraldan yeniden üretilir.
+  const differences = await runTenantQuery({ db: params.db, principal: params.principal, tenantSlug: params.tenantSlug, permission: "count_diff.approve" }, async (tx, m) => {
+    await assertSessionVisible(tx, m, sessionId);
+    return differencesOf(await readLines(tx, m.tenantId, sessionId));
+  });
+  return { status: "APPROVED", differences };
 }
 
 // --- postCountAdjustment ------------------------------------------------------------------------------------------------------
