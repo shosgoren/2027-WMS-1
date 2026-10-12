@@ -19,9 +19,15 @@ import {
   openInboundReceipt,
   receiveGoods,
   createInboundReceipt,
+  approveCount,
+  cancelCount,
+  postCountAdjustment,
+  recordCount,
+  startCount,
+  submitCount,
 } from "../../../packages/domain/src/operations/index.ts";
 import type { StockDocCallParams } from "../../../packages/domain/src/stock/index.ts";
-import { newRegistry, seedWorld, type TenantWorld } from "../fixtures/tenants.ts";
+import { mkMembership, mkUser, newRegistry, seedWorld, type TenantWorld } from "../fixtures/tenants.ts";
 import { readIntEnv } from "../harness/env.ts";
 
 const env = readIntEnv(process.env);
@@ -222,5 +228,54 @@ describe("getAvailableAtLocation", () => {
     await receiveGoods(cmd(A), { receiptId: id, lines: [{ lineId, received: "8", damaged: "2", locationId: kabul }] });
     expect((await getAvailableAtLocation(picker(A), { locationId: kabul, itemId: item })).quantity).toBe("6.000000");
     expect((await failure(getAvailableAtLocation(picker(A), { locationId: "x", itemId: item }))).code).toBe("VALIDATION_FAILED");
+  });
+});
+
+// T-334 (A-334-1): COUNTING kilidindeki lokasyonda getAvailableAtLocation miktarı count_diff.approve sahibi olmayana vermez.
+describe("getAvailableAtLocation kör sayım (T-334)", () => {
+  async function who(roles: string[]) {
+    const u = await mkUser(adm, reg, `T334 ${roles.join("+")}`);
+    await mkMembership(adm, A.tenantId, u, { roles });
+    return { db: app, principal: { userId: u, mfaVerified: true }, tenantSlug: A.slug };
+  }
+  async function setup() {
+    await q("UPDATE public.tenant_settings SET receiving_qc_enabled = false WHERE tenant_id = $1", [A.tenantId]);
+    const item = await mkItem(A);
+    const kabul = await mkLoc(A, A.warehouseId, "RECEIVING");
+    const id = await mkReceipt(A, A.warehouseId, item, "8");
+    const lineId = (await q<{ id: string }>("SELECT id FROM public.inbound_receipt_lines WHERE receipt_id=$1", [id]))[0]?.id as string;
+    await receiveGoods(cmd(A), { receiptId: id, lines: [{ lineId, received: "8", damaged: "0", locationId: kabul }] });
+    const free = await mkLoc(A, A.warehouseId, "STORAGE");
+    const sid = (await startCount(cmd(A), { warehouseId: A.warehouseId, locationIds: [kabul] })).sessionId;
+    return { item, kabul, free, sid };
+  }
+
+  it("aktif sayımda COUNTER/PICKER null + countLocked; yönetici ve sahip tam miktar; kilitsiz lokasyon etkilenmez", async () => {
+    const { item, kabul, free } = await setup();
+    for (const roles of [["COUNTER"], ["PICKER"]]) {
+      const p = await who(roles);
+      expect(await getAvailableAtLocation(p, { locationId: kabul, itemId: item })).toEqual({ quantity: null, countLocked: true });
+      expect(await getAvailableAtLocation(p, { locationId: free, itemId: item })).toEqual({ quantity: "0" });
+    }
+    for (const p of [await who(["WAREHOUSE_MANAGER"]), owner(A)]) {
+      expect(await getAvailableAtLocation(p, { locationId: kabul, itemId: item })).toEqual({ quantity: "8.000000" });
+    }
+  });
+
+  it("iptalde ve fark fişi işlenince COUNTER miktarı görür", async () => {
+    const counter = await who(["COUNTER"]);
+    const a = await setup();
+    expect((await getAvailableAtLocation(counter, { locationId: a.kabul, itemId: a.item }))).toEqual({ quantity: null, countLocked: true });
+    await cancelCount(cmd(A), { sessionId: a.sid, reason: "T334 iptal" });
+    expect(await getAvailableAtLocation(counter, { locationId: a.kabul, itemId: a.item })).toEqual({ quantity: "8.000000" });
+
+    const b = await setup();
+    expect((await getAvailableAtLocation(counter, { locationId: b.kabul, itemId: b.item }))).toEqual({ quantity: null, countLocked: true });
+    await recordCount(cmd(A), { sessionId: b.sid, lines: [{ locationId: b.kabul, itemId: b.item, countedQuantity: "8" }] });
+    await submitCount(cmd(A), { sessionId: b.sid });
+    await approveCount(cmd(A), { sessionId: b.sid });
+    expect((await getAvailableAtLocation(counter, { locationId: b.kabul, itemId: b.item }))).toEqual({ quantity: null, countLocked: true });
+    await postCountAdjustment(cmd(A), { sessionId: b.sid });
+    expect(await getAvailableAtLocation(counter, { locationId: b.kabul, itemId: b.item })).toEqual({ quantity: "8.000000" });
   });
 });
