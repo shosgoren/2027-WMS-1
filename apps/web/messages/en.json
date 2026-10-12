@@ -1494,6 +1494,12 @@
       "lockedTitle": "Putting away is closed to you",
       "lockedReason": "You cannot put goods away. Tell your manager or call for help."
     },
+    "limit": {
+      "receiveReason": "Only {n} units are still open on this delivery.",
+      "receiveAction": "Quantity stays at {n}. Press Receive to continue.",
+      "putawayReason": "Only {n} units are at the source.",
+      "putawayAction": "Quantity stays at {n}. Press Put on rack to continue."
+    },
     "camera": {
       "title": "Camera",
       "hint": "Bring the barcode into the frame.",

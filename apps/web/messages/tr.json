@@ -1494,6 +1494,12 @@
       "lockedTitle": "Yerleştirme sana kapalı",
       "lockedReason": "Yerleştirme için yetkin yok. Yöneticine haber ver ya da yardım çağır."
     },
+    "limit": {
+      "receiveReason": "Teslimde en çok {n} adet kalmış.",
+      "receiveAction": "Adet {n}'de kaldı. Devam için Kabul et'e bas.",
+      "putawayReason": "Kaynakta yalnız {n} adet var.",
+      "putawayAction": "Adet {n}'de kaldı. Devam için Rafa koy'a bas."
+    },
     "camera": {
       "title": "Kamera",
       "hint": "Barkodu çerçeveye getir.",

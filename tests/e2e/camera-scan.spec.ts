@@ -671,3 +671,42 @@ test("okuma kapalıyken (uyarı açık) gelen klavye kaması taraması bildirili
   await page.getByRole("button", { name: "Anladım, tekrar okut" }).click();
   await expect(notice).toHaveCount(0);
 });
+
+// T-292b: yatay telefonda (844x390) ve kısa dikey ekranda (390x664) çift okutma bildirimi, tam ekran uyarının başlığını, gövdesini, Geri'yi ve düğmesini örtmez (0 px²).
+// Uzak koşuda da çalışır: yalnız `login` (enterDemoShared) + `gotoPutaway` yolu kullanılır; fikstür yoktur.
+for (const size of [{ n: "844x390", w: 844, h: 390 }, { n: "390x664", w: 390, h: 664 }]) {
+  test(`çift okutma bildirimi uyarının başlığını/gövdesini/Geri'yi/düğmesini örtmez (${size.n}, 0 px²)`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width: size.w, height: size.h });
+    await page.addInitScript(`${NATIVE_STUB} ${FEEDBACK_STUBS}`);
+    await login(page, testInfo);
+    await openCamera(page);
+    await expect(page.getByTestId("camera-overlay")).toHaveAttribute("data-phase", "scanning");
+    await keystrokeScan(page, "0000000000000"); // sunucu reddi → tam ekran uyarı → okuma kapalı
+    const alert = page.getByTestId("scan-alert");
+    await expect(alert).toBeVisible();
+    await keystrokeScan(page, "1111111111116");
+    const notice = page.getByTestId("camera-dropped");
+    await expect(notice).toBeVisible();
+    type Box = { x: number; y: number; width: number; height: number };
+    const area = (a: Box, b: Box): number => Math.max(0, Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x)) * Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y));
+    const n = await notice.boundingBox();
+    const parts: Record<string, Box | null> = {
+      title: await page.locator("#scan-alert-title").boundingBox(),
+      body: await page.locator("#scan-alert-body").boundingBox(),
+      close: await page.getByRole("button", { name: "Anladım, tekrar okut" }).boundingBox(),
+    };
+    const measures: Record<string, number> = {};
+    for (const [k, b] of Object.entries(parts)) {
+      expect(b, `${size.n}: ${k} sayfada var`).not.toBeNull();
+      measures[k] = n !== null && b !== null ? area(n, b) : -1;
+    }
+    writeMeasures({ size: size.n, notice: n, parts, overlapPx2: measures }, `bildirim-${size.n}`, testInfo.project.name);
+    await page.screenshot({ path: path.join(SHOTS, `bildirim-${size.n}.png`) });
+    for (const [k, a] of Object.entries(measures)) expect(a, `${size.n}: bildirim ${k} ile örtüşme (px²)`).toBe(0);
+    const vp = page.viewportSize();
+    expect(n !== null && vp !== null && n.y >= 0 && n.y + n.height <= vp.height, `${size.n}: bildirim görünür alanda`).toBe(true);
+    await expect(notice.getByRole("button")).toHaveCount(0);
+    await page.getByRole("button", { name: "Anladım, tekrar okut" }).click();
+    await expect(notice).toHaveCount(0);
+  });
+}

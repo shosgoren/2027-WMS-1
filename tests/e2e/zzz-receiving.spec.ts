@@ -246,7 +246,8 @@ async function measure(page: Page): Promise<StepMetrics> {
         const step = document.querySelector('[data-testid="flow-step"]');
         const bar = step && step.querySelector(':scope > [role="group"]');
         if (!step || !bar) return 0;
-        const bottoms = [...step.children].filter((c) => c !== bar).map((c) => c.getBoundingClientRect().bottom);
+        // Yerleşim sarmalayıcıları display:contents olabilir (kutusu yok): tüm torunlar taranır, çubuğun kendi alt ağacı hariç.
+        const bottoms = [...step.querySelectorAll('*')].filter((c) => !bar.contains(c) && c.getBoundingClientRect().height > 0).map((c) => c.getBoundingClientRect().bottom);
         return Math.round(Math.max(...bottoms) - bar.getBoundingClientRect().top);
       })(),
     };
@@ -977,4 +978,271 @@ test("yetkisiz kullanıcı: kilit ekranı gerekçe + Yardım çağır yolu; tek 
       if (isMobile(testInfo.project.name)) await page.screenshot({ path: path.join(OUT, `final-${size.n}-locked-${flow}.png`) });
     }
   }
+});
+
+// ---- T-292b: yatay telefon (844x390) kabul miktar + yerleştirme onayı, DroppedNotice örtüşmesi, sessiz üst sınır --------------------------------------
+// Ölçüm ekran görüntüsünden ÖNCE JSON'a yazılır (DESIGN_REVIEW ilkesi); sonra assertion'lar çalışır. `T292B_TAG` = before | after.
+const T292B_OUT = process.env.T292B_OUT ?? path.resolve(import.meta.dirname, "../../.artifacts/t292b");
+const T292B_TAG = process.env.T292B_TAG ?? "after";
+const PHONE_SIZES = [
+  { name: "844x390", width: 844, height: 390 },
+  { name: "390x664", width: 390, height: 664 },
+  { name: "360x780", width: 360, height: 780 },
+  { name: "390x844", width: 390, height: 844 },
+] as const;
+
+interface FitMetrics extends StepMetrics {
+  /** Sayfa dikey kayması: scrollHeight - clientHeight (R-03; ≤ 0 = kaydırmasız). */
+  pageScroll: number;
+  barHeight: number;
+  barShare: number;
+  /** Öğe görünür alanda VE kimse örtmüyor (merkez noktasındaki öğe kendisi ya da içindeki). */
+  shown: Record<string, boolean>;
+  rackLabel: string;
+}
+
+async function stepFit(page: Page): Promise<FitMetrics> {
+  const base = await measure(page);
+  const extra = await page.evaluate<Omit<FitMetrics, keyof StepMetrics>>(`(() => {
+    const q = (s) => document.querySelector(s);
+    const shown = (el) => {
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0 || r.top < 0 || r.bottom > window.innerHeight + 0.5 || r.left < 0 || r.right > window.innerWidth + 0.5) return false;
+      const at = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      return at === el || (at !== null && el.contains(at));
+    };
+    const bar = q('[data-testid="flow-step"] > [role="group"]');
+    const barRect = bar ? bar.getBoundingClientRect() : { height: 0 };
+    const qtyInput = q('input[inputmode="numeric"]');
+    const rack = q('[data-testid="rack-choice"] p') || q('[data-testid="rack-auto"]');
+    const labelOf = [...document.querySelectorAll('label')].find((l) => /^(Gelen|Kaç adet)/.test((l.textContent || '').trim()));
+    return {
+      pageScroll: document.scrollingElement.scrollHeight - document.scrollingElement.clientHeight,
+      barHeight: Math.round(barRect.height),
+      barShare: Math.round((barRect.height / window.innerHeight) * 100) / 100,
+      rackLabel: rack ? (rack.textContent || '').trim() : '',
+      shown: {
+        primary: shown(q('[data-variant="primary"]')),
+        qtyInput: shown(qtyInput),
+        qtyLabel: shown(labelOf || null),
+        scanMore: shown(q('[data-testid="scan-more"]')),
+        rackLabel: shown(rack),
+        compound: shown(q('[data-testid="compound-qty"]')),
+        verified: shown(q('[data-testid="verified-item"]')),
+        back: shown(q('[data-testid="flow-step"] header > a, [data-testid="flow-step"] header > button')),
+      },
+    };
+  })()`);
+  return { ...base, ...extra };
+}
+
+/** Kabul miktar + yerleştirme onay ekranlarını verilen boyutlarda ölçer; ölçüm JSON'u görüntüden önce yazılır. */
+test("T-292b: yatay telefonda kabul miktar ve yerleştirme onayı kaydırmasız sığar (R-03); dikey ve masaüstü ölçüleri kaydedilir", async ({ page }, testInfo) => {
+  test.setTimeout(240_000);
+  mkdirSync(T292B_OUT, { recursive: true });
+  const mobile = isMobile(testInfo.project.name);
+  const sizes = mobile ? PHONE_SIZES : ([{ name: "1280x800", width: 1280, height: 800 }] as const);
+  const fx = await seed();
+  await db("UPDATE public.tenant_settings SET receiving_qc_enabled = false WHERE tenant_id = $1", [fx.tenantId]);
+  await login(page, "Yönetici");
+  const metrics: Record<string, FitMetrics> = {};
+  const record = async (size: string, screen: string): Promise<FitMetrics> => {
+    const m = await stepFit(page);
+    metrics[`${size}-${screen}`] = m;
+    writeFileSync(path.join(T292B_OUT, `${T292B_TAG}-metrics-${testInfo.project.name}.json`), JSON.stringify(metrics, null, 2));
+    await page.screenshot({ path: path.join(T292B_OUT, `${T292B_TAG}-${size}-${screen}.png`) });
+    return m;
+  };
+  const checks: Array<() => void> = [];
+  const expectFit = (size: string, screen: string, m: FitMetrics, needs: string[], landscape: boolean): void => {
+    checks.push(() => {
+      expect(m.scrollWidth, `${size} ${screen}: yatay taşma`).toBeLessThanOrEqual(m.clientWidth);
+      expect(m.small, `${size} ${screen}: 48 px altı hedef`).toEqual([]);
+      expect(m.primaries, `${size} ${screen}: tek birincil (N-01)`).toBe(1);
+      for (const k of needs) expect(m.shown[k], `${size} ${screen}: ${k} görünür alanda ve örtülmemiş`).toBe(true);
+      if (landscape) expect(m.bodyOverflow, `${size} ${screen}: içerik sabit çubuğun altına girmez (kaydırma gerekmez)`).toBeLessThanOrEqual(0);
+      if (landscape) expect(m.pageScroll, `${size} ${screen}: sayfa dikey kayması (R-03, scrollHeight - clientHeight)`).toBeLessThanOrEqual(0);
+    });
+  };
+  // Kabul miktar ekranı: koli okutulur (12), varsayılan ve hasarlı satırı açık durumları.
+  for (const size of sizes) {
+    await page.setViewportSize({ width: size.width, height: size.height });
+    await page.goto(`/t/demo/field/receive?receipt=${fx.receiptId}`);
+    await page.waitForLoadState("networkidle");
+    await scan(page, BARCODE.koli);
+    await expect(page.getByRole("textbox", { name: /^Gelen \(/ })).toHaveValue("12");
+    await expect(page.getByTestId("compound-qty")).toBeVisible();
+    const landscape = size.name === "844x390";
+    const m = await record(size.name, "kabul-miktar");
+    expectFit(size.name, "kabul-miktar", m, ["primary", "qtyInput", "qtyLabel", "scanMore", "rackLabel", "compound", "verified", "back"], landscape);
+    await page.getByRole("button", { name: "Hasarlı ekle" }).click();
+    await expect(page.getByRole("textbox", { name: "Hasarlı adet" })).toBeVisible();
+    const d = await record(size.name, "kabul-miktar-hasarli");
+    expectFit(size.name, "kabul-miktar-hasarli", d, ["primary", "qtyInput", "rackLabel", "back"], landscape);
+  }
+  // Teslim edilen 30'u kabul et (yerleştirme için kaynak stok).
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`/t/demo/field/receive?receipt=${fx.receiptId}`);
+  await page.waitForLoadState("networkidle");
+  await scan(page, BARCODE.koli);
+  await page.getByRole("textbox", { name: /^Gelen \(/ }).fill("30");
+  if ((await page.getByTestId("rack-chips").count()) > 0) await page.getByTestId("rack-chips").getByRole("button", { name: `E2E ${CODES.kabul}` }).click();
+  await page.getByRole("button", { name: "Kabul et" }).click();
+  await expect(page.getByTestId("saved-summary")).toContainText("30 adet kabul edildi");
+  // Yerleştirme onayı (serbest): kaynak → ürün → hedef → onay.
+  for (const size of sizes) {
+    await page.setViewportSize({ width: size.width, height: size.height });
+    await page.goto(`/t/demo/field/putaway?wh=${fx.warehouseId}`);
+    await page.waitForLoadState("networkidle");
+    await scan(page, CODES.kabul);
+    await expect(page.getByTestId("flow-step")).toHaveAttribute("data-step", "2");
+    await scan(page, BARCODE.koli);
+    await expect(page.getByTestId("flow-step")).toHaveAttribute("data-step", "3");
+    await scan(page, CODES.raf1);
+    await expect(page.getByRole("textbox", { name: "Kaç adet?" })).toHaveValue("12");
+    await expect(page.getByTestId("compound-qty")).toBeVisible();
+    const m = await record(size.name, "yerlestirme-onay");
+    expectFit(size.name, "yerlestirme-onay", m, ["primary", "qtyInput", "qtyLabel", "scanMore", "compound", "verified", "back"], size.name === "844x390");
+  }
+  for (const c of checks) c();
+});
+
+/** İki kutunun kesişim alanı (px²). */
+const overlapArea = (a: { x: number; y: number; width: number; height: number }, b: { x: number; y: number; width: number; height: number }): number =>
+  Math.max(0, Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x)) * Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y));
+
+test("T-292b: çift okutma bildirimi (uyarısız) hiçbir boyutta Geri, Kabul rafı, Hasarlı ekle, miktar alanı ve birincil düğmeyi örtmez (0 px²)", async ({ page }, testInfo) => {
+  mkdirSync(T292B_OUT, { recursive: true });
+  const fx = await seed();
+  await db("UPDATE public.tenant_settings SET receiving_qc_enabled = false WHERE tenant_id = $1", [fx.tenantId]);
+  await login(page, "Yönetici");
+  const out: Record<string, unknown> = {};
+  const failures: string[] = [];
+  for (const size of isMobile(testInfo.project.name) ? [PHONE_SIZES[0], PHONE_SIZES[1]] : [{ name: "1280x800", width: 1280, height: 800 }]) {
+    await page.setViewportSize({ width: size.width, height: size.height });
+    await page.goto(`/t/demo/field/receive?receipt=${fx.receiptId}`);
+    await page.waitForLoadState("networkidle");
+    await scan(page, BARCODE.koli);
+    await expect(page.getByRole("textbox", { name: /^Gelen \(/ })).toHaveValue("12");
+    await scanTwice(page, BARCODE.koli); // aynı tikte ikinci okuma düşer ve bildirilir (uyarı yok)
+    const notice = page.getByTestId("camera-dropped");
+    await expect(notice).toBeVisible();
+    await expect(page.getByTestId("scan-alert")).toHaveCount(0);
+    const boxes = {
+      notice: await notice.boundingBox(),
+      back: await page.getByRole("button", { name: "Geri" }).or(page.getByRole("link", { name: "Geri" })).first().boundingBox(),
+      rack: await page.getByTestId("rack-choice").boundingBox(),
+      primary: await page.locator('[data-variant="primary"]:visible').boundingBox(),
+      qty: await page.getByRole("textbox", { name: /^Gelen \(/ }).boundingBox(),
+      hasDamaged: await page.getByRole("button", { name: "Hasarlı ekle" }).boundingBox(),
+      ok: await notice.getByRole("button", { name: "Tamam" }).boundingBox(),
+    };
+    const areas: Record<string, number> = {};
+    for (const k of ["back", "rack", "primary", "qty", "hasDamaged"] as const) {
+      const b = boxes[k];
+      areas[k] = boxes.notice !== null && b !== null ? overlapArea(boxes.notice, b) : -1;
+    }
+    out[size.name] = { boxes, areas };
+    writeFileSync(path.join(T292B_OUT, `${T292B_TAG}-dropped-notice-${testInfo.project.name}.json`), JSON.stringify(out, null, 2));
+    await page.screenshot({ path: path.join(T292B_OUT, `${T292B_TAG}-${size.name}-bildirim.png`) });
+    for (const [k, a] of Object.entries(areas)) if (a !== 0) failures.push(`${size.name}: bildirim ${k} ile ${a} px² örtüşüyor`);
+    // "Tamam" düğmesi görünür alanda ve çubuğun altında kalmaz.
+    const vp = page.viewportSize();
+    if (boxes.ok === null || (vp !== null && boxes.ok.y + boxes.ok.height > vp.height)) failures.push(`${size.name}: Tamam görünür alanda değil`);
+    await notice.getByRole("button", { name: "Tamam" }).click();
+    await expect(notice).toHaveCount(0);
+  }
+  expect(failures, "bildirim örtüşmesi").toEqual([]);
+});
+
+test("T-292b: kaynak/kalan sınırını aşan kamera okuması 'Okundu' ve olumlu bip/titreşim vermez; neden + eylem görünür; sunucuya sınırlanmış gerçek adet gider", async ({ page }, testInfo) => {
+  test.setTimeout(180_000);
+  mkdirSync(T292B_OUT, { recursive: true });
+  const fx = await seed();
+  await db("UPDATE public.tenant_settings SET receiving_qc_enabled = false WHERE tenant_id = $1", [fx.tenantId]);
+  await page.addInitScript(`
+    window.__fakeCode = "";
+    window.__fb = { vibrate: [], tones: 0 };
+    navigator.vibrate = (p) => { window.__fb.vibrate.push(p); return true; };
+    window.AudioContext = class { constructor() { this.state = "running"; this.currentTime = 0; this.destination = {}; }
+      resume() { return Promise.resolve(); }
+      createOscillator() { window.__fb.tones++; return { frequency: {}, connect() {}, start() {}, stop() {} }; }
+      createGain() { return { gain: {}, connect() {} }; } };
+    navigator.mediaDevices.getUserMedia = async () => { const c = document.createElement("canvas"); c.width = 64; c.height = 64; c.getContext("2d").fillRect(0, 0, 64, 64); return c.captureStream(5); };
+  `);
+  await login(page, "Yönetici");
+  await page.addInitScript(`window.BarcodeDetector = class { async detect() { return window.__fakeCode ? [{ rawValue: window.__fakeCode }] : []; } };`);
+  await page.setViewportSize(isMobile(testInfo.project.name) ? { width: 844, height: 390 } : { width: 1280, height: 800 });
+  const overlay = page.getByTestId("camera-overlay");
+  const readWithCamera = async (button: string): Promise<void> => {
+    await page.evaluate(`window.__fakeCode = ""`);
+    await page.getByRole("button", { name: button }).click();
+    await expect(overlay).toBeVisible();
+    await page.evaluate(`window.__fakeCode = ${JSON.stringify(BARCODE.koli)}`);
+  };
+  const fb = (): Promise<{ vibrate: unknown[]; tones: number }> => page.evaluate<{ vibrate: unknown[]; tones: number }>("window.__fb");
+  /** 12 + 12 + 12 > sınır (30): üçüncü okuma sınıra takılır. */
+  const expectLimit = async (reason: string, action: string, qtyBox: ReturnType<Page["getByRole"]>, before: number): Promise<void> => {
+    await expect(overlay).toHaveAttribute("data-phase", "limit");
+    await expect(page.getByTestId("camera-status")).toContainText(reason);
+    await expect(page.getByTestId("camera-status")).toContainText(action);
+    await expect(page.getByTestId("camera-status")).not.toContainText("Okundu.");
+    await expect(page.getByTestId("camera-accepted-value")).toHaveCount(0);
+    const after = (await fb()).vibrate.slice(before);
+    expect(after.length, "sınıra takılan okuma uyarı titreşimi verir (olumlu değil)").toBeGreaterThan(0);
+    expect(after, "sınıra takılan okumada olumlu titreşim (60 ms) yok").not.toContain(60);
+    await expect(page.getByTestId("camera-status")).toHaveAttribute("role", "alert");
+    await overlay.getByRole("button", { name: "Vazgeç" }).click();
+    await expect(overlay).toHaveCount(0);
+    await expect(qtyBox).toHaveValue("30");
+    // Sayfada da görünür: role=alert, neden + eylem; `+` kapalı ve nedeni bağlı.
+    const limit = page.getByTestId("qty-limit");
+    await expect(limit).toBeVisible();
+    await expect(limit).toHaveAttribute("role", "alert");
+    await expect(limit).toContainText(reason);
+    await expect(limit).toContainText(action);
+  };
+  // Kabul: kalan 30; 12 → 24 → (36 → 30).
+  await page.goto(`/t/demo/field/receive?receipt=${fx.receiptId}`);
+  await page.waitForLoadState("networkidle");
+  await readWithCamera("Barkodu okut");
+  const recvQty = page.getByRole("textbox", { name: /^Gelen \(/ });
+  await expect(recvQty).toHaveValue("12");
+  await expect(overlay).toHaveCount(0);
+  await readWithCamera("Bir koli daha okut");
+  await expect(recvQty).toHaveValue("24");
+  await expect(overlay).toHaveCount(0);
+  const vibRecv = (await fb()).vibrate.length;
+  await readWithCamera("Bir koli daha okut");
+  await expectLimit("Teslimde en çok 30 adet kalmış.", "Devam için Kabul et'e bas.", recvQty, vibRecv);
+  await expect(page.getByRole("button", { name: /^Gelen \(.*\) \+$/ })).toBeDisabled();
+  await page.screenshot({ path: path.join(T292B_OUT, `${T292B_TAG}-844x390-kabul-sinir.png`) });
+  if ((await page.getByTestId("rack-chips").count()) > 0) await page.getByTestId("rack-chips").getByRole("button", { name: `E2E ${CODES.kabul}` }).click();
+  await page.getByRole("button", { name: "Kabul et" }).click();
+  await expect(page.getByTestId("saved-summary")).toContainText("30 adet kabul edildi");
+  const received = await db<{ received: string }>("SELECT received_quantity::text AS received FROM public.inbound_receipt_lines WHERE receipt_id = $1", [fx.receiptId]);
+  expect(received[0]?.received, "sunucuya sınırlanmış gerçek adet (30) gitti").toBe("30.000000");
+  // Yerleştirme: kaynakta 30; kaynak ve hedef klavye kamasıyla, ürün ve koliler kamerayla.
+  await page.goto(`/t/demo/field/putaway?wh=${fx.warehouseId}`);
+  await page.waitForLoadState("networkidle");
+  await scan(page, CODES.kabul);
+  await expect(page.getByTestId("flow-step")).toHaveAttribute("data-step", "2");
+  await readWithCamera("Barkodu okut");
+  await expect(page.getByTestId("flow-step")).toHaveAttribute("data-step", "3");
+  await expect(overlay).toHaveCount(0);
+  await scan(page, CODES.raf1);
+  await expect(page.getByTestId("flow-step")).toHaveAttribute("data-step", "4");
+  const putQty = page.getByRole("textbox", { name: "Kaç adet?" });
+  await expect(putQty).toHaveValue("12");
+  await readWithCamera("Bir koli daha okut");
+  await expect(putQty).toHaveValue("24");
+  await expect(overlay).toHaveCount(0);
+  const vibPut = (await fb()).vibrate.length;
+  await readWithCamera("Bir koli daha okut");
+  await expectLimit("Kaynakta yalnız 30 adet var.", "Devam için Rafa koy'a bas.", putQty, vibPut);
+  await expect(page.getByRole("button", { name: "Kaç adet? +" })).toBeDisabled();
+  await page.screenshot({ path: path.join(T292B_OUT, `${T292B_TAG}-844x390-yerlestirme-sinir.png`) });
+  await page.getByRole("button", { name: "Rafa koy" }).click();
+  await expect(page.getByTestId("saved-summary")).toContainText("30 adet");
 });
