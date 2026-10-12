@@ -1299,6 +1299,7 @@
     "scanAgain": "Anladım, tekrar okut",
     "alert": {
       "scanTitle": "Kod bulunamadı",
+      "unitTitle": "Adet alınamadı",
       "mismatchTitle": "Yanlış ürün",
       "networkTitle": "Bağlantı yok",
       "putawayTitle": "Rafa konamadı"
@@ -1353,7 +1354,11 @@
       "finish_first": "Önce açık ürünü bitir.",
       "finish_firstAction": "Aynı ürünü okut ya da geri dön.",
       "no_stock_here": "Bu rafta bu üründen yok.",
-      "no_stock_hereAction": "Doğru rafı okut."
+      "no_stock_hereAction": "Doğru rafı okut.",
+      "qty_fractional": "Bu barkodun adedi tam sayı değil.",
+      "qty_fractionalAction": "Bu ekran yalnız tam adetle çalışır. Adedi masaüstünden gir.",
+      "unit_mismatch": "Bu barkod bu satırın biriminde değil.",
+      "unit_mismatchAction": "Satırın birimindeki barkodu okut ya da adedi masaüstünden gir."
     },
     "line": {
       "complete": "Tamam",
@@ -1427,6 +1432,9 @@
       "qtyTitle": "Kaç adet geldi?",
       "qtyInstruction": "Sayıyı kontrol et, gerekirse değiştir.",
       "verify": "Okuttuğun ürün:",
+      "scanMore": "Bir koli daha okut",
+      "compound": "{text} · toplam {total} {unit}",
+      "compoundFailed": "Koli gösterimi alınamadı. Adet doğru; devam edebilirsin.",
       "received": "Gelen ({unit})",
       "damagedLabel": "Hasarlı adet",
       "hasDamaged": "Hasarlı ekle",
@@ -1491,9 +1499,11 @@
       "hint": "Barkodu çerçeveye getir.",
       "starting": "Kamera açılıyor…",
       "accepted": "Okundu.",
-      "dropped": "Bir kod okundu ama okuma şu an kapalıydı. Kodu yeniden okut.",
+      "dropped": "Bir kod okundu ama işlenmedi: okuma şu an kapalıydı. Adet eklenmedi.",
       "ok": "Tamam",
       "retry": "Tekrar dene",
+      "notTaken": "Kod işlenmedi: okuma şu an kapalıydı. Saymak için Yeniden okut'a bas.",
+      "rescan": "Yeniden okut",
       "torchOn": "Feneri aç",
       "torchOff": "Feneri kapat",
       "torchFailed": "Fener açılamadı. Işığı olan yere geç ya da barkodu elle gir.",
