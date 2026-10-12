@@ -124,6 +124,7 @@ Gerekçe: "metrik doldurma kutusu üretiyordu; kullanıcı görsel kalitesi önc
 | e57c69a GERİ ÇEKİLDİ: "2 sütun döşeme en çok kare" kuralı kaldırıldı; yerine §7.4.1 (140 px'i yalnız gerçek içerik/açıklama aşar, ≤ kare; D-04b içi boşluk ≤ 24 px) | Supervisor kararı 2026-10-07 (bağımsız inceleme T-313, 28/32); rubrik-yalnız commit, görüntülerden ÖNCE | e57c69a geri çekildi: ölçüm sonrası tavan kaldırma = eşik bükme (bağımsız inceleme T-313). Büyüyen döşemenin içi boş kalıyordu (60–75 px) |
 | 654e127 İSTİSNASI KALDIRILDI: "140 px'i açıklama taşıyan döşeme aşabilir" → D-04 88–140 px İSTİSNASIZ; ikon sabit, `cqh` yok, açıklama tek satır kesilmeden; "Şimdi" kartı (§7.4.2) ve B-02 sayım kuralı eklendi | Supervisor kararı 2026-10-07 (T-280; bağımsız denetim T-313 27/32, D-04 = 0, D-04b = 0); rubrik-yalnız commit, görüntülerden ÖNCE | Aynı hata ikinci kez: döşeme büyütülüp içi ikonla dolduruldu (metrik oyunu). Boş alan gerçek iş bilgisiyle (Şimdi kartı) kullanılır; B-02/emptyRatio eşikleri değişmedi, yalnız "bekleyen iş yok" durumunda dürüst ölçüm (assert yok) |
 | T-280 düzeltme turu: "Şimdi" kartı ölçüm ve içerik kuralları netleştirildi (§7.4.1 bekleyen iş YOK ölçümü; §7.4.2 saha rolü, kısa ekran, tek davranış) | Bağımsız denetim T-280 30/32 KOŞULLU (K-1…K-4); rubrik-yalnız commit, görüntülerden ÖNCE | Eşikler DEĞİŞMEDİ. K-1: kart ızgaraya yaslı (iki küçük aralık yerine tek dürüst boşluk), "Bekleyen iş yok" ölçümde içerik sayılmaz; K-2: toplayıcı da yetkili olduğu bekleyen işi görür; K-3/K-4: kısa ekranda fiil ve şevron kalır, satır doğrudan işe gider, satır neyi sayıyorsa onu söyler |
+| T-331: telefonda yönetim işleri ızgaradan "Daha fazla" alt sayfasına (§7.4.3) | Supervisor kararı 2026-10-12 (T-331 DUR raporu); rubrik-yalnız commit, görüntülerden ÖNCE | 10 etkin döşeme telefonda 88–140 px ve kaydırmasız şartını sağlayamıyor (ölçüm §7.4.3). Eşikler değişmedi; döşeme sayısı azaltıldı |
 
 ### 7.3 Yeni ölçütler (bağımsız inceleme "geçmez" sonrası) — ekran görüntüsü ve kod değişikliğinden ÖNCE sabitlendi
 
@@ -178,6 +179,17 @@ Geçerli kural (telefon ana ekranı, ≥ 6 izinli iş = 2 sütun):
 - **Saha rolü (T-280 düzeltme turu, K-2):** `stock.post` sahibi olup yönetim işi olmayan kullanıcıda (tek sütun) "Şimdi" satırları "Görevlerim" özetinin yerini alır: ATANMIŞ görev varsa önce o özet (T-270) gösterilir; atanmış görev yoksa kullanıcının yetkili olduğu açık işler (açık teslim, bekleyen yerleştirme görevi; aynı domain okumaları, yetki süzgeci domain'de) satır olarak gösterilir; hiçbiri yoksa mevcut "Şu an sana atanmış iş yok" durumu kalır. Yetkisi olmayan iş gösterilmez, yeni sorgu yok.
 - **Satır = tek davranış (K-4):** satır, neyi sayıyorsa onu söyler ("n teslim bekliyor", "n yerleştirme görevi bekliyor"; ürün sayısı iddia edilmez) ve DOĞRUDAN sıradaki işe götürür (`next[0].href`); yan "tümü" bağlantısı yoktur (liste için "Depoya mal geldi" döşemesi ve Görevlerim sekmesi). Satırın ikinci satırı "Sıradaki: …" KISA biçimdedir (teslim numarası, yerleştirmede adet; ürün adı yok) ve KESİLMEZ (`scrollWidth ≤ clientWidth`, e2e'de assert); "…" ile kısaltma yoktur.
 - **Kısa ekran (K-3):** görünür yükseklik azaldıkça yalnız yerleşim değişir, anlam kaybolmaz: fiil ("bekliyor") ve şevron HER yükseklikte kalır; başlık satırı ≥ 800 px'te; < 700 px'te iki satır yan yana, etiket iki satıra sarılabilir (kesilmez) ve "Sıradaki" ayrıntı satırı yoktur çünkü satırın kendisi sıradaki işi açar.
+
+#### 7.4.3 Telefonda yönetim işleri "Daha fazla" alt sayfasında (2026-10-12, T-331 Supervisor kararı; görüntülerden ÖNCE)
+
+Gerekçe: T-331 ile sipariş, sayım, stok sorgusu ve hata düzeltme etkinleşince yönetici 10 etkin iş görür. Ölçüm (T-331 ilk koşu): iPhone13 664 px'te 8. ve 9. döşeme üst çubuğun 108 px üstüne taştı ("Ekibimi yönet" erişilemedi), 360×740'ta en büyük döşeme 152 px oldu. Eşikler gevşetilmez; ızgaradaki döşeme sayısı azaltılır.
+
+Kural (telefon = `phone` kırılımı; masaüstü/tablet DEĞİŞMEZ ve tüm etkin işleri ızgarada gösterir):
+- Yönetim işleri (`admin` grubu: `members`, `settings`, `audit`) telefonda ana ızgaradan ÇIKAR. Üstteki düğme satırlarına üçüncü bir tek satırlık düğme eklenir: "Daha fazla (n)".
+- Düğme alt sayfa açar (§7.3 B-01 ile aynı biçim). Alt sayfada üç iş de satır olarak listelenir: yetkiliyse etkin bağlantı, değilse kilit + gerekçe ("Bu iş için yetkin yok…"). Kilitli yönetim işleri "Yetkin olmayan işler" alt sayfasında ÇİFT listelenmez.
+- Yerleşim kararı (1 sütun ≤ 5, 2 sütun ≥ 6 iş; D-04 88–140 px; kaydırmasız) yalnız telefonda görünen saha döşemelerinin sayısına göre verilir. D-01/D-04/D-04b, B-02, `emptyRatio`, 48 px hedef eşikleri DEĞİŞMEDİ.
+- Ölçümde saha döşemeleri (`items`, `warehouses` dahil) hâlâ sığmazsa bu ikisi de "Kurulum" başlığıyla aynı alt sayfaya taşınır (bu durumda bu bölüm güncellenir).
+- e2e: telefonda ızgara bağlantıları saha kümesidir, yönetim bağlantıları "Daha fazla" içindedir; masaüstünde yönetim bağlantıları ızgaradadır.
 
 ## 8. T-313 mal kabul ve yerleştirme ekranları — tasarım ölçütleri (görüntüden ÖNCE yazıldı)
 
