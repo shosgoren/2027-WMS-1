@@ -52,14 +52,14 @@ const PRESSED: Record<FlowHue, string> = {
   green: "aria-pressed:border-cat-green-ink aria-pressed:bg-cat-green-bg aria-pressed:text-cat-green-ink",
   teal: "aria-pressed:border-cat-teal-ink aria-pressed:bg-cat-teal-bg aria-pressed:text-cat-teal-ink",
 };
-export function SecondaryButton({ children, onClick, disabled, pressed, tone }: { children: React.ReactNode; onClick: () => void; disabled?: boolean; pressed?: boolean; tone?: FlowHue }) {
+export function SecondaryButton({ children, onClick, disabled, pressed, tone, chip }: { children: React.ReactNode; onClick: () => void; disabled?: boolean; pressed?: boolean; tone?: FlowHue; chip?: boolean }) {
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={disabled}
       aria-pressed={pressed}
-      className={`flex min-h-12 min-w-12 items-center justify-center rounded-control border-2 border-border-strong bg-surface px-4 text-base font-bold text-ink ${tone === undefined ? "aria-pressed:bg-accent-soft" : PRESSED[tone]} ${FOCUS}`}
+      className={`flex min-h-12 min-w-12 items-center justify-center rounded-control border-2 border-border-strong bg-surface px-4 text-base font-bold text-ink ${chip === true ? "shrink-0 whitespace-nowrap" : ""} ${tone === undefined ? "aria-pressed:bg-accent-soft" : PRESSED[tone]} ${FOCUS}`}
     >
       {children}
     </button>
@@ -86,49 +86,69 @@ export interface FlowShellProps {
   footer: React.ReactNode;
   /** Sabit çubukta birincil düğmenin hemen ÜSTÜNDE görünen seçim (örn. seçili kabul rafı); içerik kaydırmasına bağlı değildir. */
   footerExtra?: React.ReactNode;
+  /** İkinci sütun (yatay telefon): dikeyde `children`ın hemen ardından akar, yatay telefonda (dokunmatik + alçak ekran, `phone` varyantının ikinci koşulu) sağ sütunda durur (T-292b). */
+  side?: React.ReactNode;
+  /** Çift okutma bildirimi (`DroppedNotice` `top`): sayfanın en üstünde, uygulama çubuğunun şeridinde durur; akışa yükseklik EKLEMEZ (kontrolleri çubuğun altına itmez) ve akışın hiçbir öğesini örtmez (T-292b). */
+  notice?: React.ReactNode;
   /** Tarama adımı: ScanField yalnızca "Elle gir" ile açılır (tek yol); elle girişte birincil düğme gizlenir. */
   scanProxy?: boolean;
   children: React.ReactNode;
 }
 
+// Yatay telefon sınıfları (tam sınıf metni: Tailwind kaynağı tarar). Ortak: sabit çubuk kalan alanı daraltmasın diye alt boşluk 96 px.
+// Dikkat: `main`e transform verilmez (sabit çubuğun kapsayıcı bloğu olur ve ekranın altına oturmaz); 448 px sınırından çıkış negatif kenar boşluğuyla yapılır.
+const LAND_BAR = "[@media(pointer:coarse)_and_(max-height:500px)]:pb-24 [@media(pointer:coarse)_and_(max-height:500px)]:pt-2";
+const LAND_GRID =
+  "[@media(pointer:coarse)_and_(max-height:500px)]:ml-[calc(50%-50vw)] [@media(pointer:coarse)_and_(max-height:500px)]:w-screen [@media(pointer:coarse)_and_(max-height:500px)]:grid [@media(pointer:coarse)_and_(max-height:500px)]:min-h-0 [@media(pointer:coarse)_and_(max-height:500px)]:grid-cols-2 [@media(pointer:coarse)_and_(max-height:500px)]:content-start [@media(pointer:coarse)_and_(max-height:500px)]:gap-x-4 [@media(pointer:coarse)_and_(max-height:500px)]:gap-y-1 [@media(pointer:coarse)_and_(max-height:500px)]:pt-2 [@media(pointer:coarse)_and_(max-height:500px)]:pb-24";
+
+/** Yatay telefonda iki sütunlu adım ekranının bir sütunu; dikeyde `contents` (kutu üretmez, çocuklar ana akışta kalır). */
+const LAND_COL = "contents [@media(pointer:coarse)_and_(max-height:500px)]:flex [@media(pointer:coarse)_and_(max-height:500px)]:min-w-0 [@media(pointer:coarse)_and_(max-height:500px)]:flex-col [@media(pointer:coarse)_and_(max-height:500px)]:gap-2";
+
 /** Adım çerçevesi: tek satır üst bilgi (geri + kategori ikonu + adım + başlık), altta tek sabit birincil eylem (alt gezinme çubuğunun hemen üstünde). */
-export function FlowShell({ hue, icon, step, total, title, instruction, backHref, onBack, footer, footerExtra, scanProxy, children }: FlowShellProps) {
+export function FlowShell({ hue, icon, step, total, title, instruction, backHref, onBack, footer, footerExtra, side, notice, scanProxy, children }: FlowShellProps) {
   const t = useTranslations("receiving");
   const back = "flex size-12 shrink-0 items-center justify-center rounded-control border-2 border-border bg-surface text-ink " + FOCUS;
+  // Yatay telefon (`@media (pointer: coarse) and (max-height: 500px)`, globals.css `phone` varyantının ikinci koşulu; yeni varyant yok): saha kabuğunun 448 px sınırından çıkılır,
+  // başlık + ürün kartı solda, miktar sağda (`side`); sabit çubuk tek satır (raf seçimi solda, birincil sağda). Dikey telefon ve masaüstü sınıfları değişmez.
+  const two = side !== undefined;
   return (
     <main
-      className={`group flex min-h-[calc(100dvh-8.25rem)] w-full min-w-0 flex-col gap-3 px-4 pt-3 ${footerExtra === undefined ? "pb-24" : "pb-44"} ${scanProxy === true ? "[&_[data-mode=scan]]:hidden" : ""}`}
+      className={`group flex min-h-[calc(100dvh-8.25rem)] w-full min-w-0 flex-col gap-3 px-4 pt-3 ${footerExtra === undefined ? "pb-24" : "pb-44"} ${scanProxy === true ? "[&_[data-mode=scan]]:hidden" : ""} ${two ? LAND_GRID : LAND_BAR}`}
       data-testid="flow-step"
       data-step={step ?? 0}
     >
-      <header className="flex min-w-0 items-center gap-3">
-        {backHref !== undefined ? (
-          <Link href={backHref} aria-label={t("back")} className={back}>
-            <ArrowLeft />
-          </Link>
-        ) : onBack !== undefined ? (
-          <button type="button" aria-label={t("back")} onClick={onBack} className={back}>
-            <ArrowLeft />
-          </button>
-        ) : null}
-        <span aria-hidden="true" className={`flex size-10 shrink-0 items-center justify-center rounded-full ${HUE[hue]}`}>
-          {icon}
-        </span>
-        <div className="flex min-w-0 flex-col">
-          {step === undefined || total === undefined ? null : (
-            <p className="text-xs font-bold text-ink-muted" data-testid="step-label">
-              {t("stepOf", { n: step, total })}
-            </p>
-          )}
-          <h1 className="break-words text-xl font-extrabold leading-tight text-ink">{title}</h1>
-        </div>
-      </header>
-      {instruction === undefined ? null : <p className="break-words text-base text-ink [@media(max-height:700px)]:hidden">{instruction}</p>}
-      {children}
+      {notice}
+      <div className={two ? LAND_COL : "contents"}>
+        <header className="flex min-w-0 items-center gap-3">
+          {backHref !== undefined ? (
+            <Link href={backHref} aria-label={t("back")} className={back}>
+              <ArrowLeft />
+            </Link>
+          ) : onBack !== undefined ? (
+            <button type="button" aria-label={t("back")} onClick={onBack} className={back}>
+              <ArrowLeft />
+            </button>
+          ) : null}
+          <span aria-hidden="true" className={`flex size-10 shrink-0 items-center justify-center rounded-full ${HUE[hue]}`}>
+            {icon}
+          </span>
+          <div className="flex min-w-0 flex-col">
+            {step === undefined || total === undefined ? null : (
+              <p className="text-xs font-bold text-ink-muted" data-testid="step-label">
+                {t("stepOf", { n: step, total })}
+              </p>
+            )}
+            <h1 className="break-words text-xl font-extrabold leading-tight text-ink">{title}</h1>
+          </div>
+        </header>
+        {instruction === undefined ? null : <p className="break-words text-base text-ink [@media(max-height:700px)]:hidden">{instruction}</p>}
+        {children}
+      </div>
+      {side === undefined ? null : <div className={LAND_COL}>{side}</div>}
       <div role="group" aria-label={t("primaryBar")} className={`fixed inset-x-0 ${NAV_H} z-10 border-t border-border bg-surface px-4 py-2 group-has-[[data-mode=manual]]:hidden`}>
-        <div className="mx-auto flex w-full max-w-md flex-col gap-2">
-          {footerExtra}
-          {footer}
+        <div className="mx-auto flex w-full max-w-md flex-col gap-2 [@media(pointer:coarse)_and_(max-height:500px)]:max-w-4xl [@media(pointer:coarse)_and_(max-height:500px)]:flex-row [@media(pointer:coarse)_and_(max-height:500px)]:items-center [@media(pointer:coarse)_and_(max-height:500px)]:gap-4">
+          {footerExtra === undefined ? null : <div className="flex min-w-0 flex-col [@media(pointer:coarse)_and_(max-height:500px)]:flex-1">{footerExtra}</div>}
+          <div className="flex min-w-0 flex-col [@media(pointer:coarse)_and_(max-height:500px)]:mx-auto [@media(pointer:coarse)_and_(max-height:500px)]:w-72 [@media(pointer:coarse)_and_(max-height:500px)]:shrink-0">{footer}</div>
         </div>
       </div>
     </main>
@@ -136,7 +156,7 @@ export function FlowShell({ hue, icon, step, total, title, instruction, backHref
 }
 
 /** Yanlış tarama / engelleyici hata: tam ekran, sebep + sonraki eylem, tek "tekrar okut" düğmesi (N-13). */
-export function ScanAlert({ title, reason, action, code, onClose }: { title: string; reason: string; action: string; code?: string; onClose: () => void }) {
+export function ScanAlert({ title, reason, action, code, onClose, notice }: { title: string; reason: string; action: string; code?: string; onClose: () => void; notice?: React.ReactNode }) {
   const t = useTranslations("receiving");
   const btn = useRef<HTMLButtonElement>(null);
   useEffect(() => {
@@ -145,9 +165,9 @@ export function ScanAlert({ title, reason, action, code, onClose }: { title: str
     if (typeof navigator !== "undefined" && typeof navigator.vibrate === "function") navigator.vibrate([200, 80, 200]);
   }, []);
   return (
-    <div role="alertdialog" aria-modal="true" aria-labelledby="scan-alert-title" aria-describedby="scan-alert-body" data-testid="scan-alert" className="fixed inset-0 z-50 flex flex-col justify-between gap-4 bg-danger-bg px-6 pb-6 pt-10 text-danger-ink">
-      <div className="flex min-w-0 flex-col items-center gap-4 text-center">
-        <CircleAlert aria-hidden="true" className="size-20 text-danger" strokeWidth={2} />
+    <div role="alertdialog" aria-modal="true" aria-labelledby="scan-alert-title" aria-describedby="scan-alert-body" data-testid="scan-alert" className="fixed inset-0 z-50 flex flex-col justify-between gap-4 overflow-y-auto bg-danger-bg px-6 pb-6 pt-10 text-danger-ink [@media(pointer:coarse)_and_(max-height:500px)]:grid [@media(pointer:coarse)_and_(max-height:500px)]:grid-cols-[minmax(0,1fr)_20rem] [@media(pointer:coarse)_and_(max-height:500px)]:content-center [@media(pointer:coarse)_and_(max-height:500px)]:items-center [@media(pointer:coarse)_and_(max-height:500px)]:gap-6 [@media(pointer:coarse)_and_(max-height:500px)]:py-4">
+      <div className="flex min-w-0 flex-col items-center gap-4 text-center [@media(pointer:coarse)_and_(max-height:500px)]:gap-2">
+        <CircleAlert aria-hidden="true" className="size-20 text-danger [@media(pointer:coarse)_and_(max-height:500px)]:size-12" strokeWidth={2} />
         <h2 id="scan-alert-title" className="break-words text-3xl font-extrabold">
           {title}
         </h2>
@@ -164,24 +184,52 @@ export function ScanAlert({ title, reason, action, code, onClose }: { title: str
           </details>
         )}
       </div>
-      <button ref={btn} type="button" onClick={onClose} className={`flex min-h-14 w-full items-center justify-center rounded-control bg-danger px-4 text-lg font-bold text-on-accent ${FOCUS}`}>
-        {t("scanAgain")}
-      </button>
+      <div className="flex min-w-0 flex-col gap-3">
+        {notice}
+        <button ref={btn} type="button" onClick={onClose} className={`flex min-h-14 w-full items-center justify-center rounded-control bg-danger px-4 text-lg font-bold text-on-accent ${FOCUS}`}>
+          {t("scanAgain")}
+        </button>
+      </div>
     </div>
   );
 }
 
+/** Üst sınır açıklaması: `reason` sınırdayken `+` kapalı olduğunda görünür neden; `hit` bir okutma sınırı aştığında neden + eylemdir (role=alert). Adet sunucuya yalnız sınırlanmış HAKİKİ değerle gider (I-09). */
+export interface QtyLimit {
+  readonly reason: string;
+  readonly hit?: string | undefined;
+}
+
+/**
+ * Akışın bir okumayı işleme sonucu (kamera katmanı "Okundu" kararını buna göre verir; fail-closed: sonuç yoksa olumlu geri bildirim YOK, G-07).
+ * `taken`: akış okumayı işledi ve kabul etti; `refused`: akış okumayı REDDETTİ
+ * (sistemde olmayan kod ve her sunucu reddi, yanlış ürün, tamamlanmış satır, birim uyuşmazlığı, ağ hatası, önce bitir, rafta stok yok: tam ekran uyarı açılır); `limit`: okutma adedi üst sınıra çekti,
+ * ileti nedeni + eylemi söyler. Yalnız `taken` "Okundu" + olumlu bip/titreşim alır.
+ */
+export type ScanVerdict = "taken" | "refused" | { readonly limit: string };
+
 /** Miktar: 48 px (burada 56 px) eksi/artı + sayı alanı; `inputmode="numeric"` yalnızca bu alanda; tam sayı; sınır sunucudan gelen kalan miktardır. */
-export function QtyStepper({ label, value, min, max, onChange, scan }: { label: string; value: number; min: number; max: number | null; onChange: (n: number) => void; scan?: { label: string; onClick: () => void } }) {
+export function QtyStepper({ label, value, min, max, onChange, scan, limit }: { label: string; value: number; min: number; max: number | null; onChange: (n: number) => void; scan?: { label: string; onClick: () => void }; limit?: QtyLimit }) {
   const inputId = useId();
+  const noteId = useId();
+  const atMax = max !== null && value >= max;
+  const note = limit === undefined || !atMax ? null : limit.hit ?? limit.reason;
   const clamp = (n: number): number => Math.min(max ?? 999_999_999, Math.max(min, n));
   const btn = `flex size-12 shrink-0 items-center justify-center rounded-control border-2 border-border-strong bg-surface text-3xl font-bold text-ink disabled:opacity-40 ${FOCUS}`;
   return (
     <div className="flex min-w-0 flex-col gap-1">
-      <label className="text-base font-semibold text-ink" htmlFor={inputId}>
+      {/* Sınır iletisi dikeyde (telefon dikey, masaüstü) etiketin YERİNE aynı satıra oturur: etiket ekran okuyucu için kalır (sr-only), satır yüksekliği (24 px) aynıdır, alttaki hiçbir
+          öğe kaymaz. Yatay telefonda etiket satır içindedir ve ileti alttadır. İleti tek satırdır (kısa metin; uzarsa satır yüksekliği testle yakalanır). */}
+      {note === null ? null : (
+        <p key={limit?.hit === undefined ? "max" : "hit"} id={noteId} role={limit?.hit === undefined ? "status" : "alert"} data-testid="qty-limit" className="break-words text-base font-bold leading-6 text-warning-ink [@media(pointer:coarse)_and_(max-height:500px)]:order-1 [@media(pointer:coarse)_and_(max-height:500px)]:leading-snug">
+          {note}
+        </p>
+      )}
+      <div className="contents [@media(pointer:coarse)_and_(max-height:500px)]:flex [@media(pointer:coarse)_and_(max-height:500px)]:min-w-0 [@media(pointer:coarse)_and_(max-height:500px)]:items-center [@media(pointer:coarse)_and_(max-height:500px)]:gap-2">
+      <label className={`text-base font-semibold leading-6 text-ink ${note === null ? "" : "sr-only [@media(pointer:coarse)_and_(max-height:500px)]:not-sr-only"} [@media(pointer:coarse)_and_(max-height:500px)]:w-28 [@media(pointer:coarse)_and_(max-height:500px)]:shrink-0 [@media(pointer:coarse)_and_(max-height:500px)]:text-sm [@media(pointer:coarse)_and_(max-height:500px)]:leading-tight`} htmlFor={inputId}>
         {label}
       </label>
-      <div className="flex min-w-0 items-center gap-2">
+      <div className="flex min-w-0 items-center gap-2 [@media(pointer:coarse)_and_(max-height:500px)]:flex-1">
         <button type="button" aria-label={`${label} −`} disabled={value <= min} onClick={() => onChange(clamp(value - 1))} className={btn}>
           <span aria-hidden="true">−</span>
         </button>
@@ -197,7 +245,7 @@ export function QtyStepper({ label, value, min, max, onChange, scan }: { label: 
           }}
           className={`min-h-12 w-full min-w-0 flex-1 rounded-card border-2 border-border-strong bg-surface px-2 text-center text-2xl font-extrabold text-ink ${FOCUS}`}
         />
-        <button type="button" aria-label={`${label} +`} disabled={max !== null && value >= max} onClick={() => onChange(clamp(value + 1))} className={btn}>
+        <button type="button" aria-label={`${label} +`} disabled={atMax} aria-describedby={note === null ? undefined : noteId} onClick={() => onChange(clamp(value + 1))} className={btn}>
           <span aria-hidden="true">+</span>
         </button>
         {scan === undefined ? null : (
@@ -205,6 +253,7 @@ export function QtyStepper({ label, value, min, max, onChange, scan }: { label: 
             <ScanLine aria-hidden="true" className="size-6" strokeWidth={2} />
           </button>
         )}
+      </div>
       </div>
     </div>
   );
@@ -228,10 +277,10 @@ export function useStateRef<T>(initial: T): readonly [T, (v: T) => void, { reado
  * `camera(code)` kamera okumasını aynı servis yoluyla (`source: "camera"`) iletir ve İLETİLİP İLETİLMEDİĞİNİ döndürür (düşürülen okuma `false`).
  */
 export function useScanner(
-  handler: (value: string, source: ScanSource) => void,
+  handler: (value: string, source: ScanSource) => void | Promise<ScanVerdict>,
   enabled: boolean,
   blocked?: () => boolean,
-): { service: ScannerService | null; camera: (code: string) => boolean; dropped: boolean; clearDropped: () => void } {
+): { service: ScannerService | null; camera: (code: string) => false | Promise<ScanVerdict>; dropped: boolean; clearDropped: () => void } {
   const [service, setService] = useState<ScannerService | null>(null);
   const [dropped, setDropped] = useState(false);
   const enabledRef = useRef(enabled);
@@ -242,6 +291,8 @@ export function useScanner(
     ref.current = handler;
   });
   const cameraEmit = useRef<((v: string) => void) | null>(null);
+  // Kamera okumasının sonucu (okutma sınırı aştı mı) akışın işleyicisinden döner; kamera katmanı "Okundu"yu bu sonuca göre verir (T-292b).
+  const camWait = useRef<((r: void | Promise<ScanVerdict>) => void) | null>(null);
   useEffect(() => {
     const s = new ScannerService();
     s.registerSource(createKeystrokeSource());
@@ -264,21 +315,39 @@ export function useScanner(
     return service.onScan(
       gateScan(
         () => enabledRef.current && blocked?.() !== true,
-        (v, src) => ref.current(v, src),
+        (v, src) => {
+          const r = ref.current(v, src);
+          const wait = camWait.current;
+          if (src === "camera" && wait !== null) {
+            camWait.current = null;
+            wait(r);
+          }
+        },
         () => setDropped(true),
       ),
     );
   }, [service, blocked]);
   // Okuma kapalıyken (işlem sürüyor ya da uyarı açık) gelen kamera kodu SESSİZCE düşmez: kullanıcıya bildirilir (T-313 güvenlik MINOR) ve çağırana `false` döner.
   const camera = useCallback(
-    (code: string): boolean => {
+    (code: string): false | Promise<ScanVerdict> => {
       const emit = cameraEmit.current;
       if (!enabledRef.current || blocked?.() === true || emit === null) {
         setDropped(true);
         return false;
       }
+      let settle: (r: void | Promise<ScanVerdict>) => void = () => undefined;
+      const result = new Promise<ScanVerdict>((resolve) => {
+        settle = (r) => resolve(r === undefined ? "refused" : r);
+      });
+      camWait.current = settle;
       emit(code);
-      return true;
+      // İşleyici eşzamanlı çağrılmadıysa (dinleyici yok) okuma İŞLENMEDİ: fail-closed, olumlu geri bildirim verilmez; bildirilir (G-07).
+      if (camWait.current === settle) {
+        camWait.current = null;
+        setDropped(true);
+        return false;
+      }
+      return result;
     },
     [blocked],
   );
@@ -293,6 +362,10 @@ type CamPhase =
   | { readonly phase: "accepted"; readonly value: string }
   /** Okuma akışa iletilmedi (kod İŞLENMEDİ); kamera açık, döngü durdu: yalnız kullanıcının "Yeniden okut" eylemi yeni okuma başlatır. */
   | { readonly phase: "dropped" }
+  /** Akış okumayı REDDETTİ (tam ekran uyarı açıldı): olumlu "Okundu" yok; kamera açık, döngü durdu, yalnız "Yeniden okut" yeni okuma başlatır. */
+  | { readonly phase: "refused" }
+  /** Okuma işlendi ama adet üst sınıra takıldı (kaynak/kalan): olumlu "Okundu" yok; ileti nedeni + eylemi söyler, kamera durur. */
+  | { readonly phase: "limit"; readonly message: string }
   | { readonly phase: "failed"; readonly failure: CameraFailure | "decoder" };
 
 /** Kamera yolu kurulabilir mi: `getUserMedia` var ya da güvenli olmayan bağlam (o durumda katman HTTPS rehberini gösterir). Yoksa donanım tetiği (el terminali). */
@@ -308,7 +381,7 @@ const ACCEPT_AFTER_RESOLVE_MS = 700;
  * doğru okuma yeşil onay + okunan kod (çözülmüşse ürün adı) + kısa bip + titreşimle bildirilir. Hata mesajı neden + sonraki eylemi söyler; "Elle gir" her durumda görünür
  * (kamera yoksa/izin yoksa birincil). Klavye kaması (el terminali) katman açıkken de çalışır: katman klavye kaynağını engellemez.
  */
-export function CameraOverlay({ onCode, onClose, onManual, resolvedName }: { onCode: (code: string) => boolean; onClose: () => void; onManual: () => void; resolvedName?: string | undefined }) {
+export function CameraOverlay({ onCode, onClose, onManual, resolvedName, notice }: { onCode: (code: string) => false | Promise<ScanVerdict>; onClose: () => void; onManual: () => void; resolvedName?: string | undefined; notice?: React.ReactNode }) {
   const t = useTranslations("receiving");
   const video = useRef<HTMLVideoElement>(null);
   const onCodeRef = useRef(onCode);
@@ -377,15 +450,36 @@ export function CameraOverlay({ onCode, onClose, onManual, resolvedName }: { onC
           onAccepted: (value) => {
             // Okuma akışa İLETİLMEDİYSE (işlem sürüyor/uyarı açık) kabul edilmiş sayılmaz: "Okundu" ekranı ve olumlu bip yok. Düşen kod HİÇBİR yolla işlenmez ve
             // kamera kendiliğinden yeniden okumaz (aynı kod kullanıcı onayı olmadan sayılırdı); döngü durur, yalnız "Yeniden okut" eylemi yeni okuma başlatır.
-            if (!onCodeRef.current(value)) {
+            const verdict = onCodeRef.current(value);
+            if (verdict === false) {
               setState({ phase: "dropped" });
               return;
             }
             // Tek kabul: döngü kendini durdurdu; akış da hemen kapanır (aynı kod ikinci kez gönderilemez). Katmanı kapatma kararı üsttedir (ürün çözülünce).
-            v.pause(); // son kare pencerede kalır (okunan barkod görünür)
-            opened.stop();
-            cameraFeedback("ok");
-            setState({ phase: "accepted", value });
+            // "Okundu" ve olumlu bip/titreşim akışın sonucundan SONRA verilir: okutma adedi üst sınıra çektiyse olumlu geri bildirim yok (T-292b).
+            void verdict.then(
+              (r) => {
+                if (cancelled) return;
+                if (r === "refused") {
+                  // Akış okumayı reddetti: kamera açık kalır (uyarı kapanınca "Yeniden okut"), olumlu geri bildirim yok. Olumsuz geri bildirimi tam ekran uyarı TEK kez verir
+                  // (kendi titreşimi); katman ikinci bir ton/titreşim eklemez.
+                  setState({ phase: "refused" });
+                  return;
+                }
+                v.pause(); // son kare pencerede kalır (okunan barkod görünür)
+                opened.stop();
+                if (r !== "taken") {
+                  cameraFeedback("bad");
+                  setState({ phase: "limit", message: r.limit });
+                  return;
+                }
+                cameraFeedback("ok");
+                setState({ phase: "accepted", value });
+              },
+              () => {
+                if (!cancelled) setState({ phase: "dropped" });
+              },
+            );
           },
         });
       };
@@ -411,10 +505,10 @@ export function CameraOverlay({ onCode, onClose, onManual, resolvedName }: { onC
     void s.setTorch(next).then((ok) => setTorch((p) => ({ ...p, on: ok ? next : p.on, failed: !ok })));
   };
   const failed = state.phase === "failed";
-  const live = state.phase === "starting" || state.phase === "scanning" || state.phase === "rejected" || state.phase === "dropped";
+  const live = state.phase === "starting" || state.phase === "scanning" || state.phase === "rejected" || state.phase === "dropped" || state.phase === "refused";
   const platform = typeof navigator === "undefined" ? "other" : platformOf(navigator.userAgent, navigator.maxTouchPoints);
   const failureKey = state.phase !== "failed" ? "" : state.failure === "denied" ? `denied_${platform}` : state.failure;
-  const message = ((): { key: string; role: "status" | "alert"; tone: "plain" | "bad" | "good" } => {
+  const message = ((): { key: string; raw?: string; role: "status" | "alert"; tone: "plain" | "bad" | "good" } => {
     switch (state.phase) {
       case "starting":
         return { key: "camera.hint", role: "status", tone: "plain" };
@@ -426,17 +520,21 @@ export function CameraOverlay({ onCode, onClose, onManual, resolvedName }: { onC
         return { key: "camera.accepted", role: "status", tone: "good" };
       case "dropped":
         return { key: "camera.notTaken", role: "alert", tone: "bad" };
+      case "refused":
+        return { key: "camera.refused", role: "alert", tone: "bad" };
+      case "limit":
+        return { key: "", raw: state.message, role: "alert", tone: "bad" };
       case "failed":
         return { key: `camera.error.${failureKey}`, role: "alert", tone: "bad" };
     }
   })();
   const TONE = { plain: "text-on-accent", bad: "rounded-card bg-danger-bg px-3 py-2 text-danger-ink", good: "rounded-card bg-success-bg px-3 py-2 text-success-ink" } as const;
   const text = (
-    <p role={message.role} data-testid="camera-status" data-tone={message.tone} className={`flex min-w-0 items-start gap-2 break-words text-lg font-bold ${TONE[message.tone]}`}>
+    <p role={message.role} data-testid="camera-status" data-tone={message.tone} className={`flex min-w-0 items-start gap-2 break-words text-lg font-bold ${message.raw === undefined ? "" : "leading-snug"} ${TONE[message.tone]}`}>
       {message.tone === "bad" ? <CircleAlert aria-hidden="true" className="mt-0.5 size-6 shrink-0" strokeWidth={2.25} /> : null}
       {message.tone === "good" ? <CircleCheck aria-hidden="true" className="mt-0.5 size-6 shrink-0" strokeWidth={2.25} /> : null}
       <span className="min-w-0 flex-1">
-        {t(message.key)}
+        {message.raw ?? (message.key === "camera.refused" ? t(message.key, { button: t("camera.rescan") }) : t(message.key))}
         {state.phase === "accepted" ? (
           <span data-testid="camera-accepted-value" className="block truncate">
             {resolvedName ?? state.value}
@@ -458,7 +556,10 @@ export function CameraOverlay({ onCode, onClose, onManual, resolvedName }: { onC
       data-decoder={decoderKind}
       className="fixed inset-0 z-40 grid grid-rows-[auto_minmax(0,1fr)_auto] gap-3 overflow-hidden bg-ink p-3 text-on-accent landscape:grid-cols-[minmax(0,1fr)_20rem] landscape:grid-rows-[minmax(0,1fr)_auto]"
     >
-      <div className="row-start-1 landscape:col-start-2 landscape:self-center">{text}</div>
+      <div className="row-start-1 flex min-w-0 flex-col gap-2 landscape:col-start-2 landscape:self-center">
+        {text}
+        {notice}
+      </div>
       <div data-testid="camera-viewport" className="relative row-start-2 min-h-0 min-w-0 overflow-hidden rounded-card bg-ink landscape:col-start-1 landscape:row-span-2 landscape:row-start-1">
         <video ref={video} muted playsInline data-testid="camera-video" className={`size-full object-cover ${failed ? "invisible" : ""}`} />
         {live ? <div aria-hidden="true" data-testid="camera-reticle" className="pointer-events-none absolute inset-x-[10%] inset-y-[25%] rounded-card border-4 border-success" /> : null}
@@ -485,7 +586,7 @@ export function CameraOverlay({ onCode, onClose, onManual, resolvedName }: { onC
             {t("camera.retry")}
           </button>
         ) : null}
-        {state.phase === "dropped" ? (
+        {state.phase === "dropped" || state.phase === "refused" ? (
           <button type="button" onClick={() => beginRef.current?.()} className={primaryBtn}>
             {t("camera.rescan")}
           </button>
@@ -607,23 +708,38 @@ export interface ScanOutcome {
  * Tarama adımının birincil düğmesi: kamera yolu kurulabiliyorsa kamera katmanını açar (telefon; T-286); kurulamıyorsa okuyucuyu (el terminali tetiği) hazırlar.
  * El terminali (klavye kaması) kamera katmanı açıkken de açıkken de çalışır: kaynak servistedir, katmana bağlı değildir.
  */
-export function useScanPrimary(camera: (code: string) => boolean, outcome: ScanOutcome): { ready: boolean; press: () => void; overlay: React.ReactNode } {
+export function useScanPrimary(camera: (code: string) => false | Promise<ScanVerdict>, outcome: ScanOutcome, notice?: React.ReactNode): { ready: boolean; press: () => void; overlay: React.ReactNode; open: boolean } {
   const [cam, setCam] = useState(false);
   const [ready, setReady] = useState(false);
   // Katmanın kabul ettiği okuma (kod); yalnız akışa İLETİLEN okuma kabul sayılır (düşürülen okuma "Okundu" göstermez).
   const [accepted, setAccepted] = useState<string | null>(null);
+  // Akışa iletilmiş ama hükmü henüz gelmemiş okuma: sunucu yanıt vermezse de ACCEPT_MAX_MS üst sınırı katmanı kapatır (kamera açık kalmaz).
+  const [pending, setPending] = useState<string | null>(null);
   const wantManual = useRef(false);
   const onCode = useCallback(
-    (code: string): boolean => {
+    (code: string): false | Promise<ScanVerdict> => {
       const forwarded = camera(code);
-      if (forwarded) setAccepted(code);
-      return forwarded;
+      if (forwarded === false) return false;
+      // Yalnız akışın İŞLEDİĞİ ve sınıra takılmayan okuma kabul sayılır (sınıra takılan okuma "Okundu" göstermez).
+      setPending(code);
+      return forwarded.then(
+        (v) => {
+          setPending(null);
+          if (v === "taken") setAccepted(code);
+          return v;
+        },
+        (e: unknown) => {
+          setPending(null);
+          throw e;
+        },
+      );
     },
     [camera],
   );
   const close = useCallback(() => {
     setCam(false);
     setAccepted(null);
+    setPending(null);
   }, []);
   const onManual = useCallback(() => {
     wantManual.current = true;
@@ -640,6 +756,11 @@ export function useScanPrimary(camera: (code: string) => boolean, outcome: ScanO
     const timer = setTimeout(close, ms);
     return () => clearTimeout(timer);
   }, [accepted, outcome.busy, ownName, outcome.alerting, close]);
+  useEffect(() => {
+    if (pending === null || accepted !== null) return undefined;
+    const timer = setTimeout(close, ACCEPT_MAX_MS);
+    return () => clearTimeout(timer);
+  }, [pending, accepted, close]);
   // "Elle gir": katman kapanınca tarama panelindeki ScanField elle giriş kipine geçer (aynı bileşen, ikinci bir giriş yolu yok).
   useEffect(() => {
     if (cam || !wantManual.current) return;
@@ -653,18 +774,22 @@ export function useScanPrimary(camera: (code: string) => boolean, outcome: ScanO
       if (typeof navigator !== "undefined" && typeof navigator.vibrate === "function") navigator.vibrate(30);
     }
   };
-  return { ready, press, overlay: cam ? <CameraOverlay onCode={onCode} onClose={close} onManual={onManual} resolvedName={ownName} /> : null };
+  return { ready, press, overlay: cam ? <CameraOverlay onCode={onCode} onClose={close} onManual={onManual} resolvedName={ownName} notice={notice} /> : null, open: cam };
 }
 
-/** Okuma kapalıyken gelen kod bildirimi (kaynaktan bağımsız: kamera ya da klavye kaması). Uyarı açıkken de görünür: altta (`bottom-40`, `z-[60]`); dikey ekranda tam ekran uyarının başlığını ve Geri düğmesini örtmez (yatay: T-292b). */
-export function DroppedNotice({ show, alerting, onClose }: { show: boolean; alerting: boolean; onClose: () => void }) {
+/**
+ * Okuma kapalıyken gelen kod bildirimi (kaynaktan bağımsız: kamera ya da klavye kaması). Yerleşimi üç yerden biridir ve hiçbiri akışın öğesini örtmez ya da çubuğun altına itmez (T-292b):
+ * `top` (varsayılan akış ekranı): sabit, sayfanın en üstünde uygulama çubuğunun şeridi (akış başlığı ve Geri bu şeridin altında başlar; akışa yükseklik eklemez);
+ * `inline` (tam ekran uyarının içi ve kamera katmanının durum alanı): kapsayıcının akışında, uyarının düğmesinin üstünde. Tam ekran uyarı açıkken ikinci onay düğmesi YOKTUR:
+ * uyarı kapanınca bildirim kendiliğinden kalkar. Metin davranışla tutarlıdır: düşen kod işlenmez ve adet eklenmez; yeni okutma yalnız kullanıcının açık eylemiyle olur.
+ */
+export function DroppedNotice({ show, alerting, onClose, placement = "inline" }: { show: boolean; alerting: boolean; onClose: () => void; placement?: "top" | "inline" }) {
   const t = useTranslations("receiving");
   if (!show) return null;
-  // Alta yakın (`bottom-40`: birincil çubuğun üstü; üstteki başlığı ve Geri düğmesini örtmez); tam ekran uyarı açıkken ikinci onay düğmesi YOKTUR: uyarı kapanınca bildirim kendiliğinden kalkar.
-  // Metin davranışla tutarlıdır: düşen kod işlenmez ve adet eklenmez; yeni okutma yalnız kullanıcının açık eylemiyle olur.
+  const where = placement === "top" ? "fixed inset-x-3 top-0 z-[60] mx-auto max-w-md shadow-card" : "";
   return (
-    <div role="alert" data-testid="camera-dropped" className="fixed inset-x-4 bottom-40 z-[60] mx-auto flex max-w-md items-center gap-3 rounded-card border-2 border-warning bg-warning-bg px-4 py-3 text-warning-ink shadow-card">
-      <p className="min-w-0 flex-1 break-words text-base font-bold">{t("camera.dropped")}</p>
+    <div role="alert" data-testid="camera-dropped" data-placement={placement} className={`flex min-w-0 items-center gap-3 h-14 shrink-0 rounded-card border-2 border-warning bg-warning-bg px-3 py-0.5 text-warning-ink ${where}`}>
+      <p className="min-w-0 flex-1 break-words text-base font-bold leading-snug">{t("camera.dropped")}</p>
       {alerting ? null : (
         <button type="button" onClick={onClose} className={`flex min-h-12 min-w-12 shrink-0 items-center justify-center rounded-control border-2 border-warning-ink px-3 text-base font-bold ${FOCUS}`}>
           {t("camera.ok")}
@@ -790,15 +915,21 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
   const blocked = useCallback(() => busyRef.current || alertRef.current !== null || stageRef.current === "done", [alertRef, stageRef]);
   const [error, setError] = useState<ErrorInfo | null>(null);
   const [done, setDone] = useState<Done | null>(null);
+  /** Son okutma adedi kalan miktara çekti (sessiz kırpma yok: neden + eylem görünür, olumlu "Okundu" verilmez). */
+  const [limitHit, setLimitHit] = useState(false);
 
   const base = `/t/${encodeURIComponent(slug)}/field/receive`;
   const open = receipt.lines.filter((l) => intOf(l.open) !== 0);
 
   const onScanned = useCallback(
-    async (code: string) => {
+    async (code: string): Promise<ScanVerdict> => {
       // Eşzamanlı tek çözüm: bayrak ref'tedir (yeniden çizim beklemez); aynı tikteki ikinci okuma kapıda düşer ve bildirilir (`useScanner`).
       // Kapı ref'ten okunur (finally → commit penceresinde uyarı/bitiş durumu henüz render'a düşmemiş olabilir).
-      if (blocked()) return;
+      if (blocked()) return "refused";
+      const hit = (n: number): ScanVerdict => {
+        setLimitHit(true);
+        return { limit: `${t("limit.receiveReason", { n })} ${t("limit.cameraAction", { button: t("cancel") })}` };
+      };
       busyRef.current = true;
       setLast(code);
       setLastName(undefined);
@@ -810,23 +941,23 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
           res = await resolveItemScanAction({ slug, code });
         } catch {
           setAlert({ titleKey: "alert.networkTitle", reasonKey: "network", code: "NETWORK" });
-          return;
+          return "refused";
         }
         if (!res.ok) {
           const key = errorKeyOf(res.error, "scan");
           setAlert({ titleKey: "alert.scanTitle", reasonKey: key, code: res.error.detail === undefined ? res.error.code : `${res.error.code}/${res.error.detail}` });
-          return;
+          return "refused"; // sunucu okumayı reddetti (sistemde olmayan kod, yetki, sınır, sunucu hatası): uyarı açılır, olumlu geri bildirim yok (G-07)
         }
         const itemId = res.data.itemId;
         const lines = receipt.lines;
         if (scanMismatch(itemId, lines.map((l) => l.itemId))) {
           setAlert({ titleKey: "alert.mismatchTitle", reasonKey: "scan_mismatch", code: "SCAN_MISMATCH" });
-          return;
+          return "refused";
         }
         const line = lines.filter((l) => intOf(l.open) !== 0).find((l) => l.itemId === itemId);
         if (line === undefined) {
           setAlert({ titleKey: "alert.mismatchTitle", reasonKey: "line_done", code: "LINE_COMPLETE" });
-          return;
+          return "refused";
         }
         setLastName(line.itemName);
         const max = intOf(line.open);
@@ -834,33 +965,40 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
         const stepRes = scanStepOf(res.data, line.unitId);
         if (!stepRes.ok) {
           setAlert(stepRes.reason === "unit" ? { titleKey: "alert.unitTitle", reasonKey: "unit_mismatch", code: "UNIT_MISMATCH" } : { titleKey: "alert.unitTitle", reasonKey: "qty_fractional", code: "QUANTITY_NOT_WHOLE" });
-          return;
+          return "refused";
         }
         const step = stepRes.step;
         const cur = pickedRef.current;
         if (stageRef.current === "qty" && cur !== null && cur.line.id === line.id) {
           // Aynı ürünün koli barkodu yeniden okutuldu: adet eklenir (iki koli = iki katı).
           holder.contentChanged();
-          setPicked({ ...cur, received: Math.min(max ?? Infinity, cur.received + step) });
-          return;
+          const wanted = cur.received + step;
+          setPicked({ ...cur, received: Math.min(max ?? Infinity, wanted) });
+          if (max !== null && wanted > max) return hit(max);
+          setLimitHit(false);
+          return "taken";
         }
         if (stageRef.current === "qty" && cur !== null) {
           setAlert({ titleKey: "alert.mismatchTitle", reasonKey: "finish_first", code: "SCAN_MISMATCH" });
-          return;
+          return "refused";
         }
         holder.contentChanged();
         setShowDamaged(false);
         setPicked({ line, lineIsBase: isBaseUnit(line.unitId, res.data.baseUnitId), received: Math.max(1, Math.min(max ?? Infinity, step)), damaged: 0, locationId: receipt.receivingLocations[0]?.id ?? "" });
         setStage("qty");
+        if (max !== null && step > max) return hit(max);
+        setLimitHit(false);
+        return "taken";
       } finally {
         busyRef.current = false;
         setBusy(false);
       }
     },
-    [slug, receipt, holder, setPicked, setStage, setAlert, pickedRef, stageRef, blocked],
+    [slug, receipt, holder, setPicked, setStage, setAlert, pickedRef, stageRef, blocked, t],
   );
-  const { service: scanner, camera, dropped, clearDropped } = useScanner((v) => void onScanned(v), stage !== "done" && alert === null && !busy, blocked);
-  const scanPrimary = useScanPrimary(camera, { busy, name: lastName, code: last, alerting: alert !== null });
+  const { service: scanner, camera, dropped, clearDropped } = useScanner((v) => onScanned(v), stage !== "done" && alert === null && !busy, blocked);
+  // Çift okutma bildirimi: kamera katmanı açıkken katmanın durum alanında (katman ekranı örttüğü için), uyarı açıkken uyarının içinde, aksi hâlde sayfa şeridinde (T-292b).
+  const scanPrimary = useScanPrimary(camera, { busy, name: lastName, code: last, alerting: alert !== null }, dropped && alert === null ? <DroppedNotice show alerting={false} onClose={clearDropped} /> : undefined);
 
   async function confirm() {
     if (picked === null || busyRef.current) return;
@@ -899,11 +1037,13 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
     startTransition(() => router.refresh());
   }
 
+  // Çift okutma bildirimi: uyarı yokken akışın içinde (üste bindirilmez), uyarı açıkken uyarının içinde (T-292b).
+  const notice = dropped && alert === null && !scanPrimary.open ? <DroppedNotice show alerting={false} placement="top" onClose={clearDropped} /> : undefined;
   const alertView = (
     <>
-      <DroppedNotice show={dropped} alerting={alert !== null} onClose={clearDropped} />
       {alert === null ? null : (
       <ScanAlert
+        notice={<DroppedNotice show={dropped} alerting onClose={clearDropped} />}
         title={t(alert.titleKey)}
         reason={t(`errors.${alert.reasonKey}`, { remaining: "-" })}
         action={t(`errors.${alert.reasonKey}Action`)}
@@ -946,6 +1086,7 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
           step={4}
           total={4}
           title={t("flow.savedTitle")}
+          notice={notice}
           footer={finished ? <PrimaryLink href={base}>{t("flow.otherReceipt")}</PrimaryLink> : <PrimaryButton loading={refreshing} onClick={() => setStage("scan")}>{t("flow.nextItem")}</PrimaryButton>}
         >
           <Banner kind="success">
@@ -982,18 +1123,20 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
           instruction={t("flow.qtyInstruction")}
           onBack={() => {
             setPicked(null);
+            setLimitHit(false);
             setStage("scan");
             setError(null);
           }}
           footerExtra={
             receipt.receivingLocations.length > 1 ? (
-              <fieldset className="m-0 flex min-w-0 flex-col gap-1 border-0 p-0" data-testid="rack-choice">
+              <fieldset className="m-0 flex min-w-0 flex-col gap-1 border-0 p-0 [@media(pointer:coarse)_and_(max-height:500px)]:flex-row [@media(pointer:coarse)_and_(max-height:500px)]:items-center [@media(pointer:coarse)_and_(max-height:500px)]:gap-3" data-testid="rack-choice">
                 <legend className="sr-only">{t("flow.rackLabel")}</legend>
-                <p className="text-sm font-bold text-ink-muted">{t("flow.rackLabel")}</p>
-                <div className="flex min-w-0 gap-2 overflow-x-auto" data-testid="rack-chips">
+                <p className="text-sm font-bold text-ink-muted [@media(pointer:coarse)_and_(max-height:500px)]:shrink-0">{t("flow.rackLabel")}</p>
+                <div className="flex min-w-0 gap-2 overflow-x-auto [@media(pointer:coarse)_and_(max-height:500px)]:flex-1" data-testid="rack-chips">
                   {receipt.receivingLocations.map((l) => (
                     <SecondaryButton
                       key={l.id}
+                      chip
                       tone="green"
                       pressed={picked.locationId === l.id}
                       onClick={() => {
@@ -1012,6 +1155,46 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
               </p>
             )
           }
+          notice={notice}
+          side={
+            <>
+              <QtyStepper
+                label={t("flow.received", { unit: picked.line.unitName })}
+                scan={{ label: t("flow.scanMore"), onClick: scanPrimary.press }}
+                value={picked.received}
+                min={1}
+                max={max}
+                {...(max === null ? {} : { limit: { reason: t("limit.pageReceive", { n: max }), hit: limitHit ? t("limit.pageReceiveHit", { n: max }) : undefined } })}
+                onChange={(n) => {
+                  holder.contentChanged();
+                  setLimitHit(false);
+                  setPicked({ ...picked, received: n, damaged: Math.min(picked.damaged, n) });
+                }}
+              />
+              {showDamaged ? (
+                <QtyStepper
+                  label={t("flow.damagedLabel")}
+                  value={picked.damaged}
+                  min={0}
+                  max={picked.received}
+                  onChange={(n) => {
+                    holder.contentChanged();
+                    setPicked({ ...picked, damaged: n });
+                  }}
+                />
+              ) : (
+                <SecondaryButton
+                  onClick={() => {
+                    holder.contentChanged();
+                    setShowDamaged(true);
+                  }}
+                >
+                  {t("flow.hasDamaged")}
+                </SecondaryButton>
+              )}
+              {error === null ? null : <ErrorNotice error={error} context="receive" remaining={String(max ?? picked.line.open)} />}
+            </>
+          }
           footer={
             <PrimaryButton loading={busy} onClick={() => void confirm()}>
               {t("flow.confirm")}
@@ -1019,47 +1202,17 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
           }
         >
           <section className="flex min-w-0 flex-col gap-1 rounded-card border-2 border-border bg-surface p-3 [@media(max-height:700px)]:p-2" aria-label={t("flow.verify")}>
-            <p className="text-sm font-bold text-ink-muted">{t("flow.verify")}</p>
-            <p className="break-words text-2xl font-extrabold text-ink" data-testid="verified-item">
+            <p className="text-sm font-bold text-ink-muted [@media(pointer:coarse)_and_(max-height:500px)]:group-has-[[data-testid=qty-limit]]:hidden">{t("flow.verify")}</p>
+            <p className="break-words text-2xl font-extrabold text-ink [@media(pointer:coarse)_and_(max-height:500px)]:text-xl" data-testid="verified-item">
               {picked.line.itemName}
             </p>
             <p className="break-words text-sm text-ink-muted [@media(max-height:700px)]:hidden">{picked.line.itemCode}</p>
-            <LineStatus expected={picked.line.expected} received={picked.line.received} damaged={picked.line.damaged} open={picked.line.open} />
+            {/* YALNIZ yatay telefonda: sınır iletisi göründüğünde bu etiket ve durum satırı gizlenir (alt sütunda yer açmak için). Dikeyde ve masaüstünde hiçbir şey gizlenmez ve içerik kaymaz. */}
+            <div className="[@media(pointer:coarse)_and_(max-height:500px)]:group-has-[[data-testid=qty-limit]]:hidden">
+              <LineStatus expected={picked.line.expected} received={picked.line.received} damaged={picked.line.damaged} open={picked.line.open} />
+            </div>
             {picked.lineIsBase ? <CompoundLine slug={slug} itemId={picked.line.itemId} baseQty={picked.received} /> : null}
           </section>
-          <QtyStepper
-            label={t("flow.received", { unit: picked.line.unitName })}
-            scan={{ label: t("flow.scanMore"), onClick: scanPrimary.press }}
-            value={picked.received}
-            min={1}
-            max={max}
-            onChange={(n) => {
-              holder.contentChanged();
-              setPicked({ ...picked, received: n, damaged: Math.min(picked.damaged, n) });
-            }}
-          />
-          {showDamaged ? (
-            <QtyStepper
-              label={t("flow.damagedLabel")}
-              value={picked.damaged}
-              min={0}
-              max={picked.received}
-              onChange={(n) => {
-                holder.contentChanged();
-                setPicked({ ...picked, damaged: n });
-              }}
-            />
-          ) : (
-            <SecondaryButton
-              onClick={() => {
-                holder.contentChanged();
-                setShowDamaged(true);
-              }}
-            >
-              {t("flow.hasDamaged")}
-            </SecondaryButton>
-          )}
-          {error === null ? null : <ErrorNotice error={error} context="receive" remaining={String(max ?? picked.line.open)} />}
         </FlowShell>
         {alertView}
       </>
@@ -1082,6 +1235,7 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
         step={2}
         total={4}
         title={t("flow.scanTitle")}
+        notice={notice}
         backHref={base}
         scanProxy
         footer={<PrimaryButton onClick={scanPrimary.press}>{t("flow.scanNow")}</PrimaryButton>}

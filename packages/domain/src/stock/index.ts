@@ -128,6 +128,17 @@ export {
   type ReverseLineRequest,
   type ReversalCapacityLine,
 } from "./reversal.ts";
+// T-333: "Yanlış bir şey yaptım" okuması: çağıranın kendi son POSTED belgeleri ve ters kayıt kalanları (salt okuma, `reversal.create`, depo kapsamlı).
+export {
+  RECENT_DOCUMENTS_DEFAULT_LIMIT,
+  RECENT_DOCUMENTS_MAX_LIMIT,
+  listMyRecentDocuments,
+  type ListMyRecentDocumentsOptions,
+  type RecentDocument,
+  type RecentDocumentBlocked,
+  type RecentDocumentLine,
+  type RecentDocumentsResult,
+} from "./reversal-queries.ts";
 // T-332a: kullanıcıya açık stok sorguları ("ürün nerede / raf içeriği"); salt okuma, `stock.view`, depo kapsamlı.
 export {
   STOCK_QUERY_LIMIT_DEFAULT,
