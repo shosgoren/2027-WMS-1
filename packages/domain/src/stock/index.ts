@@ -128,3 +128,23 @@ export {
   type ReverseLineRequest,
   type ReversalCapacityLine,
 } from "./reversal.ts";
+// T-332a: kullanıcıya açık stok sorguları ("ürün nerede / raf içeriği"); salt okuma, `stock.view`, depo kapsamlı.
+export {
+  STOCK_QUERY_LIMIT_DEFAULT,
+  STOCK_QUERY_LIMIT_MAX,
+  STOCK_STATUSES,
+  stockByItem,
+  stockByLocation,
+  type StockBaseUnit,
+  type StockByItemInput,
+  type StockByItemResult,
+  type StockByItemRow,
+  type StockByLocationInput,
+  type StockByLocationResult,
+  type StockByLocationRow,
+  type StockLocationFields,
+  type StockQueryParams,
+  type StockRowCommon,
+  type StockStatus,
+  type StockTotals,
+} from "./stock-queries.ts";
