@@ -6,7 +6,11 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
-import { enterDemoShared } from "./support/demo-session.ts";
+import { enterDemoShared, isRemote } from "./support/demo-session.ts";
+
+// Demo girişi istemci IP'si başına 10 giriş / 10 dk ile sınırlıdır (T-300). Ana projelerin (desktop/mobile) istemci adresleri tam koşuda
+// sınıra dayanır; bu spec yerel vekilde kendi TEST-NET-2 adresini bildirir (sınır DEĞİŞMEZ; aynı desen: support/empty-tenant.ts). Uzakta yoktur.
+if (!isRemote()) test.use({ extraHTTPHeaders: { "x-e2e-client-ip": "198.51.100.70" } });
 
 const OUT = process.env.T332B_OUT ?? path.resolve(import.meta.dirname, "../../.artifacts/t-332b");
 
