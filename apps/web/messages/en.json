@@ -1558,14 +1558,14 @@
       "items": "Products",
       "stockLines": "Rows",
       "errorRows": "Rows with errors",
-      "lineProducts": "{total} rows: {ok} ready, {bad} with errors",
-      "lineStock": "{total} rows: {ok} ready, {bad} with errors",
+      "lineProducts": "{total} rows: {ok} ready",
+      "lineStock": "{total} rows: {ok} ready",
       "rows": "Rows"
     },
     "detail": {
       "packUnit": "The carton unit will be created too.",
       "stock": "A total of {total} pieces will be added to {warehouses} warehouses.",
-      "stockExists": "There is already stock in the system. These quantities are added on top of it. If you imported this same file before, it is not added twice.",
+      "stockExists": "There is already stock in the system. Opening stock is only written to shelves without stock; a row for a shelf that has stock is an error. If you imported this same file before, it is not added twice.",
       "stockNothing": "There are no new lines to write.",
       "stockSkipped": "{n} lines were processed before and will be skipped.",
       "create": "{n} new products will be added",
@@ -1573,7 +1573,7 @@
       "packs": "{n} carton definitions",
       "barcodes": "{n} barcodes"
     },
-    "blocked": "There are {n} errors. Fix the file and choose it again.",
+    "blocked": "The file has errors. Fix it and choose it again.",
     "clean": "No errors. You can import.",
     "issues": {
       "all": "All errors ({total}):",
@@ -1582,6 +1582,7 @@
       "row": "Row {row}",
       "fixPrefix": "How to fix:",
       "more": "Show all ({n} rows)",
+      "moreTruncated": "Show the first {shown} errors ({n} rows)",
       "less": "Show less",
       "pickFixed": "Choose the fixed file",
       "partial": "{total} errors: showing the first {rows} rows"
@@ -1590,7 +1591,7 @@
       "title": "Import",
       "apply": "Import",
       "note": "If you upload the same file again, it is not added twice.",
-      "blocked": "Fix the {n} errors first. Nothing can be imported while there are errors.",
+      "blocked": "Fix the errors first. Nothing can be imported while there are errors.",
       "progress": "{done} / {total} rows",
       "done": "Finished",
       "partial": "Stopped halfway",
@@ -1624,10 +1625,11 @@
       "none": "No new records.",
       "moreFailed": "and {n} more failed rows.",
       "reason": {
-        "PAIR_HAS_STOCK": "This product got stock on this shelf from another action. Opening stock is only for empty shelves; use a stock document to correct it.",
+        "PAIR_HAS_STOCK": "This product got stock on this shelf from another action. Opening stock is only for empty shelves; this row was not written. Ask your manager if needed.",
+        "PAIR_REVERSED": "The opening stock of this product on this shelf was undone later. It is not written to the same shelf again; ask your manager if needed.",
         "PAIR_PENDING": "There is an unfinished opening document for this product and shelf. Upload the same file again to continue it."
       },
-      "failedGeneric": "The system could not save these rows.",
+      "failedGeneric": "{n, plural, one {The system could not save this row.} other {The system could not save these rows.}}",
       "failedTitle": "Could not be saved.",
       "retryNone": "No rows were written. Fix the problem and upload the same file again."
     },
@@ -1822,7 +1824,7 @@
       },
       "PAIR_HAS_STOCK": {
         "reason": "Product {code} already has stock on shelf {shelf}.",
-        "fix": "Opening stock is only for empty shelves. Use a stock document to correct it, or delete the row."
+        "fix": "Opening stock is only for empty shelves. Delete this row from the file and ask your manager if needed."
       },
       "CELL_TOO_LONG": {
         "reason": "A cell is too long.",
@@ -1831,6 +1833,10 @@
       "TOO_MANY_COLUMNS": {
         "reason": "The row has too many columns.",
         "fix": "At most {max} columns are allowed. Delete the extra columns."
+      },
+      "PAIR_REVERSED": {
+        "reason": "The opening stock of product {code} on shelf {shelf} was undone earlier.",
+        "fix": "Undone opening stock is not written to the same shelf again. Delete this row from the file and ask your manager if needed."
       },
       "PAIR_PENDING": {
         "reason": "Product {code} has an unfinished opening document for shelf {shelf} (with another quantity).",
