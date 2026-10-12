@@ -74,7 +74,6 @@ export function StartCountForm({ slug, warehouses, tasks, lockedLocationIds, can
     if (hit.length === 0) return;
     setDropped(hit.map((id) => locs.find((l) => l.id === id)?.code ?? "").filter((c) => c !== ""));
     setSelected((cur) => new Set([...cur].filter((id) => !lockedSet.has(id.toLowerCase()))));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lockedLocationIds]);
 
   const load = useCallback(
