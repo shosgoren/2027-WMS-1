@@ -1,10 +1,10 @@
 # STATE (≤80 satır — her görev sonunda Supervisor günceller)
 
-**Oturum kilidi:** session_01C59FRaUynaDdhNGZoRbKsY · 2026-10-12T05:43Z (zamanlanmış oturum: kilit 3 saatten yeniyse ve başka oturumunsa hiçbir şey yapmadan çık; değilse kendi kimliğinle yenile, her push'ta zamanı güncelle)
+**Oturum kilidi:** session_01C59FRaUynaDdhNGZoRbKsY · 2026-10-12T06:43Z (zamanlanmış oturum: kilit 3 saatten yeniyse ve başka oturumunsa hiçbir şey yapmadan çık; değilse kendi kimliğinle yenile, her push'ta zamanı güncelle)
 **Faz:** 2 stok çekirdeği TAMAM (main) + Faz 3A (int/faz3a: …T-222/253/256/258/259/270/271/272/273/274/304/305/306; tam test:int EXIT=0 82/82 1612+). Kullanıcı UTC+3: saat `date -u` ile. Kota kesintisinde sıfırlanma saatine send_later ZORUNLU.
-**Aktif görev:** Paket #7 main 6c006f4 → deploy-staging + e2e-staging. T-292b (yatay telefon saha + sessiz üst sınır; f9dcd55, frontend-dev, t292b yığını) ve T-277a (T-308/T-309 stok MINOR; 4cdce64 kart eki, backend-dev commit+HEAD kanıtı) sürüyor.
+**Aktif görev:** Paket #8 (T-277a stok MINOR + T-279c zz-code-edit sayfalı depo listesi) yerel int ad5010f doğrulama → PR → main → e2e-staging (run 18 @6c006f4 kırmızıydı: zz-code-edit:101, staging artık depo birikimi; T-279c düzeltir). T-292b (frontend-dev) sürüyor.
 **Son tamamlanan:** #89 paket 7 T-287c koli adedi + kamera takipleri (6c006f4, 05:41Z; CI 15/15) · #88 paket 6 (749b0fb; e2e-staging run 17 yeşil) · #87 T-286b · önceki: JOURNAL
-**Sonraki adım:** (05:43Z) e2e-staging @6c006f4. T-277a → security-reviewer → paket. T-292b → SR + tasarım + kullanıcıya önce/sonra görüntüler → paket. Sonra T-293 ön yüz → T-295 → T-294 → T-287d/T-314 → T-296/T-297; T-277b/c; T-279c; 4P kartları (AC-15/17/24/26/29/30 testsiz). Kullanıcı işi: T-286 gerçek cihaz geri bildirimi, main ruleset, Q-12 (pilot profili gerçek müşteriyle — 3A kapısı), Q-102, Q-103, Q-07, sıfır-durum A/B.
+**Sonraki adım:** (06:43Z) Paket #8 → main → deploy + e2e-staging yeşil (paket 7 doğrulaması). T-292b → SR + tasarım + kullanıcıya önce/sonra → paket. Sonra T-293 ön yüz → T-295 → T-294 → T-287d/T-314 → T-296/T-297; T-277b/c; 4P kartları (AC-15/17/24/26/29/30 testsiz). Kullanıcı işi: T-286 gerçek cihaz geri bildirimi, main ruleset, Q-12 (pilot profili gerçek müşteriyle — 3A kapısı), Q-102, Q-103, Q-07, sıfır-durum A/B.
 
 ## Çalışma biçimi (kullanıcı kararı 2026-10-05 — ADR-012 rev., PROTOCOL §Onay kaynağı)
 - Kullanıcı PR incelemez. Birleştirme kapısı: CI/oturumda `pnpm verify` + `check:all` + `test:int` + ilgili `test:ac` yeşil; risk matrisine göre `security-reviewer` ve `qa-verifier` BLOCKER: 0 → Supervisor PR'ı kendisi birleştirir (`mcp__github__merge_pull_request`). Korunan değişiklikte PR açıklamasında `APPROVED-BY: supervisor (ADR-012 rev.)`.
