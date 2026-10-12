@@ -26,6 +26,7 @@ interface Loc {
   readonly id: string;
   readonly code: string;
   readonly name: string;
+  readonly kind: string;
 }
 interface Cursor {
   readonly depth: number;
@@ -40,7 +41,7 @@ const CHECK = `grid size-12 shrink-0 appearance-none place-content-center rounde
 const MAX_SELECT = 200;
 const SHOW_CODES = 8;
 
-export function StartCountForm({ slug, warehouses, tasks, canStart }: { slug: string; warehouses: readonly StartWarehouse[]; tasks: readonly StartCountTask[]; canStart: boolean }) {
+export function StartCountForm({ slug, warehouses, tasks, lockedLocationIds, canStart }: { slug: string; warehouses: readonly StartWarehouse[]; tasks: readonly StartCountTask[]; lockedLocationIds: readonly string[]; canStart: boolean }) {
   const t = useTranslations("counting");
   const router = useRouter();
   const [, startTransition] = useTransition();
@@ -58,6 +59,23 @@ export function StartCountForm({ slug, warehouses, tasks, canStart }: { slug: st
   const busyRef = useRef(false);
   const [error, setError] = useState<ErrorInfo | null>(null);
   const [started, setStarted] = useState<string | null>(null);
+  const [dropped, setDropped] = useState<readonly string[]>([]);
+  // Sonuç (başarı/hata) uzun formun altındaki düğmenin ÜSTÜNDE kalır ve görünüm dışında olabilir: sonuç bölgesi görünüme kaydırılır ve odak alır.
+  const resultRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (started === null && error === null) return;
+    resultRef.current?.scrollIntoView({ block: "center" });
+    resultRef.current?.focus({ preventScroll: true });
+  }, [started, error]);
+  // Sayımda olan raflar (sunucudan taze liste): seçimdeyse çıkarılır ve hangileri olduğu söylenir.
+  const lockedSet = new Set(lockedLocationIds.map((x) => x.toLowerCase()));
+  useEffect(() => {
+    const hit = [...selected].filter((id) => lockedSet.has(id.toLowerCase()));
+    if (hit.length === 0) return;
+    setDropped(hit.map((id) => locs.find((l) => l.id === id)?.code ?? "").filter((c) => c !== ""));
+    setSelected((cur) => new Set([...cur].filter((id) => !lockedSet.has(id.toLowerCase()))));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lockedLocationIds]);
 
   const load = useCallback(
     async (wh: string, after: Cursor | null, append: boolean) => {
@@ -84,11 +102,14 @@ export function StartCountForm({ slug, warehouses, tasks, canStart }: { slug: st
     setLocs([]);
     setNext(null);
     setSelected(new Set());
+    startKey.changed();
     void load(warehouseId, null, false);
-  }, [warehouseId, load]);
+  }, [warehouseId, load, startKey]);
 
   const toggle = (id: string): void => {
+    startKey.changed();
     setStarted(null);
+    setDropped([]);
     setSelected((cur) => {
       const n = new Set(cur);
       if (n.has(id)) n.delete(id);
@@ -113,6 +134,8 @@ export function StartCountForm({ slug, warehouses, tasks, canStart }: { slug: st
     setBusy(false);
     if (!out.ok) {
       setError(out.error);
+      // Başka biri o sırada başlattıysa sayımdaki raflar tazelenir; seçimdeki dolu raflar işaretlenip çıkarılır.
+      if (out.error.code === "LOCATION_LOCKED") startTransition(() => router.refresh());
       return;
     }
     setStarted(out.data.sessionId);
@@ -147,6 +170,7 @@ export function StartCountForm({ slug, warehouses, tasks, canStart }: { slug: st
             setConfirm(true);
           }}
         >
+          <div ref={resultRef} tabIndex={-1} className="flex min-w-0 flex-col gap-3 focus:outline-none" data-testid="start-result">
           {started === null ? null : (
             <Banner kind="success">
               <p className="font-semibold" data-testid="start-done">
@@ -162,11 +186,17 @@ export function StartCountForm({ slug, warehouses, tasks, canStart }: { slug: st
               <CountErrorNotice error={error} context="start" />
               {error.code === "LOCATION_LOCKED" && selectedCodes.length > 0 ? (
                 <p className="break-words text-base text-ink" data-testid="start-locked-codes">
-                  {t("form.lockedSelection", { codes: selectedCodes.slice(0, SHOW_CODES).join(", ") + (selectedCodes.length > SHOW_CODES ? ` +${selectedCodes.length - SHOW_CODES}` : "") })}
+                  {t("form.lockedUnknown", { codes: selectedCodes.slice(0, SHOW_CODES).join(", ") + (selectedCodes.length > SHOW_CODES ? ` +${selectedCodes.length - SHOW_CODES}` : "") })}
                 </p>
               ) : null}
             </>
           )}
+          {dropped.length === 0 ? null : (
+            <Banner kind="warning">
+              <p data-testid="start-dropped">{t("form.droppedLocked", { codes: dropped.join(", ") })}</p>
+            </Banner>
+          )}
+          </div>
           {warehouses.length > 1 ? (
             <label className="flex min-w-0 flex-col gap-1 text-base font-semibold text-ink">
               {t("form.warehouse")}
@@ -214,16 +244,26 @@ export function StartCountForm({ slug, warehouses, tasks, canStart }: { slug: st
           <fieldset className="m-0 flex min-w-0 flex-col gap-1 border-0 p-0">
             <legend className="mb-1 text-base font-semibold text-ink">{t("form.locations")}</legend>
             <ul className="m-0 flex max-h-72 min-w-0 list-none flex-col gap-1 overflow-y-auto p-0" data-testid="location-picker">
-              {visible.map((l) => (
-                <li key={l.id} className="min-w-0">
-                  <label className="flex min-h-14 min-w-0 cursor-pointer items-center gap-3 rounded-control border-2 border-border bg-surface px-2 text-base text-ink has-[:checked]:border-accent has-[:checked]:bg-accent-soft">
-                    <input type="checkbox" className={CHECK} checked={selected.has(l.id)} onChange={() => toggle(l.id)} />
-                    <span className="min-w-0 break-words">
-                      <span className="font-bold">{l.code}</span> {l.name === "" || l.name === l.code ? "" : <span className="text-ink-muted">· {l.name}</span>}
-                    </span>
-                  </label>
-                </li>
-              ))}
+              {visible.map((l) => {
+                const inCount = lockedSet.has(l.id.toLowerCase());
+                return (
+                  <li key={l.id} className="min-w-0" data-in-count={inCount ? "true" : undefined}>
+                    <label className={`flex min-h-14 min-w-0 items-center gap-3 rounded-control border-2 border-border px-2 text-base text-ink has-[:checked]:border-accent has-[:checked]:bg-accent-soft ${inCount ? "bg-bg opacity-80" : "cursor-pointer bg-surface"}`}>
+                      <input type="checkbox" className={CHECK} checked={selected.has(l.id)} disabled={inCount} onChange={() => toggle(l.id)} />
+                      <span className="min-w-0 flex-1 break-words">
+                        <span className="font-bold">{l.code}</span> {l.name === "" || l.name === l.code ? "" : <span className="text-ink-muted">· {l.name}</span>}
+                        <span className="block text-sm text-ink-muted">{t(`form.kind.${l.kind}`)}</span>
+                      </span>
+                      {inCount ? (
+                        <span className="inline-flex min-h-8 shrink-0 items-center gap-1 text-sm font-bold text-warning-ink" data-testid="in-count">
+                          <Lock aria-hidden="true" className="size-4" />
+                          {t("form.inCount")}
+                        </span>
+                      ) : null}
+                    </label>
+                  </li>
+                );
+              })}
               {visible.length === 0 && !loading ? (
                 <li className="break-words p-2 text-base text-ink-muted" data-testid="no-locations">
                   {t("form.noLocations")}
@@ -238,7 +278,10 @@ export function StartCountForm({ slug, warehouses, tasks, canStart }: { slug: st
           </fieldset>
 
           <label className="flex min-h-12 min-w-0 items-center gap-3 text-base text-ink">
-            <input type="checkbox" className={CHECK} checked={blind} onChange={(e) => setBlind(e.target.checked)} data-testid="blind-toggle" />
+            <input type="checkbox" className={CHECK} checked={blind} onChange={(e) => {
+                startKey.changed();
+                setBlind(e.target.checked);
+              }} data-testid="blind-toggle" />
             <span className="min-w-0">
               <span className="block break-words font-semibold">{t("form.blind")}</span>
               <span className="block break-words text-sm text-ink-muted">{t("form.blindHint")}</span>

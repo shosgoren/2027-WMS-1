@@ -492,6 +492,59 @@ describe("sayım gözden geçirme sayfası (/t/<slug>/counts/<id>) — T-316", (
   });
 });
 
+describe("saha sayımı ve yetkisiz gözden geçirme — T-316", () => {
+  // React öğeleri `_owner` ile döngüsel olabilir: yalnız veri alanları serileştirilir.
+  const wireOf = (v: unknown): string => JSON.stringify(v, (k, x) => (k === "_owner" || k === "_store" || (k === "type" && typeof x !== "string") ? undefined : x));
+  let sesA: string;
+  let sesB: string;
+  const mkSession = async (t: Fx): Promise<string> =>
+    (await adm.query<{ id: string }>("INSERT INTO public.count_sessions (tenant_id, id, warehouse_id, blind, started_by) VALUES ($1, gen_random_uuid(), $2, true, $3) RETURNING id", [t.tenant, t.warehouse, t.adminMembership])).rows[0]!.id;
+
+  beforeAll(async () => {
+    sesA = await mkSession(A);
+    sesB = await mkSession(B);
+  }, 60_000);
+
+  it("@AC-04 sayfa field/count?session=<B oturumu>: B'nin slug'ı -> 404 (var olmayan slug ile aynı); A'nın slug'ında B'nin oturumu -> var olmayan oturumla AYNI yanıt, B verisi/kimliği çizilmez", async () => {
+    as(A.admin);
+    const cross = await runLoader("field/count/page.tsx", B.slug, undefined, undefined, { session: sesB });
+    as(A.admin);
+    const missing = await runLoader("field/count/page.tsx", `yok-${rnd()}`, undefined, undefined, { session: randomUUID() });
+    expect(cross).toEqual({ outcome: "notFound" });
+    expect(cross).toEqual(missing);
+    as(A.admin);
+    const own = await runLoader("field/count/page.tsx", A.slug, undefined, undefined, { session: sesB });
+    as(A.admin);
+    const none = await runLoader("field/count/page.tsx", A.slug, undefined, undefined, { session: randomUUID() });
+    expect(own.outcome).toBe("render");
+    expect(own).toEqual(none);
+    expect(wireOf(own)).not.toContain(sesB);
+    expect(wireOf(own)).not.toContain(B.warehouseName);
+  });
+
+  it("@AC-04 sayfa field/count: A'nın kendi oturumu çizilir (olumlu kontrol); sayım girişi izni olmayan üye (PICKER) kilit ekranı görür, oturum verisi gitmez", async () => {
+    as(A.admin);
+    const ok = await runLoader("field/count/page.tsx", A.slug, undefined, undefined, { session: sesA });
+    expect(ok.outcome).toBe("render");
+    as(A.picker);
+    const locked = await runLoader("field/count/page.tsx", A.slug, undefined, undefined, { session: sesA });
+    expect(locked.outcome).toBe("render");
+    expect(wireOf(locked)).not.toContain(sesA);
+  });
+
+  it("@AC-04 sayfa counts/[id]: count_diff.approve olmayan üye (PICKER) satır/referans verisi almaz: canReview=false ve satır listesi boş; yetkili (admin) canReview=true", async () => {
+    as(A.picker);
+    const r = await runLoader(COUNT_DETAIL, A.slug, undefined, sesA);
+    expect(r.outcome).toBe("render");
+    const wire = wireOf(r.value);
+    expect(wire).toContain('"canReview":false');
+    expect(wire).toContain('"lines":[]');
+    as(A.admin);
+    const a = await runLoader(COUNT_DETAIL, A.slug, undefined, sesA);
+    expect(wireOf(a.value)).toContain('"canReview":true');
+  });
+});
+
 describe("ürün ayrıntı sayfası (/t/<slug>/items/<itemId>) — T-216", () => {
   let itemA: { id: string; code: string; name: string };
   let itemB: { id: string; code: string; name: string };

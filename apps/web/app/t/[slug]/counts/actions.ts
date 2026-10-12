@@ -10,6 +10,7 @@ import { createHash } from "node:crypto";
 import { headers } from "next/headers";
 import { z } from "zod";
 import { getAppDb } from "@wms/db";
+import { getItem, resolveBarcodeQuery } from "@wms/domain/catalog";
 import type { Permission } from "@wms/domain/identity/permissions";
 import { approveCount, cancelCount, getCountSession, postCountAdjustment, recordCount, startCount, submitCount } from "@wms/domain/operations";
 import { getLocationTree } from "@wms/domain/warehouse";
@@ -38,6 +39,7 @@ const recordSchema = z
   .strict();
 const transitionSchema = z.object({ slug: slugSchema, clientKey: keySchema, sessionId: idSchema }).strict();
 const cancelSchema = z.object({ slug: slugSchema, clientKey: keySchema, sessionId: idSchema, reason: z.string().trim().min(1).max(500) }).strict();
+const scanSchema = z.object({ slug: slugSchema, code: z.string().min(1).max(256) }).strict();
 const fieldSchema = z.object({ slug: slugSchema, sessionId: idSchema }).strict();
 const locationsSchema = z
   .object({ slug: slugSchema, warehouseId: idSchema, after: z.object({ depth: z.number().int().min(0).max(16), code: z.string().min(1).max(256), id: idSchema }).strict().optional() })
@@ -159,7 +161,7 @@ export async function fieldCountAction(raw: unknown) {
     // Açık beyaz liste (savunma derinliği): alan eklemek bilinçli olur; domain sızdırsa bile referans/fark istemciye geçmez.
     return {
       locations: d.locations.map((l) => ({ id: l.id, code: l.code, name: l.name, locked: l.locked })),
-      lines: d.lines.map((l) => ({ id: l.id, locationId: l.locationId, itemId: l.itemId, itemCode: l.itemCode, itemName: l.itemName, unitCode: l.unitCode, unitName: l.unitName, stockStatus: l.stockStatus, counted: l.counted })),
+      lines: d.lines.map((l) => ({ id: l.id, locationId: l.locationId, itemId: l.itemId, itemCode: l.itemCode, itemName: l.itemName, unitCode: l.unitCode, unitName: l.unitName, quantityScale: l.quantityScale, stockStatus: l.stockStatus, counted: l.counted })),
     };
   })(raw);
 }
@@ -169,5 +171,18 @@ export async function listCountLocationsAction(raw: unknown) {
   return guardedAction({ schema: locationsSchema }, async (input, ctx) => {
     const page = await getLocationTree(readContext(input.slug, ctx), { warehouseId: input.warehouseId, includeArchived: false, limit: 200, ...(input.after === undefined ? {} : { after: input.after }) });
     return { items: page.items.filter((l) => l.status === "ACTIVE").map((l) => ({ id: l.id, code: l.code, name: l.name, kind: l.kind })), next: page.next };
+  })(raw);
+}
+
+/**
+ * Okutulan ürün barkodu (saha sayımı): `resolveBarcode` çıktısı AYNEN geçer (adet `baseQuantity`, temel birim; koli içi adet sunucuda hesaplanır) + ürünün miktar ölçeği
+ * (`quantityScale`): ondalıklı ürün (örn. kg) sahada ondalık sayılır, ölçeğe uymayan giriş istemcide ve `recordCount`ta (QUANTITY_SCALE) reddedilir. Okuma `stock.view`.
+ */
+export async function resolveCountItemAction(raw: unknown) {
+  return guardedAction({ schema: scanSchema }, async (input, ctx) => {
+    const params = readContext(input.slug, ctx);
+    const r = await resolveBarcodeQuery(params, input.code);
+    const item = await getItem(params, { itemId: r.itemId });
+    return { itemId: r.itemId, itemCode: item.code, itemName: item.name, baseQuantity: r.baseQuantity, quantityScale: item.quantityScale };
   })(raw);
 }

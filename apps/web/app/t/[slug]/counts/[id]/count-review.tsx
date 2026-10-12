@@ -7,7 +7,7 @@
 // - Referans (sistem) miktarı yalnız bu ekranda ve yalnız `count_diff.approve` olana gelir (sunucu `review` kipi); saha ekranı (`count-flow.tsx`) bunu hiç almaz.
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useRef, useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { useTranslations } from "next-intl";
 import { Banner, Button, CircleCheck, Clock, ConfirmDialog, EmptyState, Lock, TriangleAlert, ClipboardCheck } from "@wms/ui";
 import type { ActionResult, ErrorInfo, Outcome } from "../../receipts/receipt-form.tsx";
@@ -45,13 +45,15 @@ export interface ReviewLine {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// Anahtar yaşam döngüsü
+// Anahtar yaşam döngüsü (T-313 ile uyumlu; Supervisor kararı)
 // ---------------------------------------------------------------------------------------------------------------------
 export interface AttemptKey {
-  /** Deneme başı: deneme sürüyorsa aynı anahtar (çift gönderim), değilse yeni anahtar. */
+  /** Deneme başı: yanıtı ALINAMAMIŞ önceki deneme ya da süren deneme varsa AYNI anahtar; değilse yeni anahtar. */
   begin(): string;
-  /** Deneme bitti (başarı, ret ya da ağ hatası): sonraki deneme yeni anahtar alır. */
-  settle(): void;
+  /** `responded=true`: sunucu yanıtı alındı (başarı ya da ret) → sonraki kullanıcı denemesi YENİ anahtar. `false`: yanıt alınamadı (ağ/zaman aşımı) → tekrar AYNI anahtar. */
+  settle(responded: boolean): void;
+  /** Gönderilecek içerik değişti: aynı anahtar başka içerikle `IDEMPOTENCY_MISMATCH` verir, bu yüzden yeni anahtar. */
+  changed(): void;
 }
 export function createAttemptKey(generate: () => string = () => crypto.randomUUID()): AttemptKey {
   let key: string | null = null;
@@ -60,7 +62,10 @@ export function createAttemptKey(generate: () => string = () => crypto.randomUUI
       if (key === null) key = generate();
       return key;
     },
-    settle: () => {
+    settle: (responded) => {
+      if (responded) key = null;
+    },
+    changed: () => {
       key = null;
     },
   };
@@ -71,18 +76,55 @@ export function useAttemptKey(): AttemptKey {
   return ref.current;
 }
 
-/** Tek kullanıcı denemesi: anahtar alınır, çağrı yapılır, deneme biter. Ağ/yürütme hatası `NETWORK` olur (yutulmaz, kullanıcıya gösterilir). */
+/** Tek kullanıcı denemesi: anahtar alınır, çağrı yapılır. Ağ/yürütme hatası `NETWORK` olur (yutulmaz) ve anahtar KORUNUR (tekrar aynı anahtar: çift kayıt olmaz). */
 export async function runAttempt<T>(holder: AttemptKey, call: (clientKey: string) => Promise<ActionResult<T>>): Promise<Outcome<T>> {
   const key = holder.begin();
+  let res: ActionResult<T>;
   try {
-    const res = await call(key);
-    if (res.ok) return { ok: true, data: res.data };
-    return { ok: false, error: { code: res.error.code, detail: res.error.detail, requestId: res.error.requestId } };
+    res = await call(key);
   } catch {
+    holder.settle(false);
     return { ok: false, error: { code: "NETWORK" } };
-  } finally {
-    holder.settle();
   }
+  holder.settle(true);
+  if (res.ok) return { ok: true, data: res.data };
+  return { ok: false, error: { code: res.error.code, detail: res.error.detail, requestId: res.error.requestId } };
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Sayılan miktar (I-09: metin; yuvarlama yok). Ölçek (`quantityScale`) üründen gelir; kural (QUANTITY_SCALE) sunucudadır, burada yalnız erken ve açık ret.
+// ---------------------------------------------------------------------------------------------------------------------
+export type QtyParse = { readonly ok: true; readonly value: string } | { readonly ok: false; readonly reason: "empty" | "format" | "scale" | "large" };
+const QTY_INT_MAX = 9;
+/** Virgül ya da nokta kabul edilir; sonuç noktalı kanonik metindir ("2,5" → "2.5"). Ölçekten fazla (sıfır olmayan) ondalık sessizce kırpılmaz, reddedilir. */
+export function parseCountQty(raw: string, scale: number): QtyParse {
+  const s = raw.trim().replace(",", ".");
+  if (s === "") return { ok: false, reason: "empty" };
+  const m = /^(\d+)(?:\.(\d*))?$/.exec(s);
+  if (m === null) return { ok: false, reason: "format" };
+  const int = (m[1] as string).replace(/^0+(?=\d)/, "");
+  if (int.length > QTY_INT_MAX) return { ok: false, reason: "large" };
+  const frac = (m[2] ?? "").replace(/0+$/, "");
+  if (frac.length > scale) return { ok: false, reason: "scale" };
+  return { ok: true, value: frac === "" ? int : `${int}.${frac}` };
+}
+const MICRO = 1_000_000n;
+const toMicro = (v: string): bigint => {
+  const [i, f = ""] = v.split(".");
+  return BigInt(i as string) * MICRO + BigInt(f.padEnd(6, "0").slice(0, 6));
+};
+const fromMicro = (n: bigint): string => {
+  const i = n / MICRO;
+  const f = (n % MICRO).toString().padStart(6, "0").replace(/0+$/, "");
+  return f === "" ? i.toString() : `${i}.${f}`;
+};
+/** Kanonik iki miktarın toplamı (tam sayı aritmetiği, kayan nokta yok); üst sınıra (999999999) kırpılır. `delta` negatifse 0'ın altına inmez. */
+export function addCountQty(a: string, delta: string): string {
+  const max = BigInt(10 ** QTY_INT_MAX - 1) * MICRO;
+  const neg = delta.startsWith("-");
+  const d = toMicro(neg ? delta.slice(1) : delta);
+  const r = neg ? toMicro(a) - d : toMicro(a) + d;
+  return fromMicro(r < 0n ? 0n : r > max ? max : r);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -219,6 +261,16 @@ export function CountReview({ slug, session, locations, lines, canReview, canCan
   const [reason, setReason] = useState("");
   const [shown, setShown] = useState(PAGE);
   const refresh = (): void => startTransition(() => router.refresh());
+  // Odak: eylem bitince (onay penceresi kapanır, düğme yer değiştirir) odak BODY'ye düşmesin; sonuç/işlem başlığına taşınır. İptal formu açılınca odak gerekçeye.
+  const actionsHead = useRef<HTMLHeadingElement>(null);
+  const reasonRef = useRef<HTMLTextAreaElement>(null);
+  const focusActions = (): void => {
+    actionsHead.current?.focus();
+    actionsHead.current?.scrollIntoView({ block: "nearest" });
+  };
+  useEffect(() => {
+    if (cancelOpen) reasonRef.current?.focus();
+  }, [cancelOpen]);
 
   const open = OPEN_STATES.has(session.status);
   const counted = lines.filter((l) => l.counted !== null).length;
@@ -244,6 +296,7 @@ export function CountReview({ slug, session, locations, lines, canReview, canCan
   async function approveAndPost() {
     setConfirm(false);
     const out = await run("approve", () => runAttempt(approveKey, (clientKey) => approveAndPostCountAction({ slug, clientKey, sessionId: session.id })));
+    focusActions();
     if (!out.ok) return;
     // Zincir: onay kalıcıdır. Fiş başarısızsa sunucu durumu APPROVED'dır ("onaylandı, fiş bekliyor"); yenileme bunu gösterir, neden aşağıda kalır.
     if (!out.data.posted) setError({ info: out.data.postError, ctx: "post" });
@@ -251,14 +304,19 @@ export function CountReview({ slug, session, locations, lines, canReview, canCan
   }
   async function postOnly() {
     const out = await run("post", () => runAttempt(postKey, (clientKey) => postCountAdjustmentAction({ slug, clientKey, sessionId: session.id })));
+    focusActions();
     if (out.ok) refresh();
   }
   async function cancel() {
     if (reason.trim() === "") return;
     const out = await run("cancel", () => runAttempt(cancelKey, (clientKey) => cancelCountAction({ slug, clientKey, sessionId: session.id, reason: reason.trim() })));
-    if (!out.ok) return;
+    if (!out.ok) {
+      reasonRef.current?.focus();
+      return;
+    }
     setCancelOpen(false);
     setReason("");
+    focusActions();
     refresh();
   }
 
@@ -292,8 +350,8 @@ export function CountReview({ slug, session, locations, lines, canReview, canCan
                     <h3 className="flex min-w-0 flex-wrap items-center gap-2 break-words text-lg font-bold text-ink">
                       <span className="min-w-0 break-words">{loc === undefined ? "" : loc.name === "" || loc.name === loc.code ? loc.code : `${loc.code} · ${loc.name}`}</span>
                       {loc === undefined ? null : (
-                        <span className="inline-flex min-h-8 items-center gap-1 text-sm font-semibold text-ink-muted">
-                          <Lock aria-hidden="true" className="size-4" />
+                        <span className="inline-flex min-h-8 items-center gap-1 text-sm font-semibold text-ink-muted" data-lock={loc.locked ? "on" : "off"}>
+                          {loc.locked ? <Lock aria-hidden="true" className="size-4" /> : <CircleCheck aria-hidden="true" className="size-4" />}
                           {loc.locked ? t("review.lockOn") : t("review.lockOff")}
                         </span>
                       )}
@@ -317,7 +375,7 @@ export function CountReview({ slug, session, locations, lines, canReview, canCan
       </section>
 
       <section aria-labelledby="count-actions" className="flex min-w-0 flex-col gap-3 self-start rounded-card border-2 border-border bg-surface p-4">
-        <h2 id="count-actions" className="text-xl font-bold text-ink">
+        <h2 id="count-actions" ref={actionsHead} tabIndex={-1} className="text-xl font-bold text-ink focus:outline-none focus-visible:outline-3 focus-visible:outline-focus">
           {t("actions.title")}
         </h2>
         <StatusBadge status={session.status} />
@@ -385,7 +443,11 @@ export function CountReview({ slug, session, locations, lines, canReview, canCan
                     value={reason}
                     maxLength={500}
                     rows={3}
-                    onChange={(e) => setReason(e.target.value)}
+                    ref={reasonRef}
+                    onChange={(e) => {
+                      cancelKey.changed();
+                      setReason(e.target.value);
+                    }}
                     className={`min-h-24 w-full min-w-0 rounded-card border-2 border-border-strong bg-surface p-3 text-base text-ink ${FOCUS}`}
                   />
                 </label>
@@ -393,7 +455,14 @@ export function CountReview({ slug, session, locations, lines, canReview, canCan
                   <Button type="submit" variant="danger" loading={busy} disabled={reason.trim() === ""} data-testid="cancel-confirm">
                     {t("cancel.confirm")}
                   </Button>
-                  <Button variant="secondary" disabled={busy} onClick={() => setCancelOpen(false)}>
+                  <Button
+                    variant="secondary"
+                    disabled={busy}
+                    onClick={() => {
+                      setCancelOpen(false);
+                      focusActions();
+                    }}
+                  >
                     {t("cancel.back")}
                   </Button>
                 </div>
@@ -426,7 +495,10 @@ export function CountReview({ slug, session, locations, lines, canReview, canCan
         variant="primary"
         loading={busy}
         onConfirm={() => void approveAndPost()}
-        onCancel={() => setConfirm(false)}
+        onCancel={() => {
+          setConfirm(false);
+          focusActions();
+        }}
       />
     </div>
   );

@@ -13,6 +13,8 @@ const postCountAdjustment = vi.hoisted(() => vi.fn());
 const cancelCount = vi.hoisted(() => vi.fn());
 const getCountSession = vi.hoisted(() => vi.fn());
 const getLocationTree = vi.hoisted(() => vi.fn());
+const getItem = vi.hoisted(() => vi.fn());
+const resolveBarcodeQuery = vi.hoisted(() => vi.fn());
 const getPrincipal = vi.hoisted(() => vi.fn());
 const runTenantQuery = vi.hoisted(() => vi.fn());
 
@@ -21,6 +23,7 @@ vi.mock("../../../../lib/auth-service.ts", () => ({ getAuthService: () => ({ get
 vi.mock("@wms/db", () => ({ getAppDb: () => ({}) }));
 vi.mock("@wms/domain/operations", () => ({ startCount, recordCount, submitCount, approveCount, postCountAdjustment, cancelCount, getCountSession }));
 vi.mock("@wms/domain/warehouse", () => ({ getLocationTree }));
+vi.mock("@wms/domain/catalog", () => ({ getItem, resolveBarcodeQuery }));
 vi.mock("../../../../lib/rate-limit.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../../lib/rate-limit.ts")>()),
   createProductionLimiter: () => ({ check: () => Promise.resolve() }),
@@ -28,8 +31,8 @@ vi.mock("../../../../lib/rate-limit.ts", async (importOriginal) => ({
 vi.mock("next-intl/server", () => ({ getTranslations: () => Promise.resolve((key: string) => key) }));
 vi.mock("@wms/domain/identity/access", () => ({ runTenantQuery }));
 
-import { approveAndPostCountAction, approveCountAction, cancelCountAction, fieldCountAction, postCountAdjustmentAction, recordCountAction, startCountAction, submitCountAction } from "./actions.ts";
-import { countErrorKey, createAttemptKey, diffSign, needsRefresh, plainQty, runAttempt } from "./[id]/count-review.tsx";
+import { approveAndPostCountAction, approveCountAction, cancelCountAction, fieldCountAction, postCountAdjustmentAction, recordCountAction, resolveCountItemAction, startCountAction, submitCountAction } from "./actions.ts";
+import { addCountQty, countErrorKey, createAttemptKey, diffSign, needsRefresh, parseCountQty, plainQty, runAttempt } from "./[id]/count-review.tsx";
 import type { ActionResult } from "../receipts/receipt-form.tsx";
 
 const SID = "11111111-1111-4111-8111-111111111111";
@@ -103,12 +106,16 @@ describe("anahtar yaşam döngüsü (T-277a: her deneme yeni anahtar; çift gön
   const ok = (): Promise<ActionResult<{ v: number }>> => Promise.resolve({ ok: true, data: { v: 1 } });
   const fail = (code: string, detail?: string): Promise<ActionResult<{ v: number }>> => Promise.resolve({ ok: false, error: { code, detail, requestId: "r" } });
 
-  it("deneme sürerken begin aynı anahtarı verir; settle sonrası yenisini", () => {
+  it("deneme sürerken begin aynı anahtarı verir; sunucu yanıtı sonrası yenisini, yanıt alınamadıysa aynısını", () => {
     const h = createAttemptKey(seq());
     expect(h.begin()).toBe("key-1");
     expect(h.begin()).toBe("key-1");
-    h.settle();
+    h.settle(false);
+    expect(h.begin()).toBe("key-1");
+    h.settle(true);
     expect(h.begin()).toBe("key-2");
+    h.changed();
+    expect(h.begin()).toBe("key-3");
   });
 
   it("çift gönderim (eşzamanlı iki çağrı): aynı anahtar", async () => {
@@ -142,7 +149,7 @@ describe("anahtar yaşam döngüsü (T-277a: her deneme yeni anahtar; çift gön
     expect(used).toEqual(["key-1", "key-2", "key-3"]);
   });
 
-  it("ağ hatası NETWORK olur (yutulmaz) ve sonraki deneme yeni anahtar alır", async () => {
+  it("ağ hatası/zaman aşımı: NETWORK olur (yutulmaz), tekrar AYNI anahtarla gider (çift kayıt olmaz); yanıt alınınca sonraki deneme yeni anahtar alır", async () => {
     const h = createAttemptKey(seq());
     const used: string[] = [];
     const net = await runAttempt(h, (k) => {
@@ -150,6 +157,25 @@ describe("anahtar yaşam döngüsü (T-277a: her deneme yeni anahtar; çift gön
       return Promise.reject(new Error("fetch failed"));
     });
     expect(net).toEqual({ ok: false, error: { code: "NETWORK" } });
+    await runAttempt(h, (k) => {
+      used.push(k);
+      return ok();
+    });
+    await runAttempt(h, (k) => {
+      used.push(k);
+      return ok();
+    });
+    expect(used).toEqual(["key-1", "key-1", "key-2"]);
+  });
+
+  it("içerik değişince (changed) ağ hatasından sonra bile yeni anahtar: aynı anahtar başka içerikle IDEMPOTENCY_MISMATCH verirdi", async () => {
+    const h = createAttemptKey(seq());
+    const used: string[] = [];
+    await runAttempt(h, (k) => {
+      used.push(k);
+      return Promise.reject(new Error("timeout"));
+    });
+    h.changed();
     await runAttempt(h, (k) => {
       used.push(k);
       return ok();
@@ -233,6 +259,62 @@ describe("domain çağrısı: miktarlar dizgi olarak gider (I-09), yazma komutla
   }
 });
 
+describe("ondalıklı ürün (SR-MAJOR): saha miktarı ürün ölçeğine göre ondalık, metin olarak gider (I-09), yuvarlama yok", () => {
+  it("2,5 kg (ölçek 3): virgül/nokta kabul, kanonik metin '2.5'; tam sayı üründe mevcut davranış", () => {
+    expect(parseCountQty("2,5", 3)).toEqual({ ok: true, value: "2.5" });
+    expect(parseCountQty("2.5", 3)).toEqual({ ok: true, value: "2.5" });
+    expect(parseCountQty("2,500", 1)).toEqual({ ok: true, value: "2.5" }); // sondaki sıfırlar ölçek aşımı değildir
+    expect(parseCountQty("0,125", 3)).toEqual({ ok: true, value: "0.125" });
+    expect(parseCountQty("007", 0)).toEqual({ ok: true, value: "7" });
+    expect(parseCountQty("12", 0)).toEqual({ ok: true, value: "12" });
+    expect(parseCountQty("12,", 0)).toEqual({ ok: true, value: "12" });
+  });
+
+  it("ölçek aşımı sessizce kırpılmaz, reddedilir; tam sayı üründe ondalık reddedilir; biçim ve boyut denetimi", () => {
+    expect(parseCountQty("2,5551", 3)).toEqual({ ok: false, reason: "scale" });
+    expect(parseCountQty("2,5", 0)).toEqual({ ok: false, reason: "scale" });
+    expect(parseCountQty("", 2)).toEqual({ ok: false, reason: "empty" });
+    expect(parseCountQty("1,2,3", 3)).toEqual({ ok: false, reason: "format" });
+    expect(parseCountQty("abc", 3)).toEqual({ ok: false, reason: "format" });
+    expect(parseCountQty("-1", 3)).toEqual({ ok: false, reason: "format" });
+    expect(parseCountQty("1234567890", 0)).toEqual({ ok: false, reason: "large" });
+  });
+
+  it("toplama kesin (kayan nokta yok), üst sınıra kırpılır, 0'ın altına inmez", () => {
+    expect(addCountQty("0.1", "0.2")).toBe("0.3");
+    expect(addCountQty("2.5", "12")).toBe("14.5");
+    expect(addCountQty("0", "-1")).toBe("0");
+    expect(addCountQty("999999999", "12")).toBe("999999999");
+    expect(addCountQty("2.5", "-1")).toBe("1.5");
+  });
+
+  it("recordCount: 2,5 kg sayımı ondalık METİN olarak domain'e gider; ölçek aşımı sunucuda QUANTITY_SCALE ile reddedilir ve aktarılır", async () => {
+    recordCount.mockResolvedValue({ recorded: 1 });
+    const q = parseCountQty("2,5", 3);
+    expect(q.ok).toBe(true);
+    await recordCountAction({ ...base, sessionId: SID, lines: [{ locationId: LOC, itemId: ITEM, countedQuantity: q.ok ? q.value : "" }] });
+    const sent = (recordCount.mock.calls[0]?.[1] as { lines: Array<{ countedQuantity: unknown }> }).lines[0]?.countedQuantity;
+    expect(sent).toBe("2.5");
+    expect(typeof sent).toBe("string");
+    recordCount.mockRejectedValue(new AppError("VALIDATION_FAILED", { detail: "QUANTITY_SCALE" }));
+    expect(await recordCountAction({ ...base, sessionId: SID, lines: [{ locationId: LOC, itemId: ITEM, countedQuantity: "2.5551" }] })).toMatchObject({ ok: false, error: { code: "VALIDATION_FAILED", detail: "QUANTITY_SCALE" } });
+    expect(countErrorKey({ code: "VALIDATION_FAILED", detail: "QUANTITY_SCALE" }, "record")).toBe("quantity_scale");
+  });
+
+  it("resolveCountItemAction: barkod çözümü AYNEN (baseQuantity) + ürün ölçeği; koli adedi sunucudan gelir", async () => {
+    resolveBarcodeQuery.mockResolvedValue({ itemId: ITEM, unitId: "u", quantity: "1", unitFactor: "12", baseQuantity: "12" });
+    getItem.mockResolvedValue({ id: ITEM, code: "K1", name: "Kablo", baseUnitId: "u", quantityScale: 3 });
+    expect(await resolveCountItemAction({ slug: "acme", code: "869" })).toEqual({ ok: true, data: { itemId: ITEM, itemCode: "K1", itemName: "Kablo", baseQuantity: "12", quantityScale: 3 } });
+  });
+
+  it("saha satırları ölçeği taşır; referans yine taşınmaz", async () => {
+    getCountSession.mockResolvedValue({ view: "field", session: { id: SID }, locations: [], lines: [{ id: "l1", locationId: LOC, itemId: ITEM, itemCode: "C", itemName: "Kablo", unitCode: "M", unitName: "Metre", quantityScale: 3, stockStatus: "AVAILABLE", counted: "2.500000" }] });
+    const res = (await fieldCountAction({ slug: "acme", sessionId: SID })) as { data: { lines: Array<Record<string, unknown>> } };
+    expect(res.data.lines[0]).toMatchObject({ quantityScale: 3, counted: "2.500000" });
+    expect(Object.keys(res.data.lines[0] ?? {}).sort()).toEqual(["counted", "id", "itemCode", "itemId", "itemName", "locationId", "quantityScale", "stockStatus", "unitCode", "unitName"]);
+  });
+});
+
 describe("kör kip: saha okuması yalnız `field` kipini kullanır ve referans/fark alanı istemciye geçmez", () => {
   it("fieldCountAction: view=field; domain yanlışlıkla referans/fark sızdırsa bile yanıtta yoktur", async () => {
     getCountSession.mockResolvedValue({
@@ -259,6 +341,10 @@ describe("kör kip: saha okuması yalnız `field` kipini kullanır ve referans/f
     // Yalnız gözden geçirme sayfası `review` okur ve onu `count_diff.approve` koşuluna bağlar.
     const review = readFileSync(path.join(__dirname, "[id]/page.tsx"), "utf8");
     expect(review).toMatch(/canReview\s*\?\s*await getCountSession\(call, \{ sessionId: id, view: "review" \}\)/);
+    // `count_diff.approve` yoksa satır listesi istemciye hiç gitmez: eşleme yalnız `review` dalındadır, yetkisizde boş dizi (davranış AC-04 dosyasında sınanır).
+    expect(review).toMatch(/detail\.view === "review"\s*\?\s*detail\.lines\.map/);
+    expect(review).toMatch(/\)\s*:\s*\[\];/);
+    expect(review).toMatch(/canReview = hasPermission\(current\.roles, "count_diff\.approve"\)/);
   });
 });
 
@@ -390,7 +476,7 @@ describe("i18n: her hata anahtarı ve her statik anahtar için TR + EN ileti var
     ["VERSION_CONFLICT"], ["IDEMPOTENCY_MISMATCH"], ["NOT_FOUND"], ["UNAUTHENTICATED"], ["RATE_LIMITED"], ["TENANT_SUSPENDED"], ["TENANT_CLOSING"], ["NETWORK"], ["INTERNAL"],
   ] as const;
   for (const [code, detail] of errs) for (const c of ctxs) keys.add(countErrorKey({ code, detail }, c));
-  for (const k of ["loc_not_in_session", "loc_closed", "unit_mismatch", "qty_fractional", "finish_first"]) keys.add(k);
+  for (const k of ["loc_not_in_session", "loc_closed", "unit_mismatch", "qty_fractional", "finish_first", "flow_closed"]) keys.add(k);
 
   for (const f of ["tr.json", "en.json"]) {
     it(`${f}: ${keys.size} hata anahtarı + sonraki eylem`, () => {

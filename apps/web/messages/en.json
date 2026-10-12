@@ -1892,7 +1892,9 @@
       "review": "Review",
       "view": "Open",
       "countInField": "Count in the field",
-      "more": "Show more"
+      "more": "Show more",
+      "startedBy": "Started by: {name}",
+      "codes": "Shelves: {codes}"
     },
     "form": {
       "title": "Start a new count",
@@ -1911,13 +1913,22 @@
       "noLocations": "No shelf found.",
       "moreLocations": "Load more shelves",
       "blind": "Blind count",
-      "blindHint": "When on, the counter does not see the system quantity. The field screen is always blind.",
+      "blindHint": "The counter does not see the system quantity. The field screen works this way for every count; the choice is saved with the count.",
       "selected": "{n} shelves selected.",
       "selectMax": "At most {max} shelves.",
       "start": "Start count",
       "confirmTitle": "Start the count?",
       "confirmBody": "{n} shelves will be locked. No stock moves on them until the count ends.",
-      "confirmStart": "Start"
+      "confirmStart": "Lock shelves",
+      "lockedUnknown": "The system does not say which shelf is busy. Your selection: {codes}.",
+      "droppedLocked": "Removed from the selection because it is already in a count: {codes}.",
+      "inCount": "In a count",
+      "kind": {
+        "RECEIVING": "Receiving shelf",
+        "STORAGE": "Storage shelf",
+        "STAGING": "Staging shelf",
+        "TRANSIT": "Transit"
+      }
     },
     "review": {
       "title": "Count review",
@@ -1948,7 +1959,7 @@
       "confirmTitle": "Approve the difference?",
       "confirmBody": "The difference on {n} lines is posted to stock and shelves unlock. This cannot be undone.",
       "confirmNone": "No difference. The count closes and shelves unlock.",
-      "confirm": "Approve"
+      "confirm": "Post to stock"
     },
     "post": {
       "pending": "Approved, voucher pending.",
@@ -1963,7 +1974,7 @@
       "button": "Cancel count",
       "effect": "No difference will be applied, shelves will unlock.",
       "reason": "Cancel reason",
-      "reasonHint": "Required; saved in the audit log. At most 500 characters. Do not write personal data.",
+      "reasonHint": "Required; saved as who cancelled and why. At most 500 characters. Do not write personal data.",
       "confirm": "Cancel count",
       "back": "Go back",
       "locked": "Cancelling a count needs approval rights. Ask your manager."
@@ -2002,7 +2013,7 @@
       "atLocation": "Shelf: {name}",
       "noneBody": "Every item you did not scan on this shelf is saved as 0.",
       "qtyTitle": "How many are there?",
-      "qtyInstruction": "Enter the number you counted on the shelf.",
+      "qtyInstruction": "Enter the quantity you counted. Use a comma for decimals.",
       "save": "Save",
       "verify": "Scanned item",
       "countedBefore": "You counted {n} before. Saving replaces it.",
@@ -2018,19 +2029,35 @@
       "checking": "Checking…",
       "itemPrompt": "Scan the item barcode.",
       "locPrompt": "Scan the shelf barcode.",
-      "noneButton": "No other item on this shelf"
+      "noneButton": "No other item on this shelf",
+      "alertOk": "OK",
+      "alertRetry": "Scan again",
+      "sendSummary": "{locs} shelves, {items} items counted.",
+      "backToSend": "Back to sending",
+      "qtyErr": {
+        "empty": "Quantity is empty.",
+        "emptyAction": "Type a quantity.",
+        "format": "Quantity must be a number.",
+        "formatAction": "Type digits, for example 2,5.",
+        "scale": "This item takes at most {scale} decimals.",
+        "scaleAction": "Delete the extra digits.",
+        "scaleInt": "This item is counted in whole numbers.",
+        "scaleIntAction": "Delete what follows the comma.",
+        "large": "Quantity is too large.",
+        "largeAction": "Check the quantity."
+      }
     },
     "errors": {
       "network": "Connection lost.",
-      "networkAction": "Try the same action again. First check whether it was saved.",
+      "networkAction": "Try the same action again. It will not be saved twice.",
       "forbidden": "You cannot do this.",
       "forbiddenAction": "Tell your manager or call for help.",
       "forbidden_scope": "You do not have access to this warehouse.",
       "forbidden_scopeAction": "Ask your manager for access.",
       "location_locked": "This shelf has no count lock, or it closed.",
       "location_lockedAction": "Scan another shelf or tell your manager.",
-      "start_locked": "One of the shelves is busy. No shelf was locked.",
-      "start_lockedAction": "Try again when the running job ends, or remove that shelf.",
+      "start_locked": "One of the shelves is already in a count or has a running job.",
+      "start_lockedAction": "No shelf was locked. Remove the shelf in a count, or retry when the job ends.",
       "start_invalid": "The count could not start with this selection.",
       "start_invalidAction": "There may be lot or serial tracked stock. Change the selection and retry.",
       "insufficient_stock": "Difference not posted: stock would fall below the reservation.",
@@ -2078,7 +2105,9 @@
       "qty_fractional": "This barcode quantity is not a whole number.",
       "qty_fractionalAction": "Type the quantity or count on the desktop.",
       "finish_first": "Save the open item first.",
-      "finish_firstAction": "Scan the same item or press Save."
+      "finish_firstAction": "Scan the same item or press Save.",
+      "flow_closed": "The count closed or the shelf lock was released.",
+      "flow_closedAction": "Press OK; the screen updates."
     }
   }
 }

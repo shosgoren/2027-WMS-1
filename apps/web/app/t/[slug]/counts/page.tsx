@@ -7,7 +7,7 @@ import { ClipboardCheck, EmptyState, Lock, TriangleAlert } from "@wms/ui";
 import { getAppDb } from "@wms/db";
 import { getMembershipSummary } from "@wms/domain/identity/member-queries";
 import { hasPermission } from "@wms/domain/identity/permissions";
-import { listCountSessions, listTasks, type CountSessionCursor } from "@wms/domain/operations";
+import { getCountSession, listCountSessions, listTasks, type CountSessionCursor } from "@wms/domain/operations";
 import { listWarehouses } from "@wms/domain/warehouse";
 import { AppError } from "@wms/shared/errors";
 import { StatusBadge } from "./[id]/count-review.tsx";
@@ -20,6 +20,7 @@ const FOCUS = "focus-visible:outline-3 focus-visible:outline-offset-2 focus-visi
 const LINK_BTN = `inline-flex min-h-12 min-w-12 items-center justify-center rounded-control border-2 border-border-strong bg-surface px-4 text-base font-bold text-ink ${FOCUS}`;
 
 // Kapanmış oturumda raf sayısı 0 dönebilir (kilit serbest, satırsız; T-316a `locationCount` tanımı): yanıltıcı "0 raf" gösterilmez.
+// Terk edilmiş oturumlar listenin üstündedir (sayfa içi sıralama; keyset sırası değişmez).
 // Sayfalı liste (≤30 satır/sayfa, keyset; R-11 deseni: sanallaştırma kütüphanesi kurulu değil, 200+ satırlık tek sayfa gerekince takip kartı).
 const PAGE_SIZE = 30;
 
@@ -52,6 +53,8 @@ export default async function CountsPage({ params, searchParams }: { params: Pro
   const t = await getTranslations("counting");
   const format = await getFormatter();
 
+  const codesBySession = new Map<string, string[]>();
+  const lockedIds = new Set<string>();
   let roles: readonly string[];
   let page: Awaited<ReturnType<typeof listCountSessions>>;
   let warehouses: Awaited<ReturnType<typeof listWarehouses>>;
@@ -64,6 +67,12 @@ export default async function CountsPage({ params, searchParams }: { params: Pro
     page = await listCountSessions(call, { limit: PAGE_SIZE, ...(after === undefined ? {} : { afterKey: after }) });
     warehouses = await listWarehouses(call);
     tasks = await listTasks(call, { kind: "COUNT", status: "OPEN", limit: 50 });
+    // Sayımda olan raflar (açık oturumların kilitli lokasyonları; `field` kipi, miktar yok): raf seçicide işaretlenir, listede kodlarıyla gösterilir.
+    for (const s of page.items.filter((x) => x.status === "COUNTING")) {
+      const d = await getCountSession(call, { sessionId: s.id, view: "field" });
+      codesBySession.set(s.id, d.locations.filter((l) => l.locked).map((l) => l.code));
+      for (const l of d.locations) if (l.locked) lockedIds.add(l.id);
+    }
   } catch (e) {
     if (e instanceof AppError) {
       if (e.code === "NOT_FOUND" || e.code === "VALIDATION_FAILED") notFound();
@@ -93,7 +102,7 @@ export default async function CountsPage({ params, searchParams }: { params: Pro
             <EmptyState icon={<ClipboardCheck aria-hidden="true" className="size-6" />} title={t("list.empty")} description={t("list.emptyAction")} />
           ) : (
             <ul aria-label={t("list.title")} className="m-0 flex list-none flex-col gap-3 p-0" data-testid="count-list">
-              {page.items.map((s) => (
+              {[...page.items].sort((a, b) => Number(b.abandoned) - Number(a.abandoned)).map((s) => (
                 <li key={s.id} data-testid="count-row" data-session-id={s.id} className="flex min-w-0 flex-col gap-2 rounded-card border-2 border-border bg-surface p-4">
                   <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
                     <h3 className="break-words text-lg font-bold text-ink">{s.warehouseName}</h3>
@@ -103,6 +112,12 @@ export default async function CountsPage({ params, searchParams }: { params: Pro
                     {s.locationCount > 0 ? `${t("list.locations", { n: s.locationCount })} · ` : ""}
                     {t("list.started", { when: format.dateTime(new Date(`${s.startedAt.slice(0, 23)}Z`), { dateStyle: "medium", timeStyle: "short" }) })}
                   </p>
+                  {s.startedBy.name === null ? null : <p className="break-words text-base text-ink-muted">{t("list.startedBy", { name: s.startedBy.name })}</p>}
+                  {(codesBySession.get(s.id) ?? []).length === 0 ? null : (
+                    <p className="break-words text-base text-ink" data-testid="count-row-codes">
+                      {t("list.codes", { codes: (codesBySession.get(s.id) ?? []).slice(0, 4).join(", ") + ((codesBySession.get(s.id) ?? []).length > 4 ? ` +${(codesBySession.get(s.id) ?? []).length - 4}` : "") })}
+                    </p>
+                  )}
                   {s.abandoned ? (
                     <p className="flex min-w-0 items-start gap-2 text-base font-bold text-warning-ink" data-testid="abandoned-badge">
                       <TriangleAlert aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-warning" />
@@ -139,6 +154,7 @@ export default async function CountsPage({ params, searchParams }: { params: Pro
           slug={slug}
           warehouses={warehouses.items.filter((w) => w.status === "ACTIVE").map((w) => ({ id: w.id, code: w.code, name: w.name }))}
           tasks={tasks.items.filter((x) => x.locationId !== null).map((x) => ({ id: x.id, warehouseId: x.warehouseId, locationId: x.locationId as string }))}
+          lockedLocationIds={[...lockedIds]}
           canStart={hasPermission(roles, "document.approve")}
         />
       </div>

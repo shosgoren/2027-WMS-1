@@ -111,7 +111,7 @@ export default async function FieldCountPage({ params, searchParams }: { params:
         sessionId={d.session.id}
         warehouseId={d.session.warehouseId}
         initialLocations={d.locations.map((l) => ({ id: l.id, code: l.code, name: l.name, locked: l.locked }))}
-        initialLines={d.lines.map((l) => ({ id: l.id, locationId: l.locationId, itemId: l.itemId, itemCode: l.itemCode, itemName: l.itemName, unitName: l.unitName || l.unitCode, stockStatus: l.stockStatus, counted: l.counted }))}
+        initialLines={d.lines.map((l) => ({ id: l.id, locationId: l.locationId, itemId: l.itemId, itemCode: l.itemCode, itemName: l.itemName, unitName: l.unitName || l.unitCode, quantityScale: l.quantityScale, stockStatus: l.stockStatus, counted: l.counted }))}
       />
     );
   } catch (e) {

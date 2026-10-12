@@ -1892,7 +1892,9 @@
       "review": "Gözden geçir",
       "view": "Aç",
       "countInField": "Sahada say",
-      "more": "Daha fazla göster"
+      "more": "Daha fazla göster",
+      "startedBy": "Başlatan: {name}",
+      "codes": "Raflar: {codes}"
     },
     "form": {
       "title": "Yeni sayım başlat",
@@ -1911,13 +1913,22 @@
       "noLocations": "Raf bulunamadı.",
       "moreLocations": "Daha fazla raf yükle",
       "blind": "Kör sayım",
-      "blindHint": "Açıkken sayıcı sistem miktarını görmez. Saha ekranı her durumda kördür.",
+      "blindHint": "Sayıcı sistemdeki miktarı görmez. Saha ekranı her sayımda böyle çalışır; bu seçim kayda yazılır.",
       "selected": "{n} raf seçildi.",
       "selectMax": "En çok {max} raf seçilir.",
       "start": "Sayımı başlat",
       "confirmTitle": "Sayım başlatılsın mı?",
       "confirmBody": "{n} raf kilitlenir. Sayım bitene kadar bu raflarda stok hareketi yapılamaz.",
-      "confirmStart": "Başlat"
+      "confirmStart": "Rafları kilitle",
+      "lockedUnknown": "Hangi rafın dolu olduğunu sistem söylemiyor. Seçtiklerin: {codes}.",
+      "droppedLocked": "Zaten sayımda olduğu için seçimden çıkarıldı: {codes}.",
+      "inCount": "Sayımda",
+      "kind": {
+        "RECEIVING": "Kabul rafı",
+        "STORAGE": "Depolama rafı",
+        "STAGING": "Hazırlık rafı",
+        "TRANSIT": "Transit"
+      }
     },
     "review": {
       "title": "Sayım gözden geçirme",
@@ -1948,7 +1959,7 @@
       "confirmTitle": "Fark onaylansın mı?",
       "confirmBody": "{n} satırdaki fark stoğa işlenir ve raflar açılır. Bu işlem geri alınmaz.",
       "confirmNone": "Fark yok. Sayım kapanır ve raflar açılır.",
-      "confirm": "Onayla"
+      "confirm": "Stoğa işle"
     },
     "post": {
       "pending": "Onaylandı, fiş bekliyor.",
@@ -1963,7 +1974,7 @@
       "button": "Sayımı iptal et",
       "effect": "Fark uygulanmayacak, kilit açılacak.",
       "reason": "İptal gerekçesi",
-      "reasonHint": "Zorunlu; denetim kaydına yazılır. En çok 500 karakter. Kişisel bilgi yazma.",
+      "reasonHint": "Zorunlu; kim, neden iptal etti diye kaydedilir. En çok 500 karakter. Kişisel bilgi yazma.",
       "confirm": "İptal et",
       "back": "Vazgeç",
       "locked": "Sayımı iptal etmek için onay yetkisi gerekir. Yöneticine söyle."
@@ -2002,7 +2013,7 @@
       "atLocation": "Raf: {name}",
       "noneBody": "Bu rafta okutmadığın her ürün 0 olarak kaydedilir.",
       "qtyTitle": "Kaç adet var?",
-      "qtyInstruction": "Rafta saydığın adedi gir.",
+      "qtyInstruction": "Rafta saydığın miktarı gir. Ondalık için virgül kullan.",
       "save": "Kaydet",
       "verify": "Okutulan ürün",
       "countedBefore": "Daha önce {n} saydın. Kaydedersen değişir.",
@@ -2018,19 +2029,35 @@
       "checking": "Kontrol ediliyor…",
       "itemPrompt": "Ürün barkodunu okut.",
       "locPrompt": "Raf barkodunu okut.",
-      "noneButton": "Bu rafta başka ürün yok"
+      "noneButton": "Bu rafta başka ürün yok",
+      "alertOk": "Tamam",
+      "alertRetry": "Tekrar okut",
+      "sendSummary": "{locs} raf, {items} ürün sayıldı.",
+      "backToSend": "Göndermeye dön",
+      "qtyErr": {
+        "empty": "Miktar boş.",
+        "emptyAction": "Bir miktar yaz.",
+        "format": "Miktar sayı olmalı.",
+        "formatAction": "Rakam yaz, örnek: 2,5.",
+        "scale": "Bu ürün en çok {scale} ondalık alır.",
+        "scaleAction": "Fazla basamağı sil.",
+        "scaleInt": "Bu ürün tam sayı sayılır.",
+        "scaleIntAction": "Virgülden sonrasını sil.",
+        "large": "Miktar çok büyük.",
+        "largeAction": "Miktarı kontrol et."
+      }
     },
     "errors": {
       "network": "Bağlantı koptu.",
-      "networkAction": "Aynı işlemi yeniden dene. Önce listede kayıt var mı bak.",
+      "networkAction": "Aynı işlemi yeniden dene. Çift kayıt olmaz.",
       "forbidden": "Bu işlem için yetkin yok.",
       "forbiddenAction": "Yöneticine söyle ya da yardım çağır.",
       "forbidden_scope": "Bu depoda çalışma iznin yok.",
       "forbidden_scopeAction": "Yöneticinden depoyu iste.",
       "location_locked": "Bu rafta sayım kilidi yok ya da kapandı.",
       "location_lockedAction": "Başka raf okut ya da yöneticine söyle.",
-      "start_locked": "Raflardan biri dolu. Hiçbir raf kilitlenmedi.",
-      "start_lockedAction": "Süren işlem bitince yeniden dene ya da o rafı seçimden çıkar.",
+      "start_locked": "Raflardan biri zaten sayımda ya da üzerinde işlem var.",
+      "start_lockedAction": "Hiçbir raf kilitlenmedi. Sayımdaki rafı çıkar ya da işlem bitince yeniden dene.",
       "start_invalid": "Sayım bu seçimle başlatılamadı.",
       "start_invalidAction": "Lot ya da seri takipli stok olabilir. Seçimi değiştirip dene.",
       "insufficient_stock": "Fark işlenemedi: stok rezervasyonun altına iniyor.",
@@ -2078,7 +2105,9 @@
       "qty_fractional": "Bu barkodun adedi tam sayı değil.",
       "qty_fractionalAction": "Adedi elle yaz ya da masaüstünden say.",
       "finish_first": "Önce açık ürünü kaydet.",
-      "finish_firstAction": "Aynı ürünü okut ya da Kaydet'e bas."
+      "finish_firstAction": "Aynı ürünü okut ya da Kaydet'e bas.",
+      "flow_closed": "Sayım kapandı ya da rafın kilidi açıldı.",
+      "flow_closedAction": "Tamam'a bas; ekran güncellenir."
     }
   }
 }
