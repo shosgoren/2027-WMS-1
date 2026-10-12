@@ -20,7 +20,7 @@
 import { sql } from "drizzle-orm";
 import type { StockDimensionKey } from "@wms/db";
 import { AppError } from "@wms/shared/errors";
-import type { AccessTx } from "../identity/access.ts";
+import type { AccessTx, Membership } from "../identity/access.ts";
 import {
   SYNC_POST_MAX_LINES,
   executeStockCommand,
@@ -31,6 +31,7 @@ import {
   type StockDocCallParams,
 } from "../stock/index.ts";
 import { dimensionIdentity, toMicro } from "../stock/plan.ts";
+import { assertWarehouseVisible } from "../warehouse/scope.ts";
 import { readReservationPlanRows, versionConflict, type ReservationPlanRow } from "../stock/reservation-reads.ts";
 import {
   DECIMAL_RE,
@@ -167,6 +168,13 @@ async function shippableRows(tx: AccessTx, tenantId: string, orderLineId: string
   return (await readReservationPlanRows(tx, tenantId, { orderLineId })).filter((r) => isShippableReservation(r) && (warehouseId === null || lc(r.warehouseId) === warehouseId));
 }
 
+/** Süzgeç deposu bu tenant'ta var ve çağıranın kapsamında olmalı; aksi `NOT_FOUND` (varlık sızmaz; A-46). Bayrak kapalıyken yalnız varlık denetlenir. */
+async function assertFilterWarehouse(tx: AccessTx, m: Membership, warehouseId: string): Promise<void> {
+  const rows = await tx.execute<{ id: string }>(sql`SELECT id FROM public.warehouses WHERE tenant_id = ${m.tenantId}::uuid AND id = ${warehouseId}::uuid`);
+  if (rows[0] === undefined) throw new AppError("NOT_FOUND");
+  await assertWarehouseVisible(tx, m, [warehouseId]);
+}
+
 function warehousesOf(rowsByLine: ReadonlyMap<string, readonly ReservationPlanRow[]>): string[] {
   return [...new Set([...rowsByLine.values()].flatMap((rs) => rs.map((r) => lc(r.warehouseId))))].sort(cmpStr);
 }
@@ -191,6 +199,9 @@ export async function shipOrder(params: StockDocCallParams, input: ShipOrderInpu
     ...(params.timeouts === undefined ? {} : { timeouts: params.timeouts }),
     ...(params.logger === undefined ? {} : { logger: params.logger }),
     plan: async (tx, _i, m): Promise<StockCommandPlan> => {
+      // T-308b: açık depo süzgeci HER ZAMAN doğrulanır; yok / başka tenant / kapsam dışı depo aynı `NOT_FOUND` (A-277a-1). Süzgeç sonucu boş kalan depoda
+      // INSUFFICIENT_STOCK (miktar) ya da FORBIDDEN (rezervasyon başka depoda) dönmez: aksi, kapsam dışı depodaki stok varlığı ayırt edilirdi.
+      if (warehouseFilter !== null) await assertFilterWarehouse(tx, m, warehouseFilter);
       const rowsByLine = new Map<string, ReservationPlanRow[]>();
       for (const l of lines) rowsByLine.set(l.orderLineId, await shippableRows(tx, m.tenantId, l.orderLineId, warehouseFilter));
       const warehouses = warehousesOf(rowsByLine);

@@ -23,7 +23,8 @@ import {
   reserveOrder,
   shipOrder,
 } from "../../../packages/domain/src/operations/index.ts";
-import { approveDocument, createStockDocument, postDocument, reverseDocument, type DocumentLineInput, type StockDocCallParams } from "../../../packages/domain/src/stock/index.ts";
+import { runTenantCommand } from "../../../packages/domain/src/identity/access.ts";
+import { approveDocument, closeReservations, createStockDocument, postDocument, reverseDocument, type DocumentLineInput, type StockDocCallParams } from "../../../packages/domain/src/stock/index.ts";
 import { mkMembership, mkUser, newRegistry, seedWorld, type TenantWorld } from "../fixtures/tenants.ts";
 import { readIntEnv } from "../harness/env.ts";
 
@@ -737,4 +738,72 @@ describe("depo kapsamı (flag WAREHOUSE_SCOPE_ENABLED)", () => {
     expect(await docCount()).toBe(docs);
     expect(await lineTriple(o.lineIds[0] as string)).toEqual({ istenen: n(4), sevk: n(2), acik: n(2), iptal: n(0), iade: n(0) });
   }, 120_000);
+
+  // T-277a / T-308b: açık `warehouseId` süzgeci kapsam dışı/yok depoda stok VARLIĞINI ya da miktarını sızdırmaz (INSUFFICIENT_STOCK ↔ FORBIDDEN farkı yok): NOT_FOUND.
+  it("T-308b: kapsam dışı ya da bulunmayan warehouseId her durumda aynı NOT_FOUND (rezervasyon olan ve olmayan depo ayırt edilemez); kapsam içi boş depo INSUFFICIENT_STOCK; hiçbir şey yazılmaz", async () => {
+    const WB = uuid();
+    const WC = uuid();
+    await q("INSERT INTO public.warehouses (tenant_id, id, code, name) VALUES ($1,$2,$3,'T277a kapsam B'), ($1,$4,$5,'T277a kapsam C')", [A.tenantId, WB, `W${hex(6)}`, WC, `W${hex(6)}`]);
+    const X = await mkItem();
+    const R = await mkLoc("STORAGE");
+    await mkSevk();
+    await stockIn(X, R, "4");
+    const o = await mkOrder([{ item: X, qty: "4" }]);
+    await reserveAndPick(o, X, R, "4");
+    const scoped = await mkUser(adm, reg, "A308 scoped b");
+    const m = await mkMembership(adm, A.tenantId, scoped, { roles: ["PICKER"] });
+    await q("INSERT INTO public.membership_warehouse_scopes (tenant_id, membership_id, warehouse_id) VALUES ($1,$2,$3)", [A.tenantId, m, WB]);
+    const docs = await docCount();
+    const ship = (userId: string, warehouseId: string) =>
+      shipOrder(callP(A, userId, uuid(), {}), { orderId: o.id, lines: [{ orderLineId: o.lineIds[0] as string, quantity: "2" }], warehouseId });
+    // bayrak kapalı: yok ya da başka tenant'ın deposu
+    expect(codeOf(await failure(ship(A.ownerUserId, uuid())))).toBe("NOT_FOUND");
+    expect(codeOf(await failure(ship(A.ownerUserId, B.warehouseId)))).toBe("NOT_FOUND");
+    process.env.WAREHOUSE_SCOPE_ENABLED = "true";
+    expect(codeOf(await failure(ship(scoped, A.warehouseId)))).toBe("NOT_FOUND"); // kapsam dışı, rezervasyonlar burada
+    expect(codeOf(await failure(ship(scoped, WC)))).toBe("NOT_FOUND"); // kapsam dışı, boş
+    expect(codeOf(await failure(ship(scoped, uuid())))).toBe("NOT_FOUND"); // yok
+    expect(codeOf(await failure(ship(scoped, WB)))).toBe("INSUFFICIENT_STOCK"); // kapsam içi, boş
+    expect(await docCount()).toBe(docs);
+    expect(await lineTriple(o.lineIds[0] as string)).toEqual({ istenen: n(4), sevk: n(0), acik: n(4), iptal: n(0), iade: n(0) });
+    expect(await reservedOf(X)).toBe(n(4));
+    delete process.env.WAREHOUSE_SCOPE_ENABLED;
+    // süzgeç var olan, kapsam içi depoda çalışır
+    const ok = await shipLines(o, [[0, "2"]], uuid(), {}, { warehouseId: A.warehouseId });
+    expect(ok.documentId).toBeDefined();
+    expect(await lineTriple(o.lineIds[0] as string)).toEqual({ istenen: n(4), sevk: n(2), acik: n(2), iptal: n(0), iade: n(0) });
+  }, 180_000);
+});
+
+// T-277a / T-308a: tüketim çekirdeği, kapatılan rezervasyonun GERÇEK sipariş satırını talep kaynağıyla karşılaştırır; yalnız ilgili sipariş satırının rezervasyonu tüketilir.
+describe("T-308a: sipariş satırı ↔ rezervasyon bağı çekirdekte doğrulanır", () => {
+  it("başka sipariş satırının rezervasyonu o satırın kaynağıyla tüketilemez (VALIDATION_FAILED, hiçbir şey değişmez); gerçek sevk yalnız kendi satırının rezervasyonunu tüketir", async () => {
+    const X = await mkItem();
+    const R = await mkLoc("STORAGE");
+    await mkSevk();
+    await stockIn(X, R, "4");
+    const o1 = await mkOrder([{ item: X, qty: "2" }]);
+    const o2 = await mkOrder([{ item: X, qty: "2" }]);
+    await reserveAndPick(o1, X, R, "2");
+    await reserveAndPick(o2, X, R, "2");
+    const l1 = o1.lineIds[0] as string;
+    const l2 = o2.lineIds[0] as string;
+    const r1 = (await reservationsOf(l1))[0] as { id: string; status: string };
+    const dim = (await q<{ stock_dimension_id: string }>("SELECT stock_dimension_id FROM public.reservations WHERE id=$1", [r1.id]))[0]?.stock_dimension_id as string;
+    const owner = ownerP();
+    const bad = runTenantCommand({ db: app, principal: owner.principal, tenantSlug: A.slug, permission: "stock.post" }, (tx) =>
+      closeReservations(tx, A.tenantId, "CONSUMED", [{ id: r1.id, take: 2_000_000n, rest: 0n, dimensionId: dim, source: { kind: "ORDER_LINE", lineId: l2 } }]),
+    );
+    expect(codeOf(await failure(bad))).toBe("VALIDATION_FAILED");
+    expect((await reservationsOf(l1)).map((r) => r.status)).toEqual(["ACTIVE"]);
+    expect(await activeSum(l1)).toBe(n(2));
+    expect(await activeSum(l2)).toBe(n(2));
+    await reservedMatches(X);
+    // gerçek yol: o1 sevki yalnız o1 satırının rezervasyonunu tüketir, o2'ninki ACTIVE kalır
+    await shipLines(o1, [[0, "2"]]);
+    expect((await reservationsOf(l1)).map((r) => r.status)).toEqual(["CONSUMED"]);
+    expect(await activeSum(l2)).toBe(n(2));
+    expect(await reservedOf(X)).toBe(n(2));
+    await reservedMatches(X);
+  }, 180_000);
 });
