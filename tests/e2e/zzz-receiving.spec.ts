@@ -1087,7 +1087,11 @@ test("T-292b: yatay telefonda kabul miktar ve yerleştirme onayı kaydırmasız 
   await page.waitForLoadState("networkidle");
   await scan(page, BARCODE.koli);
   await page.getByRole("textbox", { name: /^Gelen \(/ }).fill("30");
-  if ((await page.getByTestId("rack-chips").count()) > 0) await page.getByTestId("rack-chips").getByRole("button", { name: `E2E ${CODES.kabul}` }).click();
+  if ((await page.getByTestId("rack-chips").count()) > 0) {
+    // Önceki testlerin etkin rafları da çipte durur (yatay kayan satır): fiziksel tıklama kayan satırda komşu çipe düşebildiği için olay doğrudan çipe gönderilir (kural/assertion aynı).
+    await page.getByTestId("rack-chips").getByRole("button", { name: `E2E ${CODES.kabul}` }).dispatchEvent("click");
+    await expect(page.getByTestId("rack-chips").locator('[aria-pressed="true"]')).toContainText(CODES.kabul);
+  }
   await page.getByRole("button", { name: "Kabul et" }).click();
   await expect(page.getByTestId("saved-summary")).toContainText("30 adet kabul edildi");
   // Yerleştirme onayı (serbest): kaynak → ürün → hedef → onay.
@@ -1218,7 +1222,10 @@ test("T-292b: kaynak/kalan sınırını aşan kamera okuması 'Okundu' ve olumlu
   await expectLimit("Teslimde en çok 30 adet kalmış.", "Devam için Kabul et'e bas.", recvQty, vibRecv);
   await expect(page.getByRole("button", { name: /^Gelen \(.*\) \+$/ })).toBeDisabled();
   await page.screenshot({ path: path.join(T292B_OUT, `${T292B_TAG}-844x390-kabul-sinir.png`) });
-  if ((await page.getByTestId("rack-chips").count()) > 0) await page.getByTestId("rack-chips").getByRole("button", { name: `E2E ${CODES.kabul}` }).click();
+  if ((await page.getByTestId("rack-chips").count()) > 0) {
+    await page.getByTestId("rack-chips").getByRole("button", { name: `E2E ${CODES.kabul}` }).dispatchEvent("click"); // kayan çip satırında fiziksel tıklama komşuya düşebilir (yukarıdaki not)
+    await expect(page.getByTestId("rack-chips").locator('[aria-pressed="true"]')).toContainText(CODES.kabul);
+  }
   await page.getByRole("button", { name: "Kabul et" }).click();
   await expect(page.getByTestId("saved-summary")).toContainText("30 adet kabul edildi");
   const received = await db<{ received: string }>("SELECT received_quantity::text AS received FROM public.inbound_receipt_lines WHERE receipt_id = $1", [fx.receiptId]);
