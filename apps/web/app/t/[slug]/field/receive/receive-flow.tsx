@@ -147,8 +147,8 @@ export function FlowShell({ hue, icon, step, total, title, instruction, backHref
       {side === undefined ? null : <div className={LAND_COL}>{side}</div>}
       <div role="group" aria-label={t("primaryBar")} className={`fixed inset-x-0 ${NAV_H} z-10 border-t border-border bg-surface px-4 py-2 group-has-[[data-mode=manual]]:hidden`}>
         <div className="mx-auto flex w-full max-w-md flex-col gap-2 [@media(pointer:coarse)_and_(max-height:500px)]:max-w-4xl [@media(pointer:coarse)_and_(max-height:500px)]:flex-row [@media(pointer:coarse)_and_(max-height:500px)]:items-center [@media(pointer:coarse)_and_(max-height:500px)]:gap-4">
-          {footerExtra === undefined ? null : <div className="min-w-0 [@media(pointer:coarse)_and_(max-height:500px)]:flex-1">{footerExtra}</div>}
-          <div className="min-w-0 [@media(pointer:coarse)_and_(max-height:500px)]:mx-auto [@media(pointer:coarse)_and_(max-height:500px)]:w-72 [@media(pointer:coarse)_and_(max-height:500px)]:shrink-0">{footer}</div>
+          {footerExtra === undefined ? null : <div className="flex min-w-0 flex-col [@media(pointer:coarse)_and_(max-height:500px)]:flex-1">{footerExtra}</div>}
+          <div className="flex min-w-0 flex-col [@media(pointer:coarse)_and_(max-height:500px)]:mx-auto [@media(pointer:coarse)_and_(max-height:500px)]:w-72 [@media(pointer:coarse)_and_(max-height:500px)]:shrink-0">{footer}</div>
         </div>
       </div>
     </main>
