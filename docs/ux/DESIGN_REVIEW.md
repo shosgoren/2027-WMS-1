@@ -185,10 +185,10 @@ Geçerli kural (telefon ana ekranı, ≥ 6 izinli iş = 2 sütun):
 Gerekçe: T-331 ile sipariş, sayım, stok sorgusu ve hata düzeltme etkinleşince yönetici 10 etkin iş görür. Ölçüm (T-331 ilk koşu): iPhone13 664 px'te 8. ve 9. döşeme üst çubuğun 108 px üstüne taştı ("Ekibimi yönet" erişilemedi), 360×740'ta en büyük döşeme 152 px oldu. Eşikler gevşetilmez; ızgaradaki döşeme sayısı azaltılır.
 
 Kural (telefon = `phone` kırılımı; masaüstü/tablet DEĞİŞMEZ ve tüm etkin işleri ızgarada gösterir):
-- Yönetim işleri (`admin` grubu: `members`, `settings`, `audit`) telefonda ana ızgaradan ÇIKAR. Üstteki düğme satırlarına üçüncü bir tek satırlık düğme eklenir: "Daha fazla (n)".
+- Yönetim işleri (`admin` grubu: `members`, `settings`, `audit`; kurulum işleri için sonraki madde) telefonda ana ızgaradan ÇIKAR. Üstteki düğme satırlarına üçüncü bir tek satırlık düğme eklenir: "Daha fazla (n)".
 - Düğme alt sayfa açar (§7.3 B-01 ile aynı biçim). Alt sayfada üç iş de satır olarak listelenir: yetkiliyse etkin bağlantı, değilse kilit + gerekçe ("Bu iş için yetkin yok…"). Kilitli yönetim işleri "Yetkin olmayan işler" alt sayfasında ÇİFT listelenmez.
 - Yerleşim kararı (1 sütun ≤ 5, 2 sütun ≥ 6 iş; D-04 88–140 px; kaydırmasız) yalnız telefonda görünen saha döşemelerinin sayısına göre verilir. D-01/D-04/D-04b, B-02, `emptyRatio`, 48 px hedef eşikleri DEĞİŞMEDİ.
-- Ölçümde saha döşemeleri (`items`, `warehouses` dahil) hâlâ sığmazsa bu ikisi de "Kurulum" başlığıyla aynı alt sayfaya taşınır (bu durumda bu bölüm güncellenir).
+- ÖLÇÜM SONUCU (T-331, yalnız yönetim işleri çıkınca 7 saha döşemesi + yeni düğme 390×664'e sığmadı: 8. döşeme 108 px taştı): kurulum işleri `items` (Ürünlerim) ve `warehouses` (Depo ve raflar) da telefonda ızgaradan çıkar ve aynı "Daha fazla" alt sayfasında (yönetim ve kurulum işleri; satır başına bağlantı ya da kilit + gerekçe) listelenir. Telefon ızgarasında yalnız günlük saha işleri kalır (`receive`, `issue`, `count`, `lookup`, `undo`; izne göre). Masaüstünde hepsi ızgarada.
 - e2e: telefonda ızgara bağlantıları saha kümesidir, yönetim bağlantıları "Daha fazla" içindedir; masaüstünde yönetim bağlantıları ızgaradadır.
 
 ## 8. T-313 mal kabul ve yerleştirme ekranları — tasarım ölçütleri (görüntüden ÖNCE yazıldı)
