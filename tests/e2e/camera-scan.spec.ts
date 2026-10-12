@@ -402,7 +402,19 @@ test("kamera ile el terminali aynı anda: tek sunucu çağrısı, tek uyarı; ge
   await expect(overlay).not.toHaveAttribute("data-phase", "accepted");
   await expect(page.getByTestId("camera-accepted-value")).toHaveCount(0);
   await expect(page.getByTestId("camera-status")).not.toContainText("Okundu.");
+  await expect(page.getByTestId("camera-status")).toContainText("Kod işlenmedi");
   expect(await page.evaluate<number>("window.__fb.tones"), "düşürülen okumada olumlu bip çalmaz").toBe(0);
+  // T-287c güvenlik MAJOR-1: düşürülen kod hiçbir yolla işlenmez. Uyarı kapandıktan sonra kamera aynı kodu kendiliğinden yeniden göndermez;
+  // yalnız kullanıcının açık yeni okutma eylemi (Yeniden okut) kabul edilir.
+  await page.getByRole("button", { name: "Anladım, tekrar okut" }).click();
+  await page.waitForTimeout(3000);
+  expect(posts.length, "düşürülen kamera kodu uyarı kapanınca kendiliğinden işlenmez").toBe(1);
+  await expect(page.getByTestId("scan-alert")).toHaveCount(0);
+  await expect(page.getByTestId("last-scan-code")).toContainText("0000000000000");
+  // Açık kullanıcı eylemi ("Yeniden okut") kodu bu kez işler.
+  await overlay.getByRole("button", { name: "Yeniden okut" }).click();
+  await expect(page.getByTestId("scan-alert")).toBeVisible();
+  expect(posts.length, "yeniden okut eylemi kodu bir kez işler").toBe(2);
 });
 
 test("izin reddi: Tekrar dene izin hâlâ kapalıyken rehbere döner (tekrarlı ve çift tık), izin gelince kamerayı açar", async ({ page }, testInfo) => {

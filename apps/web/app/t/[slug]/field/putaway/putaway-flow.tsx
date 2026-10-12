@@ -49,7 +49,7 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
   const [last, setLast] = useState("");
   const [lastName, setLastName] = useState<string | undefined>(undefined);
   const [busy, setBusy] = useState(false);
-  const [alert, setAlert] = useState<(AlertState & { back?: Stage }) | null>(null);
+  const [alert, setAlert, alertRef] = useStateRef<(AlertState & { back?: Stage }) | null>(null);
   const [error, setError] = useState<ErrorInfo | null>(null);
   const [donePair, setDonePair] = useState<{ item: string; qty: number; to: string } | null>(null);
 
@@ -62,7 +62,8 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
   const onScanned = useCallback(
     async (code: string) => {
       // Eşzamanlı tek çözüm: bayrak ref'tedir; aynı tikteki ikinci okuma kapıda düşer ve bildirilir (`useScanner`).
-      if (busyRef.current) return;
+      // Kapı ref'ten okunur (finally → commit penceresinde uyarı/bitiş durumu henüz render'a düşmemiş olabilir).
+      if (busyRef.current || alertRef.current !== null || stageRef.current === "done") return;
       busyRef.current = true;
       setLast(code);
       setLastName(undefined);
@@ -93,11 +94,13 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
             return;
           }
           // Yerleştirme stokta (temel birim) çalışır: koli okutunca adım koli içi adettir (`baseQuantity`, K-1); kesirli ise uyarı, sessizce 1 değil.
-          const step = scanStepOf(res.data, res.data.baseUnitId);
-          if (step === null) {
-            showAlert("alert.scanTitle", "qty_fractional", "QUANTITY_NOT_WHOLE");
-            return;
-          }
+          // Adım yalnız adedi okutmadan alan yollarda istenir: görevli yerleştirmede miktar görevle sabittir, ondalık ölçekli ürün engellenmez.
+          const stepOf1 = (): number | null => {
+            const r = scanStepOf(res.data, res.data.baseUnitId);
+            if (r.ok) return r.step;
+            showAlert("alert.scanTitle", r.reason === "unit" ? "unit_mismatch" : "qty_fractional", r.reason === "unit" ? "UNIT_MISMATCH" : "QUANTITY_NOT_WHOLE");
+            return null;
+          };
           const current = itemRef.current;
           if (at === "confirm") {
             // Onay ekranında (serbest yerleştirme) aynı ürün yeniden okutulursa adet eklenir (iki koli = iki katı); başka ürün engellenir.
@@ -105,6 +108,8 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
               showAlert("alert.mismatchTitle", "scan_mismatch", "SCAN_MISMATCH");
               return;
             }
+            const step = stepOf1();
+            if (step === null) return;
             holder.contentChanged();
             setLastName(res.data.itemName);
             setQty(Math.min(availRef.current ?? Infinity, qtyRef.current + step));
@@ -127,6 +132,8 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
               showAlert("alert.mismatchTitle", "no_stock_here", "NO_STOCK_HERE");
               return;
             }
+            const step = stepOf1();
+            if (step === null) return;
             setAvail(have);
             // Aynı ürün geri dönüp yeniden okutulduysa adet eklenir; başka ürünse bu okutmanın adedi ile başlar.
             const sameItem = current !== null && current.id === res.data.itemId;
@@ -145,7 +152,7 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
         setBusy(false);
       }
     },
-    [slug, warehouseId, task, holder, setStage, setSource, setItem, setQty, setAvail, stageRef, sourceRef, itemRef, qtyRef, availRef],
+    [slug, warehouseId, task, holder, setStage, alertRef, setSource, setItem, setQty, setAvail, stageRef, sourceRef, itemRef, qtyRef, availRef],
   );
   // Görevsiz yerleştirmede onay ekranında da okuma açıktır (aynı ürün yeniden okutulunca adet artar); görevde adet sabittir.
   const scanning = stage === "source" || stage === "item" || stage === "target" || (stage === "confirm" && task === null);

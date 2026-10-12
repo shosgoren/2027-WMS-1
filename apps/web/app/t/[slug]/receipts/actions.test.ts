@@ -222,14 +222,16 @@ describe("koli okutma (T-287c; K-1/K-3, I-09): adet temel birimde sunucudan geli
     expect(res).toMatchObject({ ok: false, error: { code: "VALIDATION_FAILED" } });
   });
 
-  it("scanStepOf: temel birimde koli = koli içi adet; iki okutma iki koli; koli satırında koli = 1; kesirli null; bilinmeyen birim 1", () => {
+  it("scanStepOf: temel birimde koli = koli içi adet; koli satırında koli = 1; kesirli ve birimsiz eşleşme açık ret (adım uydurulmaz)", () => {
     const koli = { unitId: UNIT_KOLI, quantity: "1", baseQuantity: "12.000000", baseUnitId: UNIT_ADET };
-    expect(scanStepOf(koli, UNIT_ADET)).toBe(12);
-    expect((scanStepOf(koli, UNIT_ADET) ?? 0) * 2).toBe(24);
-    expect(scanStepOf(koli, UNIT_KOLI)).toBe(1);
-    expect(scanStepOf({ ...koli, baseQuantity: "0.5" }, UNIT_ADET)).toBeNull();
-    expect(scanStepOf({ ...koli, unitId: UNIT_ADET, quantity: "12", baseQuantity: "12" }, UNIT_ADET)).toBe(12);
-    expect(scanStepOf(koli, "99999999-9999-4999-8999-999999999999")).toBe(1);
+    expect(scanStepOf(koli, UNIT_ADET)).toEqual({ ok: true, step: 12 });
+    expect(scanStepOf(koli, UNIT_KOLI)).toEqual({ ok: true, step: 1 });
+    expect(scanStepOf({ ...koli, unitId: UNIT_ADET, quantity: "12", baseQuantity: "12" }, UNIT_ADET)).toEqual({ ok: true, step: 12 });
+    expect(scanStepOf({ ...koli, baseQuantity: "0.5" }, UNIT_ADET)).toEqual({ ok: false, reason: "fractional" });
+    // Koli satırında tekli (temel birim) barkod: sayılan birim ne temel ne barkod birimi gibi kesirli koli doğurur → ret; miktar değişmez.
+    const tekli = { unitId: UNIT_ADET, quantity: "1", baseQuantity: "1", baseUnitId: UNIT_ADET };
+    expect(scanStepOf(tekli, UNIT_KOLI)).toEqual({ ok: false, reason: "unit" });
+    expect(scanStepOf(koli, "99999999-9999-4999-8999-999999999999")).toEqual({ ok: false, reason: "unit" });
   });
 });
 

@@ -285,6 +285,8 @@ type CamPhase =
   | { readonly phase: "scanning" }
   | { readonly phase: "rejected"; readonly reason: RejectReason }
   | { readonly phase: "accepted"; readonly value: string }
+  /** Okuma akışa iletilmedi (kod İŞLENMEDİ); kamera açık, döngü durdu: yalnız kullanıcının "Yeniden okut" eylemi yeni okuma başlatır. */
+  | { readonly phase: "dropped" }
   | { readonly phase: "failed"; readonly failure: CameraFailure | "decoder" };
 
 /** Kamera yolu kurulabilir mi: `getUserMedia` var ya da güvenli olmayan bağlam (o durumda katman HTTPS rehberini gösterir). Yoksa donanım tetiği (el terminali). */
@@ -294,8 +296,6 @@ const cameraPossible = (): boolean => typeof window !== "undefined" && typeof na
 const ACCEPT_MAX_MS = 10_000;
 const ACCEPT_IDLE_MS = 1500;
 const ACCEPT_AFTER_RESOLVE_MS = 700;
-/** Akışa iletilmeyen (düşürülen) kamera okumasından sonra yeniden okuma gecikmesi (ms). */
-const DROP_RETRY_MS = 800;
 
 /**
  * Kamera katmanı (T-286): arka kamera + çözücü (yerleşik API ya da uygulama içi WASM, `camera-source.ts`). Yanlış okuma SATIR İÇİ gösterilir, katman ve kamera açık kalır;
@@ -310,6 +310,7 @@ export function CameraOverlay({ onCode, onClose, onManual, resolvedName }: { onC
     onCodeRef.current = onCode;
   });
   const session = useRef<CameraSession | null>(null);
+  const beginRef = useRef<(() => void) | null>(null);
   const [state, setState] = useState<CamPhase>({ phase: "starting" });
   const [attempt, setAttempt] = useState(0);
   const [torch, setTorch] = useState<{ supported: boolean; on: boolean; failed: boolean }>({ supported: false, on: false, failed: false });
@@ -317,7 +318,6 @@ export function CameraOverlay({ onCode, onClose, onManual, resolvedName }: { onC
   useEffect(() => {
     let cancelled = false;
     let stopLoop: (() => void) | null = null;
-    let retry: ReturnType<typeof setTimeout> | null = null;
     let cam: CameraSession | null = null;
     setState({ phase: "starting" });
     setTorch({ supported: false, on: false, failed: false });
@@ -368,10 +368,10 @@ export function CameraOverlay({ onCode, onClose, onManual, resolvedName }: { onC
             setState({ phase: "rejected", reason });
           },
           onAccepted: (value) => {
-            // Okuma akışa İLETİLMEDİYSE (işlem sürüyor/uyarı açık) kabul edilmiş sayılmaz: "Okundu" ekranı ve olumlu bip yok, akış açık kalır, kısa süre sonra yeniden okunur
-            // (kullanıcıya düşme bildirimi üsttedir). Yeniden okuma döngüsü kamera akışını yeniden açmaz.
+            // Okuma akışa İLETİLMEDİYSE (işlem sürüyor/uyarı açık) kabul edilmiş sayılmaz: "Okundu" ekranı ve olumlu bip yok. Düşen kod HİÇBİR yolla işlenmez ve
+            // kamera kendiliğinden yeniden okumaz (aynı kod kullanıcı onayı olmadan sayılırdı); döngü durur, yalnız "Yeniden okut" eylemi yeni okuma başlatır.
             if (!onCodeRef.current(value)) {
-              retry = setTimeout(begin, DROP_RETRY_MS);
+              setState({ phase: "dropped" });
               return;
             }
             // Tek kabul: döngü kendini durdurdu; akış da hemen kapanır (aynı kod ikinci kez gönderilemez). Katmanı kapatma kararı üsttedir (ürün çözülünce).
@@ -382,11 +382,15 @@ export function CameraOverlay({ onCode, onClose, onManual, resolvedName }: { onC
           },
         });
       };
+      beginRef.current = () => {
+        setState({ phase: "scanning" });
+        begin();
+      };
       begin();
     })();
     return () => {
       cancelled = true;
-      if (retry !== null) clearTimeout(retry);
+      beginRef.current = null;
       if (stopLoop !== null) stopLoop();
       cam?.stop();
       session.current = null;
@@ -400,7 +404,7 @@ export function CameraOverlay({ onCode, onClose, onManual, resolvedName }: { onC
     void s.setTorch(next).then((ok) => setTorch((p) => ({ ...p, on: ok ? next : p.on, failed: !ok })));
   };
   const failed = state.phase === "failed";
-  const live = state.phase === "starting" || state.phase === "scanning" || state.phase === "rejected";
+  const live = state.phase === "starting" || state.phase === "scanning" || state.phase === "rejected" || state.phase === "dropped";
   const platform = typeof navigator === "undefined" ? "other" : platformOf(navigator.userAgent, navigator.maxTouchPoints);
   const failureKey = state.phase !== "failed" ? "" : state.failure === "denied" ? `denied_${platform}` : state.failure;
   const message = ((): { key: string; role: "status" | "alert"; tone: "plain" | "bad" | "good" } => {
@@ -413,6 +417,8 @@ export function CameraOverlay({ onCode, onClose, onManual, resolvedName }: { onC
         return { key: `camera.rejected.${state.reason}`, role: "alert", tone: "bad" };
       case "accepted":
         return { key: "camera.accepted", role: "status", tone: "good" };
+      case "dropped":
+        return { key: "camera.notTaken", role: "alert", tone: "bad" };
       case "failed":
         return { key: `camera.error.${failureKey}`, role: "alert", tone: "bad" };
     }
@@ -470,6 +476,11 @@ export function CameraOverlay({ onCode, onClose, onManual, resolvedName }: { onC
         {failed && state.failure !== "none" && state.failure !== "insecure" ? (
           <button type="button" onClick={() => setAttempt((n) => n + 1)} className={btn}>
             {t("camera.retry")}
+          </button>
+        ) : null}
+        {state.phase === "dropped" ? (
+          <button type="button" onClick={() => beginRef.current?.()} className={primaryBtn}>
+            {t("camera.rescan")}
           </button>
         ) : null}
         {torch.supported && !failed && state.phase !== "accepted" ? (
@@ -665,15 +676,23 @@ const wholeOf = (s: string): number | null => {
   return n === null || n < 1 ? null : n;
 };
 
+/** Okutmanın adımı: `step` (tam sayı) ya da açık ret nedeni (`fractional`: tam sayı değil, `unit`: sayılan birimle bağı yok). */
+export type ScanStep = { readonly ok: true; readonly step: number } | { readonly ok: false; readonly reason: "fractional" | "unit" };
+
 /**
  * Bir okutmanın, saydığımız birimde (`countUnitId`) kaç adım artıracağı (K-1/K-3; yuvarlama yok, kesirli koli yok).
- * Sayılan birim temel birimse artış `baseQuantity`'dir (koli okutunca koli içi adet); sayılan birim barkodun kendi birimiyse okutma başına miktar (koli = 1);
- * ikisi de değilse 1 (A-287c-1: birimler arası katsayı istemcide yoktur, uydurulmaz). Tam sayı olmayan sonuç `null` (ekran uyarır, sessizce 1 yapmaz).
+ * Sayılan birim temel birimse artış `baseQuantity`'dir (koli okutunca koli içi adet); sayılan birim barkodun kendi birimiyse okutma başına miktar (koli = 1).
+ * İkisi de değilse (ör. koli satırında tekli barkod) birimler arası katsayı istemcide yoktur: adım UYDURULMAZ, `unit` reddi döner ve miktar değişmez (A-287c-1).
+ * Tam sayı olmayan sonuç `fractional` reddidir (ekran uyarır, sessizce 1 yapmaz).
  */
-export function scanStepOf(scan: ScanQty, countUnitId: string): number | null {
-  if (sameId(countUnitId, scan.baseUnitId)) return wholeOf(scan.baseQuantity);
-  if (sameId(countUnitId, scan.unitId)) return wholeOf(scan.quantity);
-  return 1;
+export function scanStepOf(scan: ScanQty, countUnitId: string): ScanStep {
+  const pick = (s: string): ScanStep => {
+    const n = wholeOf(s);
+    return n === null ? { ok: false, reason: "fractional" } : { ok: true, step: n };
+  };
+  if (sameId(countUnitId, scan.baseUnitId)) return pick(scan.baseQuantity);
+  if (sameId(countUnitId, scan.unitId)) return pick(scan.quantity);
+  return { ok: false, reason: "unit" };
 }
 export const isBaseUnit = (unitId: string, baseUnitId: string): boolean => sameId(unitId, baseUnitId);
 
@@ -755,7 +774,7 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
   const [last, setLast] = useState("");
   const [lastName, setLastName] = useState<string | undefined>(undefined);
   const [busy, setBusy] = useState(false);
-  const [alert, setAlert] = useState<AlertState | null>(null);
+  const [alert, setAlert, alertRef] = useStateRef<AlertState | null>(null);
   const [error, setError] = useState<ErrorInfo | null>(null);
   const [done, setDone] = useState<Done | null>(null);
 
@@ -765,7 +784,8 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
   const onScanned = useCallback(
     async (code: string) => {
       // Eşzamanlı tek çözüm: bayrak ref'tedir (yeniden çizim beklemez); aynı tikteki ikinci okuma kapıda düşer ve bildirilir (`useScanner`).
-      if (busyRef.current) return;
+      // Kapı ref'ten okunur (finally → commit penceresinde uyarı/bitiş durumu henüz render'a düşmemiş olabilir).
+      if (busyRef.current || alertRef.current !== null || stageRef.current === "done") return;
       busyRef.current = true;
       setLast(code);
       setLastName(undefined);
@@ -798,11 +818,12 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
         setLastName(line.itemName);
         const max = intOf(line.open);
         // Okutma başına adım (K-1): satır temel birimdeyse `baseQuantity` (koli okutunca koli içi adet), satır birimi barkod birimiyse okutma başına miktar; kesirli ise uyarı.
-        const step = scanStepOf(res.data, line.unitId);
-        if (step === null) {
-          setAlert({ titleKey: "alert.scanTitle", reasonKey: "qty_fractional", code: "QUANTITY_NOT_WHOLE" });
+        const stepRes = scanStepOf(res.data, line.unitId);
+        if (!stepRes.ok) {
+          setAlert(stepRes.reason === "unit" ? { titleKey: "alert.scanTitle", reasonKey: "unit_mismatch", code: "UNIT_MISMATCH" } : { titleKey: "alert.scanTitle", reasonKey: "qty_fractional", code: "QUANTITY_NOT_WHOLE" });
           return;
         }
+        const step = stepRes.step;
         const cur = pickedRef.current;
         if (stageRef.current === "qty" && cur !== null && cur.line.id === line.id) {
           // Aynı ürünün koli barkodu yeniden okutuldu: adet eklenir (iki koli = iki katı).
@@ -823,7 +844,7 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
         setBusy(false);
       }
     },
-    [slug, receipt, holder, setPicked, setStage, pickedRef, stageRef],
+    [slug, receipt, holder, setPicked, setStage, setAlert, pickedRef, stageRef, alertRef],
   );
   const { service: scanner, camera, dropped, clearDropped } = useScanner((v) => void onScanned(v), stage !== "done" && alert === null && !busy, busyRef);
   const scanPrimary = useScanPrimary(camera, { busy, name: lastName, code: last, alerting: alert !== null });

@@ -1355,7 +1355,9 @@
       "no_stock_here": "Bu rafta bu üründen yok.",
       "no_stock_hereAction": "Doğru rafı okut.",
       "qty_fractional": "Bu barkodun adedi tam sayı değil.",
-      "qty_fractionalAction": "Bu ekran yalnız tam adetle çalışır. Adedi masaüstünden gir."
+      "qty_fractionalAction": "Bu ekran yalnız tam adetle çalışır. Adedi masaüstünden gir.",
+      "unit_mismatch": "Bu barkod bu satırın biriminde değil.",
+      "unit_mismatchAction": "Satırın birimindeki barkodu okut ya da adedi masaüstünden gir."
     },
     "line": {
       "complete": "Tamam",
@@ -1498,6 +1500,8 @@
       "dropped": "Bir kod okundu ama okuma şu an kapalıydı. Kodu yeniden okut.",
       "ok": "Tamam",
       "retry": "Tekrar dene",
+      "notTaken": "Kod işlenmedi: okuma şu an kapalıydı.",
+      "rescan": "Yeniden okut",
       "torchOn": "Feneri aç",
       "torchOff": "Feneri kapat",
       "torchFailed": "Fener açılamadı. Işığı olan yere geç ya da barkodu elle gir.",
