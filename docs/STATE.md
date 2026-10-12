@@ -1,10 +1,10 @@
 # STATE (≤80 satır — her görev sonunda Supervisor günceller)
 
-**Oturum kilidi:** session_01C59FRaUynaDdhNGZoRbKsY · 2026-10-12T03:45Z (zamanlanmış oturum: kilit 3 saatten yeniyse ve başka oturumunsa hiçbir şey yapmadan çık; değilse kendi kimliğinle yenile, her push'ta zamanı güncelle)
+**Oturum kilidi:** session_01C59FRaUynaDdhNGZoRbKsY · 2026-10-12T04:45Z (zamanlanmış oturum: kilit 3 saatten yeniyse ve başka oturumunsa hiçbir şey yapmadan çık; değilse kendi kimliğinle yenile, her push'ta zamanı güncelle)
 **Faz:** 2 stok çekirdeği TAMAM (main) + Faz 3A (int/faz3a: …T-222/253/256/258/259/270/271/272/273/274/304/305/306; tam test:int EXIT=0 82/82 1612+). Kullanıcı UTC+3: saat `date -u` ile. Kota kesintisinde sıfırlanma saatine send_later ZORUNLU.
-**Aktif görev:** Paket #6 (T-289b + T-279b) yerel int 9008e55 tam doğrulama → PR → main → e2e-staging. T-287c düzeltme turu (SR 0·2·5 MAJOR-1/2 + tasarım MAJOR-1 kamera düğmesi + MINOR'lar).
-**Son tamamlanan:** #87 T-286b camera-scan uzak uyumu + T-277/T-289b kartları (0fa4afc, 01:30Z; deploy + guards yeşil) · #86 paket 5b içe aktarma + kilitli sayım (0aa5a72) · #85 kamera okutma (1b7c35b) · önceki: JOURNAL
-**Sonraki adım:** (03:45Z) Paket #6 → main → e2e-staging yeşil. T-287c → delta SR → paket #7 → kullanıcıya ekran görüntüleri. Sonra T-292b (yatay telefon saha ekranları; t292b-todo) → T-277a (stok MINOR'ları, SR) → T-293 ön yüz → T-295 → T-294 → T-287d/T-314 → T-296/T-297; T-277b/c; T-279c (demo.reseed test artıkları). Kullanıcı işi: T-286 gerçek cihaz geri bildirimi, main ruleset, Q-12, Q-102, Q-103, Q-07, sıfır-durum A/B.
+**Aktif görev:** T-287c @ce4ba89: son delta SR 0·0·1 GEÇTİ; tasarım delta incelemesi sürüyor → kullanıcıya ekran görüntüleri → int/faz3a birleşim + tam doğrulama → paket #7 PR → main → e2e-staging.
+**Son tamamlanan:** #88 paket 6 T-289b + T-279b (749b0fb, 04:08Z; CI 15/15, deploy + guards yeşil; e2e-staging run 17 YEŞİL) · #87 T-286b (0fa4afc) · #86 paket 5b (0aa5a72) · önceki: JOURNAL
+**Sonraki adım:** (04:45Z) T-287c tasarım delta → ekran görüntüleri → paket #7 → main → e2e-staging. Sonra T-292b (yatay telefon saha ekranları; t292b-todo) → T-277a (stok MINOR'ları, SR) → T-293 ön yüz → T-295 → T-294 → T-287d/T-314 → T-296/T-297; T-277b/c; T-279c (demo.reseed test artıkları). Kullanıcı işi: T-286 gerçek cihaz geri bildirimi, main ruleset, Q-12, Q-102, Q-103, Q-07, sıfır-durum A/B.
 
 ## Çalışma biçimi (kullanıcı kararı 2026-10-05 — ADR-012 rev., PROTOCOL §Onay kaynağı)
 - Kullanıcı PR incelemez. Birleştirme kapısı: CI/oturumda `pnpm verify` + `check:all` + `test:int` + ilgili `test:ac` yeşil; risk matrisine göre `security-reviewer` ve `qa-verifier` BLOCKER: 0 → Supervisor PR'ı kendisi birleştirir (`mcp__github__merge_pull_request`). Korunan değişiklikte PR açıklamasında `APPROVED-BY: supervisor (ADR-012 rev.)`.
