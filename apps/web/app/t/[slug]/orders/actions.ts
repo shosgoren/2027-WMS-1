@@ -153,7 +153,8 @@ export async function lineStockAction(raw: unknown) {
     return {
       rows: r.rows
         // `available` sorgudan gelir ve uygunluk kuralını (durum, lokasyon türü, pick_blocked) zaten uygular; uygun olmayan boyut "0.000000"dır.
-        .filter((x) => x.available !== "0.000000" && !x.available.startsWith("-"))
+        // `null` = sayımda kilitli lokasyon, kör çağırana miktar gizli (T-334): tahsis edilemez, listede gösterilmez.
+        .filter((x): x is typeof x & { available: string } => x.available !== null && x.available !== "0.000000" && !x.available.startsWith("-"))
         .map((x) => ({
           dimension: {
             locationId: x.locationId,
