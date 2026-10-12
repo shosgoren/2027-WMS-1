@@ -54,7 +54,7 @@ export type NowSummary =
 
 export interface TaskMenuProps {
   readonly slug: string;
-  readonly allowed: { readonly usersManage: boolean; readonly settingsManage: boolean; readonly auditView: boolean; readonly stockView: boolean; readonly stockPost?: boolean };
+  readonly allowed: { readonly usersManage: boolean; readonly settingsManage: boolean; readonly auditView: boolean; readonly stockView: boolean; readonly stockPost?: boolean; readonly reversalCreate?: boolean };
   /** Verilirse (yalnız saha rolleri) ızgaranın üstünde telefon özet kartı çizilir. */
   readonly myTasks?: MyTasksSummary;
   /** `stock.post` sahibi için gerçek bekleyen işler; 2 sütun kipinde (≥ 6 izinli iş) ızgara üstünde, saha rolünde (tek sütun) atanmış iş yoksa Görevlerim özetinin yerinde çizilir. */
@@ -217,6 +217,9 @@ export async function TaskMenu({ slug, allowed, myTasks, now }: TaskMenuProps) {
     warehouses: { allowed: true, href: `${base}/warehouses` },
     // Saha kabulü (T-313): yazma `stock.post`; yetkisiz kullanıcıya bağlantı verilmez (kilit + gerekçe), FORBIDDEN ekranına götürmez.
     receive: { allowed: allowed.stockPost === true, href: `${base}/field/receive` },
+    // "Yanlış bir şey yaptım" (T-333): ters kayıt `reversal.create`; bayrak yalnızca gösterimdir (kilit + gerekçe), hedef sayfa/eylem yetkiyi sunucuda denetler.
+    // Çağıran sayfa `reversalCreate` geçirene kadar döşeme kilitli kalır (aynı kural `receive` için de geçerli).
+    undo: { allowed: allowed.reversalCreate === true, href: `${base}/field/undo` },
   };
   const ordered = orderTasks(TASKS);
   const real = ordered.filter((d) => hrefs[d.key] !== undefined);

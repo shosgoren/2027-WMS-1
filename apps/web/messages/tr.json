@@ -2361,5 +2361,141 @@
       "flow_closed": "Sayım kapandı ya da rafın kilidi açıldı.",
       "flow_closedAction": "Tamam'a bas; ekran güncellenir."
     }
+  },
+  "undo": {
+    "title": "Yanlış bir şey yaptım",
+    "pickInstruction": "Düzeltmek istediğin kaydı seç.",
+    "emptyTitle": "Düzeltilecek kayıt yok",
+    "emptyBody": "Yaptığın son işlemler burada görünür.",
+    "lockedTitle": "Bu işe yetkin yok",
+    "lockedReason": "Kayıt düzeltmek için yetkin yok. Yöneticine haber ver.",
+    "toField": "Sahaya dön",
+    "toList": "Listeye dön",
+    "back": "Geri",
+    "lines": "{count} satır",
+    "kind": {
+      "STOCK_IN": "Giriş",
+      "STOCK_OUT": "Çıkış",
+      "STOCK_MOVE": "Taşıma"
+    },
+    "blocked": {
+      "SOURCE_LINKED": "Düzeltilemez — yöneticine bildir",
+      "STATUS_CHANGE": "Düzeltilemez — yöneticine bildir",
+      "FULLY_REVERSED": "Tamamı zaten geri alındı"
+    },
+    "notFoundTitle": "Kayıt bulunamadı",
+    "notFound": "Bu kayıt listende yok.",
+    "howTitle": "Ne kadarını geri alalım?",
+    "howInstruction": "Tamamını ya da yalnız bazı satırları geri alabilirsin.",
+    "modeAll": "Tamamı",
+    "modeSome": "Satır / miktar",
+    "allNote": "Her satırın kalan miktarı geri alınır.",
+    "lineRemaining": "Kalan: {remaining} {unit}",
+    "qtyLabel": "Geri alınacak miktar ({unit})",
+    "qtyHelp": "Boş bırakırsan bu satır geri alınmaz.",
+    "pickAtLeastOne": "En az bir satıra miktar yaz.",
+    "badQuantity": "Miktar sıfırdan büyük olmalı ve kalanı geçmemeli.",
+    "next": "Devam",
+    "reasonTitle": "Neden geri alıyorsun?",
+    "reasonInstruction": "Kısa bir gerekçe yaz. Kayıtta saklanır.",
+    "reasonLabel": "Gerekçe",
+    "reasonRequired": "Gerekçe yazmalısın.",
+    "summaryAll": "Tamamı geri alınacak: {number}",
+    "summarySome": "{count} satır geri alınacak: {number}",
+    "confirm": "Geri al",
+    "doneTitle": "Geri alındı",
+    "doneBody": "Düzeltme kaydı {number} işlendi.",
+    "detail": "Ayrıntı",
+    "errorCode": "Hata kodu: {code}",
+    "errors": {
+      "network": {
+        "msg": "Bağlantı kesildi.",
+        "action": "Bağlantını kontrol et ve tekrar dene. Aynı işlem iki kez yazılmaz."
+      },
+      "forbidden": {
+        "msg": "Bu işe yetkin yok.",
+        "action": "Yöneticine haber ver."
+      },
+      "not_found": {
+        "msg": "Kayıt bulunamadı.",
+        "action": "Listeye dön ve yeniden seç."
+      },
+      "version_conflict": {
+        "msg": "Kayıt az önce değişti.",
+        "action": "Tekrar dene."
+      },
+      "idempotency_mismatch": {
+        "msg": "Bu istek daha önce başka içerikle gönderilmiş.",
+        "action": "Listeye dönüp işlemi baştan başlat."
+      },
+      "insufficient_stock": {
+        "msg": "Rafta yeterli mal yok.",
+        "action": "Yöneticine haber ver."
+      },
+      "location_locked": {
+        "msg": "Raf şu an sayımda.",
+        "action": "Sayım bitince tekrar dene."
+      },
+      "STOCK_USED": {
+        "msg": "Bu mal sonradan kullanılmış, geri alınamaz.",
+        "action": "Yöneticine haber ver."
+      },
+      "STOCK_RESERVED": {
+        "msg": "Bu mal başka iş için ayrılmış, geri alınamaz.",
+        "action": "Yöneticine haber ver."
+      },
+      "SERIAL_IN_USE": {
+        "msg": "Seri numarası başka yerde duruyor, geri alınamaz.",
+        "action": "Yöneticine haber ver."
+      },
+      "SOURCE_LINKED": {
+        "msg": "Bu kayıt başka bir işe bağlı, buradan düzeltilemez.",
+        "action": "Yöneticine haber ver."
+      },
+      "STATUS_CHANGE": {
+        "msg": "Durum değiştiren taşıma buradan geri alınamaz.",
+        "action": "Yöneticine haber ver."
+      },
+      "EXCEEDS_REMAINING": {
+        "msg": "Miktar geri alınabilecek kalanı geçiyor.",
+        "action": "Miktarı küçült ya da listeye dön."
+      },
+      "blocked": {
+        "msg": "Bu kayıt geri alınamaz.",
+        "action": "Yöneticine haber ver."
+      },
+      "document_state": {
+        "msg": "Bu kayıt artık geri alınamaz.",
+        "action": "Listeye dön ve yeniden bak."
+      },
+      "quantity_scale": {
+        "msg": "Bu ürün için miktar tam sayı olmalı.",
+        "action": "Miktarı düzelt."
+      },
+      "validation_failed": {
+        "msg": "Girilen bilgi geçersiz.",
+        "action": "Miktarı ve gerekçeyi kontrol et."
+      },
+      "rate_limited": {
+        "msg": "Çok sık denedin.",
+        "action": "Biraz bekle, sonra tekrar dene."
+      },
+      "unauthenticated": {
+        "msg": "Oturumun kapanmış.",
+        "action": "Yeniden giriş yap."
+      },
+      "tenant_suspended": {
+        "msg": "Hesap şu an askıda.",
+        "action": "Yöneticine haber ver."
+      },
+      "tenant_closing": {
+        "msg": "Hesap kapatılıyor.",
+        "action": "Yöneticine haber ver."
+      },
+      "internal": {
+        "msg": "Bir sorun oluştu.",
+        "action": "Biraz sonra tekrar dene; sürerse hata kodunu destek ekibine ilet."
+      }
+    }
   }
 }

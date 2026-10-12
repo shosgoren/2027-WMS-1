@@ -311,6 +311,8 @@ const LOADERS = [
   "orders/page.tsx",
   // T-332b: stok sorgu sayfası; üyelik özeti sayfada çözülür, okuma domain `stock.view` ile.
   "field/lookup/page.tsx",
+  // T-333: "Yanlış bir şey yaptım"; üyelik özeti + `listMyRecentDocuments` ile sayfanın kendisinde çözülür.
+  "field/undo/page.tsx",
 ] as const;
 /**
  * T-304: tenant verisi çizmeyen saha kabuğu sayfaları. Üyelik kararı üst `layout.tsx`'tedir (yukarıdaki LOADERS satırı çapraz tenant
