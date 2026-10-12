@@ -662,6 +662,9 @@ test("okuma kapalıyken (uyarı açık) gelen klavye kaması taraması bildirili
   const hit = (a: { y: number; height: number }, b: { y: number; height: number }): boolean => a.y < b.y + b.height && b.y < a.y + a.height;
   expect(n !== null && h !== null && !hit(n, h), "bildirim ana uyarı başlığını örtmez").toBe(true);
   expect(n !== null && closeBtn !== null && !hit(n, closeBtn), "bildirim uyarının düğmesini örtmez").toBe(true);
+  const backBtn = await page.getByRole("button", { name: "Geri" }).or(page.getByRole("link", { name: "Geri" })).first().boundingBox();
+  expect(backBtn, "Geri düğmesi sayfada var").not.toBeNull();
+  expect(n !== null && backBtn !== null && !hit(n, backBtn), "bildirim Geri düğmesini örtmez").toBe(true);
   // Uyarı açıkken tek onay düğmesi vardır (uyarınki); bildirim kendi düğmesini göstermez ve uyarı kapanınca kendiliğinden kalkar.
   await expect(notice.getByRole("button")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Anladım, tekrar okut" })).toHaveCount(1);

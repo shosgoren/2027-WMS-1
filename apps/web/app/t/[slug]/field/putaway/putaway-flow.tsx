@@ -50,6 +50,12 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
   const [lastName, setLastName] = useState<string | undefined>(undefined);
   const [busy, setBusy] = useState(false);
   const [alert, setAlert, alertRef] = useStateRef<(AlertState & { back?: Stage }) | null>(null);
+  // Akış kapısı (ref'ten, eşzamanlı): `onScanned` ile tarama servisi/kamera aynı işlevi kullanır; onay ekranında okuma yalnız görevsiz yerleştirmede açıktır.
+  const blocked = useCallback(() => {
+    const at = stageRef.current;
+    const open = at === "source" || at === "item" || at === "target" || (at === "confirm" && task === null);
+    return busyRef.current || alertRef.current !== null || !open;
+  }, [alertRef, stageRef, task]);
   const [error, setError] = useState<ErrorInfo | null>(null);
   const [donePair, setDonePair] = useState<{ item: string; qty: number; to: string } | null>(null);
 
@@ -63,7 +69,7 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
     async (code: string) => {
       // Eşzamanlı tek çözüm: bayrak ref'tedir; aynı tikteki ikinci okuma kapıda düşer ve bildirilir (`useScanner`).
       // Kapı ref'ten okunur (finally → commit penceresinde uyarı/bitiş durumu henüz render'a düşmemiş olabilir).
-      if (busyRef.current || alertRef.current !== null || stageRef.current === "done") return;
+      if (blocked()) return;
       busyRef.current = true;
       setLast(code);
       setLastName(undefined);
@@ -152,11 +158,11 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
         setBusy(false);
       }
     },
-    [slug, warehouseId, task, holder, setStage, alertRef, setSource, setItem, setQty, setAvail, stageRef, sourceRef, itemRef, qtyRef, availRef],
+    [slug, warehouseId, task, holder, setStage, blocked, setSource, setItem, setQty, setAvail, stageRef, sourceRef, itemRef, qtyRef, availRef],
   );
   // Görevsiz yerleştirmede onay ekranında da okuma açıktır (aynı ürün yeniden okutulunca adet artar); görevde adet sabittir.
   const scanning = stage === "source" || stage === "item" || stage === "target" || (stage === "confirm" && task === null);
-  const { service: scanner, camera, dropped, clearDropped } = useScanner((v) => void onScanned(v), scanning && alert === null && !busy, busyRef);
+  const { service: scanner, camera, dropped, clearDropped } = useScanner((v) => void onScanned(v), scanning && alert === null && !busy, blocked);
   const scanPrimary = useScanPrimary(camera, { busy, name: lastName, code: last, alerting: alert !== null });
 
   async function confirm() {

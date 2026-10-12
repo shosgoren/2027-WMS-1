@@ -223,13 +223,14 @@ export function useStateRef<T>(initial: T): readonly [T, (v: T) => void, { reado
 
 /**
  * Tarama kaynakları: klavye kaması (DataWedge) ve kamera servis arkasındadır (ADR-010); etkin ekran tek dinleyicidir. `enabled=false` iken tarama iletilmez.
- * `busyRef` işlem sürerken eşzamanlı ayarlanan bayraktır (yeniden çizim beklemez): aynı tikte gelen ikinci okuma çözülmez, bildirilir.
+ * `blocked`, akışın KAPISIDIR ve ref'lerden eşzamanlı okunur (işlem sürüyor, uyarı açık, bitti; yeniden çizim beklemez): hem servis kapısı hem `camera()` aynı işlevi kullanır,
+ * böylece kapının atacağı bir okumaya kamera "kabul" demez. Aynı tikte gelen ikinci okuma çözülmez, bildirilir.
  * `camera(code)` kamera okumasını aynı servis yoluyla (`source: "camera"`) iletir ve İLETİLİP İLETİLMEDİĞİNİ döndürür (düşürülen okuma `false`).
  */
 export function useScanner(
   handler: (value: string, source: ScanSource) => void,
   enabled: boolean,
-  busyRef?: { readonly current: boolean },
+  blocked?: () => boolean,
 ): { service: ScannerService | null; camera: (code: string) => boolean; dropped: boolean; clearDropped: () => void } {
   const [service, setService] = useState<ScannerService | null>(null);
   const [dropped, setDropped] = useState(false);
@@ -262,24 +263,24 @@ export function useScanner(
     if (service === null) return undefined;
     return service.onScan(
       gateScan(
-        () => enabledRef.current && busyRef?.current !== true,
+        () => enabledRef.current && blocked?.() !== true,
         (v, src) => ref.current(v, src),
         () => setDropped(true),
       ),
     );
-  }, [service, busyRef]);
+  }, [service, blocked]);
   // Okuma kapalıyken (işlem sürüyor ya da uyarı açık) gelen kamera kodu SESSİZCE düşmez: kullanıcıya bildirilir (T-313 güvenlik MINOR) ve çağırana `false` döner.
   const camera = useCallback(
     (code: string): boolean => {
       const emit = cameraEmit.current;
-      if (!enabledRef.current || busyRef?.current === true || emit === null) {
+      if (!enabledRef.current || blocked?.() === true || emit === null) {
         setDropped(true);
         return false;
       }
       emit(code);
       return true;
     },
-    [busyRef],
+    [blocked],
   );
   const clearDropped = useCallback(() => setDropped(false), []);
   return { service, camera, dropped, clearDropped };
@@ -365,6 +366,7 @@ export function CameraOverlay({ onCode, onClose, onManual, resolvedName }: { onC
       setState({ phase: "scanning" });
       const opened = cam;
       const begin = (): void => {
+        stopLoop?.(); // eski döngü durdurulmadan yenisi kurulmaz ("Yeniden okut"a iki basış iki döngü açmaz)
         stopLoop = startScanLoop({
           decoder,
           video: v,
@@ -658,7 +660,7 @@ export function useScanPrimary(camera: (code: string) => boolean, outcome: ScanO
 export function DroppedNotice({ show, alerting, onClose }: { show: boolean; alerting: boolean; onClose: () => void }) {
   const t = useTranslations("receiving");
   if (!show) return null;
-  // Altta (başlığı ve Geri düğmesini örtmez); tam ekran uyarı açıkken ikinci onay düğmesi YOKTUR: uyarı kapanınca bildirim kendiliğinden kalkar.
+  // Alta yakın (`bottom-40`: birincil çubuğun üstü; üstteki başlığı ve Geri düğmesini örtmez); tam ekran uyarı açıkken ikinci onay düğmesi YOKTUR: uyarı kapanınca bildirim kendiliğinden kalkar.
   // Metin davranışla tutarlıdır: düşen kod işlenmez ve adet eklenmez; yeni okutma yalnız kullanıcının açık eylemiyle olur.
   return (
     <div role="alert" data-testid="camera-dropped" className="fixed inset-x-4 bottom-40 z-[60] mx-auto flex max-w-md items-center gap-3 rounded-card border-2 border-warning bg-warning-bg px-4 py-3 text-warning-ink shadow-card">
@@ -784,6 +786,8 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
   const [lastName, setLastName] = useState<string | undefined>(undefined);
   const [busy, setBusy] = useState(false);
   const [alert, setAlert, alertRef] = useStateRef<AlertState | null>(null);
+  // Akış kapısı (ref'ten, eşzamanlı): `onScanned` ile tarama servisi/kamera aynı işlevi kullanır.
+  const blocked = useCallback(() => busyRef.current || alertRef.current !== null || stageRef.current === "done", [alertRef, stageRef]);
   const [error, setError] = useState<ErrorInfo | null>(null);
   const [done, setDone] = useState<Done | null>(null);
 
@@ -794,7 +798,7 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
     async (code: string) => {
       // Eşzamanlı tek çözüm: bayrak ref'tedir (yeniden çizim beklemez); aynı tikteki ikinci okuma kapıda düşer ve bildirilir (`useScanner`).
       // Kapı ref'ten okunur (finally → commit penceresinde uyarı/bitiş durumu henüz render'a düşmemiş olabilir).
-      if (busyRef.current || alertRef.current !== null || stageRef.current === "done") return;
+      if (blocked()) return;
       busyRef.current = true;
       setLast(code);
       setLastName(undefined);
@@ -853,9 +857,9 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
         setBusy(false);
       }
     },
-    [slug, receipt, holder, setPicked, setStage, setAlert, pickedRef, stageRef, alertRef],
+    [slug, receipt, holder, setPicked, setStage, setAlert, pickedRef, stageRef, blocked],
   );
-  const { service: scanner, camera, dropped, clearDropped } = useScanner((v) => void onScanned(v), stage !== "done" && alert === null && !busy, busyRef);
+  const { service: scanner, camera, dropped, clearDropped } = useScanner((v) => void onScanned(v), stage !== "done" && alert === null && !busy, blocked);
   const scanPrimary = useScanPrimary(camera, { busy, name: lastName, code: last, alerting: alert !== null });
 
   async function confirm() {
