@@ -66,6 +66,21 @@ export {
   type ReceiptView,
   type ReceivingLocationView,
 } from "./receiving-queries.ts";
+// Sipariş okuma sorguları (T-314a; stock.view, keyset, depo kapsamı, satır başına miktar dökümü).
+export {
+  ORDER_LIST_LIMIT_DEFAULT,
+  ORDER_LIST_LIMIT_MAX,
+  SALES_ORDER_STATUSES,
+  getSalesOrder,
+  listSalesOrders,
+  type ListSalesOrdersInput,
+  type SalesOrderCursor,
+  type SalesOrderDetail,
+  type SalesOrderLineView,
+  type SalesOrderListItem,
+  type SalesOrderPage,
+  type SalesOrderStatus,
+} from "./order-queries.ts";
 // Müşteri siparişi, sipariş tahsisi ve iptal (T-306). `allocation.ts` saf öneri işlevidir (birim testi); `allocateInTx`/`releaseSelected` iç çekirdeklerdir: burada YOKTUR.
 export {
   cancelOrderLine,
