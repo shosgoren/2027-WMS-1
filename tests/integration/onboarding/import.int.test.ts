@@ -552,17 +552,84 @@ describe("T-289b: uygulandı işareti, ters kayıt, kilitli boyut, COUNTING, ned
     expect((await previewImport(asAdmin(A), `ürün kodu;raf kodu;miktar\n${p}-1;${shelf};9`)).issues.map((i) => i.code)).toEqual(["PAIR_HAS_STOCK"]);
   });
 
-  it("MINOR-5 (A-289-9): yalnız KİLİTLİ boyut (AVAILABLE) sayılır; yalnız KARANTİNA stoku olan çifte açılış yazılır, AVAILABLE dolu ise yazılmaz", async () => {
+  it("MINOR-5 (A-289-9, seçenek B): çiftin DİĞER boyutlarında (karantina) stok varsa PAIR_HAS_STOCK; stok yazılmaz", async () => {
     const p = pfx();
     const { shelf, loc, item } = await seedPair(p);
     await manualIn(loc, item, "4", { stockStatus: "QUARANTINE" });
     const csv = `ürün kodu;raf kodu;miktar\n${p}-1;${shelf};5`;
-    expect((await previewImport(asAdmin(A), csv)).issues).toEqual([]);
-    expect((await applyAll(() => asAdmin(A), csv))[0]?.counts).toMatchObject({ APPLIED: 1 });
+    const pv = await previewImport(asAdmin(A), csv);
+    expect(pv.issues.map((i) => i.code)).toEqual(["PAIR_HAS_STOCK"]);
+    expect((await failure(applyImportChunk(asAdmin(A), { text: csv, chunk: 0, digest: NO_DIGEST }))).code).toBe("VALIDATION_FAILED");
+    expect(await countLedger(A, p)).toBe(1); // yalnız elle girilen karantina hareketi
     const bal = await adm.query<{ st: string; q: string }>("SELECT d.stock_status AS st, b.quantity::text AS q FROM public.stock_balances b JOIN public.stock_dimensions d ON d.tenant_id = b.tenant_id AND d.id = b.stock_dimension_id WHERE d.tenant_id = $1 AND d.item_id = $2 ORDER BY d.stock_status", [A.tenantId, item.id]);
-    expect(bal.rows.map((r) => [r.st, Number(r.q)])).toEqual([["AVAILABLE", 5], ["QUARANTINE", 4]]);
-    // AVAILABLE artık dolu: farklı miktar reddedilir.
-    expect((await previewImport(asAdmin(A), `ürün kodu;raf kodu;miktar\n${p}-1;${shelf};6`)).issues.map((i) => i.code)).toEqual(["PAIR_HAS_STOCK"]);
+    expect(bal.rows.map((r) => [r.st, Number(r.q)])).toEqual([["QUARANTINE", 4]]);
+  });
+
+  it("MINOR-1: KISMİ ters kayıt da 'uygulandı' sayılmaz → PAIR_REVERSED (önizleme)", async () => {
+    const p = pfx();
+    const { shelf } = await seedPair(p);
+    const csv = `ürün kodu;raf kodu;miktar\n${p}-1;${shelf};5`;
+    await applyAll(() => asAdmin(A), csv);
+    const line = (await adm.query<{ id: string; document_id: string }>("SELECT dl.id, dl.document_id FROM public.document_lines dl JOIN public.items i ON i.tenant_id = dl.tenant_id AND i.id = dl.item_id WHERE dl.tenant_id = $1 AND i.code = $2", [A.tenantId, `${p}-1`])).rows[0] as { id: string; document_id: string };
+    await reverseDocument({ ...access(), clientKey: randomUUID() }, { documentId: line.document_id, lines: [{ lineId: line.id, quantity: "2" }], reason: "T289b kismi ters" });
+    expect((await adm.query<{ s: string }>("SELECT reversal_status AS s FROM public.document_lines WHERE id = $1", [line.id])).rows[0]?.s).toBe("PARTIAL");
+    const pv = await previewImport(asAdmin(A), csv);
+    expect(pv.issues.map((i) => i.code)).toEqual(["PAIR_REVERSED"]);
+    expect(pv.stock?.alreadyApplied).toBe(0);
+  });
+
+  // Kilitli yol (import-apply.ts apply içi yeniden denetim): önizleme/değerlendirme çift BOŞKEN geçer, kilit altında çift artık ters kayıtlıdır. Yarış TEST-YALNIZ
+  // tetikleyiciyle deterministik kurulur (üretim koduna kanca yok): içe aktarma komutunun idempotency kaydı eklenirken İLK çağrı advisory kilit 777'de bekler;
+  // test bu arada aynı dosyayı yazıp ters kaydeder, sonra kilidi bırakır.
+  describe("kilitli yol (deterministik yarış)", () => {
+    beforeAll(async () => {
+      await adm.query("CREATE TABLE IF NOT EXISTS public.t289b_gate (tenant_id uuid PRIMARY KEY)");
+      await adm.query(`CREATE OR REPLACE FUNCTION public.t289b_gate_fn() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+        BEGIN
+          IF NEW.command_type = 'onboarding.import_opening_stock' AND EXISTS (SELECT 1 FROM public.t289b_gate WHERE tenant_id = NEW.tenant_id)
+             AND pg_try_advisory_xact_lock(778) THEN
+            PERFORM pg_advisory_xact_lock(777);
+          END IF;
+          RETURN NEW;
+        END $$`);
+      await adm.query("CREATE TRIGGER t289b_gate_trg BEFORE INSERT ON public.idempotency_records FOR EACH ROW EXECUTE FUNCTION public.t289b_gate_fn()");
+    });
+    afterAll(async () => {
+      await adm.query("DROP TRIGGER IF EXISTS t289b_gate_trg ON public.idempotency_records");
+      await adm.query("DROP FUNCTION IF EXISTS public.t289b_gate_fn()");
+      await adm.query("DROP TABLE IF EXISTS public.t289b_gate");
+    });
+    for (const kind of ["FULL", "PARTIAL"] as const) {
+      it(`MINOR-1: kilit altında yeniden denetimde ${kind} ters kayıtlı çift → satır FAILED/PAIR_REVERSED (geçerli digest), ek stok yazılmaz`, async () => {
+        const p = pfx();
+        const { shelf } = await seedPair(p);
+        const csv = `ürün kodu;raf kodu;miktar\n${p}-1;${shelf};5`;
+        const pv = await previewImport(asAdmin(A), csv);
+        expect(pv.issueTotal).toBe(0);
+        await adm.query("INSERT INTO public.t289b_gate (tenant_id) VALUES ($1) ON CONFLICT DO NOTHING", [A.tenantId]);
+        await adm.query("SELECT pg_advisory_lock(777)");
+        let racer: Promise<ChunkReport> | undefined;
+        try {
+          racer = applyImportChunk(asAdmin(A), { text: csv, chunk: 0, digest: pv.digest }); // geçerli digest; değerlendirme çift boşken geçer, sonra kapıda bekler
+          for (let i = 0; i < 200; i++) {
+            if ((await num("SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND objid = 777 AND NOT granted", [])) > 0) break;
+            await new Promise((r) => setTimeout(r, 50));
+          }
+          expect(await num("SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND objid = 777 AND NOT granted", [])).toBeGreaterThan(0);
+          // Bu arada aynı dosya yazılır ve (kısmen/tamamen) ters kaydedilir.
+          expect((await applyAll(() => asAdmin(A), csv))[0]?.counts).toMatchObject({ APPLIED: 1 });
+          const line = (await adm.query<{ id: string; document_id: string }>("SELECT dl.id, dl.document_id FROM public.document_lines dl JOIN public.items i ON i.tenant_id = dl.tenant_id AND i.id = dl.item_id WHERE dl.tenant_id = $1 AND i.code = $2", [A.tenantId, `${p}-1`])).rows[0] as { id: string; document_id: string };
+          await reverseDocument({ ...access(), clientKey: randomUUID() }, { documentId: line.document_id, lines: kind === "FULL" ? "ALL" : [{ lineId: line.id, quantity: "2" }], reason: "T289b yaris ters" });
+        } finally {
+          await adm.query("SELECT pg_advisory_unlock(777)");
+          await adm.query("DELETE FROM public.t289b_gate WHERE tenant_id = $1", [A.tenantId]);
+        }
+        const r = await racer as ChunkReport;
+        expect(r.complete).toBe(false);
+        expect(r.rows.map((x) => [x.row, x.status, x.errorCode, x.reason])).toEqual([[2, "FAILED", "VALIDATION_FAILED", "PAIR_REVERSED"]]);
+        expect(await countLedger(A, p)).toBe(2); // açılış + ters; yarışan komut hiçbir şey yazmadı
+      });
+    }
   });
 
   it("paket 5b MINOR: COUNTING lokasyona içe aktarma LOCATION_LOCKED → satır FAILED, stok yazılmaz; kilit kalkınca yazılır", async () => {

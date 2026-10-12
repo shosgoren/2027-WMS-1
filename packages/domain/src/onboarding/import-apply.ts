@@ -235,7 +235,7 @@ interface PairStateMut {
 }
 
 /**
- * (ürün, raf) çiftlerinin durumu (salt okuma): KİLİTLİ boyutta (AVAILABLE) hareket ya da bakiye > 0 (`hasStock`, A-289-9); bu çifte önceki içe aktarmayla (POSTED
+ * (ürün, raf) çiftlerinin durumu (salt okuma): çiftin herhangi bir boyutunda hareket ya da bakiye > 0 (`hasStock`, A-289-9); bu çifte önceki içe aktarmayla (POSTED
  * STOCK_IN, işaret `IMPORT_COMMAND_TYPE`) yazılmış ve ters kaydı YAPILMAMIŞ miktarlar (`applied`), ters kaydı yapılmışlar (`reversed`, A-289-8); aynı çifti hedefleyen BİTMEMİŞ (DRAFT/APPROVED) STOCK_IN/STOCK_MOVE belgeleri (`pending`).
  * Yalnız verilen ürünler sorgulanır. Eski taslak otomatik İPTAL EDİLMEZ (iptal kullanıcının işini siler ve işleyen bir worker ile yarışabilir): çift "dolu" sayılır.
  */
@@ -244,11 +244,11 @@ async function readPairStates(tx: AccessTx, tenantId: string, itemIdsIn: readonl
   const itemIds = [...new Set(itemIdsIn)];
   if (itemIds.length === 0) return out;
   const list = sql.join(itemIds.map((id) => sql`${id}::uuid`), sql`, `);
-  // A-289-9: hareket/bakiye denetimi yalnız stok komutunun KİLİTLEDİĞİ boyutu okur (AVAILABLE, lotsuz/serisiz/sahipsiz/taşıma birimsiz); kilit ile denetim aynı kümeyi kapsar.
+  // A-289-9 (seçenek B): çiftin TÜM boyutları (AVAILABLE + karantina/hasarlı/bloke + lot/seri/sahip/taşıma birimi) okunur. Komutun kilitlediği AVAILABLE takipsiz
+  // boyut kilit altında, diğerleri kilitsiz okunur; yarışta en kötü sonuç "çift boş" varsayımıdır (A-289-3 garantisi önizlemede ve kilit altında AVAILABLE için tam).
   const moved = await tx.execute<{ item_id: string; location_id: string }>(
     sql`SELECT DISTINCT d.item_id, d.location_id FROM public.stock_dimensions d
          WHERE d.tenant_id = ${tenantId}::uuid AND d.item_id IN (${list})
-           AND d.stock_status = 'AVAILABLE' AND d.lot_id IS NULL AND d.serial_id IS NULL AND d.inventory_owner_id IS NULL AND d.handling_unit_id IS NULL
            AND (EXISTS (SELECT 1 FROM public.stock_ledger l WHERE l.tenant_id = d.tenant_id AND l.stock_dimension_id = d.id)
                 OR EXISTS (SELECT 1 FROM public.stock_balances b WHERE b.tenant_id = d.tenant_id AND b.stock_dimension_id = d.id AND b.quantity > 0))`,
   );
