@@ -366,10 +366,14 @@ describe("yetki (A-68): kart yazma settings.manage ister, okuma stock.view", () 
     expect(await renameLocation(admin(A), { locationId: loc.locationId, name: "P yeni" })).toEqual({ changed: true });
   });
 
-  it("okuma stock.view ile serbest: READ_ONLY / PICKER / COUNTER / WAREHOUSE_MANAGER listeler, ağaç ve kod aramasını okur", async () => {
+  it("okuma stock.view ile serbest: READ_ONLY / PICKER / WAREHOUSE_MANAGER listeler, ağaç ve kod aramasını okur; yalnız-COUNTER FORBIDDEN (T-335a)", async () => {
     const { warehouseId } = await createWarehouse(admin(A), { code: uniq("rd-"), name: "Rd" });
     const loc = await createLocation(admin(A), { warehouseId, code: "RD1", name: "R", kind: "STORAGE" });
-    for (const who of ["manager", "picker", "counter", "readOnly"] as const) {
+    const c = call(A, "counter");
+    expect((await failure(listWarehouses(c))).code).toBe("FORBIDDEN");
+    expect((await failure(getLocationTree(c, { warehouseId }))).code).toBe("FORBIDDEN");
+    expect((await failure(findLocationByCode(c, { warehouseId, code: "rd1" }))).code).toBe("FORBIDDEN");
+    for (const who of ["manager", "picker", "readOnly"] as const) {
       const p = call(A, who);
       expect((await listWarehouses(p)).items.some((w) => w.id === warehouseId), who).toBe(true);
       expect((await getLocationTree(p, { warehouseId })).items.map((l) => l.id), who).toEqual([loc.locationId]);
@@ -396,7 +400,8 @@ describe("depo kapsamı (A-77, WAREHOUSE_SCOPE_ENABLED)", () => {
     return { w1, w2 };
   }
   const inScope = (who: keyof typeof users, ids: string[]): Promise<void> =>
-    runTenantCommand({ ...call(A, who), permission: "stock.view" }, (tx, m) => assertWarehouseInScope(tx, m, ids));
+    // T-335a: yardımcı kapsam kuralını sınar, izni değil; her rolde bulunan tenant.access kullanılır (COUNTER stock.view taşımaz).
+    runTenantCommand({ ...call(A, who), permission: "tenant.access" }, (tx, m) => assertWarehouseInScope(tx, m, ids));
 
   it("bayrak tanımsız/kapalı değerler: kapsam satırı olan PICKER tüm depoları görür ve her depo kapsamda sayılır", async () => {
     const { w1, w2 } = await scopedWorld();

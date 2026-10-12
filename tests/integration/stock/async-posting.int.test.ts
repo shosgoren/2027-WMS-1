@@ -37,7 +37,7 @@ let app: DbClient;
 let workerDb: DbClient;
 let adm: pg.Client;
 let A: TenantWorld;
-let counterUserId: string;
+let creatorUserId: string;
 let producer: PgBossJobQueue;
 const workers: PgBossJobQueue[] = [];
 
@@ -170,8 +170,9 @@ beforeAll(async () => {
   await adm.connect();
   await installQueueSchema({ url: env.databaseUrlDirect });
   A = await seedWorld(adm, reg, "A222");
-  counterUserId = await mkUser(adm, reg, "counter222");
-  await mkMembership(adm, A.tenantId, counterUserId, { roles: ["COUNTER"] });
+  // T-335a (A-335-1): COUNTER document.create taşımaz; farklı-oluşturan senaryosu WAREHOUSE_MANAGER ile kurulur.
+  creatorUserId = await mkUser(adm, reg, "creator222");
+  await mkMembership(adm, A.tenantId, creatorUserId, { roles: ["WAREHOUSE_MANAGER"] });
   producer = createJobQueue({ connectionString: env.databaseUrl, max: 3, stopTimeoutMs: 5000 });
   await producer.start();
 }, 120_000);
@@ -232,11 +233,11 @@ describe("AC-36: eşik üstü belge (250 satır) worker'da, aynı anahtar", () =
     expect(await jobsOf(d.id)).toHaveLength(1);
   }, 120_000);
 
-  it("istek sahibi aktör: belgeyi stock.post izni olmayan kullanıcı oluşturdu, yetkili kullanıcı işleme istedi → audit ve defter aktörü işleme isteyen", async () => {
+  it("istek sahibi aktör: belgeyi başka kullanıcı (yönetici) oluşturdu, işleme farklı kullanıcı (PICKER) istedi → audit ve defter aktörü işleme isteyen", async () => {
     const x = await mkItem();
     const loc = await mkLoc();
-    const d = await mkApproved("STOCK_IN", many(201, () => ln(x, { targetLocationId: loc })), counterUserId);
-    expect((await docRow(d.id)).created_by).toBe(counterUserId);
+    const d = await mkApproved("STOCK_IN", many(201, () => ln(x, { targetLocationId: loc })), creatorUserId);
+    expect((await docRow(d.id)).created_by).toBe(creatorUserId);
     await requestPost(d, pickerP());
     await newWorker();
     await waitFor(async () => (await docRow(d.id)).status === "POSTED", "document POSTED");
