@@ -212,7 +212,9 @@ export async function itemsScreenChecks(page: Page, tenant: ItemsTenant): Promis
     if ((await cards.count()) === 0) {
       await expect(page.getByText("Bu filtreye uyan ürün yok")).toBeVisible();
     } else {
-      for (const badge of await cards.locator("span", { hasText: /^(Aktif|Arşivli)$/ }).allTextContents()) {
+      const badges = await cards.locator("span", { hasText: /^(Aktif|Arşivli)$/ }).allTextContents();
+      expect(badges.length, `${where}: her kartta durum rozeti (T-01)`).toBe(await cards.count());
+      for (const badge of badges) {
         expect(badge, `${where}: Arşivli süzgeçte her kart Arşivli rozetli (T-01)`).toBe("Arşivli");
       }
       await page.goto(`${base}/items?status=ARCHIVED&q=zzyok${Date.now().toString(36)}`);
