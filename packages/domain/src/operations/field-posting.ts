@@ -122,9 +122,24 @@ function postingLines(spec: FieldPostSpec, ids: readonly string[]): PostingLine[
   }));
 }
 
+const REASON_MAX = 500;
+const CONTROL_RE = /\p{C}/u;
+/**
+ * Belge nedeni (SR MINOR-3): `stock/documents.ts` `reasonOf` ile AYNI kural (o işlev o dosyada özeldir; kural kopyası): yok/`null` → `null`; metin
+ * kırpılır, boş olamaz, ≤ 500 karakter (kod noktası), kontrol/biçim karakteri (`\p{C}`) yok. İhlal `VALIDATION_FAILED`.
+ */
+export function fieldReasonOf(raw: unknown): string | null {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== "string") throw new AppError("VALIDATION_FAILED");
+  const v = raw.trim();
+  if (v === "" || Array.from(v).length > REASON_MAX || CONTROL_RE.test(v)) throw new AppError("VALIDATION_FAILED");
+  return v;
+}
+
 function assertSize(spec: FieldPostSpec): void {
   if (spec.lines.length < 1) throw new AppError("VALIDATION_FAILED");
   if (spec.lines.length > SYNC_POST_MAX_LINES) throw tooLarge();
+  fieldReasonOf(spec.reason); // planda da apply'da da: geçersiz neden hiçbir şey yazılmadan reddedilir
 }
 
 /**
@@ -221,7 +236,7 @@ export async function postFieldDocument(
   await tx.execute(
     sql`INSERT INTO public.documents (tenant_id, id, kind, type_version_id, warehouse_id, business_date, created_by, source_kind, source_id, reason)
         VALUES (${ctx.tenantId}::uuid, ${documentId}::uuid, ${spec.kind}, ${typeVersionId}::uuid, ${spec.warehouseId}::uuid, ${date}::date,
-                ${ctx.userId}::uuid, ${spec.sourceKind}, ${spec.sourceId}::uuid, ${spec.reason ?? null})`,
+                ${ctx.userId}::uuid, ${spec.sourceKind}, ${spec.sourceId}::uuid, ${fieldReasonOf(spec.reason)})`,
   );
   const json = JSON.stringify(
     spec.lines.map((l, i) => ({

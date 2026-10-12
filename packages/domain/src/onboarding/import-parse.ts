@@ -81,6 +81,7 @@ export type IssueCode =
   | "PAIR_DUPLICATE_FILE"
   | "PAIR_HAS_STOCK"
   | "PAIR_PENDING"
+  | "PAIR_REVERSED"
   | "CELL_TOO_LONG"
   | "TOO_MANY_COLUMNS";
 
@@ -399,6 +400,8 @@ export interface PairState {
   readonly applied: ReadonlySet<string>;
   /** Aynı çifti hedefleyen BİTMEMİŞ (DRAFT/APPROVED) belgelerin miktarları (kümenin boş olmaması yeter; miktar önemsizdir). */
   readonly pending: ReadonlySet<string>;
+  /** Bu çifte önceki içe aktarmayla yazılıp sonradan (kısmen/tamamen) TERS KAYDEDİLMİŞ miktarlar; "uygulandı" sayılmaz (A-289-8). Verilmezse boş. */
+  readonly reversed?: ReadonlySet<string>;
 }
 export interface StockContext {
   /** Anahtar `${itemId}|${locationId}`; verilmezse çiftlerde stok yok sayılır (yalnız saf birim testleri). */
@@ -660,6 +663,7 @@ export function validateStock(records: Records, ctx: StockContext): PreviewResul
       const st = ctx.pairs?.get(`${item.id}|${shelf.id}`);
       if (st !== undefined && st.hasStock) {
         if (st.applied.has(quantity)) alreadyApplied = true;
+        else if (st.reversed?.has(quantity) === true) issues.push(issue(row, "raf kodu", "PAIR_REVERSED", { code: clip(itemCode), shelf: clip(shelfCode) }));
         else issues.push(issue(row, "raf kodu", "PAIR_HAS_STOCK", { code: clip(itemCode), shelf: clip(shelfCode) }));
       } else if (st !== undefined && st.pending.size > 0) {
         // Aynı çifte yazılacak BİTMEMİŞ (DRAFT/APPROVED) bir belge var: çift miktardan bağımsız "dolu" sayılır (en güvenli taraf; açılış stoku kendi belgesini

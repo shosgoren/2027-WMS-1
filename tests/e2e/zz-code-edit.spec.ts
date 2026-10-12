@@ -2,8 +2,9 @@
 // (eski → yeni önizleme, "geçmiş hareketler etkilenmez" açıklaması) → değişti bildirimi + "Geri al" → sunucu reddi (CODE_TAKEN) neden +
 // sonraki eylemle pencerede kalır → ürün için ESKİ kodla arama yeni karta yönlenir ve "Bu kod X olarak değişti" der.
 // Ortak demo tenant'a yalnızca mobile projesinde yazar (bkz. aşağıdaki not): kayıtlar kendi rastgele kodlarını taşır ve test sonunda arşivlenir
-// (arşivli kodlar DEPO-/URN- öneri sayacını etkilemez). Masaüstü projesi yazmaz: mobile-shell.spec.ts (Durum=Arşivli filtresi) bu dosyadan ÖNCE koşar ve
-// demo'da arşivli ürün beklemez. T-279: demo tenant T-223'ten beri dolu açılır; boş tenant akışları (rehber, S-01) empty-tenant.spec.ts / z-easy-setup.spec.ts'te.
+// (arşivli kodlar DEPO-/URN- öneri sayacını etkilemez). Masaüstü projesi yazmaz. T-279b: uygulama ürün silmeyi desteklemez (arşiv-yalnız), bu yüzden
+// kalıcı (uzak) demo'da KAI-/KEI- arşivli artıkları birikir; mobile-shell.spec.ts'in "Arşivli" denetimi artık bunu varsaymaz (support/items-screen.ts,
+// iki dal). Artığı kurutmak demo.reseed işinin kapsamıdır (kart önerisi T-279b raporunda). T-279: boş tenant akışları empty-tenant.spec.ts / z-easy-setup.spec.ts'te.
 // Ekran görüntüleri `.artifacts/t-257/` altına yazılır (git'e girmez).
 import { randomBytes } from "node:crypto";
 import { expect, test } from "@playwright/test";
