@@ -30,7 +30,7 @@ vi.mock("@wms/domain/catalog", () => ({ getItem: vi.fn(), listItemConversions: v
 vi.mock("@wms/domain/warehouse", () => ({ findLocationByCode: vi.fn() }));
 
 import { cancelOrderAction, cancelOrderLineAction, createOrderAction, createPickAssignmentAction, lineStockAction, reserveOrderAction } from "./actions.ts";
-import { createKeyRegistry, fmtQty, orderErrorKey, sumQuantities, unallocatedOf } from "./order-form.tsx";
+import { createKeyRegistry, createdNumberOf, fmtQty, orderErrorKey, rememberCreated, reserveOutcome, sumQuantities, unallocatedOf, validQty } from "./order-form.tsx";
 import { submitWithKey, type ActionResult } from "../receipts/receipt-form.tsx";
 
 const OID = "11111111-1111-4111-8111-111111111111";
@@ -286,6 +286,35 @@ describe("gösterim yardımcıları (kural değil, biçim)", () => {
   });
 });
 
+describe("sonuç türü, miktar doğrulama ve oluşturma numarası (A-314a-2)", () => {
+  it("reserveOutcome: tam / kısmi / hiç / yeni rezervasyon yok — 0 tahsiste yeşil 'tamamlandı' çıkmaz (SR-MINOR-1)", () => {
+    expect(reserveOutcome(5_000_000n, 0)).toBe("full");
+    expect(reserveOutcome(3_000_000n, 1)).toBe("partial");
+    expect(reserveOutcome(0n, 2)).toBe("none");
+    expect(reserveOutcome(0n, 0)).toBe("nothing");
+  });
+
+  it("validQty: yalnız 1–999999999 tam sayı; ondalık, sıfır, boş, işaretli reddedilir", () => {
+    for (const ok of ["1", "12", "999999999"]) expect(validQty(ok), ok).toBe(true);
+    for (const bad of ["", "0", "01", "1.5", "1,5", "-3", "1000000000", " 5", "5 ", "x"]) expect(validQty(bad), bad).toBe(false);
+  });
+
+  it("oluşturma numarası: yalnız oluşturma eyleminin kimliğiyle eşleşince döner; başka kimlik (rastgele UUID) göstermez; tüketince silinir", () => {
+    const store = new Map<string, string>();
+    vi.stubGlobal("sessionStorage", { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => void store.set(k, v), removeItem: (k: string) => void store.delete(k) });
+    try {
+      expect(createdNumberOf(OID, false)).toBeNull();
+      rememberCreated({ id: OID.toUpperCase(), number: "SIP-2026-AB12CD34" });
+      expect(createdNumberOf(LID, false)).toBeNull();
+      expect(createdNumberOf(OID, false)).toBe("SIP-2026-AB12CD34");
+      expect(createdNumberOf(OID, true)).toBe("SIP-2026-AB12CD34");
+      expect(createdNumberOf(OID, false)).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
 describe("i18n: her hata anahtarı için TR + EN ileti ve sonraki eylem var; anahtar kümeleri eşit", () => {
   const dir = path.join(__dirname, "../../../../messages");
   type Msgs = { orders: Record<string, unknown> & { errors: Record<string, string> } };
@@ -315,6 +344,12 @@ describe("i18n: her hata anahtarı için TR + EN ileti ve sonraki eylem var; ana
     const empties = (o: unknown): number => (typeof o === "object" && o !== null ? Object.values(o).reduce<number>((a, v) => a + empties(v), 0) : o === "" ? 1 : 0);
     expect(empties(load("tr.json").orders)).toBe(0);
     expect(empties(load("en.json").orders)).toBe(0);
+  });
+
+  it("terim tutarlılığı (R-08): rezervasyon ailesi tek terim; 'tahsis' / 'ayır' ve teknik terimler ekran metninde yok; hitap 'sen'", () => {
+    const text = JSON.stringify(load("tr.json").orders).toLowerCase();
+    for (const banned of ["tahsis", "ayır", "override", "uuid", "sku", "yönetici ne", "yapınız", "giriniz"]) expect(text, banned).not.toContain(banned);
+    expect(text).toContain("rezerve");
   });
 
   it("ekranda kullanılan her `orders.*` anahtarı iletide vardır (kaynak taraması)", () => {

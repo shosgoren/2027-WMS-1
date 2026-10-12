@@ -128,6 +128,10 @@ async function snapshot(t: Fx): Promise<unknown> {
     // T-313: kabul/yerleştirme eylemleri B'de belge, satır, görev, idempotency kaydı, defter ve bakiye bırakmamalı.
     receipts: await q("SELECT id, status, version FROM public.inbound_receipts WHERE tenant_id = $1 ORDER BY id"),
     receiptLines: await q("SELECT id, received_quantity::text AS r, damaged_quantity::text AS d FROM public.inbound_receipt_lines WHERE tenant_id = $1 ORDER BY id"),
+    // T-314: sipariş eylemleri B'de sipariş, satır iptali, rezervasyon ve görev bırakmamalı.
+    orders: await q("SELECT id, status, version FROM public.sales_orders WHERE tenant_id = $1 ORDER BY id"),
+    orderLines: await q("SELECT id, requested_quantity::text AS r, cancelled_quantity::text AS c FROM public.sales_order_lines WHERE tenant_id = $1 ORDER BY id"),
+    reservations: await q("SELECT count(*)::int AS n FROM public.reservations WHERE tenant_id = $1"),
     documents: await q("SELECT count(*)::int AS n FROM public.documents WHERE tenant_id = $1"),
     tasks: await q("SELECT count(*)::int AS n, count(*) FILTER (WHERE status = 'OPEN')::int AS open FROM public.warehouse_tasks WHERE tenant_id = $1"),
     idempotency: await q("SELECT count(*)::int AS n FROM public.idempotency_records WHERE tenant_id = $1"),
@@ -161,6 +165,9 @@ let inviteAccept: Actions;
 let itemActions: Actions;
 let taskActions: Actions;
 let receiptActions: Actions;
+let orderActions: Actions;
+/** T-314: B tenant'ının GERÇEK siparişi ve satırı (sipariş eylemleri bu kimliklerle çağrılır). */
+let bOrder: { order: string; line: string };
 /** T-313: B tenant'ının GERÇEK kabul belgesi/satırı ve lokasyonları (yazma eylemleri bu kimliklerle çağrılır; rastgele kimlik "yok" olduğundan tek başına yalıtımı kanıtlamaz). */
 let bRcpt: { receipt: string; line: string; kabul: string; raf: string };
 /** T-304: B tenant'ının sentetik görevi (eylem tablosu bu kimlikle çağırır). */
@@ -212,6 +219,7 @@ beforeAll(async () => {
   itemActions = (await load("app/t/[slug]/items/actions.ts")) as Actions;
   taskActions = (await load("app/t/[slug]/tasks/actions.ts")) as Actions;
   receiptActions = (await load("app/t/[slug]/receipts/actions.ts")) as Actions;
+  orderActions = (await load("app/t/[slug]/orders/actions.ts")) as Actions;
   bTask = (await adm.query<{ id: string }>("INSERT INTO public.warehouse_tasks (tenant_id, warehouse_id, kind) VALUES ($1, $2, 'PICK') RETURNING id", [B.tenant, B.warehouse])).rows[0]!.id;
   const mkFx = async (t: Fx): Promise<ItemFx> => {
     const unit = (await adm.query<{ id: string }>("INSERT INTO public.units (tenant_id, id, code, name) VALUES ($1, gen_random_uuid(), $2, 'Birim') RETURNING id", [t.tenant, `U${rnd()}`])).rows[0]!.id;
@@ -234,6 +242,15 @@ beforeAll(async () => {
       [B.tenant, receipt, fx.B.item, fx.B.unit],
     )).rows[0]!.id;
     bRcpt = { receipt, line, kabul, raf };
+    const order = (await adm.query<{ id: string }>(
+      "INSERT INTO public.sales_orders (tenant_id, id, number, customer_ref, created_by) VALUES ($1, gen_random_uuid(), $2, 'B-GIZLI-MUS', (SELECT user_id FROM public.tenant_memberships WHERE id = $3)) RETURNING id",
+      [B.tenant, `SIP-B-${rnd()}`, B.adminMembership],
+    )).rows[0]!.id;
+    const oline = (await adm.query<{ id: string }>(
+      "INSERT INTO public.sales_order_lines (tenant_id, id, order_id, line_no, item_id, requested_quantity) VALUES ($1, gen_random_uuid(), $2, 1, $3, 5) RETURNING id",
+      [B.tenant, order, fx.B.item],
+    )).rows[0]!.id;
+    bOrder = { order, line: oline };
   }
 
   // B yöneticisi (meşru) bir davet üretir: hem olumlu kontrol hem de çapraz tenant kabul denemesi için belirteç.
@@ -648,17 +665,32 @@ const RECEIPT_ACTIONS: Record<string, Call> = {
   compoundQuantityAction: (slug) => receiptActions.compoundQuantityAction!({ slug, itemId: fx.B.item, baseQuantity: "5" }),
 };
 
+/**
+ * T-314: sipariş eylemleri (6 yazma/okuma eylemi); hepsi B'nin sipariş/satır/ürün/üyelik kimlikleriyle çağrılır. Yazma eylemleri `limitVerifiedTenant` ile üyelik
+ * çözümünde, kimlik tabanlı olanlar domain'de `NOT_FOUND` verir; A slug'ında B kimlikleri etkisizdir ve yanıtta B verisi yoktur.
+ */
+const ORDER_ACTIONS: Record<string, Call> = {
+  createOrderAction: (slug) => orderActions.createOrderAction!({ slug, clientKey: randomUUID(), customerRef: "Ele geçirme", lines: [{ itemId: fx.B.item, unitId: fx.B.unit, quantity: "1" }] }),
+  reserveOrderAction: (slug) => orderActions.reserveOrderAction!({ slug, clientKey: randomUUID(), orderId: bOrder.order }),
+  cancelOrderLineAction: (slug) => orderActions.cancelOrderLineAction!({ slug, clientKey: randomUUID(), lineId: bOrder.line, quantity: "1", reason: "Ele geçirme" }),
+  cancelOrderAction: (slug) => orderActions.cancelOrderAction!({ slug, clientKey: randomUUID(), orderId: bOrder.order, expectedVersion: 1, reason: "Ele geçirme" }),
+  createPickAssignmentAction: (slug, v) =>
+    orderActions.createPickAssignmentAction!({ slug, clientKey: randomUUID(), orderIds: [bOrder.order], assigneeMembershipId: v.membership }),
+  lineStockAction: (slug) => orderActions.lineStockAction!({ slug, itemId: fx.B.item }),
+};
+
 describe("Server Action'lar", () => {
   it("@AC-04 kapsam: members/actions.ts dışa aktarımlarının tamamı tabloda; ayarlar eylemi ayrıca sınanır", () => {
     expect(Object.keys(members).sort()).toEqual(Object.keys(ACTIONS).sort());
     expect(Object.keys(itemActions).sort()).toEqual(Object.keys(ITEM_ACTIONS).sort());
     expect(Object.keys(taskActions).sort()).toEqual(Object.keys(TASK_ACTIONS).sort());
     expect(Object.keys(receiptActions).sort()).toEqual(Object.keys(RECEIPT_ACTIONS).sort());
+    expect(Object.keys(orderActions).sort()).toEqual(Object.keys(ORDER_ACTIONS).sort());
     expect(Object.keys(settings)).toEqual(["saveSettingsAction"]);
     expect(Object.keys(inviteAccept)).toEqual(["acceptInvitationAction"]);
   });
 
-  for (const [name, call] of Object.entries({ ...ACTIONS, ...ITEM_ACTIONS, ...TASK_ACTIONS, ...RECEIPT_ACTIONS })) {
+  for (const [name, call] of Object.entries({ ...ACTIONS, ...ITEM_ACTIONS, ...TASK_ACTIONS, ...RECEIPT_ACTIONS, ...ORDER_ACTIONS })) {
     it(`@AC-04 ${name}: A yöneticisi B'nin slug'ıyla -> NOT_FOUND (var olmayan slug ile aynı yanıt); B'de hiçbir değişiklik yok`, async () => {
       const victim = { membership: B.managerMembership, invitation: bInvite.invitationId };
       const beforeB = await snapshot(B);
@@ -702,6 +734,21 @@ describe("Server Action'lar", () => {
       if (!own.ok) expect(own.error.code).toBe("NOT_FOUND");
       expect(JSON.stringify(own)).not.toContain(B.slug);
       expect(JSON.stringify(own)).not.toContain(bRcpt.receipt);
+      expect(await snapshot(A)).toEqual(beforeA);
+      expect(await snapshot(B)).toEqual(beforeB);
+    });
+  }
+
+  for (const [name, call] of Object.entries(ORDER_ACTIONS)) {
+    it(`@AC-04 ${name}: A yöneticisi KENDİ slug'ında B'nin GERÇEK sipariş/satır/ürün/üye kimlikleriyle -> NOT_FOUND (rastgele kimlikle aynı yanıt); B verisi yanıtta yok; A ve B'de etki yok`, async () => {
+      const victim = { membership: B.managerMembership, invitation: bInvite.invitationId };
+      const beforeA = await snapshot(A);
+      const beforeB = await snapshot(B);
+      as(A.admin);
+      const own = await call(A.slug, victim);
+      expect(own.ok, `${name}: ${JSON.stringify(own)}`).toBe(false);
+      if (!own.ok) expect(own.error.code).toBe("NOT_FOUND");
+      for (const secret of [B.slug, B.name, bOrder.order, bOrder.line, fx.B.item, "B-GIZLI-MUS"]) expect(JSON.stringify(own)).not.toContain(secret);
       expect(await snapshot(A)).toEqual(beforeA);
       expect(await snapshot(B)).toEqual(beforeB);
     });

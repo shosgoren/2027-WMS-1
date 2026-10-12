@@ -48,6 +48,7 @@ export default async function OrdersPage({ params, searchParams }: { params: Pro
 
   let roles: readonly string[];
   let page: Awaited<ReturnType<typeof listSalesOrders>> | null = null;
+  let badCursor = false;
   let members: Awaited<ReturnType<typeof listMembers>> = [];
   try {
     const summary = await getMembershipSummary({ db, principal });
@@ -55,7 +56,15 @@ export default async function OrdersPage({ params, searchParams }: { params: Pro
     if (current === undefined) notFound();
     roles = current.roles;
     try {
-      page = await listSalesOrders(call, { limit: PAGE_SIZE, ...(statusFilter === "ALL" ? {} : { status: statusFilter }), ...(after === undefined ? {} : { afterKey: after }) });
+      const filter = statusFilter === "ALL" ? {} : { status: statusFilter };
+      try {
+        page = await listSalesOrders(call, { limit: PAGE_SIZE, ...filter, ...(after === undefined ? {} : { afterKey: after }) });
+      } catch (e) {
+        // Bozuk `after` imleci kullanıcı hatasıdır: 404 yerine ilk sayfa + açıklama (SR-MINOR-4).
+        if (after === undefined || !(e instanceof AppError && e.code === "VALIDATION_FAILED")) throw e;
+        badCursor = true;
+        page = await listSalesOrders(call, { limit: PAGE_SIZE, ...filter });
+      }
       members = await listMembers(call, { demoEmailDomain: process.env.DEMO_EMAIL_DOMAIN?.trim().toLowerCase() || null });
     } catch (e) {
       // Okuma izni yok (stock.view): kilit + gerekçe gösterilir; MFA / oturum aşağıda yönlendirilir.
@@ -98,6 +107,7 @@ export default async function OrdersPage({ params, searchParams }: { params: Pro
           assignees={members.filter((m) => hasPermission(m.roles, "stock.post")).map((m) => ({ membershipId: m.membershipId, displayName: m.displayName }))}
           canCreate={hasPermission(roles, "document.create")}
           canApprove={hasPermission(roles, "document.approve")}
+          badCursor={badCursor}
         />
       )}
     </main>

@@ -1,16 +1,19 @@
 "use client";
 // Sipariş ekranları istemci takımı (T-314): sipariş listesi + oluşturma formu + toplama görevlendirmesi (OrdersView) ve sipariş ayrıntısı (OrderDetailView).
-// - Kurallar sunucuda/domain'dedir: yetki (`document.create` / `document.approve`), kapsam, durum, tahsis ve iptal kuralları burada YENİDEN YAZILMAZ. `canCreate` /
-//   `canApprove` yalnızca gösterimdir (kilit + gerekçe); eylem sunucuda yeniden denetlenir ve sunucu reddi neden + sonraki eylemle gösterilir (FORBIDDEN ekranı yok).
+// - Kurallar sunucuda/domain'dedir: yetki (`document.create` / `document.approve`), kapsam, durum, rezervasyon ve iptal kuralları burada YENİDEN YAZILMAZ. `canCreate` /
+//   `canApprove` yalnızca gösterimdir (kilit + gerekçe + yol); eylem sunucuda yeniden denetlenir ve sunucu reddi neden + sonraki eylemle gösterilir (FORBIDDEN ekranı yok).
 // - Anahtar yaşam döngüsü (ADR-018 §1-3; receipts/receipt-form.tsx `createKeyHolder` ile aynı): her niyet (işlem + hedef + içerik imzası) kendi anahtarını taşır;
 //   ağ/geçici hatada AYNI anahtarla yeniden gönderilir (çift gönderimde tekrar oynatılır), başarıdan sonra yenilenir, içerik değişince (imza değişir) yeni anahtar.
+// - Geri bildirim eylemin YANINDA gösterilir (satır/panel içinde ya da eylem bölümünde), `role=alert|status` taşır ve odak ona taşınır (`Notice`). Doğrulama
+//   alanın altında neden + eylemle yazılır (`TextField error`); düğme doğrulama yüzünden kapatılmaz.
+// - Terim: rezervasyon ailesi tek terimle yazılır (Rezerve et / Rezerve / Rezerve edilemeyen; docs/GLOSSARY.md "Rezervasyon"); "tahsis/ayırma" kullanılmaz (A-314-8).
 // - Yatay taşma yok: liste ve satırlar kart düzenindedir (tablo yok); sayfa başına ≤30 sipariş (keyset). TanStack Virtual bağımlılığı bu pakette kurulu
-//   değildir (bkz. rapor bulgusu); büyük listeye karşı sayfalama kullanılır.
+//   değildir (A-314-5); büyük listeye karşı sayfalama kullanılır.
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { useRef, useState, useTransition } from "react";
+import { useParams, useRouter } from "next/navigation";
+import { useEffect, useRef, useState, useTransition, type ReactNode } from "react";
 import { useTranslations } from "next-intl";
-import { Banner, Button, CircleCheck, Clock, ConfirmDialog, EmptyState, Lock, PackagePlus, TextField, TriangleAlert } from "@wms/ui";
+import { Banner, Button, CircleAlert, CircleCheck, Clock, ConfirmDialog, EmptyState, Lock, PackagePlus, TextField, TriangleAlert } from "@wms/ui";
 import { itemUnitsAction } from "../receipts/actions.ts";
 import { createKeyHolder, submitWithKey, type ErrorInfo, type KeyHolder } from "../receipts/receipt-form.tsx";
 import { searchItemsAction } from "../items/actions.ts";
@@ -75,13 +78,39 @@ function useKeyFor(): (signature: string) => KeyHolder {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Oluşturulan siparişin numarası (A-314a-2): kapsamlı kullanıcı yeni siparişi okuyamayabilir; numara oluşturma YANITINDAN gelir ve oturumda tutulur.
+// Metin yalnızca oluşturma eyleminin döndürdüğü kimlikle eşleşince gösterilir (URL parametresine güvenilmez).
+// ---------------------------------------------------------------------------------------------------------------------
+const CREATED_KEY = "wms.orders.created";
+export function rememberCreated(created: { readonly id: string; readonly number: string }): void {
+  try {
+    sessionStorage.setItem(CREATED_KEY, JSON.stringify({ id: created.id.toLowerCase(), number: created.number }));
+  } catch {
+    // depolama kapalı: yalnızca numara ipucu kaybolur, akış sürer
+  }
+}
+/** Kimlik eşleşirse numarayı döndürür; `consume` ise kaydı siler. */
+export function createdNumberOf(id: string, consume: boolean): string | null {
+  try {
+    const raw = sessionStorage.getItem(CREATED_KEY);
+    if (raw === null) return null;
+    const v = JSON.parse(raw) as { id?: unknown; number?: unknown };
+    if (typeof v.id !== "string" || typeof v.number !== "string" || v.id !== id.toLowerCase()) return null;
+    if (consume) sessionStorage.removeItem(CREATED_KEY);
+    return v.number;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // Hata eşlemesi (kural yeniden yazılmaz; yalnızca ileti seçilir)
 // ---------------------------------------------------------------------------------------------------------------------
 export type OrderErrorContext = "create" | "reserve" | "cancel" | "assign" | "lookup";
 
 /**
- * Sunucu hatası → `orders.errors.<anahtar>` (+ `Action`). `INSUFFICIENT_STOCK` elle tahsiste "tahsis edilemeyen miktar"dır; otomatik rezervasyonda yetersiz stok RET
- * değildir (T-306): satır tahsissiz açık kalır ve ekran bunu satırda gösterir. `DOCUMENT_STATE` = sipariş artık açık değil / işlem görmüş.
+ * Sunucu hatası → `orders.errors.<anahtar>` (+ `Action`). `INSUFFICIENT_STOCK` elle rezervede "rezerve edilemeyen miktar"dır; otomatik rezervasyonda yetersiz stok RET
+ * DEĞİLDİR (T-306): satır rezervesiz kalır ve ekran bunu satırda gösterir. `DOCUMENT_STATE` = sipariş artık açık değil.
  */
 export function orderErrorKey(error: Pick<ErrorInfo, "code" | "detail">, context: OrderErrorContext): string {
   const { code, detail } = error;
@@ -124,30 +153,74 @@ export function orderErrorKey(error: Pick<ErrorInfo, "code" | "detail">, context
   }
 }
 
-function ErrorNotice({ error, context }: { error: ErrorInfo; context: OrderErrorContext }) {
-  const t = useTranslations("orders");
-  const key = orderErrorKey(error, context);
+// ---------------------------------------------------------------------------------------------------------------------
+// Geri bildirim bileşenleri: eylemin yanında, rol + odak
+// ---------------------------------------------------------------------------------------------------------------------
+type Tone = "success" | "warning" | "info" | "error";
+/** Geri bildirim kutusu: bağlandığında (ve `seq` değişince) odak ona taşınır; içeride `role=status|alert` taşıyan `Banner` vardır. */
+function Notice({ kind, seq = 0, testId, children }: { kind: Tone; seq?: number; testId?: string; children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    ref.current?.focus();
+  }, [seq]);
   return (
-    <Banner kind="error">
+    <div ref={ref} tabIndex={-1} data-testid={testId} className="min-w-0 rounded-card focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus">
+      <Banner kind={kind}>{children}</Banner>
+    </div>
+  );
+}
+
+interface ErrState {
+  readonly info: ErrorInfo;
+  readonly ctx: OrderErrorContext;
+  readonly seq: number;
+}
+function ErrorNotice({ error }: { error: ErrState }) {
+  const t = useTranslations("orders");
+  const key = orderErrorKey(error.info, error.ctx);
+  return (
+    <Notice kind="error" seq={error.seq} testId="error-notice">
       <p className="font-semibold" data-testid="error-reason">
         {t(`errors.${key}`)}
       </p>
       <p data-testid="error-action">{t(`errors.${key}Action`)}</p>
       <details className="mt-1 text-sm">
         <summary className="flex min-h-12 cursor-pointer items-center">{t("moreInfo")}</summary>
-        <p data-testid="error-code">{t("errorCode", { code: error.detail === undefined ? error.code : `${error.code}/${error.detail}` })}</p>
-        {error.requestId === undefined ? null : <p className="break-all">{error.requestId}</p>}
+        <p data-testid="error-code">{t("errorCode", { code: error.info.detail === undefined ? error.info.code : `${error.info.code}/${error.info.detail}` })}</p>
+        {error.info.requestId === undefined ? null : <p className="break-all">{error.info.requestId}</p>}
       </details>
-    </Banner>
+    </Notice>
   );
 }
 
-function LockedNote({ text, testId }: { text: string; testId: string }) {
+/** Alan altı doğrulama iletisi (neden + eylem; `TextField error` ile aynı görünüm) — alanı olmayan bölüm düzeyi doğrulama için. */
+function FieldMsg({ reason, action, testId }: { reason: string; action: string; testId?: string }) {
   return (
-    <p className="flex min-w-0 items-start gap-2 text-base text-ink-muted" data-testid={testId}>
-      <Lock aria-hidden="true" className="mt-0.5 size-5 shrink-0" />
-      <span className="min-w-0 break-words">{text}</span>
+    <p role="alert" data-testid={testId} className="m-0 flex items-start gap-1 break-words text-sm font-medium text-danger-ink">
+      <CircleAlert aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-danger" />
+      <span className="min-w-0">
+        {reason} {action}
+      </span>
     </p>
+  );
+}
+
+const FOCUS = "focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus";
+const LINK_BTN = `inline-flex min-h-12 min-w-12 items-center justify-center rounded-control border-2 border-border-strong bg-surface px-4 text-base font-bold text-ink ${FOCUS}`;
+const SELECT = `min-h-12 w-full min-w-0 rounded-card border-2 border-border-strong bg-surface px-3 text-base text-ink disabled:opacity-60 ${FOCUS}`;
+
+function LockedNote({ text, testId }: { text: string; testId: string }) {
+  const t = useTranslations("orders");
+  return (
+    <div className="flex min-w-0 flex-col gap-2" data-testid={testId}>
+      <p className="m-0 flex min-w-0 items-start gap-2 text-base text-ink">
+        <Lock aria-hidden="true" className="mt-0.5 size-5 shrink-0" />
+        <span className="min-w-0 break-words">{text}</span>
+      </p>
+      <Link href="/help" className={`${LINK_BTN} w-fit`} data-testid="help-link">
+        {t("helpCall")}
+      </Link>
+    </div>
   );
 }
 
@@ -165,7 +238,7 @@ function microOf(s: string): bigint {
   const v = BigInt(m[2] as string) * 1_000_000n + BigInt(((m[3] ?? "") + "000000").slice(0, 6));
   return m[1] === "-" ? -v : v;
 }
-/** Açık − tahsisli (yalnız gösterim: "tahsis edilemeyen miktar" rozeti). Negatif → 0. */
+/** Kalan − rezerve (yalnız gösterim: "rezerve edilemeyen" rozeti). Negatif → 0. */
 export function unallocatedOf(open: string, allocated: string): bigint {
   const d = microOf(open) - microOf(allocated);
   return d < 0n ? 0n : d;
@@ -175,17 +248,35 @@ function fromMicroDisplay(v: bigint): string {
   const frac = (v % 1_000_000n).toString().padStart(6, "0").replace(/0+$/, "");
   return frac === "" ? whole.toString() : `${whole}.${frac}`;
 }
+/** Ondalık dizgilerin toplamı (1e-6 ölçeği, BigInt; float yok). */
+export function sumQuantities(list: readonly string[]): string {
+  return fromMicroDisplay(list.reduce((a, q) => a + microOf(q), 0n));
+}
+export type ReserveOutcome = "full" | "partial" | "none" | "nothing";
+/** Rezervasyon sonucu: bu çağrıda rezerve edilen toplam ve (yenilenmiş veriden) rezerve edilemeyen satır sayısı → ileti türü. Sahte "tamamlandı" yok. */
+export function reserveOutcome(total: bigint, shortCount: number): ReserveOutcome {
+  if (total > 0n) return shortCount === 0 ? "full" : "partial";
+  return shortCount > 0 ? "none" : "nothing";
+}
 
-const FOCUS = "focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus";
-const LINK_BTN = `inline-flex min-h-12 min-w-12 items-center justify-center rounded-control border-2 border-border-strong bg-surface px-4 text-base font-bold text-ink ${FOCUS}`;
-const SELECT = `min-h-12 w-full min-w-0 rounded-card border-2 border-border-strong bg-surface px-3 text-base text-ink ${FOCUS}`;
 const STATUS_TONE: Record<OrderStatus, string> = {
   OPEN: "bg-info-bg text-info-ink",
   CLOSED: "bg-success-bg text-success-ink",
   CANCELLED: "bg-danger-bg text-danger-ink",
 };
-const QTY_RE = /^\d{1,9}(\.\d{1,6})?$/;
-const validQty = (q: string): boolean => QTY_RE.test(q) && /[1-9]/.test(q);
+/** Miktar: tam sayı (ondalık istemcide reddedilir; ölçek denetimi ayrıca domain'dedir). */
+const QTY_RE = /^[1-9]\d{0,8}$/;
+export const validQty = (q: string): boolean => QTY_RE.test(q);
+/** Yazılan miktar kırpılmaz/sessizce değiştirilmez (ondalık "1.5" → "15" olmaz); geçersizse alan altında neden + eylem gösterilir. */
+const digits = (v: string): string => v.slice(0, 12);
+
+/** Sarmalayıcı içindeki ilk alana odak (TextField ref iletmez). */
+function focusIn(el: HTMLElement | null): void {
+  el?.querySelector<HTMLElement>("input, select, textarea")?.focus();
+}
+const afterRender = (fn: () => void): void => {
+  requestAnimationFrame(() => requestAnimationFrame(fn));
+};
 
 function StatusBadge({ status }: { status: OrderStatus }) {
   const t = useTranslations("orders");
@@ -208,6 +299,8 @@ export interface OrdersViewProps {
   readonly assignees: readonly AssigneeOption[];
   readonly canCreate: boolean;
   readonly canApprove: boolean;
+  /** Bozuk sayfa bağlantısı (`after`) yüzünden ilk sayfa gösteriliyor. */
+  readonly badCursor?: boolean;
 }
 interface DraftLine {
   readonly itemId: string;
@@ -226,40 +319,62 @@ interface UnitOption {
   readonly unitCode: string;
   readonly unitName: string;
 }
-type AssignResult = { readonly groupId: string | null; readonly taskCount: number; readonly assigned: boolean };
+type SearchProblem = { readonly kind: "none" } | { readonly kind: "error"; readonly info: ErrorInfo };
+type AssignResult = { readonly groupId: string | null; readonly taskCount: number; readonly assigned: boolean; readonly seq: number };
 
-export function OrdersView({ slug, orders, nextHref, statusFilter, assignees, canCreate, canApprove }: OrdersViewProps) {
+export function OrdersView({ slug, orders, nextHref, statusFilter, assignees, canCreate, canApprove, badCursor = false }: OrdersViewProps) {
   const t = useTranslations("orders");
   const router = useRouter();
   const [, startTransition] = useTransition();
   const keyFor = useKeyFor();
+  const seq = useRef(0);
   const [customerRef, setCustomerRef] = useState("");
   const [lines, setLines] = useState<readonly DraftLine[]>([]);
   const [query, setQuery] = useState("");
   const [found, setFound] = useState<readonly Found[]>([]);
+  const [problem, setProblem] = useState<SearchProblem | null>(null);
+  const [noLines, setNoLines] = useState(false);
   const [picked, setPicked] = useState<(Found & { units: readonly UnitOption[] }) | null>(null);
   const [unitId, setUnitId] = useState("");
   const [qty, setQty] = useState("");
+  const [qtyBad, setQtyBad] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<{ info: ErrorInfo; ctx: OrderErrorContext } | null>(null);
+  const [createError, setCreateError] = useState<ErrState | null>(null);
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [assignee, setAssignee] = useState("");
   const [confirm, setConfirm] = useState(false);
   const [assignResult, setAssignResult] = useState<AssignResult | null>(null);
+  const [assignError, setAssignError] = useState<ErrState | null>(null);
+  const searchToken = useRef(0);
+  const itemRef = useRef<HTMLDivElement>(null);
+  const qtyRef = useRef<HTMLDivElement>(null);
 
   const base = `/t/${encodeURIComponent(slug)}/orders`;
+  const nextSeq = (): number => ++seq.current;
 
   async function search(q: string) {
     setQuery(q);
+    setNoLines(false);
+    const token = ++searchToken.current;
     if (q.trim().length < 1) {
       setFound([]);
+      setProblem(null);
       return;
     }
     try {
       const r = await searchItemsAction({ slug, q: q.trim(), limit: 5 });
-      if (r.ok) setFound(r.data.items);
+      if (token !== searchToken.current) return;
+      if (!r.ok) {
+        setFound([]);
+        setProblem({ kind: "error", info: { code: r.error.code, detail: r.error.detail, requestId: r.error.requestId } });
+        return;
+      }
+      setFound(r.data.items);
+      setProblem(r.data.items.length === 0 ? { kind: "none" } : null);
     } catch {
+      if (token !== searchToken.current) return;
       setFound([]);
+      setProblem({ kind: "error", info: { code: "NETWORK" } });
     }
   }
   async function pick(f: Found) {
@@ -268,28 +383,43 @@ export function OrdersView({ slug, orders, nextHref, statusFilter, assignees, ca
     try {
       const r = await itemUnitsAction({ slug, itemId: f.id });
       if (!r.ok) {
-        setError({ info: { code: r.error.code, detail: r.error.detail, requestId: r.error.requestId }, ctx: "lookup" });
+        setProblem({ kind: "error", info: { code: r.error.code, detail: r.error.detail, requestId: r.error.requestId } });
         return;
       }
       setPicked({ ...f, units: r.data.units });
       setUnitId(r.data.units[0]?.unitId ?? "");
-      setError(null);
+      setProblem(null);
+      afterRender(() => focusIn(qtyRef.current));
     } catch {
-      setError({ info: { code: "NETWORK" }, ctx: "lookup" });
+      setProblem({ kind: "error", info: { code: "NETWORK" } });
     }
   }
   function addLine() {
     const unit = picked?.units.find((u) => u.unitId === unitId);
-    if (picked === null || unit === undefined || !validQty(qty)) return;
+    if (picked === null || unit === undefined) return;
+    if (!validQty(qty)) {
+      setQtyBad(true);
+      focusIn(qtyRef.current);
+      return;
+    }
+    setCreateError(null);
     setLines((l) => [...l, { itemId: picked.id, itemName: picked.name, unitId: unit.unitId, unitName: unit.unitName || unit.unitCode, quantity: qty }]);
     setPicked(null);
     setQuery("");
     setQty("");
+    setQtyBad(false);
+    setNoLines(false);
+    afterRender(() => focusIn(itemRef.current));
   }
   async function submitCreate() {
-    if (busy || lines.length === 0) return;
+    if (busy) return;
+    if (lines.length === 0) {
+      setNoLines(true);
+      focusIn(itemRef.current);
+      return;
+    }
     setBusy(true);
-    setError(null);
+    setCreateError(null);
     const payload = { customerRef: customerRef.trim(), lines: lines.map((l) => ({ itemId: l.itemId, unitId: l.unitId, quantity: l.quantity })) };
     const holder = keyFor(`create:${JSON.stringify(payload)}`);
     const out = await submitWithKey(holder, (clientKey) =>
@@ -297,14 +427,16 @@ export function OrdersView({ slug, orders, nextHref, statusFilter, assignees, ca
     );
     if (!out.ok) {
       setBusy(false);
-      setError({ info: out.error, ctx: "create" });
+      setCreateError({ info: out.error, ctx: "create", seq: nextSeq() });
       return;
     }
-    // A-314a-2: kapsamlı kullanıcı yeni siparişi listede göremeyebilir → doğrudan ayrıntıya gidilir (orada neden + sonraki eylem gösterilir).
-    router.push(`${base}/${encodeURIComponent(out.data.orderId)}?created=1`);
+    // A-314a-2: kapsamlı kullanıcı yeni siparişi listede/ayrıntıda göremeyebilir → numara oluşturma yanıtından saklanır, doğrudan ayrıntıya gidilir.
+    rememberCreated({ id: out.data.orderId, number: out.data.number });
+    router.push(`${base}/${encodeURIComponent(out.data.orderId)}`);
   }
   function toggle(id: string) {
     setAssignResult(null);
+    setAssignError(null);
     setSelected((s) => {
       const n = new Set(s);
       if (n.has(id)) n.delete(id);
@@ -315,7 +447,7 @@ export function OrdersView({ slug, orders, nextHref, statusFilter, assignees, ca
   async function submitAssign() {
     if (busy || selected.size === 0) return;
     setBusy(true);
-    setError(null);
+    setAssignError(null);
     const ids = [...selected].sort();
     const holder = keyFor(`assign:${ids.join(",")}:${assignee}`);
     const out = await submitWithKey(holder, (clientKey) =>
@@ -324,63 +456,84 @@ export function OrdersView({ slug, orders, nextHref, statusFilter, assignees, ca
     setBusy(false);
     setConfirm(false);
     if (!out.ok) {
-      setError({ info: out.error, ctx: "assign" });
+      setAssignError({ info: out.error, ctx: "assign", seq: nextSeq() });
       return;
     }
-    setAssignResult({ groupId: out.data.groupId, taskCount: out.data.taskCount, assigned: assignee !== "" });
+    setAssignResult({ groupId: out.data.groupId, taskCount: out.data.taskCount, assigned: assignee !== "", seq: nextSeq() });
     setSelected(new Set());
     startTransition(() => router.refresh());
   }
 
   const filters: readonly (OrderStatus | "ALL")[] = ["OPEN", "CLOSED", "CANCELLED", "ALL"];
   const assigneeName = assignees.find((a) => a.membershipId === assignee)?.displayName ?? "";
+  const itemProblem =
+    problem?.kind === "error"
+      ? { reason: t(`errors.${orderErrorKey(problem.info, "lookup")}`), action: t(`errors.${orderErrorKey(problem.info, "lookup")}Action`) }
+      : problem?.kind === "none"
+        ? { reason: t("form.itemNoneReason"), action: t("form.itemNoneAction") }
+        : noLines
+          ? { reason: t("form.noLinesReason"), action: t("form.noLinesAction") }
+          : undefined;
+  // Sayfa başına TEK birincil: seçim varken görevlendirme; yoksa siparişi kaydet.
+  const assignPrimary = selected.size > 0;
   return (
     <div className="grid min-w-0 gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,28rem)]">
+      <div className="flex min-w-0 flex-wrap gap-2 lg:col-span-2">
+        <a href="#orders-list" className={`sr-only focus:not-sr-only ${LINK_BTN}`}>
+          {t("skipList")}
+        </a>
+        {canApprove ? (
+          <a href="#assign-bar" className={`sr-only focus:not-sr-only ${LINK_BTN}`}>
+            {t("skipAssign")}
+          </a>
+        ) : null}
+        <a href="#order-new" className={`sr-only focus:not-sr-only ${LINK_BTN}`}>
+          {t("skipForm")}
+        </a>
+      </div>
       <section aria-labelledby="orders-list" className="flex min-w-0 flex-col gap-3">
-        <h2 id="orders-list" className="text-xl font-bold text-ink">
+        <h2 id="orders-list" tabIndex={-1} className="text-xl font-bold text-ink outline-none">
           {t("list.title")}
         </h2>
         <nav aria-label={t("list.filter")} className="flex min-w-0 flex-wrap gap-2">
-          {filters.map((f) => (
-            <Link
-              key={f}
-              href={`${base}?status=${f}`}
-              aria-current={f === statusFilter ? "page" : undefined}
-              className={`${LINK_BTN} ${f === statusFilter ? "bg-info-bg" : ""}`}
-              data-testid={`filter-${f}`}
-            >
-              {t(`filter.${f}`)}
-            </Link>
-          ))}
+          {filters.map((f) => {
+            const on = f === statusFilter;
+            return (
+              <Link
+                key={f}
+                href={`${base}?status=${f}`}
+                aria-current={on ? "page" : undefined}
+                data-selected={on}
+                className={`inline-flex min-h-12 min-w-12 items-center justify-center gap-1 rounded-control border-2 px-4 text-base font-bold ${FOCUS} ${
+                  on ? "border-accent bg-info-bg text-info-ink" : "border-border-strong bg-surface text-ink"
+                }`}
+                data-testid={`filter-${f}`}
+              >
+                {on ? <CircleCheck aria-hidden="true" className="size-4" /> : null}
+                {t(`filter.${f}`)}
+              </Link>
+            );
+          })}
         </nav>
-        {assignResult === null ? null : assignResult.groupId === null ? (
+        {badCursor ? (
           <Banner kind="warning">
-            <p className="font-semibold" data-testid="assign-none">
-              {t("assign.noneTitle")}
+            <p className="font-semibold" data-testid="bad-cursor">
+              {t("list.badCursor")}
             </p>
-            <p>{t("assign.noneAction")}</p>
+            <p>{t("list.badCursorAction")}</p>
           </Banner>
-        ) : (
-          <Banner kind="success">
-            <p data-testid="assign-done">{t(assignResult.assigned ? "assign.doneAssigned" : "assign.doneOpen", { n: assignResult.taskCount })}</p>
-          </Banner>
-        )}
-        {error !== null && (error.ctx === "assign" || error.ctx === "lookup") ? <ErrorNotice error={error.info} context={error.ctx} /> : null}
+        ) : null}
         {canApprove ? (
-          selected.size === 0 ? (
-            <p className="text-sm text-ink-muted">{t("assign.hint")}</p>
-          ) : (
-            <div className="flex min-w-0 flex-col gap-2 rounded-card border-2 border-border-strong bg-surface p-4" data-testid="assign-panel">
-              <h3 className="text-lg font-bold text-ink">{t("assign.title")}</h3>
-              <p className="text-base text-ink">{t("assign.selected", { n: selected.size })}</p>
+          <div id="assign-bar" tabIndex={-1} className="sticky top-0 z-10 flex min-w-0 flex-col gap-2 rounded-card border-2 border-border-strong bg-surface p-3 outline-none focus-visible:outline-3 focus-visible:outline-focus" data-testid="assign-bar">
+            <p className="m-0 text-base font-semibold text-ink" aria-live="polite">
+              {selected.size === 0 ? t("assign.idle") : t("assign.selected", { n: selected.size })}
+            </p>
+            {assignees.length === 0 ? (
+              <p className="m-0 text-sm text-ink-muted">{t("assign.noAssignees")}</p>
+            ) : (
               <label className="flex min-w-0 flex-col gap-1 text-base font-semibold text-ink">
                 {t("assign.picker")}
-                <select
-                  value={assignee}
-                  onChange={(e) => setAssignee(e.target.value)}
-                  className={SELECT}
-                  data-testid="assign-picker"
-                >
+                <select value={assignee} onChange={(e) => setAssignee(e.target.value)} disabled={selected.size === 0} className={SELECT} data-testid="assign-picker">
                   <option value="">{t("assign.anyone")}</option>
                   {assignees.map((a) => (
                     <option key={a.membershipId} value={a.membershipId}>
@@ -390,14 +543,32 @@ export function OrdersView({ slug, orders, nextHref, statusFilter, assignees, ca
                 </select>
                 <span className="text-sm font-normal text-ink-muted">{t("assign.pickerHint")}</span>
               </label>
-              <Button variant="secondary" disabled={busy} onClick={() => setConfirm(true)} data-testid="assign-open">
+            )}
+            <div className="flex min-w-0 flex-wrap gap-2">
+              <Button variant={assignPrimary ? "primary" : "secondary"} disabled={busy || selected.size === 0} onClick={() => setConfirm(true)} data-testid="assign-open">
                 {t("assign.create")}
               </Button>
+              {selected.size === 0 ? null : (
+                <Button variant="secondary" disabled={busy} onClick={() => setSelected(new Set())} data-testid="assign-clear">
+                  {t("assign.clear")}
+                </Button>
+              )}
             </div>
-          )
+          </div>
         ) : (
           <LockedNote text={t("assign.locked")} testId="assign-locked" />
         )}
+        {assignResult === null ? null : assignResult.groupId === null ? (
+          <Notice kind="warning" seq={assignResult.seq} testId="assign-none">
+            <p className="font-semibold">{t("assign.noneTitle")}</p>
+            <p>{t("assign.noneAction")}</p>
+          </Notice>
+        ) : (
+          <Notice kind="success" seq={assignResult.seq} testId="assign-done">
+            <p>{t(assignResult.assigned ? "assign.doneAssigned" : "assign.doneOpen", { n: assignResult.taskCount })}</p>
+          </Notice>
+        )}
+        {assignError === null ? null : <ErrorNotice error={assignError} />}
         {orders.length === 0 ? (
           <EmptyState icon={<PackagePlus aria-hidden="true" className="size-6" />} title={t("list.empty")} description={t("list.emptyAction")} />
         ) : (
@@ -441,7 +612,7 @@ export function OrdersView({ slug, orders, nextHref, statusFilter, assignees, ca
       </section>
 
       <section aria-labelledby="order-new" className="flex min-w-0 flex-col gap-3 self-start rounded-card border-2 border-border bg-surface p-4">
-        <h2 id="order-new" className="text-xl font-bold text-ink">
+        <h2 id="order-new" tabIndex={-1} className="text-xl font-bold text-ink outline-none">
           {t("form.title")}
         </h2>
         {!canCreate ? (
@@ -449,20 +620,24 @@ export function OrdersView({ slug, orders, nextHref, statusFilter, assignees, ca
         ) : (
           <form
             className="flex min-w-0 flex-col gap-3"
+            noValidate
             onSubmit={(e) => {
               e.preventDefault();
               void submitCreate();
             }}
           >
-            <p className="text-sm text-ink-muted">{t("form.scopeHint")}</p>
-            {error !== null && error.ctx === "create" ? <ErrorNotice error={error.info} context="create" /> : null}
+            <p className="m-0 text-sm text-ink-muted">{t("form.scopeHint")}</p>
+            {createError === null ? null : <ErrorNotice error={createError} />}
             <TextField
               label={t("form.customerRef")}
               hint={t("form.customerRefHint")}
               value={customerRef}
               maxLength={100}
               autoComplete="off"
-              onChange={(e) => setCustomerRef(e.target.value)}
+              onChange={(e) => {
+                setCustomerRef(e.target.value);
+                setCreateError(null);
+              }}
             />
             {lines.length === 0 ? null : (
               <ul aria-label={t("form.lines")} className="m-0 flex list-none flex-col gap-2 p-0" data-testid="draft-lines">
@@ -471,7 +646,15 @@ export function OrdersView({ slug, orders, nextHref, statusFilter, assignees, ca
                     <span className="min-w-0 break-words text-base text-ink">
                       {l.itemName} · {l.quantity} {l.unitName}
                     </span>
-                    <Button variant="secondary" aria-label={t("form.removeLine", { name: l.itemName })} onClick={() => setLines((x) => x.filter((_, j) => j !== i))}>
+                    <Button
+                      variant="secondary"
+                      aria-label={t("form.removeLine", { name: l.itemName })}
+                      onClick={() => {
+                        setCreateError(null);
+                        setLines((x) => x.filter((_, j) => j !== i));
+                        afterRender(() => focusIn(itemRef.current));
+                      }}
+                    >
                       {t("form.remove")}
                     </Button>
                   </li>
@@ -479,7 +662,9 @@ export function OrdersView({ slug, orders, nextHref, statusFilter, assignees, ca
               </ul>
             )}
             <div className="flex min-w-0 flex-col gap-2 rounded-card border-2 border-dashed border-border p-3">
-              <TextField label={t("form.item")} hint={t("form.itemHint")} value={query} autoComplete="off" onChange={(e) => void search(e.target.value)} />
+              <div ref={itemRef} className="min-w-0">
+                <TextField label={t("form.item")} hint={t("form.itemHint")} value={query} autoComplete="off" error={itemProblem} onChange={(e) => void search(e.target.value)} />
+              </div>
               {found.length === 0 ? null : (
                 <ul className="m-0 flex list-none flex-col gap-1 p-0" aria-label={t("form.item")}>
                   {found.map((f) => (
@@ -505,14 +690,26 @@ export function OrdersView({ slug, orders, nextHref, statusFilter, assignees, ca
                       ))}
                     </select>
                   </label>
-                  <TextField label={t("form.quantity")} inputMode="decimal" value={qty} onChange={(e) => setQty(e.target.value.replace(/[^0-9.]/g, "").slice(0, 16))} />
-                  <Button variant="secondary" onClick={addLine} disabled={!validQty(qty)}>
+                  <div ref={qtyRef} className="min-w-0">
+                    <TextField
+                      label={t("form.quantity")}
+                      hint={t("form.quantityHint")}
+                      inputMode="numeric"
+                      value={qty}
+                      error={qtyBad || (qty !== "" && !validQty(qty)) ? { reason: t("form.qtyReason"), action: t("form.qtyAction") } : undefined}
+                      onChange={(e) => {
+                        setQty(digits(e.target.value));
+                        setQtyBad(false);
+                      }}
+                    />
+                  </div>
+                  <Button variant="secondary" onClick={addLine}>
                     {t("form.addLine")}
                   </Button>
                 </>
               )}
             </div>
-            <Button type="submit" variant="primary" loading={busy} disabled={lines.length === 0} data-testid="create-submit">
+            <Button type="submit" variant={assignPrimary ? "secondary" : "primary"} loading={busy} data-testid="create-submit">
               {t("form.save")}
             </Button>
           </form>
@@ -540,7 +737,6 @@ export interface OrderDetailViewProps {
   readonly slug: string;
   readonly order: OrderDetail;
   readonly canApprove: boolean;
-  readonly justCreated: boolean;
 }
 interface StockRow {
   readonly dimension: {
@@ -558,113 +754,189 @@ interface StockRow {
   readonly available: string;
 }
 type Panel = { readonly lineId: string; readonly kind: "cancel" | "manual" } | null;
+interface LineErr extends ErrState {
+  readonly lineId: string;
+}
 
 const METRICS = ["requested", "allocated", "picked", "shipped", "open", "returned", "cancelled"] as const;
 
-export function OrderDetailView({ slug, order, canApprove, justCreated }: OrderDetailViewProps) {
+export function OrderDetailView({ slug, order, canApprove }: OrderDetailViewProps) {
   const t = useTranslations("orders");
   const router = useRouter();
-  const [, startTransition] = useTransition();
+  const [pending, startTransition] = useTransition();
   const keyFor = useKeyFor();
+  const seq = useRef(0);
+  const nextSeq = (): number => ++seq.current;
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<{ info: ErrorInfo; ctx: OrderErrorContext } | null>(null);
-  const [reserved, setReserved] = useState<{ total: string; manual: boolean } | null>(null);
-  const [cancelled, setCancelled] = useState<string | null>(null);
+  const [createdNumber, setCreatedNumber] = useState<string | null>(null);
+  const [attempted, setAttempted] = useState(false);
+  const [reserved, setReserved] = useState<{ total: bigint; lineId: string | null; seq: number } | null>(null);
+  const [actionError, setActionError] = useState<ErrState | null>(null);
+  const [actionDone, setActionDone] = useState<string | null>(null);
+  const [lineError, setLineError] = useState<LineErr | null>(null);
+  const [lineNote, setLineNote] = useState<{ lineId: string; text: string; seq: number } | null>(null);
   const [panel, setPanel] = useState<Panel>(null);
   const [cancelQty, setCancelQty] = useState("");
+  const [qtyTouched, setQtyTouched] = useState(false);
   const [reason, setReason] = useState("");
+  const [reasonTouched, setReasonTouched] = useState(false);
   const [stock, setStock] = useState<{ rows: readonly StockRow[]; truncated: boolean } | null>(null);
   const [alloc, setAlloc] = useState<Readonly<Record<number, string>>>({});
+  const [allocNone, setAllocNone] = useState(false);
   const [confirmOrder, setConfirmOrder] = useState(false);
   const [orderReason, setOrderReason] = useState("");
+  const [orderReasonTouched, setOrderReasonTouched] = useState(false);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const orderPanelRef = useRef<HTMLElement>(null);
+
+  // A-314a-2: oluşturma yanıtından gelen numara (yalnızca bu siparişin kimliğiyle eşleşirse) bir kez gösterilir.
+  useEffect(() => {
+    setCreatedNumber(createdNumberOf(order.id, true));
+  }, [order.id]);
+  // Panel açılınca (ve rafları yüklenince) ilk alana odak.
+  useEffect(() => {
+    if (panel !== null) focusIn(panelRef.current);
+  }, [panel, stock]);
+  useEffect(() => {
+    if (confirmOrder) focusIn(orderPanelRef.current);
+  }, [confirmOrder]);
 
   const isOpen = order.status === "OPEN";
   const base = `/t/${encodeURIComponent(slug)}/orders`;
   const refresh = (): void => startTransition(() => router.refresh());
+  /** Rezerve edilemeyen satır: kalan > rezerve VE (bu ekranda rezervasyon denendi ya da satırda kısmi rezerve var). Yalnız gösterim. */
+  const isShort = (l: OrderLine): boolean => isOpen && microOf(l.open) > 0n && unallocatedOf(l.open, l.allocated) > 0n && (attempted || microOf(l.allocated) > 0n);
+  const shortLines = order.lines.filter(isShort);
 
-  async function reserve(overrides?: { lineId: string; allocations: { dimension: StockRow["dimension"]; quantity: string }[] }[]) {
+  async function reserve(overrides?: { lineId: string; allocations: { dimension: StockRow["dimension"]; quantity: string }[] }[], lineId: string | null = null) {
     if (busy) return;
     setBusy(true);
-    setError(null);
+    setActionError(null);
+    setLineError(null);
     setReserved(null);
     const holder = keyFor(`reserve:${order.id}:${JSON.stringify(overrides ?? null)}`);
-    const out = await submitWithKey(holder, (clientKey) =>
-      reserveOrderAction({ slug, clientKey, orderId: order.id, ...(overrides === undefined ? {} : { overrides }) }),
-    );
+    const out = await submitWithKey(holder, (clientKey) => reserveOrderAction({ slug, clientKey, orderId: order.id, ...(overrides === undefined ? {} : { overrides }) }));
     setBusy(false);
     if (!out.ok) {
-      setError({ info: out.error, ctx: "reserve" });
+      if (lineId === null) setActionError({ info: out.error, ctx: "reserve", seq: nextSeq() });
+      else setLineError({ lineId, info: out.error, ctx: "reserve", seq: nextSeq() });
       return;
     }
-    setReserved({ total: sumQuantities(out.data.lines.map((l) => l.quantity)), manual: overrides !== undefined });
+    setAttempted(true);
+    setReserved({ total: out.data.lines.reduce((a, l) => a + microOf(l.quantity), 0n), lineId, seq: nextSeq() });
     setPanel(null);
     setStock(null);
     setAlloc({});
     refresh();
+  }
+  /** Rezervasyon sonucu bildirimi (yenilenmiş veriden; yenilenirken gösterilmez). */
+  function outcomeNotice() {
+    if (reserved === null || pending) return null;
+    const kind = reserveOutcome(reserved.total, shortLines.length);
+    const total = fromMicroDisplay(reserved.total);
+    const tone: Tone = kind === "full" ? "success" : kind === "nothing" ? "info" : "warning";
+    return (
+      <Notice kind={tone} seq={reserved.seq} testId="reserve-result">
+        <p className="font-semibold" data-testid={kind === "full" ? "reserve-done" : `reserve-${kind}`}>
+          {t(`reserve.${kind === "nothing" ? "nothingNew" : kind}`, { total, n: shortLines.length })}
+        </p>
+        {kind === "partial" || kind === "none" ? <p>{t("reserve.shortAction")}</p> : kind === "nothing" ? <p>{t("reserve.nothingNewAction")}</p> : null}
+      </Notice>
+    );
   }
   async function openManual(line: OrderLine) {
     setPanel({ lineId: line.id, kind: "manual" });
     setStock(null);
     setAlloc({});
-    setError(null);
+    setAllocNone(false);
+    setLineError(null);
+    setActionError(null);
     try {
       const r = await lineStockAction({ slug, itemId: line.itemId });
       if (!r.ok) {
-        setError({ info: { code: r.error.code, detail: r.error.detail, requestId: r.error.requestId }, ctx: "lookup" });
+        setLineError({ lineId: line.id, info: { code: r.error.code, detail: r.error.detail, requestId: r.error.requestId }, ctx: "lookup", seq: nextSeq() });
         return;
       }
       setStock({ rows: r.data.rows, truncated: r.data.truncated });
     } catch {
-      setError({ info: { code: "NETWORK" }, ctx: "lookup" });
+      setLineError({ lineId: line.id, info: { code: "NETWORK" }, ctx: "lookup", seq: nextSeq() });
     }
   }
   async function submitManual(line: OrderLine) {
-    if (stock === null) return;
-    const allocations = stock.rows.flatMap((r, i) => {
-      const q = (alloc[i] ?? "").trim();
-      return validQty(q) ? [{ dimension: r.dimension, quantity: q }] : [];
-    });
-    if (allocations.length === 0) return;
-    await reserve([{ lineId: line.id, allocations }]);
+    if (stock === null || busy) return;
+    const entered = stock.rows.map((_, i) => (alloc[i] ?? "").trim());
+    const bad = entered.findIndex((q) => q !== "" && !validQty(q));
+    if (bad >= 0) {
+      setAllocNone(false);
+      panelRef.current?.querySelectorAll<HTMLInputElement>("input")[bad]?.focus();
+      return;
+    }
+    const allocations = stock.rows.flatMap((r, i) => (validQty(entered[i] as string) ? [{ dimension: r.dimension, quantity: entered[i] as string }] : []));
+    if (allocations.length === 0) {
+      setAllocNone(true);
+      focusIn(panelRef.current);
+      return;
+    }
+    setAllocNone(false);
+    await reserve([{ lineId: line.id, allocations }], line.id);
   }
   function openCancel(line: OrderLine) {
     setPanel({ lineId: line.id, kind: "cancel" });
     setCancelQty(fmtQty(line.open));
+    setQtyTouched(false);
     setReason("");
-    setError(null);
+    setReasonTouched(false);
+    setLineError(null);
+    setActionError(null);
   }
   async function submitCancelLine(line: OrderLine) {
-    if (busy || !validQty(cancelQty) || reason.trim() === "") return;
+    if (busy) return;
+    if (!validQty(cancelQty)) {
+      setQtyTouched(true);
+      panelRef.current?.querySelectorAll<HTMLInputElement>("input")[0]?.focus();
+      return;
+    }
+    if (reason.trim() === "") {
+      setReasonTouched(true);
+      panelRef.current?.querySelectorAll<HTMLInputElement>("input")[1]?.focus();
+      return;
+    }
     setBusy(true);
-    setError(null);
+    setLineError(null);
     const holder = keyFor(`cancel-line:${line.id}:${cancelQty}:${reason.trim()}`);
     const out = await submitWithKey(holder, (clientKey) => cancelOrderLineAction({ slug, clientKey, lineId: line.id, quantity: cancelQty, reason: reason.trim() }));
     setBusy(false);
     if (!out.ok) {
-      setError({ info: out.error, ctx: "cancel" });
+      setLineError({ lineId: line.id, info: out.error, ctx: "cancel", seq: nextSeq() });
       return;
     }
-    setCancelled(t("cancel.lineDone", { no: line.lineNo }));
+    setLineNote({ lineId: line.id, text: t("cancel.lineDone", { no: line.lineNo }), seq: nextSeq() });
     setPanel(null);
     refresh();
   }
   async function submitCancelOrder() {
-    if (busy || orderReason.trim() === "") return;
+    if (busy) return;
+    if (orderReason.trim() === "") {
+      setOrderReasonTouched(true);
+      focusIn(orderPanelRef.current);
+      return;
+    }
     setBusy(true);
-    setError(null);
+    setActionError(null);
     const holder = keyFor(`cancel-order:${order.id}:${order.version}:${orderReason.trim()}`);
     const out = await submitWithKey(holder, (clientKey) => cancelOrderAction({ slug, clientKey, orderId: order.id, expectedVersion: order.version, reason: orderReason.trim() }));
     setBusy(false);
-    setConfirmOrder(false);
     if (!out.ok) {
-      setError({ info: out.error, ctx: "cancel" });
+      setActionError({ info: out.error, ctx: "cancel", seq: nextSeq() });
       return;
     }
-    setCancelled(t("cancel.orderDone", { number: order.number }));
+    setConfirmOrder(false);
+    setLineNote(null);
+    setReserved(null);
+    setActionDone(t("cancel.orderDone", { number: order.number }));
     refresh();
   }
 
-  const shortLines = order.lines.filter((l) => unallocatedOf(l.open, l.allocated) > 0n);
   return (
     <div className="flex min-w-0 flex-col gap-4">
       <section className="flex min-w-0 flex-col gap-2 rounded-card border-2 border-border bg-surface p-4" aria-labelledby="order-head">
@@ -678,36 +950,19 @@ export function OrderDetailView({ slug, order, canApprove, justCreated }: OrderD
         <p className="text-sm font-semibold text-ink">{t("list.lines", { open: order.openLineCount, total: order.lineCount })}</p>
       </section>
 
-      {justCreated ? (
-        <Banner kind="success">
-          <p data-testid="created-note">{t("detail.created", { number: order.number })}</p>
-          <p>{t("detail.createdNext")}</p>
-        </Banner>
-      ) : null}
-      {reserved === null ? null : (
-        <Banner kind="success">
-          <p data-testid="reserve-done">{t(reserved.manual ? "reserve.doneManual" : "reserve.done", { total: reserved.total })}</p>
-        </Banner>
+      {createdNumber === null ? null : (
+        <Notice kind="success" testId="created-note">
+          <p data-testid="created-text">{t("detail.created", { number: createdNumber })}</p>
+          {isOpen ? <p>{t("detail.createdNext")}</p> : null}
+        </Notice>
       )}
-      {cancelled === null ? null : (
-        <Banner kind="success">
-          <p data-testid="cancel-done">{cancelled}</p>
-        </Banner>
-      )}
-      {error !== null ? <ErrorNotice error={error.info} context={error.ctx} /> : null}
-      {isOpen && shortLines.length > 0 ? (
-        <Banner kind="warning">
-          <p className="font-semibold" data-testid="short-note">
-            {t("detail.shortTitle", { n: shortLines.length })}
-          </p>
-          <p>{t("detail.shortAction")}</p>
-        </Banner>
-      ) : null}
 
       <ul aria-label={t("detail.lines")} className="m-0 flex list-none flex-col gap-3 p-0" data-testid="order-lines">
         {order.lines.map((l) => {
           const short = unallocatedOf(l.open, l.allocated);
           const lineOpen = isOpen && microOf(l.open) > 0n;
+          const showShort = isShort(l);
+          const here = panel !== null && panel.lineId === l.id ? panel.kind : null;
           return (
             <li key={l.id} data-testid="order-line" data-line-id={l.id} className="flex min-w-0 flex-col gap-3 rounded-card border-2 border-border bg-surface p-4">
               <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-2">
@@ -724,15 +979,21 @@ export function OrderDetailView({ slug, order, canApprove, justCreated }: OrderD
                   </div>
                 ))}
               </dl>
-              {isOpen && short > 0n ? (
-                <p className="flex min-w-0 items-start gap-2 text-base font-semibold text-warning-ink" data-testid="line-short">
+              {showShort ? (
+                <p className="m-0 flex min-w-0 items-start gap-2 text-base font-semibold text-warning-ink" data-testid="line-short">
                   <TriangleAlert aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-warning" />
                   <span className="min-w-0 break-words">{t("detail.lineShort", { n: fromMicroDisplay(short) })}</span>
                 </p>
               ) : null}
+              {lineNote !== null && lineNote.lineId === l.id ? (
+                <Notice kind="success" seq={lineNote.seq} testId="cancel-done">
+                  <p>{lineNote.text}</p>
+                </Notice>
+              ) : null}
+              {reserved !== null && reserved.lineId === l.id ? outcomeNotice() : null}
               {lineOpen && canApprove ? (
                 <div className="flex min-w-0 flex-wrap gap-2">
-                  {short > 0n ? (
+                  {showShort ? (
                     <Button variant="secondary" disabled={busy} onClick={() => void openManual(l)} data-testid="manual-open">
                       {t("manual.open")}
                     </Button>
@@ -742,67 +1003,91 @@ export function OrderDetailView({ slug, order, canApprove, justCreated }: OrderD
                   </Button>
                 </div>
               ) : null}
-              {panel !== null && panel.lineId === l.id && panel.kind === "cancel" ? (
-                <div className="flex min-w-0 flex-col gap-2 rounded-card border-2 border-border-strong p-3" data-testid="cancel-panel">
-                  <h4 className="text-base font-bold text-ink">{t("cancel.lineTitle", { no: l.lineNo })}</h4>
-                  <TextField label={t("cancel.quantity")} hint={t("cancel.quantityHint", { open: fmtQty(l.open) })} inputMode="decimal" value={cancelQty} onChange={(e) => setCancelQty(e.target.value.replace(/[^0-9.]/g, "").slice(0, 16))} />
-                  <TextField label={t("cancel.reason")} hint={t("cancel.reasonHint")} value={reason} maxLength={500} autoComplete="off" onChange={(e) => setReason(e.target.value)} />
+              {here === "cancel" ? (
+                <div ref={panelRef} className="flex min-w-0 flex-col gap-2 rounded-card border-2 border-border-strong p-3" data-testid="cancel-panel">
+                  <h4 className="m-0 text-base font-bold text-ink">{t("cancel.lineTitle", { no: l.lineNo })}</h4>
+                  <TextField
+                    label={t("cancel.quantity")}
+                    hint={t("cancel.quantityHint", { open: fmtQty(l.open) })}
+                    inputMode="numeric"
+                    value={cancelQty}
+                    error={qtyTouched || (cancelQty !== "" && !validQty(cancelQty)) ? { reason: t("form.qtyReason"), action: t("form.qtyAction") } : undefined}
+                    onChange={(e) => {
+                      setCancelQty(digits(e.target.value));
+                      setQtyTouched(false);
+                    }}
+                  />
+                  <TextField
+                    label={t("cancel.reason")}
+                    hint={t("cancel.reasonHint")}
+                    value={reason}
+                    maxLength={500}
+                    autoComplete="off"
+                    required
+                    aria-required="true"
+                    error={reasonTouched && reason.trim() === "" ? { reason: t("cancel.reasonMissingReason"), action: t("cancel.reasonMissingAction") } : undefined}
+                    onChange={(e) => setReason(e.target.value)}
+                  />
                   <div className="flex min-w-0 flex-wrap gap-2">
-                    <Button variant="danger" loading={busy} disabled={!validQty(cancelQty) || reason.trim() === ""} onClick={() => void submitCancelLine(l)} data-testid="cancel-line-submit">
+                    <Button variant="danger" loading={busy} onClick={() => void submitCancelLine(l)} data-testid="cancel-line-submit">
                       {t("cancel.lineSubmit")}
                     </Button>
                     <Button variant="secondary" disabled={busy} onClick={() => setPanel(null)}>
                       {t("dismiss")}
                     </Button>
                   </div>
+                  {lineError !== null && lineError.lineId === l.id ? <ErrorNotice error={lineError} /> : null}
                 </div>
               ) : null}
-              {panel !== null && panel.lineId === l.id && panel.kind === "manual" ? (
-                <div className="flex min-w-0 flex-col gap-2 rounded-card border-2 border-border-strong p-3" data-testid="manual-panel">
-                  <h4 className="text-base font-bold text-ink">{t("manual.title", { no: l.lineNo })}</h4>
-                  <p className="text-sm text-ink-muted">{t("manual.hint", { n: fromMicroDisplay(short) })}</p>
-                  <p className="text-sm text-ink-muted">{t("manual.sideEffect")}</p>
+              {here === "manual" ? (
+                <div ref={panelRef} className="flex min-w-0 flex-col gap-2 rounded-card border-2 border-border-strong p-3" data-testid="manual-panel">
+                  <h4 className="m-0 text-base font-bold text-ink">{t("manual.title", { no: l.lineNo })}</h4>
+                  <p className="m-0 text-sm text-ink-muted">{t("manual.hint", { n: fromMicroDisplay(short) })}</p>
+                  <p className="m-0 text-sm text-ink-muted">{t("manual.sideEffect")}</p>
                   {stock === null ? (
-                    <p className="text-base text-ink-muted">{t("manual.loading")}</p>
+                    lineError !== null && lineError.lineId === l.id ? null : <p className="m-0 text-base text-ink-muted">{t("manual.loading")}</p>
                   ) : stock.rows.length === 0 ? (
-                    <p className="text-base text-ink" data-testid="manual-empty">
+                    <p className="m-0 text-base text-ink" data-testid="manual-empty">
                       {t("manual.empty")}
                     </p>
                   ) : (
                     <ul className="m-0 flex list-none flex-col gap-2 p-0">
-                      {stock.rows.map((r, i) => (
-                        <li key={`${r.dimension.locationId}-${i}`} className="flex min-w-0 flex-col gap-1 border-t border-border pt-2">
-                          <span className="break-words text-base font-semibold text-ink">
-                            {r.warehouseCode} · {r.locationCode}
-                            {r.lotCode === null ? "" : ` · ${t("manual.lot", { code: r.lotCode })}`}
-                            {r.serialNo === null ? "" : ` · ${t("manual.serial", { no: r.serialNo })}`}
-                          </span>
-                          <span className="text-sm text-ink-muted">{t("manual.available", { n: fmtQty(r.available) })}</span>
-                          <TextField
-                            label={t("manual.quantity")}
-                            inputMode="decimal"
-                            value={alloc[i] ?? ""}
-                            onChange={(e) => setAlloc((a) => ({ ...a, [i]: e.target.value.replace(/[^0-9.]/g, "").slice(0, 16) }))}
-                          />
-                        </li>
-                      ))}
+                      {stock.rows.map((r, i) => {
+                        const v = (alloc[i] ?? "").trim();
+                        return (
+                          <li key={`${r.dimension.locationId}-${i}`} className="flex min-w-0 flex-col gap-1 border-t border-border pt-2">
+                            <span className="break-words text-base font-semibold text-ink">
+                              {r.warehouseCode} · {r.locationCode}
+                              {r.lotCode === null ? "" : ` · ${t("manual.lot", { code: r.lotCode })}`}
+                              {r.serialNo === null ? "" : ` · ${t("manual.serial", { no: r.serialNo })}`}
+                            </span>
+                            <span className="text-sm text-ink-muted">{t("manual.available", { n: fmtQty(r.available) })}</span>
+                            <TextField
+                              label={t("manual.quantity")}
+                              inputMode="numeric"
+                              value={alloc[i] ?? ""}
+                              error={v !== "" && !validQty(v) ? { reason: t("form.qtyReason"), action: t("form.qtyAction") } : undefined}
+                              onChange={(e) => {
+                                setAllocNone(false);
+                                setAlloc((a) => ({ ...a, [i]: digits(e.target.value) }));
+                              }}
+                            />
+                          </li>
+                        );
+                      })}
                     </ul>
                   )}
-                  {stock?.truncated === true ? <p className="text-sm text-ink-muted">{t("manual.truncated")}</p> : null}
+                  {stock?.truncated === true ? <p className="m-0 text-sm text-ink-muted">{t("manual.truncated")}</p> : null}
+                  {allocNone ? <FieldMsg reason={t("manual.noneReason")} action={t("manual.noneAction")} testId="manual-none" /> : null}
                   <div className="flex min-w-0 flex-wrap gap-2">
-                    <Button
-                      variant="secondary"
-                      loading={busy}
-                      disabled={stock === null || !stock.rows.some((_, i) => validQty((alloc[i] ?? "").trim()))}
-                      onClick={() => void submitManual(l)}
-                      data-testid="manual-submit"
-                    >
+                    <Button variant="secondary" loading={busy} disabled={stock === null || stock.rows.length === 0} onClick={() => void submitManual(l)} data-testid="manual-submit">
                       {t("manual.submit")}
                     </Button>
                     <Button variant="secondary" disabled={busy} onClick={() => setPanel(null)}>
                       {t("dismiss")}
                     </Button>
                   </div>
+                  {lineError !== null && lineError.lineId === l.id ? <ErrorNotice error={lineError} /> : null}
                 </div>
               ) : null}
             </li>
@@ -814,13 +1099,20 @@ export function OrderDetailView({ slug, order, canApprove, justCreated }: OrderD
         <h2 id="order-actions" className="text-xl font-bold text-ink">
           {t("actions.title")}
         </h2>
+        {actionDone === null ? null : (
+          <Notice kind="success" testId="cancel-order-done">
+            <p>{actionDone}</p>
+          </Notice>
+        )}
+        {reserved !== null && reserved.lineId === null ? outcomeNotice() : null}
+        {actionError === null ? null : <ErrorNotice error={actionError} />}
         {!isOpen ? (
-          <p className="text-base text-ink-muted" data-testid="order-closed">
+          <p className="m-0 text-base text-ink-muted" data-testid="order-closed">
             {t("actions.closed")}
           </p>
         ) : canApprove ? (
           <>
-            <p className="text-base text-ink">{t("reserve.explain")}</p>
+            <p className="m-0 text-base text-ink">{t("reserve.explain")}</p>
             <Button variant="primary" loading={busy} onClick={() => void reserve()} data-testid="reserve-submit">
               {t("reserve.submit")}
             </Button>
@@ -837,14 +1129,24 @@ export function OrderDetailView({ slug, order, canApprove, justCreated }: OrderD
       </section>
 
       {confirmOrder ? (
-        <section className="flex min-w-0 flex-col gap-2 rounded-card border-2 border-danger bg-surface p-4" data-testid="cancel-order-panel" aria-labelledby="cancel-order-title">
+        <section ref={orderPanelRef} className="flex min-w-0 flex-col gap-2 rounded-card border-2 border-danger bg-surface p-4" data-testid="cancel-order-panel" aria-labelledby="cancel-order-title">
           <h2 id="cancel-order-title" className="text-xl font-bold text-ink">
             {t("cancel.orderTitle", { number: order.number })}
           </h2>
-          <p className="text-base text-ink">{t("cancel.orderBody")}</p>
-          <TextField label={t("cancel.reason")} hint={t("cancel.reasonHint")} value={orderReason} maxLength={500} autoComplete="off" onChange={(e) => setOrderReason(e.target.value)} />
+          <p className="m-0 text-base text-ink">{t("cancel.orderBody")}</p>
+          <TextField
+            label={t("cancel.reason")}
+            hint={t("cancel.reasonHint")}
+            value={orderReason}
+            maxLength={500}
+            autoComplete="off"
+            required
+            aria-required="true"
+            error={orderReasonTouched && orderReason.trim() === "" ? { reason: t("cancel.reasonMissingReason"), action: t("cancel.reasonMissingAction") } : undefined}
+            onChange={(e) => setOrderReason(e.target.value)}
+          />
           <div className="flex min-w-0 flex-wrap gap-2">
-            <Button variant="danger" loading={busy} disabled={orderReason.trim() === ""} onClick={() => void submitCancelOrder()} data-testid="cancel-order-submit">
+            <Button variant="danger" loading={busy} onClick={() => void submitCancelOrder()} data-testid="cancel-order-submit">
               {t("cancel.orderSubmit")}
             </Button>
             <Button variant="secondary" disabled={busy} onClick={() => setConfirmOrder(false)}>
@@ -857,7 +1159,25 @@ export function OrderDetailView({ slug, order, canApprove, justCreated }: OrderD
   );
 }
 
-/** Ondalık dizgilerin toplamı (1e-6 ölçeği, BigInt; float yok). Yalnız "bu çağrıda tahsis edilen toplam" gösterimi içindir. */
-export function sumQuantities(list: readonly string[]): string {
-  return fromMicroDisplay(list.reduce((a, q) => a + microOf(q), 0n));
+/**
+ * Okunamayan sipariş paneli (A-314a-2): sipariş yok / başka depo / yeni oluşturulup henüz rezerve edilmediği için kapsamlı kullanıcıya görünmüyor.
+ * Oluşturma eyleminin döndürdüğü kimlikle eşleşirse sipariş numarası ve sonraki eylem gösterilir; eşleşmezse genel açıklama.
+ */
+export function OrderHiddenNotice() {
+  const t = useTranslations("orders");
+  // Kimlik yoldan okunur (prop değil): sunucu çıktısı var olmayan / başka tenant / kapsam dışı kimlikler için birebir aynıdır.
+  const orderId = String(useParams<{ orderId?: string }>().orderId ?? "");
+  const [number, setNumber] = useState<string | null>(null);
+  useEffect(() => {
+    setNumber(createdNumberOf(orderId, false));
+  }, [orderId]);
+  return (
+    <section className="flex min-w-0 flex-col gap-2 rounded-card border-2 border-border bg-surface p-4" data-testid="detail-hidden" data-created={number !== null}>
+      <h2 className="m-0 break-words text-xl font-bold text-ink">{number === null ? t("detail.hiddenTitle") : t("detail.hiddenCreatedTitle", { number })}</h2>
+      <p className="m-0 text-base text-ink">{number === null ? t("detail.hiddenReason") : t("detail.hiddenCreatedReason")}</p>
+      <p className="m-0 text-base font-semibold text-ink" data-testid="hidden-action">
+        {number === null ? t("detail.hiddenAction") : t("detail.hiddenCreatedAction", { number })}
+      </p>
+    </section>
+  );
 }

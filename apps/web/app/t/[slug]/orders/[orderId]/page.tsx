@@ -8,7 +8,7 @@ import { getMembershipSummary } from "@wms/domain/identity/member-queries";
 import { hasPermission } from "@wms/domain/identity/permissions";
 import { getSalesOrder } from "@wms/domain/operations";
 import { AppError } from "@wms/shared/errors";
-import { OrderDetailView } from "../order-form.tsx";
+import { OrderDetailView, OrderHiddenNotice } from "../order-form.tsx";
 
 export const dynamic = "force-dynamic";
 
@@ -22,10 +22,8 @@ const LINK = "inline-flex min-h-12 w-fit items-center text-base font-bold text-a
 
 // Sipariş ayrıntısı (T-314): satır başına istenen / tahsisli / toplanan / sevk / açık / iade / iptal (`getSalesOrder`, stock.view). Okunamayan sipariş (yok, başka depo,
 // ya da yeni oluşturulup henüz tahsis edilmemiş ve kullanıcı depo kapsamlı — A-314a-2) 404'e DÜŞÜRÜLMEZ: neden + sonraki eylem gösterilir. Okuma izni yoksa kilit + gerekçe.
-export default async function OrderDetailPage({ params, searchParams }: { params: Promise<{ slug: string; orderId: string }>; searchParams: Promise<Record<string, string | string[] | undefined>> }) {
+export default async function OrderDetailPage({ params }: { params: Promise<{ slug: string; orderId: string }>; searchParams?: Promise<Record<string, string | string[] | undefined>> }) {
   const { slug, orderId } = await params;
-  const sp = await searchParams;
-  const createdParam = Array.isArray(sp.created) ? sp.created[0] : sp.created;
   const returnTo = `/t/${encodeURIComponent(slug)}/orders/${encodeURIComponent(orderId)}`;
   if (!UUID_RE.test(orderId)) notFound();
   const { getAuthService } = await import("../../../../../lib/auth-service.ts");
@@ -68,13 +66,19 @@ export default async function OrderDetailPage({ params, searchParams }: { params
         </Link>
       </header>
       {order !== null ? (
-        <OrderDetailView slug={slug} order={order} canApprove={hasPermission(roles, "document.approve")} justCreated={createdParam === "1"} />
-      ) : (
-        <section className="flex min-w-0 flex-col gap-2 rounded-card border-2 border-border bg-surface p-4" data-testid={problem === "locked" ? "detail-locked" : "detail-hidden"}>
-          <h2 className="text-xl font-bold text-ink">{t(problem === "locked" ? "detail.lockedTitle" : "detail.hiddenTitle")}</h2>
-          <p className="text-base text-ink">{t(problem === "locked" ? "detail.lockedReason" : createdParam === "1" ? "detail.hiddenCreated" : "detail.hiddenReason")}</p>
-          <p className="text-base font-semibold text-ink">{t(problem === "locked" ? "detail.lockedAction" : "detail.hiddenAction")}</p>
+        <OrderDetailView slug={slug} order={order} canApprove={hasPermission(roles, "document.approve")} />
+      ) : problem === "locked" ? (
+        <section className="flex min-w-0 flex-col gap-2 rounded-card border-2 border-border bg-surface p-4" data-testid="detail-locked">
+          <h2 className="text-xl font-bold text-ink">{t("detail.lockedTitle")}</h2>
+          <p className="text-base text-ink">{t("detail.lockedReason")}</p>
+          <p className="text-base font-semibold text-ink">{t("detail.lockedAction")}</p>
+          <Link href="/help" className={`${LINK} min-w-12 justify-center rounded-control border-2 border-border-strong px-4 no-underline`} data-testid="help-link">
+            {t("helpCall")}
+          </Link>
         </section>
+      ) : (
+        // Kimlik oluşturma eyleminin döndürdüğüyle eşleşirse (oturum belleği) sipariş numarası + sonraki eylem gösterilir (A-314a-2).
+        <OrderHiddenNotice />
       )}
     </main>
   );
