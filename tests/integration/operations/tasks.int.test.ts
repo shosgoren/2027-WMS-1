@@ -9,9 +9,11 @@ import { DB_CLIENT_SETTINGS, type DbClient } from "../../../packages/db/src/clie
 import { AppError } from "../../../packages/shared/src/errors.ts";
 import * as ops from "../../../packages/domain/src/operations/index.ts";
 import { assignTask, cancelTask, claimTask, listMyTasks, listTasks, type TaskKind } from "../../../packages/domain/src/operations/index.ts";
+import { cancelCount, startCount } from "../../../packages/domain/src/operations/index.ts";
 import { completeTask, createTasks } from "../../../packages/domain/src/operations/tasks.ts";
 import { createWarehouse, setMembershipWarehouseScopes } from "../../../packages/domain/src/warehouse/index.ts";
 import { runTenantCommand } from "../../../packages/domain/src/identity/access.ts";
+import type { StockDocCallParams } from "../../../packages/domain/src/stock/index.ts";
 import { mkMembership, mkUser, newRegistry, seedWorld, type TenantWorld } from "../fixtures/tenants.ts";
 import { readIntEnv } from "../harness/env.ts";
 
@@ -305,5 +307,67 @@ describe("görev sorguları", () => {
     const lowest = { createdKey: "0001-01-01T00:00:00.000000Z", id: randomUUID() };
     expect((await listTasks(admin(w), { after: lowest })).items.length).toBeGreaterThan(0); // her görev bu imleçten sonradır; DB sorgusu hata vermez
     expect((await listMyTasks(picker(w), { after: lowest })).items).toBeDefined();
+  });
+});
+
+// T-334b (A-334b-1): COUNTING kilidindeki lokasyona bağlı görev miktarı count_diff.approve sahibi olmayana görünmez (görev görünür kalır).
+describe("kör sayım görev listelerinde (T-334b)", () => {
+  const NO_WAIT = { sleep: async () => undefined } as const;
+  const cmd = (w: TenantWorld): StockDocCallParams => ({ ...admin(w), clientKey: randomUUID(), retry: NO_WAIT });
+  async function mkLocation(w: TenantWorld, kind: "RECEIVING" | "STAGING"): Promise<string> {
+    const id = randomUUID();
+    await adm.query("INSERT INTO public.locations (tenant_id, id, warehouse_id, parent_id, code, name, depth, kind) VALUES ($1,$2,$3,NULL,$4,'T334b lok',0,$5)", [
+      w.tenantId, id, w.warehouseId, `L-${randomUUID().slice(0, 8)}`, kind,
+    ]);
+    return id;
+  }
+  async function mkItem(w: TenantWorld): Promise<string> {
+    const id = randomUUID();
+    await adm.query("INSERT INTO public.items (tenant_id, id, code, name, base_unit_id, tracking_mode, quantity_scale) VALUES ($1,$2,$3,'T334b urun',$4,'NONE',0)", [
+      w.tenantId, id, `I-${randomUUID().slice(0, 10)}`, w.unitId,
+    ]);
+    return id;
+  }
+  async function setup(w: TenantWorld) {
+    const item = await mkItem(w);
+    const locked = await mkLocation(w, "RECEIVING");
+    const free = await mkLocation(w, "STAGING");
+    const [tLocked, tFree] = await runTenantCommand({ ...admin(w), permission: "stock.post" }, async (tx, m) => [
+      ...(await createTasks(tx, m, [
+        { warehouseId: w.warehouseId, kind: "PUTAWAY", locationId: locked, itemId: item, quantity: "7.000000" },
+        { warehouseId: w.warehouseId, kind: "REPUTAWAY", locationId: free, itemId: item, quantity: "4" },
+      ])),
+    ]);
+    const sid = (await startCount(cmd(w), { warehouseId: w.warehouseId, locationIds: [locked] })).sessionId;
+    return { item, locked, free, tLocked: tLocked as string, tFree: tFree as string, sid };
+  }
+  const qtyOf = async (call: Promise<ops.TaskPage>, id: string) => (await call).items.find((t) => t.id === id);
+
+  it("aktif sayımda PICKER/COUNTER: kilitli lokasyondaki görevin miktarı null + countLocked; görev görünür; kilitsiz ve yönetici etkilenmez", async () => {
+    const w = await seedWorld(adm, reg, "L334b");
+    const { tLocked, tFree } = await setup(w);
+    {
+      const p = picker(w);
+      for (const list of [() => listMyTasks(p, { limit: 200 }), () => listTasks(p, { limit: 200 })]) {
+        expect(await qtyOf(list(), tLocked)).toMatchObject({ kind: "PUTAWAY", status: "OPEN", quantity: null, countLocked: true });
+        expect(await qtyOf(list(), tFree)).toMatchObject({ kind: "REPUTAWAY", quantity: "4.000000", countLocked: false });
+      }
+    }
+    const cu = await mkUser(adm, reg, "L334b counter");
+    await mkMembership(adm, w.tenantId, cu, { roles: ["COUNTER"] });
+    expect(await qtyOf(listTasks({ db: app, principal: { userId: cu, mfaVerified: true }, tenantSlug: w.slug }, { limit: 200 }), tLocked)).toMatchObject({ quantity: null, countLocked: true });
+    expect(await qtyOf(listTasks(admin(w), { limit: 200 }), tLocked)).toMatchObject({ quantity: "7.000000", countLocked: true });
+    expect(await qtyOf(listMyTasks(admin(w), { limit: 200 }), tLocked)).toMatchObject({ quantity: "7.000000", countLocked: true });
+    // Komut yolu maskelenmez: kilitli lokasyondaki görev üstlenilebilir (claim gerçek görevle çalışır).
+    expect(await claimTask(picker(w), { taskId: tLocked, expectedVersion: 1 })).toEqual({ version: 2 });
+  });
+
+  it("sayım iptal edilince PICKER miktarı yeniden görür", async () => {
+    const w = await seedWorld(adm, reg, "M334b");
+    const a = await setup(w);
+    expect(await qtyOf(listTasks(picker(w), { limit: 200 }), a.tLocked)).toMatchObject({ quantity: null, countLocked: true });
+    await cancelCount(cmd(w), { sessionId: a.sid, reason: "T334b iptal" });
+    expect(await qtyOf(listTasks(picker(w), { limit: 200 }), a.tLocked)).toMatchObject({ quantity: "7.000000", countLocked: false });
+    expect(await qtyOf(listMyTasks(picker(w), { limit: 200 }), a.tLocked)).toMatchObject({ quantity: "7.000000", countLocked: false });
   });
 });

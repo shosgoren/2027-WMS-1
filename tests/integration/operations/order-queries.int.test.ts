@@ -13,6 +13,7 @@ import { createWarehouse, setMembershipWarehouseScopes } from "../../../packages
 import * as ops from "../../../packages/domain/src/operations/index.ts";
 import {
   ORDER_LIST_LIMIT_MAX,
+  cancelCount,
   cancelOrderLine,
   confirmPick,
   createCustomerReturn,
@@ -22,6 +23,7 @@ import {
   listSalesOrders,
   reserveOrder,
   shipOrder,
+  startCount,
 } from "../../../packages/domain/src/operations/index.ts";
 import { approveDocument, createStockDocument, postDocument, type StockDocCallParams } from "../../../packages/domain/src/stock/index.ts";
 import { newRegistry, seedWorld, type TenantWorld } from "../fixtures/tenants.ts";
@@ -357,4 +359,37 @@ describe("depo kapsamı (A-46, A-314a-2)", () => {
       else process.env.WAREHOUSE_SCOPE_ENABLED = prev;
     }
   }, 180_000);
+});
+
+// T-334b (A-334b-3): toplanan (STAGING) pay COUNTING kilidindeki lokasyondaysa `picked` count_diff.approve sahibi olmayana görünmez.
+describe("getSalesOrder kör sayım (T-334b)", () => {
+  async function setup() {
+    const X = await mkItem(A);
+    const R01 = await mkLoc(A, A.warehouseId, "STORAGE");
+    await mkLoc(A, A.warehouseId, "STAGING", `0S${hex(8)}`);
+    await stockIn(A, A.warehouseId, X, R01, "10");
+    const o = await mkOrder(A, [{ item: X, qty: "6" }]);
+    await reserveOrder(cmd(A), { orderId: o.id });
+    const a = await createPickAssignment(cmd(A), { orderIds: [o.id] });
+    const t = (await q<{ id: string }>("SELECT id FROM public.warehouse_tasks WHERE tenant_id=$1 AND group_id=$2", [A.tenantId, a.groupId]))[0] as { id: string };
+    await pick(A, t.id, "6", R01, X);
+    // Toplama hedefi (hangi STAGING seçildiği tenant'taki diğer sevk alanlarına bağlıdır): rezervasyonun gerçek lokasyonu.
+    const staged = (await q<{ location_id: string }>(
+      `SELECT d.location_id FROM public.reservations r JOIN public.stock_dimensions d ON d.tenant_id = r.tenant_id AND d.id = r.stock_dimension_id
+         JOIN public.locations l ON l.tenant_id = d.tenant_id AND l.id = d.location_id
+        WHERE r.tenant_id = $1 AND r.order_line_id = $2 AND r.status = 'ACTIVE' AND l.kind = 'STAGING'`,
+      [A.tenantId, o.lineIds[0]],
+    ))[0] as { location_id: string };
+    const sid = (await startCount(cmd(A), { warehouseId: A.warehouseId, locationIds: [staged.location_id] })).sessionId;
+    return { o, sid };
+  }
+
+  it("aktif sayımda PICKER picked null + pickedCountLocked; yönetici görür; sayım iptalinde PICKER görür; kilitsiz STORAGE payı etkilenmez", async () => {
+    const { o, sid } = await setup();
+    const line = async (p: ReturnType<typeof picker>) => (await getSalesOrder(p, { orderId: o.id })).lines[0];
+    expect(await line(picker(A))).toMatchObject({ requested: "6.000000", allocated: "6.000000", picked: null, pickedCountLocked: true });
+    expect(await line(owner(A))).toMatchObject({ picked: "6.000000", pickedCountLocked: true });
+    await cancelCount(cmd(A), { sessionId: sid, reason: "T334b iptal" });
+    expect(await line(picker(A))).toMatchObject({ picked: "6.000000", pickedCountLocked: false });
+  });
 });

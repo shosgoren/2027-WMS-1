@@ -152,7 +152,13 @@ export async function countLockedLocationIds(tx: Pick<AccessTx, "execute">, tena
   return new Set(rows.map((r) => r.location_id.toLowerCase()));
 }
 
-const COUNT_LOCKED_SQL = sql`EXISTS (SELECT 1 FROM public.location_count_locks k WHERE k.tenant_id = d.tenant_id AND k.location_id = d.location_id AND k.status = 'COUNTING')`;
+/**
+ * Kilit tanımının TEK SQL kaynağı (T-334b): "bu lokasyon şu an sayımda" koşulu. Başka dosyalar (görev listeleri) kilit tablosunu kendi SQL'ine yazmaz;
+ * sütun ifadelerini (sabit, kullanıcı girdisi değil) verip aynı SELECT içinde kullanır (kilit + miktar tek ifade). `tenantCol`/`locationCol` yalnızca kod sabitidir.
+ */
+export const countLockedExistsSql = (tenantCol: string, locationCol: string) =>
+  sql`EXISTS (SELECT 1 FROM public.location_count_locks k WHERE k.tenant_id = ${sql.raw(tenantCol)} AND k.location_id = ${sql.raw(locationCol)} AND k.status = 'COUNTING')`;
+const COUNT_LOCKED_SQL = countLockedExistsSql("d.tenant_id", "d.location_id");
 
 // Ortak SELECT parçaları. Her JOIN'de tenant eşitliği açık.
 const DIM_COLS = sql`d.id AS dimension_id, d.stock_status,
@@ -200,31 +206,42 @@ export async function stockByItem(params: StockQueryParams, input: StockByItemIn
     );
     const h = head[0];
     if (h === undefined) throw new AppError("NOT_FOUND");
-    const rows = await tx.execute<
-      DimDbRow & { warehouse_id: string; warehouse_code: string; warehouse_name: string; location_id: string; location_code: string; location_name: string; location_kind: StockByItemRow["locationKind"]; pick_blocked: boolean }
-    >(
-      sql`SELECT ${DIM_COLS}, w.id AS warehouse_id, w.code AS warehouse_code, w.name AS warehouse_name,
-                 l.id AS location_id, l.code AS location_code, l.name AS location_name, l.kind AS location_kind, l.pick_blocked
-            ${DIM_JOINS}
-           WHERE b.tenant_id = ${m.tenantId}::uuid AND d.item_id = ${itemId}::uuid AND b.quantity <> 0 AND ${scopeSql}
-             AND (${cur === null}::boolean OR (w.code COLLATE "C", l.code COLLATE "C", d.id) > (${cur?.[0] ?? ""}::text, ${cur?.[1] ?? ""}::text, ${cur?.[2] ?? "00000000-0000-0000-0000-000000000000"}::uuid))
-           ORDER BY w.code COLLATE "C", l.code COLLATE "C", d.id
-           LIMIT ${limit + 1}`,
+    // Satırlar ve toplamlar TEK ifadede (T-334b): READ COMMITTED'da iki ifade arasında kilit değişirse "toplam − görünen satırlar" gizli miktarı verirdi
+    // (PR #92 Codex P1). Tek ifade = tek anlık görüntü; `ord` satır sırasını (UNION sırasız) korur.
+    type ItemDbRow = DimDbRow & { warehouse_id: string; warehouse_code: string; warehouse_name: string; location_id: string; location_code: string; location_name: string; location_kind: StockByItemRow["locationKind"]; pick_blocked: boolean };
+    type TotDbRow = { reserved: string; available: string; st: StockStatus; st_physical: string; excluded: boolean };
+    const notExcluded = sql`NOT (${blind}::boolean AND ${COUNT_LOCKED_SQL})`;
+    const both = await tx.execute<{ part: "row" | "tot"; ord: number | string | null; j: ItemDbRow | TotDbRow }>(
+      sql`WITH pg AS (
+            SELECT ${DIM_COLS}, w.id AS warehouse_id, w.code AS warehouse_code, w.name AS warehouse_name,
+                   l.id AS location_id, l.code AS location_code, l.name AS location_name, l.kind AS location_kind, l.pick_blocked,
+                   row_number() OVER (ORDER BY w.code COLLATE "C", l.code COLLATE "C", d.id) AS ord
+              ${DIM_JOINS}
+             WHERE b.tenant_id = ${m.tenantId}::uuid AND d.item_id = ${itemId}::uuid AND b.quantity <> 0 AND ${scopeSql}
+               AND (${cur === null}::boolean OR (w.code COLLATE "C", l.code COLLATE "C", d.id) > (${cur?.[0] ?? ""}::text, ${cur?.[1] ?? ""}::text, ${cur?.[2] ?? "00000000-0000-0000-0000-000000000000"}::uuid))
+             ORDER BY w.code COLLATE "C", l.code COLLATE "C", d.id
+             LIMIT ${limit + 1}),
+          tot AS (
+            SELECT d.stock_status AS st, COALESCE(sum(b.quantity) FILTER (WHERE ${notExcluded}), 0)::numeric(20,6)::text AS st_physical,
+                   COALESCE(sum(b.reserved_quantity) FILTER (WHERE ${notExcluded}), 0)::numeric(20,6)::text AS reserved,
+                   COALESCE(sum(CASE WHEN d.stock_status = 'AVAILABLE' AND l.kind IN ('STORAGE', 'STAGING') AND l.pick_blocked = false
+                                     THEN b.quantity - b.reserved_quantity ELSE 0 END) FILTER (WHERE ${notExcluded}), 0)::numeric(20,6)::text AS available,
+                   COALESCE(bool_or(NOT (${notExcluded})), false) AS excluded
+              ${DIM_JOINS}
+             WHERE b.tenant_id = ${m.tenantId}::uuid AND d.item_id = ${itemId}::uuid AND b.quantity <> 0 AND ${scopeSql}
+             GROUP BY d.stock_status)
+          SELECT 'row' AS part, pg.ord, to_jsonb(pg.*) AS j FROM pg
+          UNION ALL
+          SELECT 'tot', NULL, to_jsonb(tot.*) FROM tot`,
     );
+    const rows = both
+      .filter((x) => x.part === "row")
+      .sort((x, y) => Number(x.ord) - Number(y.ord))
+      .map((x) => x.j as ItemDbRow);
+    const tot = both.filter((x) => x.part === "tot").map((x) => x.j as TotDbRow);
     const page = rows.slice(0, limit);
     const last = page[page.length - 1];
     const nextCursor = rows.length > limit && last !== undefined ? encodeCursor([last.warehouse_code, last.location_code, last.dimension_id]) : null;
-    const notExcluded = sql`NOT (${blind}::boolean AND ${COUNT_LOCKED_SQL})`;
-    const tot = await tx.execute<{ reserved: string; available: string; st: StockStatus; st_physical: string; excluded: boolean }>(
-      sql`SELECT d.stock_status AS st, COALESCE(sum(b.quantity) FILTER (WHERE ${notExcluded}), 0)::numeric(20,6)::text AS st_physical,
-                 COALESCE(sum(b.reserved_quantity) FILTER (WHERE ${notExcluded}), 0)::numeric(20,6)::text AS reserved,
-                 COALESCE(sum(CASE WHEN d.stock_status = 'AVAILABLE' AND l.kind IN ('STORAGE', 'STAGING') AND l.pick_blocked = false
-                                   THEN b.quantity - b.reserved_quantity ELSE 0 END) FILTER (WHERE ${notExcluded}), 0)::numeric(20,6)::text AS available,
-                 COALESCE(bool_or(NOT (${notExcluded})), false) AS excluded
-            ${DIM_JOINS}
-           WHERE b.tenant_id = ${m.tenantId}::uuid AND d.item_id = ${itemId}::uuid AND b.quantity <> 0 AND ${scopeSql}
-           GROUP BY d.stock_status`,
-    );
     const byStatus: Record<StockStatus, bigint> = { AVAILABLE: 0n, QUARANTINE: 0n, DAMAGED: 0n, BLOCKED: 0n };
     let reserved = 0n;
     let available = 0n;

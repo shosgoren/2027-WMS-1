@@ -9,11 +9,15 @@
 // GÖRÜNMEZ (fail-closed, A-314a-2). Liste süzgeçle, tekil okuma aynı koşulla çalışır; yok / başka tenant / kapsam dışı AYNI tek sorgu + aynı `NOT_FOUND`
 // yolundan geçer (yanıt, sorgu sayısı ve yan etki farkı yok).
 //
+// Kör sayım (T-334b, A-334b-3): satırın toplanan (STAGING) payı COUNTING kilidindeki bir STAGING lokasyonundaysa `picked` kör çağırana `null` + `pickedCountLocked`
+// (kısmen dışlama yok: dışlanan pay `allocated`'dan çıkarılarak geri bulunabilirdi). Kilit ve miktar AYNI ifadede.
+//
 // A-xx (docs/OPEN_QUESTIONS.md): A-314a-1 miktar tanımları (aşağıda `SalesOrderLineView`); A-314a-2 kapsam kuralı (yukarıda); A-314a-3 sıralama eskiden yeniye.
 import { sql } from "drizzle-orm";
 import { AppError } from "@wms/shared/errors";
 import { runTenantQuery } from "../identity/access.ts";
 import { pgUuidArray, resolveWarehouseScope } from "../warehouse/scope.ts";
+import { isCountBlind } from "../stock/stock-queries.ts";
 import { isCalendarTime, type TaskCallParams } from "./tasks.ts";
 
 export const SALES_ORDER_STATUSES = ["OPEN", "CLOSED", "CANCELLED"] as const;
@@ -59,7 +63,9 @@ export interface SalesOrderLineView {
   /** Σ ACTIVE rezervasyon (toplananlar dahil; sevk edilince CONSUMED olur ve düşer). */
   readonly allocated: string;
   /** Σ ACTIVE rezervasyonun SEVK alanında (STAGING lokasyonu) olan kısmı = toplanmış, sevki bekleyen (A-314a-1). */
-  readonly picked: string;
+  readonly picked: string | null;
+  /** Toplanan miktarın bulunduğu STAGING lokasyonlarından biri şu an sayımda (COUNTING kilidi). */
+  readonly pickedCountLocked: boolean;
   readonly shipped: string;
   /** istenen − sevk − iptal (A-306-4/A-140; iade girmez, 16 kural 6). */
   readonly open: string;
@@ -91,7 +97,8 @@ type LineDbRow = {
   unit_name: string;
   requested: string;
   allocated: string;
-  picked: string;
+  picked: string | null;
+  picked_locked: boolean;
   shipped: string;
   open: string;
   returned: string;
@@ -181,6 +188,7 @@ export async function getSalesOrder(params: TaskCallParams, input: { readonly or
   const orderId = uuid(input.orderId);
   return runTenantQuery({ ...params, permission: "stock.view" }, async (tx, m) => {
     const scope = await resolveWarehouseScope(tx, m);
+    const blind = isCountBlind(m.roles);
     // Varlık ve görünürlük TEK sorguda: yok ile kapsam dışı ayırt edilemez.
     const heads = await tx.execute<ListDbRow>(
       sql`SELECT o.id, o.number, o.customer_ref, o.status, o.version, ${CREATED_KEY} AS created_key, c.line_count, c.open_line_count
@@ -194,7 +202,8 @@ export async function getSalesOrder(params: TaskCallParams, input: { readonly or
       sql`SELECT l.id, l.line_no, l.item_id, i.code AS item_code, i.name AS item_name, u.id AS unit_id, u.code AS unit_code, u.name AS unit_name,
                  l.requested_quantity::text AS requested,
                  COALESCE(rs.allocated, 0)::numeric(20, 6)::text AS allocated,
-                 COALESCE(rs.picked, 0)::numeric(20, 6)::text AS picked,
+                 CASE WHEN ${blind}::boolean AND rs.picked_locked THEN NULL ELSE COALESCE(rs.picked, 0)::numeric(20, 6)::text END AS picked,
+                 rs.picked_locked,
                  l.shipped_quantity::text AS shipped,
                  (l.requested_quantity - l.shipped_quantity - l.cancelled_quantity)::text AS open,
                  l.returned_quantity::text AS returned,
@@ -203,10 +212,12 @@ export async function getSalesOrder(params: TaskCallParams, input: { readonly or
             JOIN public.items i ON i.tenant_id = l.tenant_id AND i.id = l.item_id
             JOIN public.units u ON u.tenant_id = i.tenant_id AND u.id = i.base_unit_id
             LEFT JOIN LATERAL (
-              SELECT sum(r.quantity) AS allocated, sum(r.quantity) FILTER (WHERE loc.kind = 'STAGING') AS picked
+              SELECT sum(r.quantity) AS allocated, sum(r.quantity) FILTER (WHERE loc.kind = 'STAGING') AS picked,
+                     COALESCE(bool_or(k.location_id IS NOT NULL) FILTER (WHERE loc.kind = 'STAGING'), false) AS picked_locked
                 FROM public.reservations r
                 JOIN public.stock_dimensions d ON d.tenant_id = r.tenant_id AND d.id = r.stock_dimension_id
                 JOIN public.locations loc ON loc.tenant_id = d.tenant_id AND loc.id = d.location_id
+                LEFT JOIN public.location_count_locks k ON k.tenant_id = d.tenant_id AND k.location_id = d.location_id AND k.status = 'COUNTING'
                WHERE r.tenant_id = l.tenant_id AND r.order_line_id = l.id AND r.status = 'ACTIVE') rs ON true
            WHERE l.tenant_id = ${m.tenantId}::uuid AND l.order_id = ${orderId}::uuid
            ORDER BY l.line_no`,
@@ -225,6 +236,7 @@ export async function getSalesOrder(params: TaskCallParams, input: { readonly or
         requested: l.requested,
         allocated: l.allocated,
         picked: l.picked,
+        pickedCountLocked: l.picked_locked,
         shipped: l.shipped,
         open: l.open,
         returned: l.returned,

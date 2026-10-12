@@ -6,7 +6,7 @@ import { sql } from "drizzle-orm";
 import { AppError } from "@wms/shared/errors";
 import { runTenantQuery } from "../identity/access.ts";
 import { assertWarehouseVisible, pgUuidArray, resolveWarehouseScope } from "../warehouse/scope.ts";
-import { countLockedLocationIds, isCountBlind } from "../stock/stock-queries.ts";
+import { isCountBlind } from "../stock/stock-queries.ts";
 import { isCalendarTime, type TaskCallParams } from "./tasks.ts";
 
 export const RECEIPT_STATUSES = ["DRAFT", "OPEN", "CLOSED", "CANCELLED"] as const;
@@ -212,15 +212,23 @@ export async function getAvailableAtLocation(
     );
     if (loc[0] === undefined) throw new AppError("NOT_FOUND");
     await assertWarehouseVisible(tx, m, [loc[0].warehouse_id]);
-    if (isCountBlind(m.roles) && (await countLockedLocationIds(tx, m.tenantId, [locationId])).has(locationId)) return { quantity: null, countLocked: true };
-    const sum = await tx.execute<{ q: string }>(
-      sql`SELECT COALESCE(sum(b.quantity - b.reserved_quantity), 0)::text AS q
-            FROM public.stock_dimensions s
-            JOIN public.stock_balances b ON b.tenant_id = s.tenant_id AND b.stock_dimension_id = s.id
-           WHERE s.tenant_id = ${m.tenantId}::uuid AND s.location_id = ${locationId}::uuid AND s.item_id = ${itemId}::uuid
-             AND s.stock_status = 'AVAILABLE'`,
+    const blind = isCountBlind(m.roles);
+    // Kilit denetimi ve bakiye toplamı TEK ifade (T-334b; READ COMMITTED'da iki ifade arasında kilit değişebilirdi, PR #92 Codex P1).
+    const res = await tx.execute<{ locked: boolean; q: string | null }>(
+      sql`SELECT g.locked,
+                 CASE WHEN g.locked THEN NULL ELSE (
+                   SELECT COALESCE(sum(b.quantity - b.reserved_quantity), 0)::text
+                     FROM public.stock_dimensions s
+                     JOIN public.stock_balances b ON b.tenant_id = s.tenant_id AND b.stock_dimension_id = s.id
+                    WHERE s.tenant_id = ${m.tenantId}::uuid AND s.location_id = ${locationId}::uuid AND s.item_id = ${itemId}::uuid
+                      AND s.stock_status = 'AVAILABLE') END AS q
+            FROM (SELECT ${blind}::boolean AND EXISTS (
+                           SELECT 1 FROM public.location_count_locks k
+                            WHERE k.tenant_id = ${m.tenantId}::uuid AND k.location_id = ${locationId}::uuid AND k.status = 'COUNTING') AS locked) g`,
     );
-    return { quantity: sum[0]?.q ?? "0" };
+    const r = res[0];
+    if (r?.locked === true) return { quantity: null, countLocked: true };
+    return { quantity: r?.q ?? "0" };
   });
 }
 

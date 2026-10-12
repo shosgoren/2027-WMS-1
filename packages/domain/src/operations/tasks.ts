@@ -16,6 +16,7 @@ import { AppError } from "@wms/shared/errors";
 import { runTenantCommand, runTenantQuery, type AccessTx, type Membership, type TenantAccessParams } from "../identity/access.ts";
 import { hasPermission, type Permission } from "../identity/permissions.ts";
 import { assertWarehouseVisible, pgUuidArray, resolveWarehouseScope } from "../warehouse/scope.ts";
+import { countLockedExistsSql, isCountBlind } from "../stock/stock-queries.ts";
 
 export const TASK_KINDS = ["PUTAWAY", "PICK", "REPUTAWAY", "COUNT"] as const;
 export type TaskKind = (typeof TASK_KINDS)[number];
@@ -61,6 +62,11 @@ export function nextTaskStatus(from: TaskStatus, event: TaskEvent): TaskStatus |
   }
 }
 
+/** Liste satırı: `quantity` kilitli lokasyonda kör çağırana `null` (A-334b-1); `countLocked` görevin lokasyonu şu an sayımdadır. */
+export interface TaskListRow extends TaskRow {
+  readonly countLocked: boolean;
+}
+
 export interface TaskRow {
   readonly id: string;
   readonly warehouseId: string;
@@ -95,10 +101,24 @@ type TaskDbRow = {
   created_at: Date | string;
   completed_at: Date | string | null;
   created_key: string;
+  /** Yalnızca liste sorgularında (`listColumns`). */
+  count_locked?: boolean;
 };
+
+const TASK_LOCKED_SQL = countLockedExistsSql("warehouse_tasks.tenant_id", "warehouse_tasks.location_id");
 
 const COLUMNS = sql`id, warehouse_id, kind, status, assigned_membership_id, group_id, source_kind, source_id, location_id, item_id,
   quantity::text AS quantity, version, created_at, completed_at,
+  to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_key`;
+
+/**
+ * Liste sütunları, kör sayım maskesiyle (T-334b, A-334b-1): görevin lokasyonu COUNTING kilidindeyse ve çağıran kör ise (`blind`) `quantity` NULL,
+ * `count_locked` true. Kilit denetimi ve miktar AYNI ifadededir (READ COMMITTED'da kilit/okuma arası yarış yok). `lockTask` (komut yolu) maskesiz
+ * `COLUMNS` kullanır: komutlar gerçek miktarla çalışır, yalnızca okuma yolu maskelenir.
+ */
+const listColumns = (blind: boolean) => sql`id, warehouse_id, kind, status, assigned_membership_id, group_id, source_kind, source_id, location_id, item_id,
+  (CASE WHEN ${blind}::boolean AND ${TASK_LOCKED_SQL} THEN NULL ELSE quantity::text END) AS quantity, version, created_at, completed_at,
+  ${TASK_LOCKED_SQL} AS count_locked,
   to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_key`;
 
 const toRow = (r: TaskDbRow): TaskRow => ({
@@ -380,7 +400,7 @@ export interface TaskCursor {
   readonly id: string;
 }
 export interface TaskPage {
-  readonly items: readonly TaskRow[];
+  readonly items: readonly TaskListRow[];
   readonly next: TaskCursor | null;
 }
 
@@ -405,7 +425,7 @@ function cursorOf(raw: TaskCursor | undefined): { key: string; id: string } | nu
 function page(rows: readonly TaskDbRow[], limit: number): TaskPage {
   const items = rows.slice(0, limit);
   const last = items[items.length - 1];
-  return { items: items.map(toRow), next: rows.length > limit && last !== undefined ? { createdKey: last.created_key, id: last.id } : null };
+  return { items: items.map((r) => ({ ...toRow(r), countLocked: r.count_locked === true })), next: rows.length > limit && last !== undefined ? { createdKey: last.created_key, id: last.id } : null };
 }
 
 export interface ListMyTasksInput {
@@ -422,9 +442,10 @@ export async function listMyTasks(params: TaskCallParams, input: ListMyTasksInpu
   const cur = cursorOf(input.after);
   return runTenantQuery({ ...params, permission: "stock.view" }, async (tx, m) => {
     const scope = await resolveWarehouseScope(tx, m);
+    const blind = isCountBlind(m.roles);
     const kinds = TASK_KINDS.filter((k) => hasPermission(m.roles, TASK_KIND_PERMISSION[k]));
     const rows = await tx.execute<TaskDbRow>(
-      sql`SELECT ${COLUMNS}
+      sql`SELECT ${listColumns(blind)}
             FROM public.warehouse_tasks
            WHERE tenant_id = ${m.tenantId}::uuid
              AND (   (status = 'ASSIGNED' AND assigned_membership_id = ${m.membershipId}::uuid)
@@ -457,8 +478,9 @@ export async function listTasks(params: TaskCallParams, input: ListTasksInput = 
   const warehouseId = input.warehouseId === undefined ? null : uuid(input.warehouseId);
   return runTenantQuery({ ...params, permission: "stock.view" }, async (tx, m) => {
     const scope = await resolveWarehouseScope(tx, m);
+    const blind = isCountBlind(m.roles);
     const rows = await tx.execute<TaskDbRow>(
-      sql`SELECT ${COLUMNS}
+      sql`SELECT ${listColumns(blind)}
             FROM public.warehouse_tasks
            WHERE tenant_id = ${m.tenantId}::uuid
              AND (${kind}::text IS NULL OR kind = ${kind}::text)
