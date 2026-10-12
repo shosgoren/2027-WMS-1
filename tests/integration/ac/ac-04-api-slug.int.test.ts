@@ -285,6 +285,8 @@ const LOADERS = [
   "receipts/page.tsx",
   "field/receive/page.tsx",
   "field/putaway/page.tsx",
+  // T-314: sipariş listesi; üyelik özeti + `listSalesOrders`/`listMembers` ile sayfanın kendisinde çözülür.
+  "orders/page.tsx",
 ] as const;
 /**
  * T-304: tenant verisi çizmeyen saha kabuğu sayfaları. Üyelik kararı üst `layout.tsx`'tedir (yukarıdaki LOADERS satırı çapraz tenant
@@ -295,24 +297,27 @@ const SHELL_LOADERS = ["field/layout.tsx", "field/page.tsx"] as const;
 const LABELS = "labels/page.tsx" as const;
 /** T-216: ürün ayrıntısı ek bir dinamik segment (`itemId`) ister; ortak döngüde değil, aşağıdaki özel bloktadır. */
 const ITEM_DETAIL = "items/[itemId]/page.tsx" as const;
+/** T-314: sipariş ayrıntısı ek bir dinamik segment (`orderId`) ister; ortak döngüde değil, aşağıdaki özel bloktadır. */
+const ORDER_DETAIL = "orders/[orderId]/page.tsx" as const;
 type Loader = (props: {
-  params: Promise<{ slug: string; warehouseId?: string; itemId?: string }>;
+  params: Promise<{ slug: string; warehouseId?: string; itemId?: string; orderId?: string }>;
   searchParams?: Promise<Record<string, string>>;
   children?: unknown;
 }) => Promise<unknown>;
 
 /** `[warehouseId]` yükleyicisi için kimlik: verilmezse slug A'nınsa A'nın, değilse B'nin deposu (çapraz tenant denemesi). */
 async function runLoader(
-  rel: (typeof LOADERS)[number] | typeof ITEM_DETAIL | (typeof SHELL_LOADERS)[number] | typeof LABELS,
+  rel: (typeof LOADERS)[number] | typeof ITEM_DETAIL | typeof ORDER_DETAIL | (typeof SHELL_LOADERS)[number] | typeof LABELS,
   slug: string,
   warehouseId?: string,
   itemId?: string,
   search: Record<string, string> = {},
+  orderId?: string,
 ): Promise<{ outcome: "render" | "notFound" | "redirect"; to?: string; value?: unknown }> {
   const mod = (await import(/* @vite-ignore */ path.join(SLUG_DIR, rel))) as { default: Loader };
   const wid = warehouseId ?? (slug === A.slug ? A.warehouse : B.warehouse);
   try {
-    const params = itemId === undefined ? { slug, warehouseId: wid } : { slug, warehouseId: wid, itemId };
+    const params = { slug, warehouseId: wid, ...(itemId === undefined ? {} : { itemId }), ...(orderId === undefined ? {} : { orderId }) };
     const value = await mod.default({ params: Promise.resolve(params), searchParams: Promise.resolve(search), children: null });
     return { outcome: "render", value };
   } catch (e) {
@@ -372,7 +377,7 @@ describe("saha kabuğu ve etiket sayfaları (/t/<slug>)", () => {
 
 describe("sayfa yükleyicileri (/t/<slug>)", () => {
   it("@AC-04 kapsam: apps/web/app/t/[slug] altındaki her page/layout bu tabloda (yeni yükleyici testsiz kalamaz)", () => {
-    expect(files(SLUG_DIR, /^(page|layout)\.[cm]?[jt]sx?$/)).toEqual([...LOADERS, ...SHELL_LOADERS, LABELS, ITEM_DETAIL].sort());
+    expect(files(SLUG_DIR, /^(page|layout)\.[cm]?[jt]sx?$/)).toEqual([...LOADERS, ...SHELL_LOADERS, LABELS, ITEM_DETAIL, ORDER_DETAIL].sort());
   });
 
   for (const rel of LOADERS) {
@@ -523,6 +528,63 @@ describe("ürün ayrıntı sayfası (/t/<slug>/items/<itemId>) — T-216", () =>
     const r = await runLoader(ITEM_DETAIL, A.slug, undefined, itemA.id);
     expect(`${r.outcome} ${r.to ?? ""}`).toBe("render ");
     expect(r.value).not.toBeNull();
+  });
+});
+
+describe("sipariş ayrıntı sayfası (/t/<slug>/orders/<orderId>) — T-314", () => {
+  async function mkOrder(t: Fx, userId: string): Promise<{ id: string; ref: string }> {
+    const id = randomUUID();
+    const ref = `GIZLI-MUS-${rnd()}`;
+    await adm.query("INSERT INTO public.sales_orders (tenant_id, id, number, customer_ref, created_by) VALUES ($1, $2, $3, $4, $5)", [t.tenant, id, `SIP-${rnd()}`, ref, userId]);
+    return { id, ref };
+  }
+  let orderA: { id: string; ref: string };
+  let orderB: { id: string; ref: string };
+  beforeAll(async () => {
+    orderA = await mkOrder(A, A.admin);
+    orderB = await mkOrder(B, B.admin);
+  }, 60_000);
+
+  it("@AC-04 sayfa orders/[orderId]: B'nin slug'ı + B'nin siparişi ile var olmayan slug + var olmayan sipariş -> 404 ve birebir aynı yanıt; B verisi yok", async () => {
+    as(A.admin);
+    const cross = await runLoader(ORDER_DETAIL, B.slug, undefined, undefined, {}, orderB.id);
+    as(A.admin);
+    const missing = await runLoader(ORDER_DETAIL, `yok-${rnd()}`, undefined, undefined, {}, randomUUID());
+    expect(cross).toEqual({ outcome: "notFound" });
+    expect(cross).toEqual(missing);
+    expect(JSON.stringify(cross)).not.toContain(orderB.ref);
+  });
+
+  it("@AC-04 sayfa orders/[orderId]: A'nın slug'ında B'nin sipariş kimliği, var olmayan kimlikle AYNI yanıtı verir (varlık sızmaz); B sipariş verisi çizilmez", async () => {
+    const norm = (v: unknown): string => JSON.stringify(v, (k, x: unknown) => (k === "type" || k === "_owner" || k === "_store" ? undefined : x));
+    as(A.admin);
+    const cross = await runLoader(ORDER_DETAIL, A.slug, undefined, undefined, {}, orderB.id);
+    as(A.admin);
+    const missing = await runLoader(ORDER_DETAIL, A.slug, undefined, undefined, {}, randomUUID());
+    expect(cross.outcome).toBe(missing.outcome);
+    expect(norm(cross)).toEqual(norm(missing));
+    expect(norm(cross)).not.toContain(orderB.ref);
+    expect(norm(cross)).not.toContain(orderB.id);
+  });
+
+  it("@AC-04 sayfa orders/[orderId]: UUID olmayan kimlik 404; hiçbir tenant'ın üyesi olmayan oturum 404; oturumsuz /login; B üyesi A'nın slug'ında 404", async () => {
+    as(A.admin);
+    expect(await runLoader(ORDER_DETAIL, A.slug, undefined, undefined, {}, "not-a-uuid")).toEqual({ outcome: "notFound" });
+    as(outsider.id);
+    expect(await runLoader(ORDER_DETAIL, B.slug, undefined, undefined, {}, orderB.id)).toEqual({ outcome: "notFound" });
+    as(null);
+    const anon = await runLoader(ORDER_DETAIL, B.slug, undefined, undefined, {}, orderB.id);
+    expect(anon.outcome).toBe("redirect");
+    expect(anon.to).toMatch(/^\/login\?next=/);
+    as(B.admin);
+    expect(await runLoader(ORDER_DETAIL, A.slug, undefined, undefined, {}, orderA.id)).toEqual({ outcome: "notFound" });
+  });
+
+  it("@AC-04 sayfa orders/[orderId]: olumlu kontrol — A kullanıcısı kendi siparişini kendi slug'ında çizer (testin geçersiz kılınmadığının kanıtı)", async () => {
+    as(A.admin);
+    const r = await runLoader(ORDER_DETAIL, A.slug, undefined, undefined, {}, orderA.id);
+    expect(`${r.outcome} ${r.to ?? ""}`).toBe("render ");
+    expect(JSON.stringify(r.value, (k, x: unknown) => (k === "type" || k === "_owner" || k === "_store" ? undefined : x))).toContain(orderA.ref);
   });
 });
 
