@@ -7,7 +7,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { expect, test } from "@playwright/test";
-import type { Page, Request } from "@playwright/test";
+import type { BrowserContext, Page, Request } from "@playwright/test";
 
 // Demo girişi hız sınırı kovası: proje başına ayrı istemci adresi playwright.config.ts projelerindedir (receiving-desktop/-mobile); dosya düzeyinde ezilmez (T-280).
 
@@ -254,11 +254,22 @@ async function measure(page: Page): Promise<StepMetrics> {
   })()`);
 }
 
+// Demo girişi hız sınırlıdır (10 deneme / 10 dk / istemci adresi; sınır DEĞİŞMEZ): bu dosyada çok test olduğundan her rol için TEK giriş yapılır, sonraki testler aynı
+// oturum çerezini yeniden kullanır (camera-scan.spec.ts ile aynı yöntem). Proje başına ayrı çalışma işçisi/adres olduğundan çerezler projeler arasında karışmaz.
+const sessions = new Map<string, Parameters<BrowserContext["addCookies"]>[0]>();
 async function login(page: Page, label: string): Promise<void> {
   await page.addInitScript("window.__taps = 0; document.addEventListener('pointerdown', () => { window.__taps++; }, true); try { delete window.BarcodeDetector; } catch (e) { window.BarcodeDetector = undefined; }");
+  const known = sessions.get(label);
+  if (known !== undefined) {
+    await page.context().addCookies(known);
+    await page.goto("/t/demo");
+    await expect(page).toHaveURL(/\/t\/demo$/);
+    return;
+  }
   await page.goto("/");
   await page.getByRole("button", { name: `${label} olarak gir` }).click();
   await expect(page).toHaveURL(/\/t\/demo$/);
+  sessions.set(label, await page.context().cookies());
 }
 
 const isMobile = (name: string): boolean => name.endsWith("mobile");
