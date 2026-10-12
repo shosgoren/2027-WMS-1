@@ -1499,7 +1499,7 @@
       "putawayReason": "Only {n} units are at the source.",
       "cameraAction": "Press {button}.",
       "pageReceive": "Open on delivery: {n}.",
-      "pageReceiveHit": "{n} left. Press Receive.",
+      "pageReceiveHit": "Extra not counted. Press Receive.",
       "pagePutaway": "At source: {n}.",
       "pagePutawayHit": "{n} at source. Press Put on rack."
     },

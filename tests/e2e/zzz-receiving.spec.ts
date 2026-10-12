@@ -1246,7 +1246,7 @@ test("T-292b: 6 kabul rafında çipler sıkışmaz (48 px, ad kırılmaz), çubu
   await db("INSERT INTO public.inbound_receipt_lines (tenant_id, id, receipt_id, line_no, item_id, unit_id, conversion_factor, expected_quantity) VALUES ($1, gen_random_uuid(), $2, 1, $3, $4, 1, 24)", [fx.tenantId, r24, fx.itemId, fx.unitId]);
   try {
     await addRacks(fx, 5);
-    for (const size of mobile ? [PHONE_SIZES[0], PHONE_SIZES[1], PHONE_SIZES[3]] : [{ name: "1280x800", width: 1280, height: 800 }]) {
+    for (const size of mobile ? [PHONE_SIZES[0], PHONE_SIZES[1], PHONE_SIZES[2], PHONE_SIZES[3]] : [{ name: "1280x800", width: 1280, height: 800 }]) {
       await page.setViewportSize({ width: size.width, height: size.height });
       await page.goto(`/t/demo/field/receive?receipt=${r24}`);
       await page.waitForLoadState("networkidle");
@@ -1376,7 +1376,7 @@ test("T-292b: kaynak/kalan sınırını aşan kamera okuması 'Okundu' ve olumlu
   await expect(overlay).toHaveCount(0);
   const vibRecv = (await fb()).vibrate.length;
   await readWithCamera("Bir koli daha okut");
-  await expectLimit("Teslimde yalnız 30 adet kalmış.", "Kalan 30 adet. Kabul et'e bas.", recvQty, vibRecv);
+  await expectLimit("Teslimde yalnız 30 adet kalmış.", "Fazlası sayılmadı. Kabul et'e bas.", recvQty, vibRecv);
   await expect(page.getByRole("button", { name: /^Gelen \(.*\) \+$/ })).toBeDisabled();
   await page.screenshot({ path: path.join(T292B_OUT, `${T292B_TAG}-844x390-kabul-sinir.png`) });
   if ((await page.getByTestId("rack-chips").count()) > 0) {
@@ -1404,7 +1404,7 @@ test("T-292b: kaynak/kalan sınırını aşan kamera okuması 'Okundu' ve olumlu
   await expect(overlay).toHaveCount(0);
   const vibPut = (await fb()).vibrate.length;
   await readWithCamera("Bir koli daha okut");
-  await expectLimit("Kaynakta yalnız 30 adet var.", "Kaynak 30 adet. Rafa koy'a bas.", putQty, vibPut);
+  await expectLimit("Kaynakta yalnız 30 adet var.", "Kaynakta 30 var. Rafa koy'a bas.", putQty, vibPut);
   await expect(page.getByRole("button", { name: "Kaç adet? +" })).toBeDisabled();
   await page.screenshot({ path: path.join(T292B_OUT, `${T292B_TAG}-844x390-yerlestirme-sinir.png`) });
   await page.getByRole("button", { name: "Rafa koy" }).click();
@@ -1456,7 +1456,7 @@ test("T-292b: akışın REDDETTİĞİ kamera okuması (yanlış ürün, tamamlan
     await expect(page.getByTestId("camera-status")).not.toContainText("Okundu.");
     const after = await fb();
     expect(after.vibrate.slice(before.vibrate.length), `${label}: olumlu titreşim (60 ms) yok`).not.toContain(60);
-    expect(after.tones, `${label}: olumlu ton yok`).toBe(before.tones);
+    expect(after.tones, `${label}: ton yok (olumlu ya da olumsuz; olumsuzu uyarı titreşimle verir)`).toBe(before.tones);
     expect(after.vibrate.slice(before.vibrate.length).filter((v) => Array.isArray(v)), `${label}: olumsuz geri bildirim TEK kez`).toHaveLength(1);
     await page.getByRole("button", { name: "Anladım, tekrar okut" }).click();
     await expect(page.getByTestId("scan-alert")).toHaveCount(0);

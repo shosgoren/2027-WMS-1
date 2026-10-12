@@ -16,6 +16,9 @@ import { enterDemoShared, isRemote } from "./support/demo-session.ts";
 // Her yüklemede (işçi başına) rastgele geçerli EAN-13 (mağaza içi "2" öneki): fikstür barkodu arşivlenen ürüne bağlı kalsa da yeniden koşuda çakışmaz.
 const BODY = "2" + String(randomInt(0, 1e11)).padStart(11, "0");
 const CODE = BODY + ean13CheckDigit(BODY);
+// Kayıtlı raf barkodu (yerleştirme olumlu yolu): geçerli EAN-13 raf kodu; fikstür rafı bu kodla açılır.
+const LBODY = "2" + String(randomInt(0, 1e11)).padStart(11, "0");
+const LOC_CODE = LBODY + ean13CheckDigit(LBODY);
 const BAD_CHECKSUM = BODY + ((ean13CheckDigit(BODY) + 1) % 10);
 const ROOT = path.resolve(import.meta.dirname, "../..");
 const SHOTS = process.env.T286_OUT ?? path.join(ROOT, ".artifacts/t286-shots");
@@ -191,7 +194,7 @@ function expectRubric(m: Layout, label: string, opts: { alert: boolean; maxButto
   expect(m.contrast, `${label} K-07 kontrast`).toBeGreaterThanOrEqual(4.5);
 }
 
-test("uygulama içi çözücü yolu: BarcodeDetector yok; WASM yalnızca tarama ekranında yüklenir, kod okunur ve akışa iletilir", async ({ page }, testInfo) => {
+test("uygulama içi çözücü yolu: BarcodeDetector yok; WASM yalnızca tarama ekranında yüklenir, kayıtsız kod okunur, akışa iletilir ve sunucuda reddedilir (olumlu geri bildirim yok)", async ({ page }, testInfo) => {
   mkdirSync(SHOTS, { recursive: true });
   await page.addInitScript(`try { delete window.BarcodeDetector; } catch (e) { window.BarcodeDetector = undefined; } ${FEEDBACK_STUBS}`);
   await login(page, testInfo);
@@ -218,7 +221,7 @@ test("uygulama içi çözücü yolu: BarcodeDetector yok; WASM yalnızca tarama 
   await expect(page.getByTestId("camera-accepted-value")).toHaveCount(0);
   const fb = await page.evaluate<{ vibrate: unknown[]; tones: number }>("window.__fb");
   expect(fb.vibrate, "reddedilen okumada olumlu titreşim (60 ms) yok").not.toContainEqual(60);
-  expect(fb.tones, "reddedilen okumada olumlu ton yok").toBe(0);
+  expect(fb.tones, "reddedilen okumada ton yok").toBe(0);
   expect(fb.vibrate.filter((v) => Array.isArray(v)), "olumsuz geri bildirim TEK kez (uyarının titreşimi)").toHaveLength(1);
   // Sunucu kuralı değişmedi: kayıtsız raf kodu sunucuda reddedilir (kod + sonraki eylem tam ekran uyarıda), UI kuralı yeniden yazmaz.
   await expect(page.getByTestId("scan-alert")).toBeVisible();
@@ -244,7 +247,7 @@ test("uygulama içi çözücü yolu: BarcodeDetector yok; WASM yalnızca tarama 
   }
 });
 
-test("yerleşik API yolu: seçilir, WASM yüklenmez; yanlış okuma satır içi kalır (ses+titreşim); doğru okuma tek kez iletilir", async ({ page }, testInfo) => {
+test("yerleşik API yolu: seçilir, WASM yüklenmez; yanlış okuma satır içi kalır (ses+titreşim); kayıtsız kodlu okuma tek kez iletilir ve reddedilir (olumlu geri bildirim yok)", async ({ page }, testInfo) => {
   mkdirSync(SHOTS, { recursive: true });
   await page.addInitScript(`${NATIVE_STUB} ${FEEDBACK_STUBS}`);
   await login(page, testInfo);
@@ -315,7 +318,7 @@ test("yerleşik API yolu: seçilir, WASM yüklenmez; yanlış okuma satır içi 
   await expect(page.getByTestId("last-scan-code")).toContainText(CODE);
   const after = await page.evaluate<{ vibrate: unknown[]; tones: number }>("window.__fb");
   expect(after.vibrate.slice(before.vibrate.length), "olumlu titreşim (60 ms) yok").not.toContain(60);
-  expect(after.tones, "olumlu ton yok").toBe(before.tones);
+  expect(after.tones, "ton yok").toBe(before.tones);
   expect(after.vibrate.slice(before.vibrate.length).filter((v) => Array.isArray(v)), "olumsuz geri bildirim TEK kez (uyarının titreşimi)").toHaveLength(1);
   await page.waitForTimeout(1200);
   expect(posts.length, "kod sunucuya tek kez gitti (çift okuma yok)").toBe(1);
@@ -614,7 +617,7 @@ function seed(): Fx {
   psql("INSERT INTO public.units (tenant_id, id, code, name) VALUES ($1,$2,$3,'E2E adet')", [tenantId, fx.unitId, `EC${run}`]);
   psql("INSERT INTO public.items (tenant_id, id, code, name, base_unit_id, tracking_mode, quantity_scale) VALUES ($1,$2,$3,$4,$5,'NONE',0)", [tenantId, fx.itemId, `E2C-${run}`, fx.itemName, fx.unitId]);
   psql("INSERT INTO public.item_barcodes (tenant_id, id, item_id, barcode) VALUES ($1, gen_random_uuid(), $2, $3)", [tenantId, fx.itemId, CODE]);
-  psql("INSERT INTO public.locations (tenant_id, id, warehouse_id, parent_id, code, name, depth, kind) VALUES ($1,$2,$3,NULL,$4,$5,0,'RECEIVING')", [tenantId, fx.locId, fx.warehouseId, `E2CK${run}`, "E2E kabul"]);
+  psql("INSERT INTO public.locations (tenant_id, id, warehouse_id, parent_id, code, name, depth, kind) VALUES ($1,$2,$3,NULL,$4,$5,0,'RECEIVING')", [tenantId, fx.locId, fx.warehouseId, LOC_CODE, "E2E kabul"]);
   psql("INSERT INTO public.inbound_receipts (tenant_id, id, warehouse_id, number, supplier_ref, created_by, status) VALUES ($1,$2,$3,$4,'E2E-CAM-1',(SELECT user_id FROM public.tenant_memberships WHERE id = $5),'OPEN')", [tenantId, fx.receiptId, fx.warehouseId, `KBL-CAM-${run}`, membershipId]);
   psql("INSERT INTO public.inbound_receipt_lines (tenant_id, id, receipt_id, line_no, item_id, unit_id, conversion_factor, expected_quantity) VALUES ($1, gen_random_uuid(), $2, 1, $3, $4, 1, 30)", [tenantId, fx.receiptId, fx.itemId, fx.unitId]);
   return fx;
@@ -641,6 +644,42 @@ if (!process.env.E2E_BASE_URL?.trim()) {
       await expect(page.getByTestId("flow-step")).toHaveAttribute("data-step", "3");
     }
   });
+  // T-292b: OLUMLU yol (kayıtlı kodla okuma kabul edilir): 60 ms titreşim, tek ton, "Okundu", okunan ürün/raf adı, katman kapanır, akış ilerler. Kayıtsız kod artık reddedilir
+  // (yukarıdaki testler); olumlu geri bildirimin varlığı yalnız bu testlerle sınanır: `cameraFeedback("ok")` kaybolursa ya da ret yolu kabul sayılırsa kırmızı olur.
+  for (const path_ of ["wasm", "native"] as const) {
+    test(`kabul edilen okuma (${path_ === "wasm" ? "uygulama içi çözücü" : "yerleşik API"}): kayıtlı ürün (kabul) ve kayıtlı raf (yerleştirme) okunur; 60 ms titreşim, tek ton, "Okundu", ad, katman kapanır`, async ({ page }, testInfo) => {
+      test.setTimeout(120_000);
+      const fx = seed();
+      await page.addInitScript(path_ === "wasm" ? `try { delete window.BarcodeDetector; } catch (e) { window.BarcodeDetector = undefined; } ${FEEDBACK_STUBS}` : `${NATIVE_STUB} ${FEEDBACK_STUBS}`);
+      await login(page, testInfo);
+      const overlay = page.getByTestId("camera-overlay");
+      const fb = (): Promise<{ vibrate: unknown[]; tones: number }> => page.evaluate<{ vibrate: unknown[]; tones: number }>("window.__fb");
+      const accept = async (url: string, code: string, name: string, step: string): Promise<void> => {
+        await page.goto(url);
+        await page.waitForLoadState("networkidle");
+        const before = await fb();
+        await page.getByRole("button", { name: "Barkodu okut" }).click();
+        await expect(overlay).toBeVisible();
+        await expect(overlay).toHaveAttribute("data-decoder", path_);
+        if (path_ === "native") {
+          await expect.poll(() => page.evaluate<number>("document.querySelector('[data-testid=camera-video]').videoWidth")).toBeGreaterThan(0);
+          await page.evaluate(`window.__code = ${JSON.stringify(code)}`);
+        }
+        await expect(overlay).toHaveAttribute("data-phase", "accepted", { timeout: 40_000 });
+        await expect(page.getByTestId("camera-status")).toContainText("Okundu.");
+        await expect(page.getByTestId("camera-accepted-value")).toHaveText(name, { timeout: 30_000 });
+        await expect(overlay).toHaveCount(0);
+        await expect(page.getByTestId("flow-step")).toHaveAttribute("data-step", step);
+        await expect(page.getByTestId("scan-alert")).toHaveCount(0);
+        const after = await fb();
+        expect(after.vibrate.slice(before.vibrate.length), "okuma anında tek kısa titreşim (60 ms)").toEqual([60]);
+        expect(after.tones, "okuma anında tek ton").toBe(before.tones + 1);
+      };
+      await accept(`/t/demo/field/receive?receipt=${fx.receiptId}`, CODE, fx.itemName, "3"); // kabul: kayıtlı ürün
+      await accept(`/t/demo/field/putaway?wh=${fx.warehouseId}`, LOC_CODE, "E2E kabul", "2"); // yerleştirme: kayıtlı raf (kaynak adımı)
+    });
+  }
+
 }
 
 function writeMeasures(data: Record<string, unknown>, tag: string, project: string): void {

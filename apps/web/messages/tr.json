@@ -1499,9 +1499,9 @@
       "putawayReason": "Kaynakta yalnız {n} adet var.",
       "cameraAction": "{button} düğmesine bas.",
       "pageReceive": "Teslimde kalan: {n} adet.",
-      "pageReceiveHit": "Kalan {n} adet. Kabul et'e bas.",
+      "pageReceiveHit": "Fazlası sayılmadı. Kabul et'e bas.",
       "pagePutaway": "Kaynakta var: {n} adet.",
-      "pagePutawayHit": "Kaynak {n} adet. Rafa koy'a bas."
+      "pagePutawayHit": "Kaynakta {n} var. Rafa koy'a bas."
     },
     "camera": {
       "title": "Kamera",
