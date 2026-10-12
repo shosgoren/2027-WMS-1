@@ -16,9 +16,6 @@ import { enterDemoShared, isRemote } from "./support/demo-session.ts";
 // Her yüklemede (işçi başına) rastgele geçerli EAN-13 (mağaza içi "2" öneki): fikstür barkodu arşivlenen ürüne bağlı kalsa da yeniden koşuda çakışmaz.
 const BODY = "2" + String(randomInt(0, 1e11)).padStart(11, "0");
 const CODE = BODY + ean13CheckDigit(BODY);
-// Kayıtlı raf barkodu (yerleştirme olumlu yolu): geçerli EAN-13 raf kodu; fikstür rafı bu kodla açılır.
-const LBODY = "2" + String(randomInt(0, 1e11)).padStart(11, "0");
-const LOC_CODE = LBODY + ean13CheckDigit(LBODY);
 const BAD_CHECKSUM = BODY + ((ean13CheckDigit(BODY) + 1) % 10);
 const ROOT = path.resolve(import.meta.dirname, "../..");
 const SHOTS = process.env.T286_OUT ?? path.join(ROOT, ".artifacts/t286-shots");
@@ -613,11 +610,15 @@ function seed(): Fx {
   const existing = psql<{ id: string }>("SELECT id FROM public.warehouses WHERE tenant_id = $1 AND status = 'ACTIVE' ORDER BY code LIMIT 1", [tenantId])[0]?.id;
   const fx: Fx = { tenantId, warehouseId: existing ?? randomUUID(), createdWarehouse: existing === undefined, unitId: randomUUID(), itemId: randomUUID(), locId: randomUUID(), receiptId: randomUUID(), itemName: `Kamera Vida ${run}` };
   fixtures.push(fx); // temizlik listesine HEMEN: kurulum yarıda kalsa da afterAll geri alır
+  // Video yalnız CODE'u gösterir: kayıtlı ürün barkodu VE fikstür rafının kodu aynı CODE'dur (ürün adımında ürün, kaynak adımında raf olarak çözülür). Bu dosyadaki önceki
+  // testlerin (afterAll'a kadar duran) fikstürleri CODE'u tutuyorsa serbest bırakılır.
+  psql("DELETE FROM public.item_barcodes WHERE tenant_id = $1 AND barcode = $2", [tenantId, CODE]);
+  psql("UPDATE public.locations SET status = 'ARCHIVED', archived_at = now(), code = 'OLD-' || id::text WHERE tenant_id = $1 AND code = $2", [tenantId, CODE]);
   if (fx.createdWarehouse) psql("INSERT INTO public.warehouses (tenant_id, id, code, name) VALUES ($1,$2,$3,'E2E depo')", [tenantId, fx.warehouseId, `E2C${run}`]);
   psql("INSERT INTO public.units (tenant_id, id, code, name) VALUES ($1,$2,$3,'E2E adet')", [tenantId, fx.unitId, `EC${run}`]);
   psql("INSERT INTO public.items (tenant_id, id, code, name, base_unit_id, tracking_mode, quantity_scale) VALUES ($1,$2,$3,$4,$5,'NONE',0)", [tenantId, fx.itemId, `E2C-${run}`, fx.itemName, fx.unitId]);
   psql("INSERT INTO public.item_barcodes (tenant_id, id, item_id, barcode) VALUES ($1, gen_random_uuid(), $2, $3)", [tenantId, fx.itemId, CODE]);
-  psql("INSERT INTO public.locations (tenant_id, id, warehouse_id, parent_id, code, name, depth, kind) VALUES ($1,$2,$3,NULL,$4,$5,0,'RECEIVING')", [tenantId, fx.locId, fx.warehouseId, LOC_CODE, "E2E kabul"]);
+  psql("INSERT INTO public.locations (tenant_id, id, warehouse_id, parent_id, code, name, depth, kind) VALUES ($1,$2,$3,NULL,$4,$5,0,'RECEIVING')", [tenantId, fx.locId, fx.warehouseId, CODE, "E2E kabul"]);
   psql("INSERT INTO public.inbound_receipts (tenant_id, id, warehouse_id, number, supplier_ref, created_by, status) VALUES ($1,$2,$3,$4,'E2E-CAM-1',(SELECT user_id FROM public.tenant_memberships WHERE id = $5),'OPEN')", [tenantId, fx.receiptId, fx.warehouseId, `KBL-CAM-${run}`, membershipId]);
   psql("INSERT INTO public.inbound_receipt_lines (tenant_id, id, receipt_id, line_no, item_id, unit_id, conversion_factor, expected_quantity) VALUES ($1, gen_random_uuid(), $2, 1, $3, $4, 1, 30)", [tenantId, fx.receiptId, fx.itemId, fx.unitId]);
   return fx;
@@ -676,7 +677,7 @@ if (!process.env.E2E_BASE_URL?.trim()) {
         expect(after.tones, "okuma anında tek ton").toBe(before.tones + 1);
       };
       await accept(`/t/demo/field/receive?receipt=${fx.receiptId}`, CODE, fx.itemName, "3"); // kabul: kayıtlı ürün
-      await accept(`/t/demo/field/putaway?wh=${fx.warehouseId}`, LOC_CODE, "E2E kabul", "2"); // yerleştirme: kayıtlı raf (kaynak adımı)
+      await accept(`/t/demo/field/putaway?wh=${fx.warehouseId}`, CODE, "E2E kabul", "2"); // yerleştirme: kayıtlı raf (kaynak adımı; raf kodu = CODE)
     });
   }
 
