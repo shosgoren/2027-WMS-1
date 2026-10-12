@@ -1,10 +1,10 @@
 # STATE (≤80 satır — her görev sonunda Supervisor günceller)
 
-**Oturum kilidi:** session_01C59FRaUynaDdhNGZoRbKsY · 2026-10-12T10:42Z (zamanlanmış oturum: kilit 3 saatten yeniyse ve başka oturumunsa hiçbir şey yapmadan çık; değilse kendi kimliğinle yenile, her push'ta zamanı güncelle)
+**Oturum kilidi:** session_01C59FRaUynaDdhNGZoRbKsY · 2026-10-12T11:42Z (zamanlanmış oturum: kilit 3 saatten yeniyse ve başka oturumunsa hiçbir şey yapmadan çık; değilse kendi kimliğinle yenile, her push'ta zamanı güncelle)
 **Faz:** 2 stok çekirdeği TAMAM (main) + Faz 3A (int/faz3a: …T-222/253/256/258/259/270/271/272/273/274/304/305/306; tam test:int EXIT=0 82/82 1612+). Kullanıcı UTC+3: saat `date -u` ile. Kota kesintisinde sıfırlanma saatine send_later ZORUNLU.
-**Aktif görev:** T-292b tek düzeltme turu (SR 0·2·4 + tasarım K-05) · T-334 kör sayımı stok okumalarında koru (backend-dev) · T-314 masaüstü sipariş ekranları (frontend-dev).
+**Aktif görev:** T-292b düzeltme turu · T-334 kör sayım okumaları · T-314 masaüstü sipariş (AC-04 + baseline eki; son doğrulama + push) · T-316 sayım ekranları.
 **Son tamamlanan:** #91 paket 9 okuma katmanları T-314a/T-332a/T-316a (f86a872; CI 15/15) · #90 paket 8 (f090630; e2e-staging run 19 yeşil) · #89 paket 7 · önceki: JOURNAL
-**Sonraki adım:** (10:42Z) T-334 (kör sayımı stok okumalarında koru; taslak scratchpad; T-316 sahaya açılmadan ÖNCE) → T-314 (masaüstü sipariş) + T-316 (sayım ekranları) + T-332b (stok sorgu ekranı) → T-331 (ana ekran + dürüst metin) → T-315 → T-293 ön yüz → T-314c → T-333 (ters kayıt ekranı). Olası pilot: kauçuk fabrikası (prototip PX57gcUDXfKDF377aQhA5v; cevaplar gelince PILOT.md + transfer/üretim/lot öne). Kullanıcı işi: T-286 cihaz, main ruleset, Q-12, Q-102, Q-103, Q-07, sıfır-durum A/B.
+**Sonraki adım:** (11:42Z) T-334 (kör sayımı stok okumalarında koru; taslak scratchpad; T-316 sahaya açılmadan ÖNCE) → T-314 (masaüstü sipariş) + T-316 (sayım ekranları) + T-332b (stok sorgu ekranı) → T-331 (ana ekran + dürüst metin) → T-315 → T-293 ön yüz → T-314c → T-333 (ters kayıt ekranı). Olası pilot: kauçuk fabrikası (prototip PX57gcUDXfKDF377aQhA5v; cevaplar gelince PILOT.md + transfer/üretim/lot öne). Kullanıcı işi: T-286 cihaz, main ruleset, Q-12, Q-102, Q-103, Q-07, sıfır-durum A/B.
 
 ## Çalışma biçimi (kullanıcı kararı 2026-10-05 — ADR-012 rev., PROTOCOL §Onay kaynağı)
 - Kullanıcı PR incelemez. Birleştirme kapısı: CI/oturumda `pnpm verify` + `check:all` + `test:int` + ilgili `test:ac` yeşil; risk matrisine göre `security-reviewer` ve `qa-verifier` BLOCKER: 0 → Supervisor PR'ı kendisi birleştirir (`mcp__github__merge_pull_request`). Korunan değişiklikte PR açıklamasında `APPROVED-BY: supervisor (ADR-012 rev.)`.
