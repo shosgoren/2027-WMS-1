@@ -212,11 +212,14 @@ test("uygulama içi çözücü yolu: BarcodeDetector yok; WASM yalnızca tarama 
   const origin = new URL(page.url()).origin;
   expect(wasm.every((u) => u.startsWith(origin)), `WASM kendi kaynağımızdan: ${wasm.join(",")}`).toBe(true);
   expect(requests.filter((u) => !u.startsWith(origin) && !u.startsWith("data:") && !u.startsWith("blob:")), "üçüncü taraf istek yok (jsDelivr vb.)").toEqual([]);
-  await expect(page.getByTestId("camera-overlay")).toHaveCount(0);
-  // Okuma doğru geri bildirim aldı (sahte ses/titreşim sayacı): iyi okuma = 1 titreşim + 1 ton.
+  // T-292b (G-07, ürün vaadi "doğru işlemi doğrular"): kayıtsız raf kodu sunucuda REDDEDİLİR; reddedilen okuma "Okundu" ve olumlu geri bildirim ALMAZ.
+  // Eski beklenti (okuma kabul + 1 olumlu titreşim + 1 ton + katman kapanır) kaldırıldı; yerine yokluk ve uyarının görünmesi doğrulanır.
+  await expect(page.getByTestId("camera-overlay")).toHaveAttribute("data-phase", "refused");
+  await expect(page.getByTestId("camera-accepted-value")).toHaveCount(0);
   const fb = await page.evaluate<{ vibrate: unknown[]; tones: number }>("window.__fb");
-  expect(fb.vibrate).toContainEqual(60);
-  expect(fb.tones).toBeGreaterThanOrEqual(1);
+  expect(fb.vibrate, "reddedilen okumada olumlu titreşim (60 ms) yok").not.toContainEqual(60);
+  expect(fb.tones, "reddedilen okumada olumlu ton yok").toBe(0);
+  expect(fb.vibrate.filter((v) => Array.isArray(v)), "olumsuz geri bildirim TEK kez (uyarının titreşimi)").toHaveLength(1);
   // Sunucu kuralı değişmedi: kayıtsız raf kodu sunucuda reddedilir (kod + sonraki eylem tam ekran uyarıda), UI kuralı yeniden yazmaz.
   await expect(page.getByTestId("scan-alert")).toBeVisible();
   await expect(page.getByTestId("error-code")).toHaveCount(1);
@@ -228,10 +231,16 @@ test("uygulama içi çözücü yolu: BarcodeDetector yok; WASM yalnızca tarama 
     await gotoPutaway(page);
     await page.waitForLoadState("networkidle");
     await page.getByRole("button", { name: "Barkodu okut" }).click();
-    await expect(overlay).toHaveAttribute("data-phase", "accepted", { timeout: 30_000 });
-    await expect(page.getByTestId("camera-accepted-value")).toHaveText(CODE);
-    expectRubric(await layout(page), `${size.name} okundu (kod)`, { alert: false });
-    await page.screenshot({ path: path.join(SHOTS, `${size.name}-okundu-kod.png`) });
+    await expect(overlay).toHaveAttribute("data-phase", "refused", { timeout: 30_000 });
+    await expect(page.getByTestId("scan-alert")).toBeVisible();
+    await page.getByRole("button", { name: "Anladım, tekrar okut" }).click();
+    await expect(page.getByTestId("camera-accepted-value")).toHaveCount(0);
+    await expect(page.getByTestId("camera-status")).not.toContainText("Okundu.");
+    // Uyarı kapandıktan sonra katman, ekranda gerçekten bulunan düğmeyi adlandırır (görünmeyen uyarıya atıf yok).
+    await expect(page.getByTestId("camera-status")).toContainText("Yeniden okut düğmesine bas.");
+    await expect(overlay.getByRole("button", { name: "Yeniden okut" })).toBeVisible();
+    expectRubric(await layout(page), `${size.name} reddedilen okuma (kod)`, { alert: true });
+    await page.screenshot({ path: path.join(SHOTS, `${size.name}-reddedilen-kod.png`) });
   }
 });
 
@@ -296,18 +305,18 @@ test("yerleşik API yolu: seçilir, WASM yüklenmez; yanlış okuma satır içi 
   });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.evaluate(`window.__code = ${JSON.stringify(CODE)}`);
-  await expect(overlay).toHaveAttribute("data-phase", "accepted");
-  await expect(page.getByTestId("camera-status")).toContainText("Okundu.");
-  await expect(page.getByTestId("camera-accepted-value")).toHaveText(CODE); // kod çözülmediyse (ürün adı yok) okunan kod gösterilir
-  await page.screenshot({ path: path.join(SHOTS, "390x844-okundu.png") });
-  await expect(overlay).toHaveCount(0);
+  // T-292b (G-07): kayıtsız raf kodu sunucuda reddedilir; "Okundu" ve olumlu geri bildirim YOK, tam ekran uyarı açılır. Eski beklenti (accepted + "Okundu." + 60 ms titreşim +
+  // 1 ton + katman kapanır) kaldırıldı; yerine yokluk ve uyarının görünmesi doğrulanır.
+  await expect(overlay).toHaveAttribute("data-phase", "refused");
+  await expect(page.getByTestId("scan-alert")).toBeVisible();
+  await expect(page.getByTestId("camera-accepted-value")).toHaveCount(0);
+  await expect(page.getByTestId("camera-status")).not.toContainText("Okundu.");
+  await page.screenshot({ path: path.join(SHOTS, "390x844-reddedilen.png") });
   await expect(page.getByTestId("last-scan-code")).toContainText(CODE);
   const after = await page.evaluate<{ vibrate: unknown[]; tones: number }>("window.__fb");
-  // Okuma anında tek kısa titreşim (60) ve tek ton; ardından sunucu reddi mevcut tam ekran uyarının kendi titreşimini ekleyebilir (sıra: önce okuma).
-  expect(after.vibrate[before.vibrate.length]).toBe(60);
-  expect(after.vibrate.slice(before.vibrate.length).filter((v) => v === 60)).toHaveLength(1);
-  expect(after.tones).toBe(before.tones + 1);
-  await expect(page.getByTestId("scan-alert")).toBeVisible();
+  expect(after.vibrate.slice(before.vibrate.length), "olumlu titreşim (60 ms) yok").not.toContain(60);
+  expect(after.tones, "olumlu ton yok").toBe(before.tones);
+  expect(after.vibrate.slice(before.vibrate.length).filter((v) => Array.isArray(v)), "olumsuz geri bildirim TEK kez (uyarının titreşimi)").toHaveLength(1);
   await page.waitForTimeout(1200);
   expect(posts.length, "kod sunucuya tek kez gitti (çift okuma yok)").toBe(1);
   writeMeasures(measures, "okuma", testInfo.project.name);

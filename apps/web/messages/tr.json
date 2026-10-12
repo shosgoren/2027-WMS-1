@@ -1497,20 +1497,22 @@
     "limit": {
       "receiveReason": "Teslimde yalnız {n} adet kalmış.",
       "putawayReason": "Kaynakta yalnız {n} adet var.",
-      "confirmReceive": "Devam için Kabul et'e bas.",
-      "confirmPutaway": "Devam için Rafa koy'a bas.",
-      "cameraAction": "Kamerayı kapat."
+      "cameraAction": "{button} düğmesine bas.",
+      "pageReceive": "Teslimde kalan: {n} adet.",
+      "pageReceiveHit": "Kalan {n} adet. Kabul et'e bas.",
+      "pagePutaway": "Kaynakta var: {n} adet.",
+      "pagePutawayHit": "Kaynak {n} adet. Rafa koy'a bas."
     },
     "camera": {
       "title": "Kamera",
       "hint": "Barkodu çerçeveye getir.",
       "starting": "Kamera açılıyor…",
       "accepted": "Okundu.",
-      "dropped": "Bir kod okundu ama işlenmedi: okuma şu an kapalıydı. Adet eklenmedi.",
+      "dropped": "Kod işlenmedi: okuma şu an kapalıydı.",
       "ok": "Tamam",
       "retry": "Tekrar dene",
       "notTaken": "Kod işlenmedi: okuma şu an kapalıydı. Saymak için Yeniden okut'a bas.",
-      "refused": "Bu okuma kabul edilmedi. Uyarıdaki adımı uygula.",
+      "refused": "Bu okuma kabul edilmedi. {button} düğmesine bas.",
       "rescan": "Yeniden okut",
       "torchOn": "Feneri aç",
       "torchOff": "Feneri kapat",

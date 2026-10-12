@@ -202,8 +202,8 @@ export interface QtyLimit {
 
 /**
  * Akışın bir okumayı işleme sonucu (kamera katmanı "Okundu" kararını buna göre verir; fail-closed: sonuç yoksa olumlu geri bildirim YOK, G-07).
- * `taken`: akış okumayı işledi (sunucunun "bu kod sistemde yok" yanıtı da işlenmiş okumadır: uyarıyı ayrıca gösterir); `refused`: akış okumayı REDDETTİ
- * (yanlış ürün, tamamlanmış satır, birim uyuşmazlığı, ağ hatası, önce bitir, rafta stok yok: tam ekran uyarı açılır); `limit`: okutma adedi üst sınıra çekti,
+ * `taken`: akış okumayı işledi ve kabul etti; `refused`: akış okumayı REDDETTİ
+ * (sistemde olmayan kod ve her sunucu reddi, yanlış ürün, tamamlanmış satır, birim uyuşmazlığı, ağ hatası, önce bitir, rafta stok yok: tam ekran uyarı açılır); `limit`: okutma adedi üst sınıra çekti,
  * ileti nedeni + eylemi söyler. Yalnız `taken` "Okundu" + olumlu bip/titreşim alır.
  */
 export type ScanVerdict = "taken" | "refused" | { readonly limit: string };
@@ -218,8 +218,15 @@ export function QtyStepper({ label, value, min, max, onChange, scan, limit }: { 
   const btn = `flex size-12 shrink-0 items-center justify-center rounded-control border-2 border-border-strong bg-surface text-3xl font-bold text-ink disabled:opacity-40 ${FOCUS}`;
   return (
     <div className="flex min-w-0 flex-col gap-1">
+      {/* Sınır iletisi dikeyde (telefon dikey, masaüstü) etiketin YERİNE aynı satıra oturur: etiket ekran okuyucu için kalır (sr-only), satır yüksekliği (24 px) aynıdır, alttaki hiçbir
+          öğe kaymaz. Yatay telefonda etiket satır içindedir ve ileti alttadır. İleti tek satırdır (kısa metin; uzarsa satır yüksekliği testle yakalanır). */}
+      {note === null ? null : (
+        <p key={limit?.hit === undefined ? "max" : "hit"} id={noteId} role={limit?.hit === undefined ? "status" : "alert"} data-testid="qty-limit" className="break-words text-base font-bold leading-6 text-warning-ink [@media(pointer:coarse)_and_(max-height:500px)]:order-1 [@media(pointer:coarse)_and_(max-height:500px)]:leading-snug">
+          {note}
+        </p>
+      )}
       <div className="contents [@media(pointer:coarse)_and_(max-height:500px)]:flex [@media(pointer:coarse)_and_(max-height:500px)]:min-w-0 [@media(pointer:coarse)_and_(max-height:500px)]:items-center [@media(pointer:coarse)_and_(max-height:500px)]:gap-2">
-      <label className="text-base font-semibold text-ink [@media(pointer:coarse)_and_(max-height:500px)]:w-28 [@media(pointer:coarse)_and_(max-height:500px)]:shrink-0 [@media(pointer:coarse)_and_(max-height:500px)]:text-sm [@media(pointer:coarse)_and_(max-height:500px)]:leading-tight" htmlFor={inputId}>
+      <label className={`text-base font-semibold leading-6 text-ink ${note === null ? "" : "sr-only [@media(pointer:coarse)_and_(max-height:500px)]:not-sr-only"} [@media(pointer:coarse)_and_(max-height:500px)]:w-28 [@media(pointer:coarse)_and_(max-height:500px)]:shrink-0 [@media(pointer:coarse)_and_(max-height:500px)]:text-sm [@media(pointer:coarse)_and_(max-height:500px)]:leading-tight`} htmlFor={inputId}>
         {label}
       </label>
       <div className="flex min-w-0 items-center gap-2 [@media(pointer:coarse)_and_(max-height:500px)]:flex-1">
@@ -248,11 +255,6 @@ export function QtyStepper({ label, value, min, max, onChange, scan, limit }: { 
         )}
       </div>
       </div>
-      {note === null ? null : (
-        <p key={limit?.hit === undefined ? "max" : "hit"} id={noteId} role={limit?.hit === undefined ? "status" : "alert"} data-testid="qty-limit" className="break-words text-base font-bold leading-snug text-warning-ink">
-          {note}
-        </p>
-      )}
     </div>
   );
 }
@@ -459,8 +461,8 @@ export function CameraOverlay({ onCode, onClose, onManual, resolvedName, notice 
               (r) => {
                 if (cancelled) return;
                 if (r === "refused") {
-                  // Akış okumayı reddetti: kamera açık kalır (uyarı kapanınca "Yeniden okut"), olumlu geri bildirim yok.
-                  cameraFeedback("bad");
+                  // Akış okumayı reddetti: kamera açık kalır (uyarı kapanınca "Yeniden okut"), olumlu geri bildirim yok. Olumsuz geri bildirimi tam ekran uyarı TEK kez verir
+                  // (kendi titreşimi); katman ikinci bir ton/titreşim eklemez.
                   setState({ phase: "refused" });
                   return;
                 }
@@ -528,11 +530,11 @@ export function CameraOverlay({ onCode, onClose, onManual, resolvedName, notice 
   })();
   const TONE = { plain: "text-on-accent", bad: "rounded-card bg-danger-bg px-3 py-2 text-danger-ink", good: "rounded-card bg-success-bg px-3 py-2 text-success-ink" } as const;
   const text = (
-    <p role={message.role} data-testid="camera-status" data-tone={message.tone} className={`flex min-w-0 items-start gap-2 break-words font-bold ${message.raw === undefined ? "text-lg" : "text-base leading-snug"} ${TONE[message.tone]}`}>
+    <p role={message.role} data-testid="camera-status" data-tone={message.tone} className={`flex min-w-0 items-start gap-2 break-words text-lg font-bold ${message.raw === undefined ? "" : "leading-snug"} ${TONE[message.tone]}`}>
       {message.tone === "bad" ? <CircleAlert aria-hidden="true" className="mt-0.5 size-6 shrink-0" strokeWidth={2.25} /> : null}
       {message.tone === "good" ? <CircleCheck aria-hidden="true" className="mt-0.5 size-6 shrink-0" strokeWidth={2.25} /> : null}
       <span className="min-w-0 flex-1">
-        {message.raw ?? t(message.key)}
+        {message.raw ?? (message.key === "camera.refused" ? t(message.key, { button: t("camera.rescan") }) : t(message.key))}
         {state.phase === "accepted" ? (
           <span data-testid="camera-accepted-value" className="block truncate">
             {resolvedName ?? state.value}
@@ -770,8 +772,8 @@ export function DroppedNotice({ show, alerting, onClose, placement = "inline" }:
   if (!show) return null;
   const where = placement === "top" ? "fixed inset-x-3 top-0 z-[60] mx-auto max-w-md shadow-card" : "";
   return (
-    <div role="alert" data-testid="camera-dropped" data-placement={placement} className={`flex min-w-0 items-center gap-3 rounded-card border-2 border-warning bg-warning-bg px-3 py-0 text-warning-ink ${where}`}>
-      <p className="min-w-0 flex-1 break-words text-sm font-bold leading-snug">{t("camera.dropped")}</p>
+    <div role="alert" data-testid="camera-dropped" data-placement={placement} className={`flex min-w-0 items-center gap-3 h-14 shrink-0 rounded-card border-2 border-warning bg-warning-bg px-3 py-0.5 text-warning-ink ${where}`}>
+      <p className="min-w-0 flex-1 break-words text-base font-bold leading-snug">{t("camera.dropped")}</p>
       {alerting ? null : (
         <button type="button" onClick={onClose} className={`flex min-h-12 min-w-12 shrink-0 items-center justify-center rounded-control border-2 border-warning-ink px-3 text-base font-bold ${FOCUS}`}>
           {t("camera.ok")}
@@ -910,7 +912,7 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
       if (blocked()) return "refused";
       const hit = (n: number): ScanVerdict => {
         setLimitHit(true);
-        return { limit: `${t("limit.receiveReason", { n })} ${t("limit.cameraAction")}` };
+        return { limit: `${t("limit.receiveReason", { n })} ${t("limit.cameraAction", { button: t("cancel") })}` };
       };
       busyRef.current = true;
       setLast(code);
@@ -928,7 +930,7 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
         if (!res.ok) {
           const key = errorKeyOf(res.error, "scan");
           setAlert({ titleKey: "alert.scanTitle", reasonKey: key, code: res.error.detail === undefined ? res.error.code : `${res.error.code}/${res.error.detail}` });
-          return "taken"; // barkod okundu ve sunucuya işlendi; sunucunun "bu kod sistemde yok" yanıtı tam ekran uyarıdır (T-286 sözleşmesi)
+          return "refused"; // sunucu okumayı reddetti (sistemde olmayan kod, yetki, sınır, sunucu hatası): uyarı açılır, olumlu geri bildirim yok (G-07)
         }
         const itemId = res.data.itemId;
         const lines = receipt.lines;
@@ -1146,7 +1148,7 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
                 value={picked.received}
                 min={1}
                 max={max}
-                {...(max === null ? {} : { limit: { reason: t("limit.receiveReason", { n: max }), hit: limitHit ? `${t("limit.receiveReason", { n: max })} ${t("limit.confirmReceive")}` : undefined } })}
+                {...(max === null ? {} : { limit: { reason: t("limit.pageReceive", { n: max }), hit: limitHit ? t("limit.pageReceiveHit", { n: max }) : undefined } })}
                 onChange={(n) => {
                   holder.contentChanged();
                   setLimitHit(false);
@@ -1184,13 +1186,13 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
           }
         >
           <section className="flex min-w-0 flex-col gap-1 rounded-card border-2 border-border bg-surface p-3 [@media(max-height:700px)]:p-2" aria-label={t("flow.verify")}>
-            <p className="text-sm font-bold text-ink-muted group-has-[[data-testid=qty-limit]]:hidden">{t("flow.verify")}</p>
+            <p className="text-sm font-bold text-ink-muted [@media(pointer:coarse)_and_(max-height:500px)]:group-has-[[data-testid=qty-limit]]:hidden">{t("flow.verify")}</p>
             <p className="break-words text-2xl font-extrabold text-ink [@media(pointer:coarse)_and_(max-height:500px)]:text-xl" data-testid="verified-item">
               {picked.line.itemName}
             </p>
             <p className="break-words text-sm text-ink-muted [@media(max-height:700px)]:hidden">{picked.line.itemCode}</p>
-            {/* Sınır iletisi göründüğünde (kalan miktar iletinin kendisidir) etiket ve durum satırı gizlenir: ileti akışa net yükseklik eklemez, kontroller çubuğun altına itilmez. */}
-            <div className="group-has-[[data-testid=qty-limit]]:hidden">
+            {/* YALNIZ yatay telefonda: sınır iletisi göründüğünde bu etiket ve durum satırı gizlenir (alt sütunda yer açmak için). Dikeyde ve masaüstünde hiçbir şey gizlenmez ve içerik kaymaz. */}
+            <div className="[@media(pointer:coarse)_and_(max-height:500px)]:group-has-[[data-testid=qty-limit]]:hidden">
               <LineStatus expected={picked.line.expected} received={picked.line.received} damaged={picked.line.damaged} open={picked.line.open} />
             </div>
             {picked.lineIsBase ? <CompoundLine slug={slug} itemId={picked.line.itemId} baseQty={picked.received} /> : null}

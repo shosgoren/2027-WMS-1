@@ -75,7 +75,7 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
       let verdict: ScanVerdict = "taken";
       const hit = (n: number): void => {
         setLimitHit(true);
-        verdict = { limit: `${t("limit.putawayReason", { n })} ${t("limit.cameraAction")}` };
+        verdict = { limit: `${t("limit.putawayReason", { n })} ${t("limit.cameraAction", { button: t("cancel") })}` };
       };
       busyRef.current = true;
       setLast(code);
@@ -88,7 +88,7 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
           const res = await resolveLocationScanAction({ slug, warehouseId, code });
           if (!res.ok) {
             showAlert("alert.scanTitle", errorKeyOf(res.error, "scan"), res.error.detail === undefined ? res.error.code : `${res.error.code}/${res.error.detail}`);
-            return "taken"; // barkod okundu ve sunucuya işlendi; "bu kod sistemde yok" tam ekran uyarıdır (T-286 sözleşmesi)
+            return "refused"; // sunucu okumayı reddetti (sistemde olmayan kod, yetki, sınır, sunucu hatası): uyarı açılır, olumlu geri bildirim yok (G-07)
           }
           const loc = { id: res.data.id, code: res.data.code, name: res.data.name };
           holder.contentChanged();
@@ -104,7 +104,7 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
           const res = await resolveItemScanAction({ slug, code });
           if (!res.ok) {
             showAlert("alert.scanTitle", errorKeyOf(res.error, "scan"), res.error.detail === undefined ? res.error.code : `${res.error.code}/${res.error.detail}`);
-            return "taken"; // barkod okundu ve sunucuya işlendi; "bu kod sistemde yok" tam ekran uyarıdır (T-286 sözleşmesi)
+            return "refused"; // sunucu okumayı reddetti (sistemde olmayan kod, yetki, sınır, sunucu hatası): uyarı açılır, olumlu geri bildirim yok (G-07)
           }
           // Yerleştirme stokta (temel birim) çalışır: koli okutunca adım koli içi adettir (`baseQuantity`, K-1); kesirli ise uyarı, sessizce 1 değil.
           // Adım yalnız adedi okutmadan alan yollarda istenir: görevli yerleştirmede miktar görevle sabittir, ondalık ölçekli ürün engellenmez.
@@ -324,7 +324,7 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
               value={qty}
               min={1}
               max={avail}
-              {...(avail === null ? {} : { limit: { reason: t("limit.putawayReason", { n: avail }), hit: limitHit ? `${t("limit.putawayReason", { n: avail })} ${t("limit.confirmPutaway")}` : undefined } })}
+              {...(avail === null ? {} : { limit: { reason: t("limit.pagePutaway", { n: avail }), hit: limitHit ? t("limit.pagePutawayHit", { n: avail }) : undefined } })}
               onChange={(n) => {
                 holder.contentChanged();
                 setLimitHit(false);
