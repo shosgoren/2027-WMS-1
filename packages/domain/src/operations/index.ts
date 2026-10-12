@@ -118,6 +118,27 @@ export {
   type RecordCountLineInput,
   type StartCountInput,
 } from "./counting.ts";
+// Sayım okuma sorguları (T-316a): oturum listesi + ayrıntı; `field` kipi kördür (referans/fark anahtarı yok), `review` kipi `count_diff.approve` ister.
+export {
+  COUNT_LIST_LIMIT_DEFAULT,
+  COUNT_LIST_LIMIT_MAX,
+  COUNT_SESSION_STATUSES,
+  COUNT_VIEWS,
+  getCountSession,
+  listCountSessions,
+  type CountFieldDetail,
+  type CountFieldLine,
+  type CountLocationView,
+  type CountReviewDetail,
+  type CountReviewLine,
+  type CountSessionCursor,
+  type CountSessionDetail,
+  type CountSessionPage,
+  type CountSessionStatus,
+  type CountSessionView,
+  type CountView,
+  type ListCountSessionsInput,
+} from "./counting-queries.ts";
 // Kısmi sevk ve müşteri iadesi (T-308). `planShipment`/`isShippableReservation` (shipping.ts) ve iade saf yardımcıları iç/test amaçlıdır: burada YOKTUR.
 export { shipOrder, type ShipLineInput, type ShipOrderInput } from "./shipping.ts";
 export { createCustomerReturn, type CreateCustomerReturnInput } from "./returns.ts";
