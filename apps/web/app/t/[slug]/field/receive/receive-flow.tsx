@@ -713,22 +713,33 @@ export function useScanPrimary(camera: (code: string) => false | Promise<ScanVer
   const [ready, setReady] = useState(false);
   // Katmanın kabul ettiği okuma (kod); yalnız akışa İLETİLEN okuma kabul sayılır (düşürülen okuma "Okundu" göstermez).
   const [accepted, setAccepted] = useState<string | null>(null);
+  // Akışa iletilmiş ama hükmü henüz gelmemiş okuma: sunucu yanıt vermezse de ACCEPT_MAX_MS üst sınırı katmanı kapatır (kamera açık kalmaz).
+  const [pending, setPending] = useState<string | null>(null);
   const wantManual = useRef(false);
   const onCode = useCallback(
     (code: string): false | Promise<ScanVerdict> => {
       const forwarded = camera(code);
       if (forwarded === false) return false;
       // Yalnız akışın İŞLEDİĞİ ve sınıra takılmayan okuma kabul sayılır (sınıra takılan okuma "Okundu" göstermez).
-      return forwarded.then((v) => {
-        if (v === "taken") setAccepted(code);
-        return v;
-      });
+      setPending(code);
+      return forwarded.then(
+        (v) => {
+          setPending(null);
+          if (v === "taken") setAccepted(code);
+          return v;
+        },
+        (e: unknown) => {
+          setPending(null);
+          throw e;
+        },
+      );
     },
     [camera],
   );
   const close = useCallback(() => {
     setCam(false);
     setAccepted(null);
+    setPending(null);
   }, []);
   const onManual = useCallback(() => {
     wantManual.current = true;
@@ -745,6 +756,11 @@ export function useScanPrimary(camera: (code: string) => false | Promise<ScanVer
     const timer = setTimeout(close, ms);
     return () => clearTimeout(timer);
   }, [accepted, outcome.busy, ownName, outcome.alerting, close]);
+  useEffect(() => {
+    if (pending === null || accepted !== null) return undefined;
+    const timer = setTimeout(close, ACCEPT_MAX_MS);
+    return () => clearTimeout(timer);
+  }, [pending, accepted, close]);
   // "Elle gir": katman kapanınca tarama panelindeki ScanField elle giriş kipine geçer (aynı bileşen, ikinci bir giriş yolu yok).
   useEffect(() => {
     if (cam || !wantManual.current) return;
