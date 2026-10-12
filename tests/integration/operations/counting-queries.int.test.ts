@@ -13,6 +13,7 @@ import {
   findAbandonedCounts,
   getCountSession,
   listCountSessions,
+  postCountAdjustment,
   recordCount,
   startCount,
   submitCount,
@@ -150,6 +151,29 @@ describe("kör sayım sunucuda zorlanır (anahtar düzeyi)", () => {
     await recordCount(cmd(A, COUNTER.userId), { sessionId: sid, lines: [{ locationId: L, itemId: X, countedQuantity: "3" }] });
     await submitCount(cmd(A, COUNTER.userId), { sessionId: sid });
     expect((await getCountSession(counter(), { sessionId: sid, view: "field" })).session.status).toBe("SUBMITTED");
+  });
+
+  it("T-335a güvence: yalnız-COUNTER APPROVED/POSTED oturumu field kipinde okuyamaz (NOT_FOUND) ve listede göremez; COUNTING/SUBMITTED görür; WAREHOUSE_MANAGER hepsini görür", async () => {
+    const X = await mkItem(A);
+    const L = await mkLocWithStock(X, "7");
+    const sid = await start(A, [L]);
+    const counterSees = async (): Promise<boolean> => (await listCountSessions(counter(), { limit: COUNT_LIST_LIMIT_MAX })).items.some((s) => s.id === sid);
+    const mgrSees = async (): Promise<boolean> => (await listCountSessions(mgr(), { limit: COUNT_LIST_LIMIT_MAX })).items.some((s) => s.id === sid);
+    expect(await counterSees()).toBe(true); // COUNTING
+    await recordCount(cmd(A, COUNTER.userId), { sessionId: sid, lines: [{ locationId: L, itemId: X, countedQuantity: "6" }] });
+    await submitCount(cmd(A, COUNTER.userId), { sessionId: sid });
+    expect(await counterSees()).toBe(true); // SUBMITTED
+    expect((await getCountSession(counter(), { sessionId: sid, view: "field" })).session.status).toBe("SUBMITTED");
+    await approveCount(cmd(A), { sessionId: sid });
+    expect(await counterSees()).toBe(false); // APPROVED
+    expect(codeOf(await failure(getCountSession(counter(), { sessionId: sid, view: "field" })))).toBe("NOT_FOUND");
+    await postCountAdjustment(cmd(A), { sessionId: sid }); // POSTED
+    expect(await counterSees()).toBe(false);
+    expect(codeOf(await failure(getCountSession(counter(), { sessionId: sid, view: "field" })))).toBe("NOT_FOUND");
+    expect((await listCountSessions(counter(), { status: "POSTED", limit: COUNT_LIST_LIMIT_MAX })).items.some((s) => s.id === sid)).toBe(false);
+    expect(await mgrSees()).toBe(true);
+    expect((await getCountSession(mgr(), { sessionId: sid, view: "field" })).session.status).toBe("POSTED");
+    expect((await getCountSession(mgr(), { sessionId: sid, view: "review" })).session.status).toBe("POSTED");
   });
 
   it("sayılmamış satır: field counted=null; review difference=null; sayılan referanstan fazlaysa işaret +", async () => {

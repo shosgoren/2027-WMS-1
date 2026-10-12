@@ -10,6 +10,7 @@
 import { sql } from "drizzle-orm";
 import { AppError } from "@wms/shared/errors";
 import { runTenantQuery } from "../identity/access.ts";
+import { hasPermission } from "../identity/permissions.ts";
 import { assertWarehouseVisible, pgUuidArray, resolveWarehouseScope } from "../warehouse/scope.ts";
 import { findAbandonedCounts, type CountStockStatus } from "./counting.ts";
 import { isCalendarTime, type TaskCallParams } from "./tasks.ts";
@@ -154,7 +155,13 @@ async function abandonedIds(tx: Parameters<typeof findAbandonedCounts>[0], tenan
   return new Set((await findAbandonedCounts(tx, tenantId)).map((a) => a.sessionId.toLowerCase()));
 }
 
-/** Sayım oturumları, yeniden eskiye (started_at, id), keyset; kapsam dışı depo oturumları görünmez. `count.perform`. */
+/** `stock.view` ve `count_diff.approve` taşımayan (yalnız-sayımcı) çağıran yalnız süren sayımları görür (ADR-026). */
+const BLIND_VISIBLE_STATUSES: readonly string[] = ["COUNTING", "SUBMITTED"];
+function isBlindOnly(roles: readonly string[]): boolean {
+  return !hasPermission(roles, "stock.view") && !hasPermission(roles, "count_diff.approve");
+}
+
+/** Sayım oturumları, yeniden eskiye (started_at, id), keyset; kapsam dışı depo oturumları görünmez. `count.perform`; yalnız-sayımcıya yalnız COUNTING/SUBMITTED. */
 export async function listCountSessions(params: TaskCallParams, input: ListCountSessionsInput = {}): Promise<CountSessionPage> {
   const limit = limitOf(input.limit);
   const cur = cursorOf(input.afterKey);
@@ -162,10 +169,12 @@ export async function listCountSessions(params: TaskCallParams, input: ListCount
   if (status !== null && !(COUNT_SESSION_STATUSES as readonly string[]).includes(status)) throw new AppError("VALIDATION_FAILED");
   return runTenantQuery({ ...params, permission: "count.perform" }, async (tx, m) => {
     const scope = await resolveWarehouseScope(tx, m);
+    const blindOnly = isBlindOnly(m.roles);
     const rows = await tx.execute<SessionDbRow>(
       sql`${SESSION_SELECT}
            WHERE s.tenant_id = ${m.tenantId}::uuid
              AND (${status}::text IS NULL OR s.status = ${status}::text)
+             AND (${!blindOnly}::boolean OR s.status IN ('COUNTING', 'SUBMITTED'))
              AND (${scope === null}::boolean OR s.warehouse_id = ANY(${pgUuidArray(scope ?? [])}::uuid[]))
              AND (${cur === null}::boolean OR (s.started_at, s.id) < (${cur?.key ?? "1970-01-01T00:00:00.000000Z"}::timestamptz, ${cur?.id ?? "00000000-0000-0000-0000-000000000000"}::uuid))
            ORDER BY s.started_at DESC, s.id DESC
@@ -208,6 +217,8 @@ export async function getCountSession(params: TaskCallParams, input: { readonly 
     const rows = await tx.execute<SessionDbRow>(sql`${SESSION_SELECT} WHERE s.tenant_id = ${m.tenantId}::uuid AND s.id = ${sessionId}::uuid`);
     const row = rows[0];
     if (row === undefined) throw new AppError("NOT_FOUND");
+    // Kör güvence (ADR-026): yalnız sayım yetkisi olan çağıran APPROVED/POSTED oturumu göremez (sayılan değer sistem bakiyesine eşitlenmiştir).
+    if (view === "field" && isBlindOnly(m.roles) && !BLIND_VISIBLE_STATUSES.includes(row.status)) throw new AppError("NOT_FOUND");
     await assertWarehouseVisible(tx, m, [row.warehouse_id]);
     const session = toView(row, await abandonedIds(tx, m.tenantId));
 
