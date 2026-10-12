@@ -285,6 +285,8 @@ const LOADERS = [
   "receipts/page.tsx",
   "field/receive/page.tsx",
   "field/putaway/page.tsx",
+  // T-333: "Yanlış bir şey yaptım"; üyelik özeti + `listMyRecentDocuments` ile sayfanın kendisinde çözülür.
+  "field/undo/page.tsx",
 ] as const;
 /**
  * T-304: tenant verisi çizmeyen saha kabuğu sayfaları. Üyelik kararı üst `layout.tsx`'tedir (yukarıdaki LOADERS satırı çapraz tenant
