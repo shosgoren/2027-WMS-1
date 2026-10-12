@@ -285,6 +285,9 @@ const LOADERS = [
   "receipts/page.tsx",
   "field/receive/page.tsx",
   "field/putaway/page.tsx",
+  // T-316: sayım listesi ve saha sayımı; üyelik özeti + `listCountSessions`/`listTasks`/`getCountSession` ile sayfanın kendisinde çözülür.
+  "counts/page.tsx",
+  "field/count/page.tsx",
 ] as const;
 /**
  * T-304: tenant verisi çizmeyen saha kabuğu sayfaları. Üyelik kararı üst `layout.tsx`'tedir (yukarıdaki LOADERS satırı çapraz tenant
@@ -295,15 +298,17 @@ const SHELL_LOADERS = ["field/layout.tsx", "field/page.tsx"] as const;
 const LABELS = "labels/page.tsx" as const;
 /** T-216: ürün ayrıntısı ek bir dinamik segment (`itemId`) ister; ortak döngüde değil, aşağıdaki özel bloktadır. */
 const ITEM_DETAIL = "items/[itemId]/page.tsx" as const;
+/** T-316: sayım gözden geçirme ek bir dinamik segment (`id`) ister; ortak döngüde değil, aşağıdaki özel bloktadır. */
+const COUNT_DETAIL = "counts/[id]/page.tsx" as const;
 type Loader = (props: {
-  params: Promise<{ slug: string; warehouseId?: string; itemId?: string }>;
+  params: Promise<{ slug: string; warehouseId?: string; itemId?: string; id?: string }>;
   searchParams?: Promise<Record<string, string>>;
   children?: unknown;
 }) => Promise<unknown>;
 
 /** `[warehouseId]` yükleyicisi için kimlik: verilmezse slug A'nınsa A'nın, değilse B'nin deposu (çapraz tenant denemesi). */
 async function runLoader(
-  rel: (typeof LOADERS)[number] | typeof ITEM_DETAIL | (typeof SHELL_LOADERS)[number] | typeof LABELS,
+  rel: (typeof LOADERS)[number] | typeof ITEM_DETAIL | typeof COUNT_DETAIL | (typeof SHELL_LOADERS)[number] | typeof LABELS,
   slug: string,
   warehouseId?: string,
   itemId?: string,
@@ -312,7 +317,7 @@ async function runLoader(
   const mod = (await import(/* @vite-ignore */ path.join(SLUG_DIR, rel))) as { default: Loader };
   const wid = warehouseId ?? (slug === A.slug ? A.warehouse : B.warehouse);
   try {
-    const params = itemId === undefined ? { slug, warehouseId: wid } : { slug, warehouseId: wid, itemId };
+    const params = itemId === undefined ? { slug, warehouseId: wid } : { slug, warehouseId: wid, itemId, id: itemId };
     const value = await mod.default({ params: Promise.resolve(params), searchParams: Promise.resolve(search), children: null });
     return { outcome: "render", value };
   } catch (e) {
@@ -372,7 +377,7 @@ describe("saha kabuğu ve etiket sayfaları (/t/<slug>)", () => {
 
 describe("sayfa yükleyicileri (/t/<slug>)", () => {
   it("@AC-04 kapsam: apps/web/app/t/[slug] altındaki her page/layout bu tabloda (yeni yükleyici testsiz kalamaz)", () => {
-    expect(files(SLUG_DIR, /^(page|layout)\.[cm]?[jt]sx?$/)).toEqual([...LOADERS, ...SHELL_LOADERS, LABELS, ITEM_DETAIL].sort());
+    expect(files(SLUG_DIR, /^(page|layout)\.[cm]?[jt]sx?$/)).toEqual([...LOADERS, ...SHELL_LOADERS, LABELS, ITEM_DETAIL, COUNT_DETAIL].sort());
   });
 
   for (const rel of LOADERS) {
@@ -437,6 +442,53 @@ describe("sayfa yükleyicileri (/t/<slug>)", () => {
     }
     as(B.admin);
     expect((await runLoader("members/page.tsx", B.slug)).outcome).toBe("render");
+  });
+});
+
+describe("sayım gözden geçirme sayfası (/t/<slug>/counts/<id>) — T-316", () => {
+  let sesA: string;
+  let sesB: string;
+  const mkSession = async (t: Fx): Promise<string> =>
+    (await adm.query<{ id: string }>("INSERT INTO public.count_sessions (tenant_id, id, warehouse_id, blind, started_by) VALUES ($1, gen_random_uuid(), $2, true, $3) RETURNING id", [t.tenant, t.warehouse, t.adminMembership])).rows[0]!.id;
+
+  beforeAll(async () => {
+    sesA = await mkSession(A);
+    sesB = await mkSession(B);
+  }, 60_000);
+
+  it("@AC-04 sayfa counts/[id]: B'nin slug'ı + B'nin oturumu ile var olmayan slug + var olmayan oturum -> 404 ve birebir aynı yanıt", async () => {
+    as(A.admin);
+    const cross = await runLoader(COUNT_DETAIL, B.slug, undefined, sesB);
+    as(A.admin);
+    const missing = await runLoader(COUNT_DETAIL, `yok-${rnd()}`, undefined, randomUUID());
+    expect(cross).toEqual({ outcome: "notFound" });
+    expect(cross).toEqual(missing);
+    expect(JSON.stringify(cross)).not.toContain(sesB);
+  });
+
+  it("@AC-04 sayfa counts/[id]: A'nın slug'ında B'nin oturum kimliği -> 404, var olmayan kimlikle aynı yanıt", async () => {
+    as(A.admin);
+    const cross = await runLoader(COUNT_DETAIL, A.slug, undefined, sesB);
+    as(A.admin);
+    const missing = await runLoader(COUNT_DETAIL, A.slug, undefined, randomUUID());
+    expect(cross).toEqual({ outcome: "notFound" });
+    expect(cross).toEqual(missing);
+    expect(JSON.stringify(cross)).not.toContain(sesB);
+  });
+
+  it("@AC-04 sayfa counts/[id]: UUID olmayan kimlik 404; hiçbir tenant'ın üyesi olmayan oturum 404; oturumsuz /login; olumlu kontrol A kendi oturumunu çizer", async () => {
+    as(A.admin);
+    expect(await runLoader(COUNT_DETAIL, A.slug, undefined, "not-a-uuid")).toEqual({ outcome: "notFound" });
+    as(outsider.id);
+    expect(await runLoader(COUNT_DETAIL, B.slug, undefined, sesB)).toEqual({ outcome: "notFound" });
+    as(null);
+    const anon = await runLoader(COUNT_DETAIL, B.slug, undefined, sesB);
+    expect(anon.outcome).toBe("redirect");
+    expect(anon.to).toMatch(/^\/login\?next=/);
+    as(A.admin);
+    const own = await runLoader(COUNT_DETAIL, A.slug, undefined, sesA);
+    expect(own.outcome).toBe("render");
+    expect(own.value).not.toBeNull();
   });
 });
 
