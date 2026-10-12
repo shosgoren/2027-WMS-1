@@ -1,6 +1,6 @@
 // Sayım okuma sorguları (T-316a; T-313 `receiving-queries.ts` deseni). Salt okur: yazma yok, kilit yok, stok kuralı yok.
 //
-// - `listCountSessions` `stock.view`; `getCountSession` `field` kipinde `stock.view`, `review` kipinde `count_diff.approve` ister (komut izin matrisiyle aynı: A-132).
+// - `listCountSessions` `count.perform`; `getCountSession` `field` kipinde `count.perform`, `review` kipinde `count_diff.approve` ister (komut izin matrisiyle aynı: A-132).
 // - KÖR SAYIM SUNUCUDA ZORLANIR: `field` kipinde referans (sistem) miktarı ve fark SQL'den bile okunmaz ve satır nesnesinde ANAHTAR olarak bulunmaz
 //   (alan "null" değil, hiç yoktur). Kip oturumun `blind` bayrağından bağımsızdır (A-316a-2: fail-closed).
 // - Tenant kimliği yalnızca doğrulanmış üyelikten gelir ve her sorguda AÇIK süzgeçtir (RLS ikinci savunma). Depo kapsamı (A-46): liste kapsam süzgeciyle,
@@ -154,13 +154,13 @@ async function abandonedIds(tx: Parameters<typeof findAbandonedCounts>[0], tenan
   return new Set((await findAbandonedCounts(tx, tenantId)).map((a) => a.sessionId.toLowerCase()));
 }
 
-/** Sayım oturumları, yeniden eskiye (started_at, id), keyset; kapsam dışı depo oturumları görünmez. `stock.view`. */
+/** Sayım oturumları, yeniden eskiye (started_at, id), keyset; kapsam dışı depo oturumları görünmez. `count.perform`. */
 export async function listCountSessions(params: TaskCallParams, input: ListCountSessionsInput = {}): Promise<CountSessionPage> {
   const limit = limitOf(input.limit);
   const cur = cursorOf(input.afterKey);
   const status = input.status ?? null;
   if (status !== null && !(COUNT_SESSION_STATUSES as readonly string[]).includes(status)) throw new AppError("VALIDATION_FAILED");
-  return runTenantQuery({ ...params, permission: "stock.view" }, async (tx, m) => {
+  return runTenantQuery({ ...params, permission: "count.perform" }, async (tx, m) => {
     const scope = await resolveWarehouseScope(tx, m);
     const rows = await tx.execute<SessionDbRow>(
       sql`${SESSION_SELECT}
@@ -194,7 +194,7 @@ type LineDbRow = {
 };
 
 /**
- * Tek oturum: başlık + lokasyonlar + satırlar. `view: "field"` (`stock.view`) kördür: referans/fark sorguya bile girmez. `view: "review"` (`count_diff.approve`)
+ * Tek oturum: başlık + lokasyonlar + satırlar. `view: "field"` (`count.perform`) kördür: referans/fark sorguya bile girmez. `view: "review"` (`count_diff.approve`)
  * referans / sayılan / fark döner. İzin, oturum varlığından ÖNCE denetlenir (rol tabanlı `FORBIDDEN` varlık sızdırmaz). Yok / başka tenant / kapsam dışı → `NOT_FOUND`.
  */
 export function getCountSession(params: TaskCallParams, input: { readonly sessionId: string; readonly view: "field" }): Promise<CountFieldDetail>;
@@ -204,7 +204,7 @@ export async function getCountSession(params: TaskCallParams, input: { readonly 
   const sessionId = uuid(input.sessionId);
   const view = input.view;
   if (!(COUNT_VIEWS as readonly string[]).includes(view)) throw new AppError("VALIDATION_FAILED");
-  return runTenantQuery({ ...params, permission: view === "review" ? "count_diff.approve" : "stock.view" }, async (tx, m) => {
+  return runTenantQuery({ ...params, permission: view === "review" ? "count_diff.approve" : "count.perform" }, async (tx, m) => {
     const rows = await tx.execute<SessionDbRow>(sql`${SESSION_SELECT} WHERE s.tenant_id = ${m.tenantId}::uuid AND s.id = ${sessionId}::uuid`);
     const row = rows[0];
     if (row === undefined) throw new AppError("NOT_FOUND");

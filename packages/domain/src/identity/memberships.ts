@@ -291,7 +291,7 @@ export async function removeMember(params: RemoveMemberParams, deps: MembershipD
 }
 
 /** Her rolün taşıdığı ortak izin: kendi üyeliğinden ayrılmak ayrıca bir izin gerektirmez (yalnızca ACTIVE üyelik). */
-const LEAVE_PERMISSION = "stock.view" as const;
+const LEAVE_PERMISSION = "tenant.access" as const;
 
 export async function leaveTenant(params: CommandParams): Promise<{ membershipId: string }> {
   const { requestId, ...access } = params;

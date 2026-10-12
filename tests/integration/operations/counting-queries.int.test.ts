@@ -31,6 +31,7 @@ let adm: pg.Client;
 let A: TenantWorld;
 let B: TenantWorld;
 let MGR: { userId: string; membershipId: string };
+let READER: { userId: string; membershipId: string };
 let COUNTER: { userId: string; membershipId: string };
 let otherWh: string;
 
@@ -103,6 +104,8 @@ beforeAll(async () => {
   MGR = { userId: m, membershipId: await mkMembership(adm, A.tenantId, m, { roles: ["WAREHOUSE_MANAGER"] }) };
   const c = await mkUser(adm, reg, "A316a counter");
   COUNTER = { userId: c, membershipId: await mkMembership(adm, A.tenantId, c, { roles: ["COUNTER"] }) };
+  const rd = await mkUser(adm, reg, "A316a reader");
+  READER = { userId: rd, membershipId: await mkMembership(adm, A.tenantId, rd, { roles: ["READ_ONLY"] }) };
   otherWh = (await createWarehouse(owner(A), { code: `s${hex(8)}`, name: "T316a ikinci depo" })).warehouseId;
 }, 120_000);
 
@@ -117,7 +120,7 @@ describe("kör sayım sunucuda zorlanır (anahtar düzeyi)", () => {
     for (const blind of [true, false]) {
       const sid = await start(A, [await mkLocWithStock(X, "7")], blind);
       await recordCount(cmd(A, COUNTER.userId), { sessionId: sid, lines: (await lineLocs(sid)).map((l) => ({ locationId: l.location_id, itemId: l.item_id, countedQuantity: "6" })) });
-      for (const who of [counter(), picker(), mgr(), owner(A)]) {
+      for (const who of [counter(), mgr(), owner(A)]) {
         const d = await getCountSession(who, { sessionId: sid, view: "field" });
         expect(d.view).toBe("field");
         expect(d.lines.length).toBeGreaterThan(0);
@@ -133,6 +136,20 @@ describe("kör sayım sunucuda zorlanır (anahtar düzeyi)", () => {
       expect(Object.keys(r.lines[0] as object).sort()).toEqual([...FIELD_LINE_KEYS, "difference", "reference"].sort());
       expect(r.lines.map((l) => [l.reference, l.counted, l.difference])).toEqual([["7.000000", "6.000000", "-1.000000"]]);
     }
+  });
+
+  it("T-335a: saha görünümü ve liste count.perform ister: PICKER/READ_ONLY FORBIDDEN; COUNTER listeler, kaydeder, gönderir", async () => {
+    const X = await mkItem(A);
+    const L = await mkLocWithStock(X, "3");
+    const sid = await start(A, [L]);
+    for (const who of [picker(), as(A, READER.userId)]) {
+      expect(codeOf(await failure(getCountSession(who, { sessionId: sid, view: "field" })))).toBe("FORBIDDEN");
+      expect(codeOf(await failure(listCountSessions(who, {})))).toBe("FORBIDDEN");
+    }
+    expect((await listCountSessions(counter(), { limit: COUNT_LIST_LIMIT_MAX })).items.map((s) => s.id)).toContain(sid);
+    await recordCount(cmd(A, COUNTER.userId), { sessionId: sid, lines: [{ locationId: L, itemId: X, countedQuantity: "3" }] });
+    await submitCount(cmd(A, COUNTER.userId), { sessionId: sid });
+    expect((await getCountSession(counter(), { sessionId: sid, view: "field" })).session.status).toBe("SUBMITTED");
   });
 
   it("sayılmamış satır: field counted=null; review difference=null; sayılan referanstan fazlaysa işaret +", async () => {

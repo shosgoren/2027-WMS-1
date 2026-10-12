@@ -16,6 +16,9 @@ const PERMISSION_LIST = [
   "settings.manage",
   "users.manage",
   "audit.view",
+  "tenant.access",
+  "catalog.view",
+  "count.perform",
 ] as const;
 export type Permission = (typeof PERMISSION_LIST)[number];
 /** Derin dondurulmuş (çalışma anında değiştirilemez). */
@@ -38,10 +41,14 @@ export const ROLE_PERMISSIONS: Readonly<Record<RoleKey, readonly Permission[]>> 
     "reversal.create",
     "count_diff.approve",
     "audit.view",
+    "tenant.access",
+    "catalog.view",
+    "count.perform",
   ]),
-  PICKER: freeze(["stock.view", "stock.post"]),
-  COUNTER: freeze(["stock.view", "document.create"]),
-  READ_ONLY: freeze(["stock.view"]),
+  PICKER: freeze(["stock.view", "stock.post", "tenant.access", "catalog.view"]),
+  // Kör sayım güvencesi rol düzeyinde (T-335a): COUNTER stok miktarı görmez (`stock.view` yok), `document.create` yok (A-335-1).
+  COUNTER: freeze(["tenant.access", "catalog.view", "count.perform"]),
+  READ_ONLY: freeze(["stock.view", "tenant.access", "catalog.view"]),
 });
 
 /** Rollerden en az biri izni taşıyorsa `true`. Bilinmeyen rol/izin → `false`. */

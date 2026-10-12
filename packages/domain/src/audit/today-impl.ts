@@ -76,7 +76,7 @@ export async function listMyActionsTodayAt(
   }
   if (!(now instanceof Date) || Number.isNaN(now.getTime())) throw new AppError("VALIDATION_FAILED");
 
-  return runTenantQuery({ ...params, permission: "stock.view" }, async (tx, membership) => {
+  return runTenantQuery({ ...params, permission: "tenant.access" }, async (tx, membership) => {
     const tz = await tx.execute<{ time_zone: string }>(
       sql`SELECT time_zone FROM public.tenant_settings WHERE tenant_id = ${membership.tenantId}::uuid`,
     );

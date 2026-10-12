@@ -84,7 +84,7 @@ export function resetLinkPrechecks(i: ResetLinkInput): boolean {
 
 /** Aktif üyeler: ad, e-posta (yetkiye göre), roller, sahiplik, demo, sıfırlama bağlantısı üretilebilirliği. */
 export async function listMembers(params: QueryParams, deps: MemberQueryDeps): Promise<MemberRow[]> {
-  return runTenantQuery({ ...params, permission: "stock.view" }, async (tx, actor) => {
+  return runTenantQuery({ ...params, permission: "tenant.access" }, async (tx, actor) => {
     const canManage = hasPermission(actor.roles, "users.manage");
     const tenantRows = await tx.execute<{ is_demo: boolean }>(sql`SELECT is_demo FROM public.tenants WHERE id = ${actor.tenantId}::uuid`);
     const tenantIsDemo = tenantRows[0]?.is_demo !== false; // fail-closed
