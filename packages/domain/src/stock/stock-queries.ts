@@ -4,10 +4,13 @@
 //   kapsam dışı lokasyon TEK sorguyla (kapsam süzgeçli) aranır ve üçü de aynı `NOT_FOUND`'u verir (aynı sorgu sayısı ve yol; varlık sızmaz).
 // - Keyset sayfalama, OFFSET yok (I-14). İmleç opaktır (base64url JSON) ve sıkı doğrulanır. Sıra `COLLATE "C"` (deterministik).
 // - Miktarlar `numeric(20,6)` metni (I-09; float yok). Bakiyesi sıfır olan boyutlar gösterilmez (A-332a-1).
+// - Kör sayım (T-334, A-334-1): lokasyon `location_count_locks.status = 'COUNTING'` ise `count_diff.approve` sahibi olmayan çağıranda miktar alanları
+//   `null` + `countLocked: true` (satır gizlenmez); toplamlar kilitli lokasyonları dışlar (`countLockedExcluded`). Sayım bitince/iptalde kilit IDLE olur.
 // - Kullanılabilir (GLOSSARY, 16 kural 5; `availability.ts` ile aynı): AVAILABLE ∧ lokasyon STORAGE|STAGING ∧ !pick_blocked ise fiziksel − rezerve, aksi 0.
 import { sql } from "drizzle-orm";
 import { AppError } from "@wms/shared/errors";
-import { runTenantQuery, type TenantAccessParams } from "../identity/access.ts";
+import { runTenantQuery, type AccessTx, type TenantAccessParams } from "../identity/access.ts";
+import { hasPermission } from "../identity/permissions.ts";
 import { pgUuidArray, resolveWarehouseScope } from "../warehouse/scope.ts";
 import { fromMicro, toMicro } from "./plan.ts";
 
@@ -65,10 +68,13 @@ export interface StockRowCommon {
   readonly serial: { readonly id: string; readonly serialNo: string } | null;
   readonly owner: { readonly id: string; readonly code: string; readonly name: string } | null;
   readonly handlingUnit: { readonly id: string; readonly code: string; readonly kind: "KOLI" | "PALET" } | null;
-  readonly physical: string;
-  readonly reserved: string;
-  /** Kural 5: yalnızca AVAILABLE ∧ STORAGE|STAGING ∧ !pick_blocked boyutlarda fiziksel − rezerve; aksi `"0.000000"`. */
-  readonly available: string;
+  /** Sayım kilitli lokasyonda (`countLocked`) ve çağıran `count_diff.approve` sahibi değilse `null` (A-334-1). */
+  readonly physical: string | null;
+  readonly reserved: string | null;
+  /** Kural 5: yalnızca AVAILABLE ∧ STORAGE|STAGING ∧ !pick_blocked boyutlarda fiziksel − rezerve; aksi `"0.000000"`. Kör sayımda `null`. */
+  readonly available: string | null;
+  /** Lokasyon şu an sayımda (COUNTING kilidi). Miktarı görmek için `count_diff.approve` gerekir. */
+  readonly countLocked: boolean;
 }
 export interface StockLocationFields {
   readonly warehouseId: string;
@@ -93,6 +99,8 @@ export interface StockTotals {
   readonly available: string;
   /** Durum başına fiziksel toplam (her durum anahtarı vardır). */
   readonly physicalByStatus: Readonly<Record<StockStatus, string>>;
+  /** Kör sayım: sayımdaki lokasyonlar toplamlardan çıkarıldı (A-334-1; aksi toplam − görünen satırlar gizli miktarı verirdi). */
+  readonly countLockedExcluded: boolean;
 }
 export interface StockByItemResult {
   readonly item: { readonly id: string; readonly code: string; readonly name: string; readonly baseUnit: StockBaseUnit };
@@ -116,18 +124,35 @@ type DimDbRow = {
   owner_id: string | null; owner_code: string | null; owner_name: string | null;
   hu_id: string | null; hu_code: string | null; hu_kind: "KOLI" | "PALET" | null;
   physical: string; reserved: string; available: string;
+  count_locked: boolean;
 };
-const toCommon = (r: DimDbRow): StockRowCommon => ({
+const toCommon = (r: DimDbRow, blind: boolean): StockRowCommon => ({
   dimensionId: r.dimension_id,
   stockStatus: r.stock_status,
   lot: r.lot_id === null ? null : { id: r.lot_id, code: r.lot_code as string, expiryDate: r.lot_expiry },
   serial: r.serial_id === null ? null : { id: r.serial_id, serialNo: r.serial_no as string },
   owner: r.owner_id === null ? null : { id: r.owner_id, code: r.owner_code as string, name: r.owner_name as string },
   handlingUnit: r.hu_id === null ? null : { id: r.hu_id, code: r.hu_code as string, kind: r.hu_kind as "KOLI" | "PALET" },
-  physical: r.physical,
-  reserved: r.reserved,
-  available: r.available,
+  physical: r.count_locked && blind ? null : r.physical,
+  reserved: r.count_locked && blind ? null : r.reserved,
+  available: r.count_locked && blind ? null : r.available,
+  countLocked: r.count_locked,
 });
+
+/** Kör sayım maskesi uygulanır mı: yalnızca `count_diff.approve` sahipleri sayımdaki lokasyonun miktarını görür (A-334-1). */
+export const isCountBlind = (roles: readonly string[]): boolean => !hasPermission(roles, "count_diff.approve");
+
+/** Verilen lokasyonlardan COUNTING kilidinde olanlar (salt SELECT; kilit tanımı `location_count_locks.status = 'COUNTING'`, counting.ts ile aynı). */
+export async function countLockedLocationIds(tx: Pick<AccessTx, "execute">, tenantId: string, locationIds: readonly string[]): Promise<Set<string>> {
+  if (locationIds.length === 0) return new Set();
+  const rows = await tx.execute<{ location_id: string }>(
+    sql`SELECT location_id FROM public.location_count_locks
+         WHERE tenant_id = ${tenantId}::uuid AND status = 'COUNTING' AND location_id = ANY(${pgUuidArray(locationIds)}::uuid[])`,
+  );
+  return new Set(rows.map((r) => r.location_id.toLowerCase()));
+}
+
+const COUNT_LOCKED_SQL = sql`EXISTS (SELECT 1 FROM public.location_count_locks k WHERE k.tenant_id = d.tenant_id AND k.location_id = d.location_id AND k.status = 'COUNTING')`;
 
 // Ortak SELECT parçaları. Her JOIN'de tenant eşitliği açık.
 const DIM_COLS = sql`d.id AS dimension_id, d.stock_status,
@@ -137,7 +162,8 @@ const DIM_COLS = sql`d.id AS dimension_id, d.stock_status,
        hu.id AS hu_id, hu.code AS hu_code, hu.kind AS hu_kind,
        b.quantity::text AS physical, b.reserved_quantity::text AS reserved,
        (CASE WHEN d.stock_status = 'AVAILABLE' AND l.kind IN ('STORAGE', 'STAGING') AND l.pick_blocked = false
-             THEN b.quantity - b.reserved_quantity ELSE 0 END)::numeric(20,6)::text AS available`;
+             THEN b.quantity - b.reserved_quantity ELSE 0 END)::numeric(20,6)::text AS available,
+       ${COUNT_LOCKED_SQL} AS count_locked`;
 const DIM_JOINS = sql`FROM public.stock_balances b
   JOIN public.stock_dimensions d ON d.tenant_id = b.tenant_id AND d.id = b.stock_dimension_id
   JOIN public.locations l ON l.tenant_id = d.tenant_id AND l.id = d.location_id
@@ -165,6 +191,7 @@ export async function stockByItem(params: StockQueryParams, input: StockByItemIn
   const cur = decodeCursor(input.afterKey, 3);
   return runTenantQuery({ ...params, permission: "stock.view" }, async (tx, m) => {
     const scope = await resolveWarehouseScope(tx, m);
+    const blind = isCountBlind(m.roles);
     const scopeSql = sql`(${scope === null}::boolean OR l.warehouse_id = ANY(${pgUuidArray(scope ?? [])}::uuid[]))`;
     const head = await tx.execute<{ id: string; code: string; name: string; unit_id: string; unit_code: string; unit_name: string }>(
       sql`SELECT i.id, i.code, i.name, u.id AS unit_id, u.code AS unit_code, u.name AS unit_name
@@ -187,11 +214,13 @@ export async function stockByItem(params: StockQueryParams, input: StockByItemIn
     const page = rows.slice(0, limit);
     const last = page[page.length - 1];
     const nextCursor = rows.length > limit && last !== undefined ? encodeCursor([last.warehouse_code, last.location_code, last.dimension_id]) : null;
-    const tot = await tx.execute<{ reserved: string; available: string; st: StockStatus; st_physical: string }>(
-      sql`SELECT d.stock_status AS st, sum(b.quantity)::numeric(20,6)::text AS st_physical,
-                 sum(b.reserved_quantity)::numeric(20,6)::text AS reserved,
+    const notExcluded = sql`NOT (${blind}::boolean AND ${COUNT_LOCKED_SQL})`;
+    const tot = await tx.execute<{ reserved: string; available: string; st: StockStatus; st_physical: string; excluded: boolean }>(
+      sql`SELECT d.stock_status AS st, COALESCE(sum(b.quantity) FILTER (WHERE ${notExcluded}), 0)::numeric(20,6)::text AS st_physical,
+                 COALESCE(sum(b.reserved_quantity) FILTER (WHERE ${notExcluded}), 0)::numeric(20,6)::text AS reserved,
                  COALESCE(sum(CASE WHEN d.stock_status = 'AVAILABLE' AND l.kind IN ('STORAGE', 'STAGING') AND l.pick_blocked = false
-                                   THEN b.quantity - b.reserved_quantity ELSE 0 END), 0)::numeric(20,6)::text AS available
+                                   THEN b.quantity - b.reserved_quantity ELSE 0 END) FILTER (WHERE ${notExcluded}), 0)::numeric(20,6)::text AS available,
+                 COALESCE(bool_or(NOT (${notExcluded})), false) AS excluded
             ${DIM_JOINS}
            WHERE b.tenant_id = ${m.tenantId}::uuid AND d.item_id = ${itemId}::uuid AND b.quantity <> 0 AND ${scopeSql}
            GROUP BY d.stock_status`,
@@ -199,7 +228,9 @@ export async function stockByItem(params: StockQueryParams, input: StockByItemIn
     const byStatus: Record<StockStatus, bigint> = { AVAILABLE: 0n, QUARANTINE: 0n, DAMAGED: 0n, BLOCKED: 0n };
     let reserved = 0n;
     let available = 0n;
+    let countLockedExcluded = false;
     for (const t of tot) {
+      if (t.excluded) countLockedExcluded = true;
       byStatus[t.st] = toMicro(t.st_physical);
       reserved += toMicro(t.reserved);
       available += toMicro(t.available);
@@ -208,7 +239,7 @@ export async function stockByItem(params: StockQueryParams, input: StockByItemIn
     return {
       item: { id: h.id, code: h.code, name: h.name, baseUnit: { id: h.unit_id, code: h.unit_code, name: h.unit_name } },
       rows: page.map((r) => ({
-        ...toCommon(r),
+        ...toCommon(r, blind),
         warehouseId: r.warehouse_id,
         warehouseCode: r.warehouse_code,
         warehouseName: r.warehouse_name,
@@ -229,6 +260,7 @@ export async function stockByItem(params: StockQueryParams, input: StockByItemIn
           DAMAGED: fromMicro(byStatus.DAMAGED),
           BLOCKED: fromMicro(byStatus.BLOCKED),
         },
+        countLockedExcluded,
       },
     };
   });
@@ -250,6 +282,7 @@ export async function stockByLocation(params: StockQueryParams, input: StockByLo
   const cur = decodeCursor(input.afterKey, 2);
   return runTenantQuery({ ...params, permission: "stock.view" }, async (tx, m) => {
     const scope = await resolveWarehouseScope(tx, m);
+    const blind = isCountBlind(m.roles);
     const head = await tx.execute<{
       id: string; code: string; name: string; kind: StockLocationFields["locationKind"]; pick_blocked: boolean; warehouse_id: string; warehouse_code: string; warehouse_name: string;
     }>(
@@ -285,7 +318,7 @@ export async function stockByLocation(params: StockQueryParams, input: StockByLo
         pickBlocked: h.pick_blocked,
       },
       rows: page.map((r) => ({
-        ...toCommon(r),
+        ...toCommon(r, blind),
         itemId: r.item_id,
         itemCode: r.item_code,
         itemName: r.item_name,
