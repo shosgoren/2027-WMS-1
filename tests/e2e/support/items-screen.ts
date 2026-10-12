@@ -203,7 +203,21 @@ export async function itemsScreenChecks(page: Page, tenant: ItemsTenant): Promis
     await expect(page).toHaveURL(/status=ARCHIVED/);
     await expect(page.getByLabel("Durum")).toHaveValue("ARCHIVED");
     // T-01: yalnız filtre ile arama sonuçsuz: filtreye özgü ileti; "Aramayı temizle" arama alanıyla sol kenarda hizalı.
-    await expect(page.getByText("Bu filtreye uyan ürün yok")).toBeVisible();
+    // T-279b: ortak (kalıcı) demo kiracısında önceki koşulardan arşivli ürün kalmış olabilir; "Arşivli" boş varsayılmaz. İki dal, ikisi de kesin:
+    //  - liste boşsa (taze DB) filtreye özgü ileti ZORUNLU (T-01 aynen);
+    //  - doluysa her kart "Arşivli" rozeti taşır (süzgeç gerçekten uygulandı) VE sonuçsuz olduğu garanti bir arama + aynı süzgeç boş-durumu
+    //    ("Aramana uyan ürün yok") ve hizalı "Aramayı temizle"yi sınar. Süzgeç tek başına sonuçsuz yapılamaz (yalnız ACTIVE/ARCHIVED var).
+    const cards = page.getByTestId("item-card");
+    await expect(cards.first().or(page.getByText("Bu filtreye uyan ürün yok"))).toBeVisible();
+    if ((await cards.count()) === 0) {
+      await expect(page.getByText("Bu filtreye uyan ürün yok")).toBeVisible();
+    } else {
+      for (const badge of await cards.locator("span", { hasText: /^(Aktif|Arşivli)$/ }).allTextContents()) {
+        expect(badge, `${where}: Arşivli süzgeçte her kart Arşivli rozetli (T-01)`).toBe("Arşivli");
+      }
+      await page.goto(`${base}/items?status=ARCHIVED&q=zzyok${Date.now().toString(36)}`);
+      await expect(page.getByText("Aramana uyan ürün yok")).toBeVisible();
+    }
     const clear = page.getByRole("link", { name: "Aramayı temizle" });
     const lx = (await clear.boundingBox())?.x ?? -99;
     const fx = (await box.boundingBox())?.x ?? 99;
