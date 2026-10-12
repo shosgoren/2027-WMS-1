@@ -38,6 +38,8 @@ let appPg: pg.Client;
 let A: TenantWorld;
 let B: TenantWorld;
 let counterUserId: string;
+// T-335a (A-335-1): COUNTER document.create taşımaz; "ikinci kullanıcı belge oluşturur" testlerinin aktörü (WAREHOUSE_MANAGER).
+let clerkUserId: string;
 
 const NO_WAIT = { sleep: async () => undefined } as const;
 const uuid = (): string => randomUUID();
@@ -52,6 +54,13 @@ const ownerP = (w: TenantWorld, clientKey: string | null = uuid()): StockDocCall
 const pickerP = (w: TenantWorld, clientKey: string = uuid()): StockDocCallParams => ({
   db: app,
   principal: { userId: w.memberUserId, mfaVerified: true },
+  tenantSlug: w.slug,
+  clientKey,
+  retry: NO_WAIT,
+});
+const clerkP = (w: TenantWorld, clientKey: string = uuid()): StockDocCallParams => ({
+  db: app,
+  principal: { userId: clerkUserId, mfaVerified: true },
   tenantSlug: w.slug,
   clientKey,
   retry: NO_WAIT,
@@ -172,6 +181,8 @@ beforeAll(async () => {
   B = await seedWorld(adm, reg, "B213");
   counterUserId = await mkUser(adm, reg, "A213 counter");
   await mkMembership(adm, A.tenantId, counterUserId, { roles: ["COUNTER"] });
+  clerkUserId = await mkUser(adm, reg, "A213 clerk");
+  await mkMembership(adm, A.tenantId, clerkUserId, { roles: ["WAREHOUSE_MANAGER"] });
 }, 120_000);
 
 afterEach(async () => {
@@ -227,7 +238,7 @@ describe("idempotency (I-06, ADR-018 §2-§3)", () => {
     const key = uuid();
     const input = { kind: "STOCK_IN", warehouseId: A.warehouseId, lines: [line(A)] } as const;
     const first = await createStockDocument(ownerP(A, key), input);
-    const e = await failure(createStockDocument(counterP(A, key), input));
+    const e = await failure(createStockDocument(clerkP(A, key), input));
     expect(e.code).toBe("IDEMPOTENCY_MISMATCH");
     const body = JSON.stringify(e.toBody());
     expect(body).not.toContain(first.documentId as string);
@@ -371,14 +382,14 @@ describe("idempotency (I-06, ADR-018 §2-§3)", () => {
   it("depo kapsamı: kapsam dışı depo → FORBIDDEN/WAREHOUSE_OUT_OF_SCOPE (idempotency'den ÖNCE), kayıt yok", async () => {
     const w2 = uuid();
     await adm.query("INSERT INTO public.warehouses (tenant_id, id, code, name) VALUES ($1, $2, 'D2-213', 'Depo 2')", [A.tenantId, w2]);
-    const membership = (await q<{ id: string }>("SELECT id FROM public.tenant_memberships WHERE tenant_id = $1 AND user_id = $2", [A.tenantId, counterUserId]))[0] as { id: string };
+    const membership = (await q<{ id: string }>("SELECT id FROM public.tenant_memberships WHERE tenant_id = $1 AND user_id = $2", [A.tenantId, clerkUserId]))[0] as { id: string };
     await adm.query("INSERT INTO public.membership_warehouse_scopes (tenant_id, membership_id, warehouse_id) VALUES ($1, $2, $3)", [A.tenantId, membership.id, w2]);
     process.env.WAREHOUSE_SCOPE_ENABLED = "true";
     const key = uuid();
-    const e = await failure(createStockDocument(counterP(A, key), { kind: "STOCK_IN", warehouseId: A.warehouseId }));
+    const e = await failure(createStockDocument(clerkP(A, key), { kind: "STOCK_IN", warehouseId: A.warehouseId }));
     expect([e.code, e.detail]).toEqual(["FORBIDDEN", "WAREHOUSE_OUT_OF_SCOPE"]);
     expect(await idemRows(A, key)).toHaveLength(0);
-    await expect(createStockDocument(counterP(A), { kind: "STOCK_IN", warehouseId: w2 })).resolves.toMatchObject({ status: "DRAFT" });
+    await expect(createStockDocument(clerkP(A), { kind: "STOCK_IN", warehouseId: w2 })).resolves.toMatchObject({ status: "DRAFT" });
   });
 
   it("zaman aşımları withMembership'ten hemen sonra, plan'dan ÖNCE kurulur (A-75: 2 sn / 10 sn) ve transaction-local", async () => {
@@ -743,7 +754,7 @@ async function mkWarehouseWithLocation(w: TenantWorld): Promise<{ warehouseId: s
   return { warehouseId, locationId };
 }
 async function scopeCounter(w: TenantWorld, warehouseIds: string[]): Promise<void> {
-  const m = (await q<{ id: string }>("SELECT id FROM public.tenant_memberships WHERE tenant_id = $1 AND user_id = $2", [w.tenantId, counterUserId]))[0] as { id: string };
+  const m = (await q<{ id: string }>("SELECT id FROM public.tenant_memberships WHERE tenant_id = $1 AND user_id = $2", [w.tenantId, clerkUserId]))[0] as { id: string };
   for (const wh of warehouseIds) {
     await adm.query("INSERT INTO public.membership_warehouse_scopes (tenant_id, membership_id, warehouse_id) VALUES ($1, $2, $3)", [w.tenantId, m.id, wh]);
   }
@@ -754,10 +765,10 @@ describe("A-145: satır lokasyonları belge deposunda olmalı", () => {
     const w2 = await mkWarehouseWithLocation(A);
     await scopeCounter(A, [A.warehouseId]); // belge deposu kapsamda, w2 değil
     process.env.WAREHOUSE_SCOPE_ENABLED = "true";
-    const e = await failure(createStockDocument(counterP(A), { kind: "STOCK_IN", warehouseId: A.warehouseId, lines: [line(A, { targetLocationId: w2.locationId })] }));
+    const e = await failure(createStockDocument(clerkP(A), { kind: "STOCK_IN", warehouseId: A.warehouseId, lines: [line(A, { targetLocationId: w2.locationId })] }));
     expect([e.code, e.detail]).toEqual(["FORBIDDEN", "WAREHOUSE_OUT_OF_SCOPE"]);
-    const ok = await createStockDocument(counterP(A), { kind: "STOCK_IN", warehouseId: A.warehouseId, lines: [line(A)] });
-    const e2 = await failure(updateDraft(counterP(A), { documentId: ok.documentId as string, expectedVersion: 1, lines: [line(A, { targetLocationId: w2.locationId })] }));
+    const ok = await createStockDocument(clerkP(A), { kind: "STOCK_IN", warehouseId: A.warehouseId, lines: [line(A)] });
+    const e2 = await failure(updateDraft(clerkP(A), { documentId: ok.documentId as string, expectedVersion: 1, lines: [line(A, { targetLocationId: w2.locationId })] }));
     expect([e2.code, e2.detail]).toEqual(["FORBIDDEN", "WAREHOUSE_OUT_OF_SCOPE"]);
   });
 
@@ -766,18 +777,18 @@ describe("A-145: satır lokasyonları belge deposunda olmalı", () => {
     await scopeCounter(A, [A.warehouseId, w2.warehouseId]);
     process.env.WAREHOUSE_SCOPE_ENABLED = "true";
     const mismatch = (e: AppError) => [e.code, e.detail];
-    const e1 = await failure(createStockDocument(counterP(A), { kind: "STOCK_MOVE", warehouseId: A.warehouseId, lines: [line(A, { sourceLocationId: w2.locationId })] }));
+    const e1 = await failure(createStockDocument(clerkP(A), { kind: "STOCK_MOVE", warehouseId: A.warehouseId, lines: [line(A, { sourceLocationId: w2.locationId })] }));
     expect(mismatch(e1)).toEqual(["VALIDATION_FAILED", "LOCATION_WAREHOUSE_MISMATCH"]);
-    const doc = await createStockDocument(counterP(A), { kind: "STOCK_IN", warehouseId: A.warehouseId, lines: [line(A)] });
+    const doc = await createStockDocument(clerkP(A), { kind: "STOCK_IN", warehouseId: A.warehouseId, lines: [line(A)] });
     const id = doc.documentId as string;
-    const e2 = await failure(updateDraft(counterP(A), { documentId: id, expectedVersion: 1, lines: [line(A, { targetLocationId: w2.locationId })] }));
+    const e2 = await failure(updateDraft(clerkP(A), { documentId: id, expectedVersion: 1, lines: [line(A, { targetLocationId: w2.locationId })] }));
     expect(mismatch(e2)).toEqual(["VALIDATION_FAILED", "LOCATION_WAREHOUSE_MISMATCH"]);
     // Depo değişir, satırlar korunur: mevcut satırlar eski depoda kalacağından ret.
-    const e3 = await failure(updateDraft(counterP(A), { documentId: id, expectedVersion: 1, warehouseId: w2.warehouseId }));
+    const e3 = await failure(updateDraft(clerkP(A), { documentId: id, expectedVersion: 1, warehouseId: w2.warehouseId }));
     expect(mismatch(e3)).toEqual(["VALIDATION_FAILED", "LOCATION_WAREHOUSE_MISMATCH"]);
     expect((await docRow(id)).version).toBe(1);
     // Aynı depodaki lokasyon geçer; satırlarla birlikte depo da taşınabilir.
-    await expect(updateDraft(counterP(A), { documentId: id, expectedVersion: 1, warehouseId: w2.warehouseId, lines: [line(A, { targetLocationId: w2.locationId })] })).resolves.toMatchObject({ status: "DRAFT" });
+    await expect(updateDraft(clerkP(A), { documentId: id, expectedVersion: 1, warehouseId: w2.warehouseId, lines: [line(A, { targetLocationId: w2.locationId })] })).resolves.toMatchObject({ status: "DRAFT" });
   });
 
   it("var olmayan ya da başka tenant'a ait lokasyon → NOT_FOUND (varlık sızdırmaz)", async () => {
@@ -789,9 +800,16 @@ describe("A-145: satır lokasyonları belge deposunda olmalı", () => {
 });
 
 describe("A-146: iptal izni durumdan türer", () => {
-  it("COUNTER (create var, approve yok) DRAFT'ı iptal eder; APPROVED'ı iptal edemez (FORBIDDEN, belge ve audit değişmez)", async () => {
-    const draft = await createStockDocument(counterP(A), { kind: "STOCK_IN", warehouseId: A.warehouseId, lines: [line(A)] });
-    await expect(cancelDocument(counterP(A), { documentId: draft.documentId as string, expectedVersion: 1 })).resolves.toMatchObject({ status: "CANCELLED" });
+  it("COUNTER (create yok, approve yok; A-335-1) belge oluşturamaz, DRAFT'ı ve APPROVED'ı iptal edemez (FORBIDDEN, belge ve audit değişmez)", async () => {
+    const eCreate = await failure(createStockDocument(counterP(A), { kind: "STOCK_IN", warehouseId: A.warehouseId, lines: [line(A)] }));
+    expect(eCreate.code).toBe("FORBIDDEN");
+    const draft = await createStockDocument(ownerP(A), { kind: "STOCK_IN", warehouseId: A.warehouseId, lines: [line(A)] });
+    const draftBefore = await docRow(draft.documentId as string);
+    const eDraft = await failure(cancelDocument(counterP(A), { documentId: draft.documentId as string, expectedVersion: 1 }));
+    expect(eDraft.code).toBe("FORBIDDEN");
+    expect(await docRow(draft.documentId as string)).toEqual(draftBefore);
+    // create izni olan (approve'suz rol kalmadı: WAREHOUSE_MANAGER ikisini de taşır) DRAFT'ı iptal eder.
+    await expect(cancelDocument(clerkP(A), { documentId: draft.documentId as string, expectedVersion: 1 })).resolves.toMatchObject({ status: "CANCELLED" });
 
     const doc = await createStockDocument(ownerP(A), { kind: "STOCK_IN", warehouseId: A.warehouseId, lines: [line(A)] });
     const id = doc.documentId as string;

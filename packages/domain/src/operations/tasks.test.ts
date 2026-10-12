@@ -32,8 +32,8 @@ describe("nextTaskStatus (durum geçiş tablosu)", () => {
 });
 
 describe("TASK_KIND_PERMISSION (A-132)", () => {
-  it("PUTAWAY/PICK/REPUTAWAY stock.post, COUNT document.create", () => {
-    expect(TASK_KIND_PERMISSION).toEqual({ PUTAWAY: "stock.post", PICK: "stock.post", REPUTAWAY: "stock.post", COUNT: "document.create" });
+  it("PUTAWAY/PICK/REPUTAWAY stock.post, COUNT count.perform (T-335a)", () => {
+    expect(TASK_KIND_PERMISSION).toEqual({ PUTAWAY: "stock.post", PICK: "stock.post", REPUTAWAY: "stock.post", COUNT: "count.perform" });
     expect(Object.keys(TASK_KIND_PERMISSION).sort()).toEqual([...TASK_KINDS].sort());
   });
 

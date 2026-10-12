@@ -372,7 +372,8 @@ describe("depo kapsamı (A-46)", () => {
 
 // T-334 (A-334-1): COUNTING kilidindeki lokasyonun miktarı count_diff.approve sahibi olmayana hiçbir stok okumasında görünmez.
 describe("kör sayım stok okumalarında (T-334)", () => {
-  const ROLES = { COUNTER: ["COUNTER"], PICKER: ["PICKER"] } as const;
+  // A-335-4: yalnız-COUNTER stock.view taşımaz (aşağıda FORBIDDEN); maske ikinci katmandır, çoklu rollü sayımcıyı (COUNTER+PICKER) korur.
+  const ROLES = { COUNTER: ["COUNTER", "PICKER"], PICKER: ["PICKER"] } as const;
   async function who(w: TenantWorld, roles: readonly string[]) {
     const u = await mkUser(adm, reg, `T334 ${roles.join("+")}`);
     await mkMembership(adm, w.tenantId, u, { roles: [...roles] });
@@ -389,7 +390,14 @@ describe("kör sayım stok okumalarında (T-334)", () => {
   }
   const NULLS = { physical: null, reserved: null, available: null, countLocked: true };
 
-  it("aktif sayımda COUNTER/PICKER: kilitli lokasyon miktarı null + countLocked; kilitsiz lokasyon ve yönetici etkilenmez", async () => {
+  it("yalnız-COUNTER stok okumalarında FORBIDDEN (T-335a: stock.view yok)", async () => {
+    const { item, locked } = await setup();
+    const p = await who(A, ["COUNTER"]);
+    await expect(stockByLocation(p, { locationId: locked })).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(stockByItem(p, { itemId: item })).rejects.toMatchObject({ code: "FORBIDDEN" });
+  });
+
+  it("aktif sayımda çoklu rollü sayımcı (COUNTER+PICKER)/PICKER: kilitli lokasyon miktarı null + countLocked; kilitsiz lokasyon ve yönetici etkilenmez", async () => {
     const { item, locked, free } = await setup();
     const mgr = await who(A, ["WAREHOUSE_MANAGER"]);
     for (const r of [ROLES.COUNTER, ROLES.PICKER]) {
@@ -417,9 +425,9 @@ describe("kör sayım stok okumalarında (T-334)", () => {
     }
   });
 
-  it("sayım iptalinde ve fark fişi işlenince COUNTER miktarı yeniden görür", async () => {
+  it("sayım iptalinde ve fark fişi işlenince çoklu rollü sayımcı (COUNTER+PICKER) miktarı yeniden görür", async () => {
     const a = await setup();
-    const counter = await who(A, ["COUNTER"]);
+    const counter = await who(A, ["COUNTER", "PICKER"]);
     expect((await stockByLocation(counter, { locationId: a.locked })).rows[0]).toMatchObject(NULLS);
     await cancelCount(cmd(A), { sessionId: a.sid, reason: "T334 iptal" });
     expect((await stockByLocation(counter, { locationId: a.locked })).rows[0]).toMatchObject({ physical: "7.000000", countLocked: false });

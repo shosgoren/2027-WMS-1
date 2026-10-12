@@ -250,9 +250,9 @@ describe("getAvailableAtLocation kör sayım (T-334)", () => {
     return { item, kabul, free, sid };
   }
 
-  it("aktif sayımda COUNTER/PICKER null + countLocked; yönetici ve sahip tam miktar; kilitsiz lokasyon etkilenmez", async () => {
+  it("aktif sayımda çoklu rollü sayımcı (COUNTER+PICKER)/PICKER null + countLocked; yönetici ve sahip tam miktar; kilitsiz lokasyon etkilenmez", async () => {
     const { item, kabul, free } = await setup();
-    for (const roles of [["COUNTER"], ["PICKER"]]) {
+    for (const roles of [["COUNTER", "PICKER"], ["PICKER"]]) {
       const p = await who(roles);
       expect(await getAvailableAtLocation(p, { locationId: kabul, itemId: item })).toEqual({ quantity: null, countLocked: true });
       expect(await getAvailableAtLocation(p, { locationId: free, itemId: item })).toEqual({ quantity: "0" });
@@ -262,8 +262,14 @@ describe("getAvailableAtLocation kör sayım (T-334)", () => {
     }
   });
 
-  it("iptalde ve fark fişi işlenince COUNTER miktarı görür", async () => {
-    const counter = await who(["COUNTER"]);
+  it("yalnız-COUNTER stok miktarı okumasında FORBIDDEN (T-335a: stock.view yok)", async () => {
+    const { item, kabul } = await setup();
+    const p = await who(["COUNTER"]);
+    await expect(getAvailableAtLocation(p, { locationId: kabul, itemId: item })).rejects.toMatchObject({ code: "FORBIDDEN" });
+  });
+
+  it("iptalde ve fark fişi işlenince çoklu rollü sayımcı (COUNTER+PICKER) miktarı görür", async () => {
+    const counter = await who(["COUNTER", "PICKER"]);
     const a = await setup();
     expect((await getAvailableAtLocation(counter, { locationId: a.kabul, itemId: a.item }))).toEqual({ quantity: null, countLocked: true });
     await cancelCount(cmd(A), { sessionId: a.sid, reason: "T334 iptal" });
