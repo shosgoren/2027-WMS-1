@@ -377,7 +377,6 @@ export function OrdersView({ slug, orders, nextHref, statusFilter, assignees, ca
       const next = new Set([...prev].filter((id) => visibleOpen.has(id)));
       return next.size === prev.size ? prev : next;
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- yalnız sipariş listesi değişince
   }, [orders]);
 
   async function search(q: string) {
