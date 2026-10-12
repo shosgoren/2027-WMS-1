@@ -30,7 +30,7 @@ vi.mock("@wms/domain/catalog", () => ({ getItem: vi.fn(), listItemConversions: v
 vi.mock("@wms/domain/warehouse", () => ({ findLocationByCode: vi.fn() }));
 
 import { cancelOrderAction, cancelOrderLineAction, createOrderAction, createPickAssignmentAction, lineStockAction, reserveOrderAction } from "./actions.ts";
-import { createKeyRegistry, createdNumberOf, fmtQty, orderErrorKey, rememberCreated, reserveOutcome, sumQuantities, unallocatedOf, validQty } from "./order-form.tsx";
+import { createKeyRegistry, createdNumberOf, fmtQty, orderErrorKey, rememberCreated, rememberReserved, reserveAttempted, reserveOutcome, sumQuantities, unallocatedOf, validQty } from "./order-form.tsx";
 import { submitWithKey, type ActionResult } from "../receipts/receipt-form.tsx";
 
 const OID = "11111111-1111-4111-8111-111111111111";
@@ -258,7 +258,8 @@ describe("hata eşlemesi: sunucu kodu kod + ayrıntıyla aktarılır, ekran nede
     expect(orderErrorKey({ code: "VALIDATION_FAILED" }, "assign")).toBe("assign_invalid");
     expect(orderErrorKey({ code: "VALIDATION_FAILED" }, "cancel")).toBe("cancel_invalid");
     expect(orderErrorKey({ code: "VALIDATION_FAILED" }, "reserve")).toBe("reserve_invalid");
-    expect(orderErrorKey({ code: "VALIDATION_FAILED" }, "create")).toBe("validation_failed");
+    expect(orderErrorKey({ code: "VALIDATION_FAILED" }, "create")).toBe("create_invalid"); // arşivlenmiş ürün vb.: neden + eylem (R-09)
+    expect(orderErrorKey({ code: "VALIDATION_FAILED" }, "lookup")).toBe("validation_failed");
     expect(orderErrorKey({ code: "VALIDATION_FAILED", detail: "CODE_TAKEN" }, "create")).toBe("code_taken");
     expect(orderErrorKey({ code: "VALIDATION_FAILED", detail: "QUANTITY_SCALE" }, "cancel")).toBe("quantity_scale");
     expect(orderErrorKey({ code: "VALIDATION_FAILED", detail: "DOCUMENT_TOO_LARGE" }, "assign")).toBe("too_large");
@@ -312,6 +313,22 @@ describe("sonuç türü, miktar doğrulama ve oluşturma numarası (A-314a-2)", 
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+});
+
+describe("rezervasyon denendi ipucu (yenilemede kalıcı durum)", () => {
+  it("rememberReserved / reserveAttempted: yalnız o siparişte; büyük-küçük harf farkı yok; depolama yoksa false", () => {
+    const store = new Map<string, string>();
+    vi.stubGlobal("sessionStorage", { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => void store.set(k, v), removeItem: (k: string) => void store.delete(k) });
+    try {
+      expect(reserveAttempted(OID)).toBe(false);
+      rememberReserved(OID.toUpperCase());
+      expect(reserveAttempted(OID)).toBe(true);
+      expect(reserveAttempted(LID)).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(reserveAttempted(OID)).toBe(false);
   });
 });
 

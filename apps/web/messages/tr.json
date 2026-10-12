@@ -1865,7 +1865,7 @@
     "helpCall": "Yardım çağır",
     "skipForm": "Yeni sipariş formuna geç",
     "skipList": "Sipariş listesine geç",
-    "skipAssign": "Görevlendirme çubuğuna geç",
+    "skipAssign": "Toplama görevi vermeye geç",
     "viewLocked": "Siparişleri görmeye yetkin yok. Yöneticine söyle ya da Yardım çağır.",
     "errors": {
       "network": "Bağlantı koptu.",
@@ -1911,7 +1911,9 @@
       "validation_failed": "Girdiğin bilgiler geçersiz.",
       "validation_failedAction": "Bilgileri kontrol et ve yeniden dene.",
       "internal": "İşlem tamamlanamadı.",
-      "internalAction": "Biraz sonra yeniden dene; sürerse hata kodunu yöneticine ilet."
+      "internalAction": "Biraz sonra yeniden dene; sürerse hata kodunu yöneticine ilet.",
+      "create_invalid": "Sipariş kaydedilemedi: bir ürün artık kullanımda değil ya da bilgiler uygun değil.",
+      "create_invalidAction": "Satırlardaki ürünleri kontrol et, kullanımda olmayanı çıkar ve yeniden kaydet."
     },
     "status": {
       "OPEN": "Açık",
@@ -1942,18 +1944,19 @@
       "selected": "{n} sipariş seçildi",
       "clear": "Seçimi temizle",
       "picker": "Toplayıcı",
-      "anyone": "Atama yapma",
+      "anyone": "Toplayıcıyı sonra seç",
       "pickerHint": "Boş bırakırsan görevleri sonra atarsın.",
       "noAssignees": "Atanabilecek toplayıcı yok. Görevler atanmadan açılır.",
       "create": "Toplama görevlendirmesi oluştur",
       "locked": "Görev vermeye yetkin yok. Yöneticine söyle: bu işi o yapabilir.",
       "confirmTitle": "Toplama görevleri oluşsun mu?",
-      "confirmBody": "{n} siparişin rezerve malı için görev oluşur ve {name} kişisine atanır.",
-      "confirmBodyOpen": "{n} siparişin rezerve malı için görev oluşur. Kimseye atanmaz.",
+      "confirmBody": "{numbers} siparişlerinin rezerve malı için görev oluşur ve {name} kişisine atanır.",
+      "confirmBodyOpen": "{numbers} siparişlerinin rezerve malı için görev oluşur. Kimseye atanmaz.",
       "doneAssigned": "{n} toplama görevi oluştu ve toplayıcıya atandı.",
       "doneOpen": "{n} toplama görevi oluştu. Henüz kimseye atanmadı.",
       "noneTitle": "Görev oluşmadı: seçtiğin siparişlerde toplanacak rezerve mal yok ya da görevleri zaten var.",
-      "noneAction": "Önce sipariş ayrıntısında Rezerve et düğmesine bas, sonra yeniden dene."
+      "noneAction": "Önce sipariş ayrıntısında Rezerve et düğmesine bas, sonra yeniden dene.",
+      "more": "ve {n} sipariş daha"
     },
     "form": {
       "title": "Yeni sipariş ekle",
@@ -1965,12 +1968,12 @@
       "removeLine": "{name} satırını çıkar",
       "remove": "Çıkar",
       "item": "Ürün",
-      "itemHint": "Ad ya da kodla ara",
+      "itemHint": "Zorunlu. Ad ya da kodla ara",
       "itemNoneReason": "Bu aramayla ürün bulunamadı.",
       "itemNoneAction": "Adı ya da kodu kontrol et. Ürün yoksa yöneticine söyle.",
       "unit": "Birim",
       "quantity": "İstenen miktar",
-      "quantityHint": "Tam sayı yaz.",
+      "quantityHint": "Zorunlu. Tam sayı yaz.",
       "qtyReason": "Miktar tam sayı olmalı.",
       "qtyAction": "1 ile 999999999 arasında bir sayı yaz.",
       "noLinesReason": "Siparişte henüz satır yok.",

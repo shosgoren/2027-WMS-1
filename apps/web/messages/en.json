@@ -1865,7 +1865,7 @@
     "helpCall": "Call for help",
     "skipForm": "Skip to the new order form",
     "skipList": "Skip to the order list",
-    "skipAssign": "Skip to the assignment bar",
+    "skipAssign": "Skip to giving pick tasks",
     "viewLocked": "You cannot see orders. Tell your manager or call for help.",
     "errors": {
       "network": "Connection lost.",
@@ -1911,7 +1911,9 @@
       "validation_failed": "The information you entered is not valid.",
       "validation_failedAction": "Check the information and try again.",
       "internal": "The action could not be completed.",
-      "internalAction": "Try again shortly. If it keeps failing, give the error code to your manager."
+      "internalAction": "Try again shortly. If it keeps failing, give the error code to your manager.",
+      "create_invalid": "The order could not be saved: an item is no longer in use or the information is not valid.",
+      "create_invalidAction": "Check the items on the lines, remove the one that is not in use, and save again."
     },
     "status": {
       "OPEN": "Open",
@@ -1942,18 +1944,19 @@
       "selected": "{n} orders selected",
       "clear": "Clear selection",
       "picker": "Picker",
-      "anyone": "Do not assign",
+      "anyone": "Choose a picker later",
       "pickerHint": "If you leave it empty you assign the tasks later.",
       "noAssignees": "No picker can be assigned. Tasks are created unassigned.",
       "create": "Create pick assignment",
       "locked": "You cannot give pick tasks. Tell your manager. They can do this for you.",
       "confirmTitle": "Create the pick tasks?",
-      "confirmBody": "Tasks are created for the reserved stock of {n} orders and assigned to {name}.",
-      "confirmBodyOpen": "Tasks are created for the reserved stock of {n} orders. Nobody is assigned.",
+      "confirmBody": "Tasks are created for the reserved stock of orders {numbers} and assigned to {name}.",
+      "confirmBodyOpen": "Tasks are created for the reserved stock of orders {numbers}. Nobody is assigned.",
       "doneAssigned": "{n} pick tasks created and assigned to the picker.",
       "doneOpen": "{n} pick tasks created. Nobody is assigned yet.",
       "noneTitle": "No task created: the orders you chose have no reserved stock to pick, or their tasks already exist.",
-      "noneAction": "First press Reserve in the order details, then try again."
+      "noneAction": "First press Reserve in the order details, then try again.",
+      "more": "and {n} more orders"
     },
     "form": {
       "title": "Add a new order",
@@ -1965,12 +1968,12 @@
       "removeLine": "Remove line {name}",
       "remove": "Remove",
       "item": "Item",
-      "itemHint": "Search by name or code",
+      "itemHint": "Required. Search by name or code",
       "itemNoneReason": "No item found for this search.",
       "itemNoneAction": "Check the name or code. If the item does not exist, tell your manager.",
       "unit": "Unit",
       "quantity": "Requested quantity",
-      "quantityHint": "Write a whole number.",
+      "quantityHint": "Required. Write a whole number.",
       "qtyReason": "The quantity must be a whole number.",
       "qtyAction": "Write a number from 1 to 999999999.",
       "noLinesReason": "The order has no lines yet.",

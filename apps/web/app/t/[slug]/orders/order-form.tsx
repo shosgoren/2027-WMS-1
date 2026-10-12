@@ -103,6 +103,23 @@ export function createdNumberOf(id: string, consume: boolean): string | null {
   }
 }
 
+const RESERVED_KEY = "wms.orders.reserved.";
+/** Bu siparişte rezervasyon denendi (oturum): yenilemede "rezerve edilemeyen" durumunu doğru göstermek için; kural değil, yalnız gösterim ipucu. */
+export function rememberReserved(orderId: string): void {
+  try {
+    sessionStorage.setItem(`${RESERVED_KEY}${orderId.toLowerCase()}`, "1");
+  } catch {
+    // depolama kapalı: yalnız yenileme sonrası ipucu kaybolur
+  }
+}
+export function reserveAttempted(orderId: string): boolean {
+  try {
+    return sessionStorage.getItem(`${RESERVED_KEY}${orderId.toLowerCase()}`) === "1";
+  } catch {
+    return false;
+  }
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Hata eşlemesi (kural yeniden yazılmaz; yalnızca ileti seçilir)
 // ---------------------------------------------------------------------------------------------------------------------
@@ -147,6 +164,7 @@ export function orderErrorKey(error: Pick<ErrorInfo, "code" | "detail">, context
       if (detail === undefined && context === "assign") return "assign_invalid";
       if (detail === undefined && context === "cancel") return "cancel_invalid";
       if (detail === undefined && context === "reserve") return "reserve_invalid";
+      if (detail === undefined && context === "create") return "create_invalid";
       return "validation_failed";
     default:
       return "internal";
@@ -351,6 +369,16 @@ export function OrdersView({ slug, orders, nextHref, statusFilter, assignees, ca
 
   const base = `/t/${encodeURIComponent(slug)}/orders`;
   const nextSeq = (): number => ++seq.current;
+  // Seçim yalnız ŞU AN görünen açık siparişleri sayar: süzgeç/sayfa değişince görünmeyen seçim sayılmaz ve temizlenir (SR-MINOR-3).
+  const visibleOpen = new Set(orders.filter((o) => o.status === "OPEN").map((o) => o.id));
+  const sel = new Set([...selected].filter((id) => visibleOpen.has(id)));
+  useEffect(() => {
+    setSelected((prev) => {
+      const next = new Set([...prev].filter((id) => visibleOpen.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- yalnız sipariş listesi değişince
+  }, [orders]);
 
   async function search(q: string) {
     setQuery(q);
@@ -445,10 +473,10 @@ export function OrdersView({ slug, orders, nextHref, statusFilter, assignees, ca
     });
   }
   async function submitAssign() {
-    if (busy || selected.size === 0) return;
+    if (busy || sel.size === 0) return;
     setBusy(true);
     setAssignError(null);
-    const ids = [...selected].sort();
+    const ids = [...sel].sort();
     const holder = keyFor(`assign:${ids.join(",")}:${assignee}`);
     const out = await submitWithKey(holder, (clientKey) =>
       createPickAssignmentAction({ slug, clientKey, orderIds: ids, ...(assignee === "" ? {} : { assigneeMembershipId: assignee }) }),
@@ -475,7 +503,9 @@ export function OrdersView({ slug, orders, nextHref, statusFilter, assignees, ca
           ? { reason: t("form.noLinesReason"), action: t("form.noLinesAction") }
           : undefined;
   // Sayfa başına TEK birincil: seçim varken görevlendirme; yoksa siparişi kaydet.
-  const assignPrimary = selected.size > 0;
+  const assignPrimary = sel.size > 0;
+  const chosen = orders.filter((o) => sel.has(o.id)).map((o) => o.number);
+  const numbersText = `${chosen.slice(0, 8).join(", ")}${chosen.length > 8 ? ` ${t("assign.more", { n: chosen.length - 8 })}` : ""}`;
   return (
     <div className="grid min-w-0 gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,28rem)]">
       <div className="flex min-w-0 flex-wrap gap-2 lg:col-span-2">
@@ -526,14 +556,14 @@ export function OrdersView({ slug, orders, nextHref, statusFilter, assignees, ca
         {canApprove ? (
           <div id="assign-bar" tabIndex={-1} className="sticky top-0 z-10 flex min-w-0 flex-col gap-2 rounded-card border-2 border-border-strong bg-surface p-3 outline-none focus-visible:outline-3 focus-visible:outline-focus" data-testid="assign-bar">
             <p className="m-0 text-base font-semibold text-ink" aria-live="polite">
-              {selected.size === 0 ? t("assign.idle") : t("assign.selected", { n: selected.size })}
+              {sel.size === 0 ? t("assign.idle") : t("assign.selected", { n: sel.size })}
             </p>
             {assignees.length === 0 ? (
               <p className="m-0 text-sm text-ink-muted">{t("assign.noAssignees")}</p>
             ) : (
               <label className="flex min-w-0 flex-col gap-1 text-base font-semibold text-ink">
                 {t("assign.picker")}
-                <select value={assignee} onChange={(e) => setAssignee(e.target.value)} disabled={selected.size === 0} className={SELECT} data-testid="assign-picker">
+                <select value={assignee} onChange={(e) => setAssignee(e.target.value)} disabled={sel.size === 0} className={SELECT} data-testid="assign-picker">
                   <option value="">{t("assign.anyone")}</option>
                   {assignees.map((a) => (
                     <option key={a.membershipId} value={a.membershipId}>
@@ -545,10 +575,10 @@ export function OrdersView({ slug, orders, nextHref, statusFilter, assignees, ca
               </label>
             )}
             <div className="flex min-w-0 flex-wrap gap-2">
-              <Button variant={assignPrimary ? "primary" : "secondary"} disabled={busy || selected.size === 0} onClick={() => setConfirm(true)} data-testid="assign-open">
+              <Button variant={assignPrimary ? "primary" : "secondary"} disabled={busy || sel.size === 0} onClick={() => setConfirm(true)} data-testid="assign-open">
                 {t("assign.create")}
               </Button>
-              {selected.size === 0 ? null : (
+              {sel.size === 0 ? null : (
                 <Button variant="secondary" disabled={busy} onClick={() => setSelected(new Set())} data-testid="assign-clear">
                   {t("assign.clear")}
                 </Button>
@@ -580,7 +610,7 @@ export function OrdersView({ slug, orders, nextHref, statusFilter, assignees, ca
                     <input
                       type="checkbox"
                       className="size-6"
-                      checked={selected.has(o.id)}
+                      checked={sel.has(o.id)}
                       onChange={() => toggle(o.id)}
                       aria-label={t("list.select", { number: o.number })}
                       data-testid="order-select"
@@ -663,7 +693,7 @@ export function OrdersView({ slug, orders, nextHref, statusFilter, assignees, ca
             )}
             <div className="flex min-w-0 flex-col gap-2 rounded-card border-2 border-dashed border-border p-3">
               <div ref={itemRef} className="min-w-0">
-                <TextField label={t("form.item")} hint={t("form.itemHint")} value={query} autoComplete="off" error={itemProblem} onChange={(e) => void search(e.target.value)} />
+                <TextField label={t("form.item")} hint={t("form.itemHint")} value={query} autoComplete="off" required aria-required="true" error={itemProblem} onChange={(e) => void search(e.target.value)} />
               </div>
               {found.length === 0 ? null : (
                 <ul className="m-0 flex list-none flex-col gap-1 p-0" aria-label={t("form.item")}>
@@ -695,6 +725,8 @@ export function OrdersView({ slug, orders, nextHref, statusFilter, assignees, ca
                       label={t("form.quantity")}
                       hint={t("form.quantityHint")}
                       inputMode="numeric"
+                      required
+                      aria-required="true"
                       value={qty}
                       error={qtyBad || (qty !== "" && !validQty(qty)) ? { reason: t("form.qtyReason"), action: t("form.qtyAction") } : undefined}
                       onChange={(e) => {
@@ -718,7 +750,7 @@ export function OrdersView({ slug, orders, nextHref, statusFilter, assignees, ca
       <ConfirmDialog
         open={confirm}
         title={t("assign.confirmTitle")}
-        description={t(assignee === "" ? "assign.confirmBodyOpen" : "assign.confirmBody", { n: selected.size, name: assigneeName })}
+        description={t(assignee === "" ? "assign.confirmBodyOpen" : "assign.confirmBody", { n: sel.size, numbers: numbersText, name: assigneeName })}
         confirmLabel={t("assign.create")}
         cancelLabel={t("dismiss")}
         variant="primary"
@@ -792,6 +824,8 @@ export function OrderDetailView({ slug, order, canApprove }: OrderDetailViewProp
   // A-314a-2: oluşturma yanıtından gelen numara (yalnızca bu siparişin kimliğiyle eşleşirse) bir kez gösterilir.
   useEffect(() => {
     setCreatedNumber(createdNumberOf(order.id, true));
+    // Yenilemede de doğru durum: bu siparişte rezervasyon denendiyse (oturum belleği) rezerve edilemeyen satırlar işaretli kalır.
+    setAttempted(reserveAttempted(order.id));
   }, [order.id]);
   // Panel açılınca (ve rafları yüklenince) ilk alana odak.
   useEffect(() => {
@@ -807,13 +841,20 @@ export function OrderDetailView({ slug, order, canApprove }: OrderDetailViewProp
   /** Rezerve edilemeyen satır: kalan > rezerve VE (bu ekranda rezervasyon denendi ya da satırda kısmi rezerve var). Yalnız gösterim. */
   const isShort = (l: OrderLine): boolean => isOpen && microOf(l.open) > 0n && unallocatedOf(l.open, l.allocated) > 0n && (attempted || microOf(l.allocated) > 0n);
   const shortLines = order.lines.filter(isShort);
+  /** Her eylemin iletisi yalnız o eylemde yazılır/odak alır: yeni eylem başlayınca eski iletiler (kaydedildi, rezervasyon, iptal, hata) temizlenir. */
+  const clearFeedback = (): void => {
+    setCreatedNumber(null);
+    setReserved(null);
+    setLineNote(null);
+    setActionDone(null);
+    setActionError(null);
+    setLineError(null);
+  };
 
   async function reserve(overrides?: { lineId: string; allocations: { dimension: StockRow["dimension"]; quantity: string }[] }[], lineId: string | null = null) {
     if (busy) return;
     setBusy(true);
-    setActionError(null);
-    setLineError(null);
-    setReserved(null);
+    clearFeedback();
     const holder = keyFor(`reserve:${order.id}:${JSON.stringify(overrides ?? null)}`);
     const out = await submitWithKey(holder, (clientKey) => reserveOrderAction({ slug, clientKey, orderId: order.id, ...(overrides === undefined ? {} : { overrides }) }));
     setBusy(false);
@@ -823,6 +864,7 @@ export function OrderDetailView({ slug, order, canApprove }: OrderDetailViewProp
       return;
     }
     setAttempted(true);
+    rememberReserved(order.id);
     setReserved({ total: out.data.lines.reduce((a, l) => a + microOf(l.quantity), 0n), lineId, seq: nextSeq() });
     setPanel(null);
     setStock(null);
@@ -849,8 +891,7 @@ export function OrderDetailView({ slug, order, canApprove }: OrderDetailViewProp
     setStock(null);
     setAlloc({});
     setAllocNone(false);
-    setLineError(null);
-    setActionError(null);
+    clearFeedback();
     try {
       const r = await lineStockAction({ slug, itemId: line.itemId });
       if (!r.ok) {
@@ -886,8 +927,7 @@ export function OrderDetailView({ slug, order, canApprove }: OrderDetailViewProp
     setQtyTouched(false);
     setReason("");
     setReasonTouched(false);
-    setLineError(null);
-    setActionError(null);
+    clearFeedback();
   }
   async function submitCancelLine(line: OrderLine) {
     if (busy) return;
@@ -902,7 +942,7 @@ export function OrderDetailView({ slug, order, canApprove }: OrderDetailViewProp
       return;
     }
     setBusy(true);
-    setLineError(null);
+    clearFeedback();
     const holder = keyFor(`cancel-line:${line.id}:${cancelQty}:${reason.trim()}`);
     const out = await submitWithKey(holder, (clientKey) => cancelOrderLineAction({ slug, clientKey, lineId: line.id, quantity: cancelQty, reason: reason.trim() }));
     setBusy(false);
@@ -922,7 +962,7 @@ export function OrderDetailView({ slug, order, canApprove }: OrderDetailViewProp
       return;
     }
     setBusy(true);
-    setActionError(null);
+    clearFeedback();
     const holder = keyFor(`cancel-order:${order.id}:${order.version}:${orderReason.trim()}`);
     const out = await submitWithKey(holder, (clientKey) => cancelOrderAction({ slug, clientKey, orderId: order.id, expectedVersion: order.version, reason: orderReason.trim() }));
     setBusy(false);
@@ -931,8 +971,6 @@ export function OrderDetailView({ slug, order, canApprove }: OrderDetailViewProp
       return;
     }
     setConfirmOrder(false);
-    setLineNote(null);
-    setReserved(null);
     setActionDone(t("cancel.orderDone", { number: order.number }));
     refresh();
   }
