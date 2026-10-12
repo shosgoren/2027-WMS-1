@@ -32,6 +32,7 @@ type Stage = "idle" | "previewing" | "ready" | "applying" | "done";
 
 /** İlk görünümde gösterilen hata kartı (satır) sayısı; "Tümünü göster" ile hepsi (domain en çok 100 hata döner). */
 const FIRST_CARDS = 10;
+const REVEAL_MARGIN = 8;
 /** Sonuçta listelenen en çok başarısız satır; fazlası "ve N satır daha" ile söylenir (sessiz kesme yok). */
 const FAILED_SHOWN = 20;
 const FOCUS = "focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus";
@@ -89,6 +90,25 @@ function Stat({ value, label, tone }: { value: number; label: string; tone?: "ba
   );
 }
 
+/**
+ * Öğeyi YALNIZ en yakın kayan atası içinde görünür yapar. `scrollIntoView` tüm atalara taşar: telefon yatayında (844x390) içerik alanı sonuna
+ * vardığında kalan kaydırma `overflow: hidden` kabuğa (`.tenant-shell`) uygulanır, üst çubuk kesilir ve sekme çubuğunun altında boşluk kalır.
+ * Kayan ata yoksa (masaüstü: sayfa gövdesi kayar) olağan `scrollIntoView` kullanılır.
+ */
+function reveal(el: Element | null | undefined, block: "start" | "nearest"): void {
+  if (el === null || el === undefined) return;
+  let box: HTMLElement | null = el.parentElement;
+  while (box !== null && !/^(auto|scroll)$/.test(getComputedStyle(box).overflowY)) box = box.parentElement;
+  if (box === null || box === document.body || box === document.documentElement) {
+    el.scrollIntoView({ block });
+    return;
+  }
+  const top = el.getBoundingClientRect().top - box.getBoundingClientRect().top;
+  const bottom = el.getBoundingClientRect().bottom - box.getBoundingClientRect().top;
+  if (block === "nearest" && top >= 0 && bottom <= box.clientHeight) return;
+  box.scrollTo({ top: box.scrollTop + top - REVEAL_MARGIN });
+}
+
 export function ImportView({ slug, templates, columns, limits }: ImportViewProps) {
   const t = useTranslations("import");
   const te = useTranslations("serverErrors");
@@ -109,14 +129,14 @@ export function ImportView({ slug, templates, columns, limits }: ImportViewProps
   // Başlık açılışta görünür olsun: uygulama kabuğunun içerik alanı kendi içinde kayar ve sayfa geçişinde kaydırma konumunu korur (ayarlar sayfasındaki
   // bağlantı sayfanın altındadır); bu yüzden açılışta başlık görünür alana alınır.
   useEffect(() => {
-    headingRef.current?.scrollIntoView({ block: "nearest" }); // görünürse kaydırmaz (masaüstünde üst çubuğu kesmez); üstte kalmışsa üste getirir
+    reveal(headingRef.current, "nearest"); // görünürse kaydırmaz (masaüstünde üst çubuğu kesmez); üstte kalmışsa üste getirir
   }, []);
   // Önizleme hazır olunca özet görünür alana gelir (telefonda adım 1-2 uzundur).
   useEffect(() => {
-    if (preview !== null) document.querySelector("[data-step=\"3\"]")?.scrollIntoView({ block: "start" }); // "3 Önizle" başlığı da görünür kalsın
+    if (preview !== null) reveal(document.querySelector("[data-step=\"3\"]"), "start"); // "3 Önizle" başlığı da görünür kalsın
   }, [preview]);
   useEffect(() => {
-    if (stage === "done") resultRef.current?.scrollIntoView({ block: "start" });
+    if (stage === "done") reveal(resultRef.current, "start");
   }, [stage]);
   // Uygulama sürerken sekmeyi kapatma uyarısı.
   useEffect(() => {
@@ -137,7 +157,7 @@ export function ImportView({ slug, templates, columns, limits }: ImportViewProps
     setFatal(null);
     setProgress({ done: 0, total: 0 });
     if (inputRef.current !== null) inputRef.current.value = "";
-    headingRef.current?.scrollIntoView({ block: "nearest" });
+    reveal(headingRef.current, "nearest");
   }
 
   async function onFile(file: File | undefined): Promise<void> {
@@ -216,7 +236,7 @@ export function ImportView({ slug, templates, columns, limits }: ImportViewProps
   // Neden metinleri BİR kez (satır başına tekrar yok): satırlardaki farklı nedenler + varsa sunucu eylem hatası.
   const causes = [
     ...new Set([
-      ...failedRows.map((r) => (r.reason !== undefined ? t(`result.reason.${r.reason}`) : rowErrorText(te, t, r.errorCode ?? "unknown"))),
+      ...failedRows.map((r) => (r.reason !== undefined ? t(`result.reason.${r.reason}`) : rowErrorText(te, t, r.errorCode ?? "unknown", failedRows.length))),
       ...(fatal === null ? [] : [`${te(errorKey(fatal.code))} ${te(`${errorKey(fatal.code)}Action`)}`]),
     ]),
   ];
@@ -306,12 +326,12 @@ export function ImportView({ slug, templates, columns, limits }: ImportViewProps
                 {preview.summary === undefined ? null : (
                   <>
                     <p className="break-words text-base font-semibold text-ink" data-testid="import-summary-line">
-                      {t(isStock ? "summary.lineStock" : "summary.lineProducts", { total: preview.rowCount, ok: preview.rowCount - preview.summary.errorRows, bad: preview.summary.errorRows })}
+                      {t(isStock ? "summary.lineStock" : "summary.lineProducts", { total: preview.rowCount, ok: preview.rowCount - preview.summary.errorRows })}
                     </p>
                     <div className="flex min-w-0 gap-2">
                       {isStock ? <Stat value={preview.summary.items} label={t("summary.items")} /> : null}
                       <Stat value={preview.rowCount} label={t("summary.rows")} />
-                      {preview.summary.errorRows > 0 || stage !== "done" ? <Stat value={preview.summary.errorRows} label={t("summary.errorRows")} tone={preview.summary.errorRows > 0 ? "bad" : undefined} /> : null}
+                      {preview.summary.errorRows > 0 ? <Stat value={preview.summary.errorRows} label={t("summary.errorRows")} tone="bad" /> : null}
                     </div>
                   </>
                 )}
@@ -352,7 +372,7 @@ export function ImportView({ slug, templates, columns, limits }: ImportViewProps
                   <div role="alert" data-kind="error" className="flex min-w-0 flex-col gap-2 rounded-card bg-danger-bg px-4 py-3 text-danger-ink">
                     <p className="flex items-start gap-3 break-words text-base font-medium">
                       <CircleAlert aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-danger" />
-                      <span className="min-w-0">{t("blocked", { n: preview.issueTotal })}</span>
+                      <span className="min-w-0">{t("blocked")}</span>
                     </p>
                     <button type="button" className={`${SECONDARY.replace("px-5", "px-2")} w-full text-ink`} onClick={pickFixed} disabled={busy}>
                       {t("issues.pickFixed")}
@@ -387,7 +407,7 @@ export function ImportView({ slug, templates, columns, limits }: ImportViewProps
                     {t("step4.apply")}
                   </button>
                   <p id="import-apply-note" className="break-words text-sm text-ink-muted">
-                    {onlyNoRows ? t("step4.noRows") : blocked ? t("step4.blocked", { n: preview.issueTotal }) : t("step4.note")}
+                    {onlyNoRows ? t("step4.noRows") : blocked ? t("step4.blocked") : t("step4.note")}
                   </p>
                   {stage === "applying" ? (
                     <div aria-live="polite" role="status" className="flex min-w-0 flex-col gap-1">
@@ -489,9 +509,9 @@ export function ImportView({ slug, templates, columns, limits }: ImportViewProps
 type Translate = ReturnType<typeof useTranslations>;
 
 /** Satır hatası metni: yetki/oturum/hız gibi kullanıcının bildiği nedenler sunucu hata sözlüğünden, diğerleri tek sade cümle (satır başına uzun metin yok). */
-function rowErrorText(te: Translate, t: Translate, code: string): string {
+function rowErrorText(te: Translate, t: Translate, code: string, n: number): string {
   const k = errorKey(code);
-  return ["forbidden", "unauthenticated", "rate_limited", "tenant_suspended", "tenant_closing"].includes(k) ? `${te(k)} ${te(`${k}Action`)}` : t("result.failedGeneric");
+  return ["forbidden", "unauthenticated", "rate_limited", "tenant_suspended", "tenant_closing"].includes(k) ? `${te(k)} ${te(`${k}Action`)}` : t("result.failedGeneric", { n });
 }
 
 function IssueList({ issues, total }: { issues: readonly ImportIssue[]; total: number }) {
@@ -505,14 +525,12 @@ function IssueList({ issues, total }: { issues: readonly ImportIssue[]; total: n
     else g.items.push(i);
   }
   const shown = all ? groups : groups.slice(0, FIRST_CARDS);
+  const truncated = total > issues.length;
   return (
     <div className="flex min-w-0 flex-col gap-2">
       <p className="break-words text-base font-semibold text-ink" data-testid="issues-heading">
-        {total > issues.length
-          ? t("issues.truncated", { shown: issues.length, total })
-          : groups.length > FIRST_CARDS && !all
-            ? t("issues.partial", { total: issues.length, rows: FIRST_CARDS })
-            : t("issues.all", { total })}
+        {/* Kapalıyken gerçek toplam ve görünen kart sayısı; açıkken sunucunun kestiği ilk {shown} hata (toplam ayrıca). */}
+        {groups.length > FIRST_CARDS && !all ? t("issues.partial", { total, rows: FIRST_CARDS }) : truncated ? t("issues.truncated", { shown: issues.length, total }) : t("issues.all", { total })}
       </p>
       <ul className="m-0 flex min-w-0 list-none flex-col gap-2 p-0" data-testid="import-issues">
         {shown.map((g) => (
@@ -541,7 +559,7 @@ function IssueList({ issues, total }: { issues: readonly ImportIssue[]; total: n
       </ul>
       {groups.length > FIRST_CARDS ? (
         <button type="button" className={`${SECONDARY} self-start`} aria-expanded={all} onClick={() => setAll(!all)} data-testid="issues-toggle">
-          {all ? t("issues.less") : t("issues.more", { n: groups.length })}
+          {all ? t("issues.less") : truncated ? t("issues.moreTruncated", { shown: issues.length, n: groups.length }) : t("issues.more", { n: groups.length })}
         </button>
       ) : null}
     </div>

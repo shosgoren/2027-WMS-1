@@ -51,6 +51,12 @@ export type ImportCallParams = Omit<TenantAccessParams, "permission" | "recentAu
 /** Önizlemede dönen en çok sorun sayısı: ilk 50 (toplam `issueTotal` ayrıca verilir; UI "İlk 50 hata gösteriliyor" yazar). */
 export const PREVIEW_ISSUE_LIMIT = 50;
 export const STOCK_REASON = "import.opening_stock";
+/**
+ * "Zaten uygulandı" işareti (SR MINOR-2; A-289-7): kullanıcının yazabildiği serbest metin `documents.reason` DEĞİL, yalnız bu komutun yazdığı
+ * `idempotency_records.command_type` (komut kodunda sabit; kullanıcı girdisi değildir, tablo sütun yetkisiyle sonradan değiştirilemez) ve
+ * `result.documentId` bağıdır. `documents.source_kind` kullanılamaz: CHECK'inde içe aktarma değeri yok ve `source_id` çifti zorunlu (şema değişikliği bu kartta yok).
+ */
+export const IMPORT_COMMAND_TYPE = "onboarding.import_opening_stock";
 
 export interface ImportPreview {
   readonly kind: ImportKind;
@@ -221,25 +227,37 @@ async function evaluate(params: ImportCallParams, text: string): Promise<Evaluat
 
 const dec = (v: string): string => (v.includes(".") ? v.replace(/0+$/, "").replace(/\.$/, "") : v);
 
+interface PairStateMut {
+  hasStock: boolean;
+  applied: Set<string>;
+  reversed: Set<string>;
+  pending: Set<string>;
+}
+
 /**
- * (ürün, raf) çiftlerinin durumu (salt okuma): defterde herhangi bir hareket ya da bakiye > 0 (`hasStock`); bu çifte önceki içe aktarmayla (POSTED
- * `import.opening_stock` STOCK_IN) yazılmış miktarlar (`applied`); aynı çifti hedefleyen BİTMEMİŞ (DRAFT/APPROVED) STOCK_IN/STOCK_MOVE belgeleri (`pending`).
+ * (ürün, raf) çiftlerinin durumu (salt okuma): KİLİTLİ boyutta (AVAILABLE) hareket ya da bakiye > 0 (`hasStock`, A-289-9); bu çifte önceki içe aktarmayla (POSTED
+ * STOCK_IN, işaret `IMPORT_COMMAND_TYPE`) yazılmış ve ters kaydı YAPILMAMIŞ miktarlar (`applied`), ters kaydı yapılmışlar (`reversed`, A-289-8); aynı çifti hedefleyen BİTMEMİŞ (DRAFT/APPROVED) STOCK_IN/STOCK_MOVE belgeleri (`pending`).
  * Yalnız verilen ürünler sorgulanır. Eski taslak otomatik İPTAL EDİLMEZ (iptal kullanıcının işini siler ve işleyen bir worker ile yarışabilir): çift "dolu" sayılır.
  */
-async function readPairStates(tx: AccessTx, tenantId: string, itemIdsIn: readonly string[]): Promise<Map<string, { hasStock: boolean; applied: Set<string>; pending: Set<string> }>> {
-  const out = new Map<string, { hasStock: boolean; applied: Set<string>; pending: Set<string> }>();
+async function readPairStates(tx: AccessTx, tenantId: string, itemIdsIn: readonly string[]): Promise<Map<string, PairStateMut>> {
+  const out = new Map<string, PairStateMut>();
   const itemIds = [...new Set(itemIdsIn)];
   if (itemIds.length === 0) return out;
   const list = sql.join(itemIds.map((id) => sql`${id}::uuid`), sql`, `);
+  // A-289-9: hareket/bakiye denetimi yalnız stok komutunun KİLİTLEDİĞİ boyutu okur (AVAILABLE, lotsuz/serisiz/sahipsiz/taşıma birimsiz); kilit ile denetim aynı kümeyi kapsar.
   const moved = await tx.execute<{ item_id: string; location_id: string }>(
     sql`SELECT DISTINCT d.item_id, d.location_id FROM public.stock_dimensions d
          WHERE d.tenant_id = ${tenantId}::uuid AND d.item_id IN (${list})
+           AND d.stock_status = 'AVAILABLE' AND d.lot_id IS NULL AND d.serial_id IS NULL AND d.inventory_owner_id IS NULL AND d.handling_unit_id IS NULL
            AND (EXISTS (SELECT 1 FROM public.stock_ledger l WHERE l.tenant_id = d.tenant_id AND l.stock_dimension_id = d.id)
                 OR EXISTS (SELECT 1 FROM public.stock_balances b WHERE b.tenant_id = d.tenant_id AND b.stock_dimension_id = d.id AND b.quantity > 0))`,
   );
-  for (const r of moved) out.set(`${r.item_id}|${r.location_id}`, { hasStock: true, applied: new Set(), pending: new Set() });
-  const lines = await tx.execute<{ item_id: string; location_id: string; q: string; st: string; imp: boolean }>(
-    sql`SELECT dl.item_id, dl.target_location_id AS location_id, dl.base_quantity::text AS q, d.status AS st, (d.reason = ${STOCK_REASON} AND d.kind = 'STOCK_IN') AS imp
+  for (const r of moved) out.set(`${r.item_id}|${r.location_id}`, { hasStock: true, applied: new Set(), reversed: new Set(), pending: new Set() });
+  const lines = await tx.execute<{ item_id: string; location_id: string; q: string; st: string; imp: boolean; rv: string }>(
+    sql`SELECT dl.item_id, dl.target_location_id AS location_id, dl.base_quantity::text AS q, d.status AS st, dl.reversal_status AS rv,
+               (d.kind = 'STOCK_IN' AND EXISTS (SELECT 1 FROM public.idempotency_records r
+                                                 WHERE r.tenant_id = d.tenant_id AND r.command_type = ${IMPORT_COMMAND_TYPE} AND r.status = 'COMPLETED'
+                                                   AND r.result ->> 'documentId' = d.id::text)) AS imp
           FROM public.document_lines dl
           JOIN public.documents d ON d.tenant_id = dl.tenant_id AND d.id = dl.document_id
          WHERE dl.tenant_id = ${tenantId}::uuid AND d.kind IN ('STOCK_IN', 'STOCK_MOVE') AND d.status IN ('DRAFT', 'APPROVED', 'POSTED')
@@ -247,9 +265,10 @@ async function readPairStates(tx: AccessTx, tenantId: string, itemIdsIn: readonl
   );
   for (const r of lines) {
     const key = `${r.item_id}|${r.location_id}`;
-    const cur = out.get(key) ?? { hasStock: false, applied: new Set<string>(), pending: new Set<string>() };
+    const cur = out.get(key) ?? { hasStock: false, applied: new Set<string>(), reversed: new Set<string>(), pending: new Set<string>() };
     if (r.st === "POSTED") {
-      if (r.imp) cur.applied.add(dec(r.q));
+      // Ters kaydı yapılmış (kısmen ya da tamamen) açılış satırı "uygulandı" DEĞİLDİR (A-289-8): ayrı `reversed` kümesine girer.
+      if (r.imp) (r.rv === "NONE" ? cur.applied : cur.reversed).add(dec(r.q));
     } else cur.pending.add(dec(r.q));
     out.set(key, cur);
   }
@@ -325,7 +344,7 @@ export interface RowReport {
   readonly errorCode?: string;
   readonly errorDetail?: string;
   /** Yalnız `FAILED`: kilit altında yeniden denetimde çift dolu/bekleyen çıktı (sade metin için; hata kodu değildir). */
-  readonly reason?: "PAIR_HAS_STOCK" | "PAIR_PENDING";
+  readonly reason?: "PAIR_HAS_STOCK" | "PAIR_PENDING" | "PAIR_REVERSED";
 }
 
 export interface ChunkReport {
@@ -479,7 +498,7 @@ async function applyStock(params: ImportCallParams, allPlans: readonly StockPlan
       for (const pl of group) reports.set(pl.row, { row: pl.row, code: pl.itemCode, status: "NOT_ATTEMPTED" });
       continue;
     }
-    const conflicts = new Map<number, "PAIR_HAS_STOCK" | "PAIR_PENDING">();
+    const conflicts = new Map<number, "PAIR_HAS_STOCK" | "PAIR_PENDING" | "PAIR_REVERSED">();
     const skipped = new Set<number>();
     const toLine = (pl: StockPlan): FieldLine => ({
       itemId: pl.itemId,
@@ -502,7 +521,7 @@ async function applyStock(params: ImportCallParams, allPlans: readonly StockPlan
         // Her deneme yeni anahtar: korunma durum tabanlıdır (çift boş değilse yazılmaz; aynı miktar önceki içe aktarmadansa "zaten uygulanmış"). İçerikten
         // türeyen anahtar, kalıcı saklanan bir RED'i (ör. bekleyen belge) sorun giderilse de sonsuza dek tekrarlardı.
         clientKey: randomUUID(),
-        commandType: "onboarding.import_opening_stock",
+        commandType: IMPORT_COMMAND_TYPE,
         permission: "stock.post",
         input: { warehouseId, lines: linesDigestOf(group) },
         plan: (tx, _i, m) => planFieldPosting(tx, m.tenantId, specOf(group)),
@@ -514,7 +533,7 @@ async function applyStock(params: ImportCallParams, allPlans: readonly StockPlan
             const st = states.get(`${pl.itemId}|${pl.locationId}`);
             if (st !== undefined && st.hasStock) {
               if (st.applied.has(pl.quantity)) skipped.add(pl.row);
-              else conflicts.set(pl.row, "PAIR_HAS_STOCK");
+              else conflicts.set(pl.row, st.reversed.has(pl.quantity) ? "PAIR_REVERSED" : "PAIR_HAS_STOCK");
             } else if (st !== undefined && st.pending.size > 0) conflicts.set(pl.row, "PAIR_PENDING");
             else todo.push(pl);
           }

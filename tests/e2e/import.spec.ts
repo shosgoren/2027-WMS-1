@@ -102,12 +102,13 @@ test.describe("açılış verisi içe aktarma (T-289)", () => {
     await expect(issues.nth(1).getByTestId("issue-reason")).toContainText("kesirli olamaz");
     const summary = page.getByTestId("import-summary");
     await expect(summary).toContainText("Ürünler dosyası");
-    await expect(page.getByTestId("import-summary-line")).toHaveText("5 satır: 1 hazır, 4 hatalı");
+    await expect(page.getByTestId("import-summary-line")).toHaveText("5 satır: 1 hazır");
     await expect(summary.getByText("Hatalı satır")).toBeVisible();
     await expect(summary.getByText("Ürün", { exact: true })).toHaveCount(0); // ürün dosyasında "Ürün/stok" kutusu yok (yalnız Satır ve Hatalı satır)
     const apply = page.getByRole("button", { name: "İçe aktar" });
     await expect(apply).toBeDisabled();
-    await expect(page.getByText("Önce 4 hatayı düzelt", { exact: false })).toBeVisible();
+    await expect(page.getByText("Önce hataları düzelt", { exact: false })).toBeVisible(); // sayı yok: aynı sayı yalnız kutuda ve liste başlığında (Tasarım 4)
+    await expect(summary.getByRole("alert")).not.toContainText("4"); // başlık/kutu sayıyı tekrar etmez
     await expect(summary.getByRole("button", { name: "Düzeltilmiş dosyayı seç" })).toBeVisible();
     const disabledBg = await page.evaluate<string>(`getComputedStyle([...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'İçe aktar')).backgroundColor`);
     const accentBg = await page.evaluate<string>(`(() => { const d = document.createElement('div'); d.className = 'bg-accent'; document.body.appendChild(d); const c = getComputedStyle(d).backgroundColor; d.remove(); return c; })()`);
@@ -138,7 +139,12 @@ test.describe("açılış verisi içe aktarma (T-289)", () => {
 
     // 60 hatalı satır: yalnız ilk 50 hata gösterilir ve bu açıkça yazılır (sessiz kesme yok).
     await page.locator("#import-file").setInputFiles(csv([PRODUCT_HEADER, ...Array.from({ length: 60 }, (_, i) => `${p}-x${i};;;;;`)]));
-    await expect(page.getByText("İlk 50 hata gösteriliyor, toplam 60 hata var.")).toBeVisible();
+    // Kapalı liste gerçek toplamı ve görünen kart sayısını yazar; "İlk 50 hata" yalnız açıldığında, düğme de aynı 50 hataya göre sayar (Tasarım 3).
+    await expect(page.getByTestId("issues-heading")).toHaveText("60 hata var: ilk 10 satır gösteriliyor");
+    await expect(page.getByTestId("issues-toggle")).toHaveText("İlk 50 hatayı göster (50 satır)");
+    await page.getByTestId("issues-toggle").click();
+    await expect(page.getByTestId("issues-heading")).toHaveText("İlk 50 hata gösteriliyor, toplam 60 hata var. Bunları düzeltince kalanlar görünür.");
+    await expect(page.getByTestId("import-issue")).toHaveCount(50);
 
     // Uzun hata listesi: aynı satırın hataları tek kartta; ilk 10 kart + "Tümünü göster".
     const many = [PRODUCT_HEADER, ...Array.from({ length: 12 }, (_, i) => `${p}-${i + 1};;PALET;;;`)];
@@ -161,7 +167,8 @@ test.describe("açılış verisi içe aktarma (T-289)", () => {
     await page.locator("#import-file").setInputFiles(products);
     await expect(summary).toContainText("Hata yok. İçe aktarabilirsin.");
     await expect(summary).toContainText("3 yeni ürün eklenecek, 2 koli tanımı, 4 barkod.");
-    await expect(page.getByTestId("import-summary-line")).toHaveText("3 satır: 3 hazır, 0 hatalı");
+    await expect(page.getByTestId("import-summary-line")).toHaveText("3 satır: 3 hazır");
+    await expect(summary).not.toContainText("Hatalı satır"); // temiz önizlemede "0 Hatalı satır" kutusu yok (Tasarım 2)
     await expect(apply).toBeEnabled();
     await capture("c-temiz", "import-summary");
 
@@ -209,7 +216,7 @@ test.describe("açılış verisi içe aktarma (T-289)", () => {
     await expect(issues.first().getByTestId("issue-item")).toHaveCount(2);
     await expect(page.getByTestId("issue-reason").nth(0)).toContainText("diye bir raf yok");
     await expect(page.getByTestId("issue-reason").nth(1)).toContainText("Adet kesirli olamaz");
-    await expect(page.getByTestId("import-summary-line")).toHaveText("2 satır: 1 hazır, 1 hatalı");
+    await expect(page.getByTestId("import-summary-line")).toHaveText("2 satır: 1 hazır");
     await expect(summary.getByText("Ürün", { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "İçe aktar" })).toBeDisabled();
     await capture("e-stok-hatali", "import-summary");
@@ -244,6 +251,42 @@ test.describe("açılış verisi içe aktarma (T-289)", () => {
     await expect(page.getByText(`${p}-1`).first()).toBeVisible();
 
     writeFileSync(path.join(OUT, `metrics-${project}.json`), JSON.stringify({ project, sizes, metrics }, null, 2));
+  });
+
+  test("yatay telefon 844x390: önizleme sonrası kabuk kaymaz (üst çubuk görünür, sekme altında boşluk yok)", async ({ page }, testInfo) => {
+    const dir = path.resolve(import.meta.dirname, "../../.artifacts/t289b");
+    mkdirSync(dir, { recursive: true });
+    const project = testInfo.project.name;
+    const p = `T289L-${Date.now()}${project === "desktop" ? "D" : "M"}`;
+    await loginAdmin(page);
+    await page.setViewportSize({ width: 844, height: 390 });
+    await page.goto("/t/demo/import");
+    await expect(page.getByRole("heading", { level: 1, name: "Ürün ve stok içe aktar" })).toBeVisible();
+    // Hatalı dosya: uzun önizleme (içerik alanı sonuna kadar kayabilir); sonra temiz dosya.
+    for (const [state, file] of [
+      ["hatali", csv([PRODUCT_HEADER, ...Array.from({ length: 12 }, (_, i) => `${p}-${i}-x;;PALET;;;`)])],
+      ["temiz", csv([PRODUCT_HEADER, `${p}-1;Vida;;;;`])],
+    ] as const) {
+      await page.locator("#import-file").setInputFiles(file);
+      await expect(page.getByTestId("import-summary")).toBeVisible();
+      await page.waitForTimeout(300); // reveal() eşzamanlı; yerleşimin oturması için
+      const m = await page.evaluate<{ shell: number; doc: number; bodyTop: number; barTop: number | null; navBottom: number | null; innerH: number; sumTop: number; sumBottom: number }>(`(() => {
+        const shell = document.querySelector('.tenant-shell'); const bar = document.querySelector('[data-testid=app-bar]'); const nav = document.querySelector('[data-testid=bottom-nav]');
+        const vis = (e) => e && e.getBoundingClientRect().height > 0;
+        const sum = document.querySelector('[data-testid=import-summary]').getBoundingClientRect();
+        return { shell: shell.scrollTop, doc: document.scrollingElement.scrollTop, bodyTop: shell.getBoundingClientRect().top,
+          barTop: vis(bar) ? bar.getBoundingClientRect().top : null, navBottom: vis(nav) ? nav.getBoundingClientRect().bottom : null, innerH: innerHeight, sumTop: sum.top, sumBottom: sum.bottom };
+      })()`);
+      await page.screenshot({ path: path.join(dir, `${project}-844x390-${state}.png`) });
+      writeFileSync(path.join(dir, `${project}-844x390-${state}.json`), JSON.stringify(m, null, 2));
+      if (project === "mobile") {
+        expect(m.shell, `${state}: kabuk kaymadı`).toBe(0);
+        expect(m.doc, `${state}: sayfa kaymadı`).toBe(0);
+        expect(m.barTop, `${state}: üst çubuk görünür`).toBe(0);
+        expect(Math.round(m.navBottom ?? -1), `${state}: sekme çubuğunun altında boşluk yok`).toBe(m.innerH);
+      }
+      expect(m.sumBottom > 0 && m.sumTop < m.innerH, `${state}: önizleme özeti görünüm alanında`).toBe(true);
+    }
   });
 
   test("yetkisiz kullanıcı (salt okunur): neden + sonraki eylem, form yok", async ({ page }, testInfo) => {

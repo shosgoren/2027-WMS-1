@@ -1558,8 +1558,8 @@
       "items": "Ürün",
       "stockLines": "Satır",
       "errorRows": "Hatalı satır",
-      "lineProducts": "{total} satır: {ok} hazır, {bad} hatalı",
-      "lineStock": "{total} satır: {ok} hazır, {bad} hatalı",
+      "lineProducts": "{total} satır: {ok} hazır",
+      "lineStock": "{total} satır: {ok} hazır",
       "rows": "Satır"
     },
     "detail": {
@@ -1573,7 +1573,7 @@
       "packs": "{n} koli tanımı",
       "barcodes": "{n} barkod"
     },
-    "blocked": "{n} hata var. Dosyayı düzeltip yeniden seç.",
+    "blocked": "Dosyada hata var. Düzeltip yeniden seç.",
     "clean": "Hata yok. İçe aktarabilirsin.",
     "issues": {
       "all": "Hataların hepsi ({total}):",
@@ -1582,6 +1582,7 @@
       "row": "Satır {row}",
       "fixPrefix": "Nasıl düzeltilir:",
       "more": "Tümünü göster ({n} satır)",
+        "moreTruncated": "İlk {shown} hatayı göster ({n} satır)",
       "less": "Daha az göster",
       "pickFixed": "Düzeltilmiş dosyayı seç",
       "partial": "{total} hata var: ilk {rows} satır gösteriliyor"
@@ -1590,7 +1591,7 @@
       "title": "İçe aktar",
       "apply": "İçe aktar",
       "note": "Aynı dosyayı tekrar yüklersen ikinci kez eklenmez.",
-      "blocked": "Önce {n} hatayı düzelt. Hata varken içe aktarılamaz.",
+      "blocked": "Önce hataları düzelt. Hata varken içe aktarılamaz.",
       "progress": "{done} / {total} satır",
       "done": "Tamamlandı",
       "partial": "Yarım kaldı",
@@ -1625,9 +1626,10 @@
       "moreFailed": "ve {n} satır daha hatalı.",
       "reason": {
         "PAIR_HAS_STOCK": "Bu ürün bu rafta başka bir işlemle stoğa girdi. Açılış stoku yalnız boş raflar içindir; düzeltme için stok belgesi kullan.",
+        "PAIR_REVERSED": "Bu ürünün bu raftaki açılış stoku sonradan ters kaydedilmiş. Yeniden yazılmaz; stoğu geri vermek için stok belgesi kullan.",
         "PAIR_PENDING": "Bu ürün ve raf için tamamlanmamış bir açılış belgesi var. Aynı dosyayı yeniden yükleyerek sürdür."
       },
-      "failedGeneric": "Sistem bu satırları kaydedemedi.",
+      "failedGeneric": "{n, plural, one {Sistem bu satırı kaydedemedi.} other {Sistem bu satırları kaydedemedi.}}",
       "failedTitle": "Kaydedilemedi.",
       "retryNone": "Hiçbir satır yazılmadı. Sorunu giderip aynı dosyayı tekrar yükle."
     },
@@ -1831,6 +1833,10 @@
       "TOO_MANY_COLUMNS": {
         "reason": "Satırda çok fazla sütun var.",
         "fix": "En çok {max} sütun olabilir. Fazla sütunları sil."
+      },
+      "PAIR_REVERSED": {
+        "reason": "{code} ürünü için {shelf} rafındaki açılış stoku daha önce ters kaydedilmiş.",
+        "fix": "Açılış stoku ters kaydedilen rafa yeniden yazılmaz. Stoğu geri vermek için stok belgesi kullan ya da satırı sil."
       },
       "PAIR_PENDING": {
         "reason": "{code} ürünü {shelf} rafı için tamamlanmamış bir açılış belgesi var (başka miktarla).",

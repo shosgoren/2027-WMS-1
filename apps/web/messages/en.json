@@ -1558,8 +1558,8 @@
       "items": "Products",
       "stockLines": "Rows",
       "errorRows": "Rows with errors",
-      "lineProducts": "{total} rows: {ok} ready, {bad} with errors",
-      "lineStock": "{total} rows: {ok} ready, {bad} with errors",
+      "lineProducts": "{total} rows: {ok} ready",
+      "lineStock": "{total} rows: {ok} ready",
       "rows": "Rows"
     },
     "detail": {
@@ -1573,7 +1573,7 @@
       "packs": "{n} carton definitions",
       "barcodes": "{n} barcodes"
     },
-    "blocked": "There are {n} errors. Fix the file and choose it again.",
+    "blocked": "The file has errors. Fix it and choose it again.",
     "clean": "No errors. You can import.",
     "issues": {
       "all": "All errors ({total}):",
@@ -1582,6 +1582,7 @@
       "row": "Row {row}",
       "fixPrefix": "How to fix:",
       "more": "Show all ({n} rows)",
+        "moreTruncated": "Show the first {shown} errors ({n} rows)",
       "less": "Show less",
       "pickFixed": "Choose the fixed file",
       "partial": "{total} errors: showing the first {rows} rows"
@@ -1590,7 +1591,7 @@
       "title": "Import",
       "apply": "Import",
       "note": "If you upload the same file again, it is not added twice.",
-      "blocked": "Fix the {n} errors first. Nothing can be imported while there are errors.",
+      "blocked": "Fix the errors first. Nothing can be imported while there are errors.",
       "progress": "{done} / {total} rows",
       "done": "Finished",
       "partial": "Stopped halfway",
@@ -1625,9 +1626,10 @@
       "moreFailed": "and {n} more failed rows.",
       "reason": {
         "PAIR_HAS_STOCK": "This product got stock on this shelf from another action. Opening stock is only for empty shelves; use a stock document to correct it.",
+        "PAIR_REVERSED": "The opening stock of this product on this shelf was reversed later. It is not written again; use a stock document to put the stock back.",
         "PAIR_PENDING": "There is an unfinished opening document for this product and shelf. Upload the same file again to continue it."
       },
-      "failedGeneric": "The system could not save these rows.",
+      "failedGeneric": "{n, plural, one {The system could not save this row.} other {The system could not save these rows.}}",
       "failedTitle": "Could not be saved.",
       "retryNone": "No rows were written. Fix the problem and upload the same file again."
     },
@@ -1831,6 +1833,10 @@
       "TOO_MANY_COLUMNS": {
         "reason": "The row has too many columns.",
         "fix": "At most {max} columns are allowed. Delete the extra columns."
+      },
+      "PAIR_REVERSED": {
+        "reason": "The opening stock of product {code} on shelf {shelf} was reversed earlier.",
+        "fix": "Opening stock is not written again to a shelf where it was reversed. Use a stock document to put the stock back, or delete the row."
       },
       "PAIR_PENDING": {
         "reason": "Product {code} has an unfinished opening document for shelf {shelf} (with another quantity).",
