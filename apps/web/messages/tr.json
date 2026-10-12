@@ -1494,15 +1494,25 @@
       "lockedTitle": "Yerleştirme sana kapalı",
       "lockedReason": "Yerleştirme için yetkin yok. Yöneticine haber ver ya da yardım çağır."
     },
+    "limit": {
+      "receiveReason": "Teslimde yalnız {n} adet kalmış.",
+      "putawayReason": "Kaynakta yalnız {n} adet var.",
+      "cameraAction": "{button} düğmesine bas.",
+      "pageReceive": "Teslimde kalan: {n} adet.",
+      "pageReceiveHit": "Fazlası sayılmadı. Kabul et'e bas.",
+      "pagePutaway": "Kaynakta var: {n} adet.",
+      "pagePutawayHit": "Kaynakta {n} var. Rafa koy'a bas."
+    },
     "camera": {
       "title": "Kamera",
       "hint": "Barkodu çerçeveye getir.",
       "starting": "Kamera açılıyor…",
       "accepted": "Okundu.",
-      "dropped": "Bir kod okundu ama işlenmedi: okuma şu an kapalıydı. Adet eklenmedi.",
+      "dropped": "Kod işlenmedi: okuma şu an kapalıydı.",
       "ok": "Tamam",
       "retry": "Tekrar dene",
       "notTaken": "Kod işlenmedi: okuma şu an kapalıydı. Saymak için Yeniden okut'a bas.",
+      "refused": "Bu okuma kabul edilmedi. {button} düğmesine bas.",
       "rescan": "Yeniden okut",
       "torchOn": "Feneri aç",
       "torchOff": "Feneri kapat",

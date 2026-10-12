@@ -191,7 +191,7 @@ function expectRubric(m: Layout, label: string, opts: { alert: boolean; maxButto
   expect(m.contrast, `${label} K-07 kontrast`).toBeGreaterThanOrEqual(4.5);
 }
 
-test("uygulama içi çözücü yolu: BarcodeDetector yok; WASM yalnızca tarama ekranında yüklenir, kod okunur ve akışa iletilir", async ({ page }, testInfo) => {
+test("uygulama içi çözücü yolu: BarcodeDetector yok; WASM yalnızca tarama ekranında yüklenir, kayıtsız kod okunur, akışa iletilir ve sunucuda reddedilir (olumlu geri bildirim yok)", async ({ page }, testInfo) => {
   mkdirSync(SHOTS, { recursive: true });
   await page.addInitScript(`try { delete window.BarcodeDetector; } catch (e) { window.BarcodeDetector = undefined; } ${FEEDBACK_STUBS}`);
   await login(page, testInfo);
@@ -212,11 +212,14 @@ test("uygulama içi çözücü yolu: BarcodeDetector yok; WASM yalnızca tarama 
   const origin = new URL(page.url()).origin;
   expect(wasm.every((u) => u.startsWith(origin)), `WASM kendi kaynağımızdan: ${wasm.join(",")}`).toBe(true);
   expect(requests.filter((u) => !u.startsWith(origin) && !u.startsWith("data:") && !u.startsWith("blob:")), "üçüncü taraf istek yok (jsDelivr vb.)").toEqual([]);
-  await expect(page.getByTestId("camera-overlay")).toHaveCount(0);
-  // Okuma doğru geri bildirim aldı (sahte ses/titreşim sayacı): iyi okuma = 1 titreşim + 1 ton.
+  // T-292b (G-07, ürün vaadi "doğru işlemi doğrular"): kayıtsız raf kodu sunucuda REDDEDİLİR; reddedilen okuma "Okundu" ve olumlu geri bildirim ALMAZ.
+  // Eski beklenti (okuma kabul + 1 olumlu titreşim + 1 ton + katman kapanır) kaldırıldı; yerine yokluk ve uyarının görünmesi doğrulanır.
+  await expect(page.getByTestId("camera-overlay")).toHaveAttribute("data-phase", "refused");
+  await expect(page.getByTestId("camera-accepted-value")).toHaveCount(0);
   const fb = await page.evaluate<{ vibrate: unknown[]; tones: number }>("window.__fb");
-  expect(fb.vibrate).toContainEqual(60);
-  expect(fb.tones).toBeGreaterThanOrEqual(1);
+  expect(fb.vibrate, "reddedilen okumada olumlu titreşim (60 ms) yok").not.toContainEqual(60);
+  expect(fb.tones, "reddedilen okumada ton yok").toBe(0);
+  expect(fb.vibrate.filter((v) => Array.isArray(v)), "olumsuz geri bildirim TEK kez (uyarının titreşimi)").toHaveLength(1);
   // Sunucu kuralı değişmedi: kayıtsız raf kodu sunucuda reddedilir (kod + sonraki eylem tam ekran uyarıda), UI kuralı yeniden yazmaz.
   await expect(page.getByTestId("scan-alert")).toBeVisible();
   await expect(page.getByTestId("error-code")).toHaveCount(1);
@@ -228,14 +231,20 @@ test("uygulama içi çözücü yolu: BarcodeDetector yok; WASM yalnızca tarama 
     await gotoPutaway(page);
     await page.waitForLoadState("networkidle");
     await page.getByRole("button", { name: "Barkodu okut" }).click();
-    await expect(overlay).toHaveAttribute("data-phase", "accepted", { timeout: 30_000 });
-    await expect(page.getByTestId("camera-accepted-value")).toHaveText(CODE);
-    expectRubric(await layout(page), `${size.name} okundu (kod)`, { alert: false });
-    await page.screenshot({ path: path.join(SHOTS, `${size.name}-okundu-kod.png`) });
+    await expect(overlay).toHaveAttribute("data-phase", "refused", { timeout: 30_000 });
+    await expect(page.getByTestId("scan-alert")).toBeVisible();
+    await page.getByRole("button", { name: "Anladım, tekrar okut" }).click();
+    await expect(page.getByTestId("camera-accepted-value")).toHaveCount(0);
+    await expect(page.getByTestId("camera-status")).not.toContainText("Okundu.");
+    // Uyarı kapandıktan sonra katman, ekranda gerçekten bulunan düğmeyi adlandırır (görünmeyen uyarıya atıf yok).
+    await expect(page.getByTestId("camera-status")).toContainText("Yeniden okut düğmesine bas.");
+    await expect(overlay.getByRole("button", { name: "Yeniden okut" })).toBeVisible();
+    expectRubric(await layout(page), `${size.name} reddedilen okuma (kod)`, { alert: true });
+    await page.screenshot({ path: path.join(SHOTS, `${size.name}-reddedilen-kod.png`) });
   }
 });
 
-test("yerleşik API yolu: seçilir, WASM yüklenmez; yanlış okuma satır içi kalır (ses+titreşim); doğru okuma tek kez iletilir", async ({ page }, testInfo) => {
+test("yerleşik API yolu: seçilir, WASM yüklenmez; yanlış okuma satır içi kalır (ses+titreşim); kayıtsız kodlu okuma tek kez iletilir ve reddedilir (olumlu geri bildirim yok)", async ({ page }, testInfo) => {
   mkdirSync(SHOTS, { recursive: true });
   await page.addInitScript(`${NATIVE_STUB} ${FEEDBACK_STUBS}`);
   await login(page, testInfo);
@@ -296,18 +305,18 @@ test("yerleşik API yolu: seçilir, WASM yüklenmez; yanlış okuma satır içi 
   });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.evaluate(`window.__code = ${JSON.stringify(CODE)}`);
-  await expect(overlay).toHaveAttribute("data-phase", "accepted");
-  await expect(page.getByTestId("camera-status")).toContainText("Okundu.");
-  await expect(page.getByTestId("camera-accepted-value")).toHaveText(CODE); // kod çözülmediyse (ürün adı yok) okunan kod gösterilir
-  await page.screenshot({ path: path.join(SHOTS, "390x844-okundu.png") });
-  await expect(overlay).toHaveCount(0);
+  // T-292b (G-07): kayıtsız raf kodu sunucuda reddedilir; "Okundu" ve olumlu geri bildirim YOK, tam ekran uyarı açılır. Eski beklenti (accepted + "Okundu." + 60 ms titreşim +
+  // 1 ton + katman kapanır) kaldırıldı; yerine yokluk ve uyarının görünmesi doğrulanır.
+  await expect(overlay).toHaveAttribute("data-phase", "refused");
+  await expect(page.getByTestId("scan-alert")).toBeVisible();
+  await expect(page.getByTestId("camera-accepted-value")).toHaveCount(0);
+  await expect(page.getByTestId("camera-status")).not.toContainText("Okundu.");
+  await page.screenshot({ path: path.join(SHOTS, "390x844-reddedilen.png") });
   await expect(page.getByTestId("last-scan-code")).toContainText(CODE);
   const after = await page.evaluate<{ vibrate: unknown[]; tones: number }>("window.__fb");
-  // Okuma anında tek kısa titreşim (60) ve tek ton; ardından sunucu reddi mevcut tam ekran uyarının kendi titreşimini ekleyebilir (sıra: önce okuma).
-  expect(after.vibrate[before.vibrate.length]).toBe(60);
-  expect(after.vibrate.slice(before.vibrate.length).filter((v) => v === 60)).toHaveLength(1);
-  expect(after.tones).toBe(before.tones + 1);
-  await expect(page.getByTestId("scan-alert")).toBeVisible();
+  expect(after.vibrate.slice(before.vibrate.length), "olumlu titreşim (60 ms) yok").not.toContain(60);
+  expect(after.tones, "ton yok").toBe(before.tones);
+  expect(after.vibrate.slice(before.vibrate.length).filter((v) => Array.isArray(v)), "olumsuz geri bildirim TEK kez (uyarının titreşimi)").toHaveLength(1);
   await page.waitForTimeout(1200);
   expect(posts.length, "kod sunucuya tek kez gitti (çift okuma yok)").toBe(1);
   writeMeasures(measures, "okuma", testInfo.project.name);
@@ -601,11 +610,15 @@ function seed(): Fx {
   const existing = psql<{ id: string }>("SELECT id FROM public.warehouses WHERE tenant_id = $1 AND status = 'ACTIVE' ORDER BY code LIMIT 1", [tenantId])[0]?.id;
   const fx: Fx = { tenantId, warehouseId: existing ?? randomUUID(), createdWarehouse: existing === undefined, unitId: randomUUID(), itemId: randomUUID(), locId: randomUUID(), receiptId: randomUUID(), itemName: `Kamera Vida ${run}` };
   fixtures.push(fx); // temizlik listesine HEMEN: kurulum yarıda kalsa da afterAll geri alır
+  // Video yalnız CODE'u gösterir: kayıtlı ürün barkodu VE fikstür rafının kodu aynı CODE'dur (ürün adımında ürün, kaynak adımında raf olarak çözülür). Bu dosyadaki önceki
+  // testlerin (afterAll'a kadar duran) fikstürleri CODE'u tutuyorsa serbest bırakılır.
+  psql("DELETE FROM public.item_barcodes WHERE tenant_id = $1 AND barcode = $2", [tenantId, CODE]);
+  psql("UPDATE public.locations SET status = 'ARCHIVED', archived_at = now(), code = 'OLD-' || id::text WHERE tenant_id = $1 AND code = $2", [tenantId, CODE]);
   if (fx.createdWarehouse) psql("INSERT INTO public.warehouses (tenant_id, id, code, name) VALUES ($1,$2,$3,'E2E depo')", [tenantId, fx.warehouseId, `E2C${run}`]);
   psql("INSERT INTO public.units (tenant_id, id, code, name) VALUES ($1,$2,$3,'E2E adet')", [tenantId, fx.unitId, `EC${run}`]);
   psql("INSERT INTO public.items (tenant_id, id, code, name, base_unit_id, tracking_mode, quantity_scale) VALUES ($1,$2,$3,$4,$5,'NONE',0)", [tenantId, fx.itemId, `E2C-${run}`, fx.itemName, fx.unitId]);
   psql("INSERT INTO public.item_barcodes (tenant_id, id, item_id, barcode) VALUES ($1, gen_random_uuid(), $2, $3)", [tenantId, fx.itemId, CODE]);
-  psql("INSERT INTO public.locations (tenant_id, id, warehouse_id, parent_id, code, name, depth, kind) VALUES ($1,$2,$3,NULL,$4,$5,0,'RECEIVING')", [tenantId, fx.locId, fx.warehouseId, `E2CK${run}`, "E2E kabul"]);
+  psql("INSERT INTO public.locations (tenant_id, id, warehouse_id, parent_id, code, name, depth, kind) VALUES ($1,$2,$3,NULL,$4,$5,0,'RECEIVING')", [tenantId, fx.locId, fx.warehouseId, CODE, "E2E kabul"]);
   psql("INSERT INTO public.inbound_receipts (tenant_id, id, warehouse_id, number, supplier_ref, created_by, status) VALUES ($1,$2,$3,$4,'E2E-CAM-1',(SELECT user_id FROM public.tenant_memberships WHERE id = $5),'OPEN')", [tenantId, fx.receiptId, fx.warehouseId, `KBL-CAM-${run}`, membershipId]);
   psql("INSERT INTO public.inbound_receipt_lines (tenant_id, id, receipt_id, line_no, item_id, unit_id, conversion_factor, expected_quantity) VALUES ($1, gen_random_uuid(), $2, 1, $3, $4, 1, 30)", [tenantId, fx.receiptId, fx.itemId, fx.unitId]);
   return fx;
@@ -632,6 +645,42 @@ if (!process.env.E2E_BASE_URL?.trim()) {
       await expect(page.getByTestId("flow-step")).toHaveAttribute("data-step", "3");
     }
   });
+  // T-292b: OLUMLU yol (kayıtlı kodla okuma kabul edilir): 60 ms titreşim, tek ton, "Okundu", okunan ürün/raf adı, katman kapanır, akış ilerler. Kayıtsız kod artık reddedilir
+  // (yukarıdaki testler); olumlu geri bildirimin varlığı yalnız bu testlerle sınanır: `cameraFeedback("ok")` kaybolursa ya da ret yolu kabul sayılırsa kırmızı olur.
+  for (const path_ of ["wasm", "native"] as const) {
+    test(`kabul edilen okuma (${path_ === "wasm" ? "uygulama içi çözücü" : "yerleşik API"}): kayıtlı ürün (kabul) ve kayıtlı raf (yerleştirme) okunur; 60 ms titreşim, tek ton, "Okundu", ad, katman kapanır`, async ({ page }, testInfo) => {
+      test.setTimeout(120_000);
+      const fx = seed();
+      await page.addInitScript(path_ === "wasm" ? `try { delete window.BarcodeDetector; } catch (e) { window.BarcodeDetector = undefined; } ${FEEDBACK_STUBS}` : `${NATIVE_STUB} ${FEEDBACK_STUBS}`);
+      await login(page, testInfo);
+      const overlay = page.getByTestId("camera-overlay");
+      const fb = (): Promise<{ vibrate: unknown[]; tones: number }> => page.evaluate<{ vibrate: unknown[]; tones: number }>("window.__fb");
+      const accept = async (url: string, code: string, name: string, step: string): Promise<void> => {
+        await page.goto(url);
+        await page.waitForLoadState("networkidle");
+        const before = await fb();
+        await page.getByRole("button", { name: "Barkodu okut" }).click();
+        await expect(overlay).toBeVisible();
+        await expect(overlay).toHaveAttribute("data-decoder", path_);
+        if (path_ === "native") {
+          await expect.poll(() => page.evaluate<number>("document.querySelector('[data-testid=camera-video]').videoWidth")).toBeGreaterThan(0);
+          await page.evaluate(`window.__code = ${JSON.stringify(code)}`);
+        }
+        await expect(overlay).toHaveAttribute("data-phase", "accepted", { timeout: 40_000 });
+        await expect(page.getByTestId("camera-status")).toContainText("Okundu.");
+        await expect(page.getByTestId("camera-accepted-value")).toHaveText(name, { timeout: 30_000 });
+        await expect(overlay).toHaveCount(0);
+        await expect(page.getByTestId("flow-step")).toHaveAttribute("data-step", step);
+        await expect(page.getByTestId("scan-alert")).toHaveCount(0);
+        const after = await fb();
+        expect(after.vibrate.slice(before.vibrate.length), "okuma anında tek kısa titreşim (60 ms)").toEqual([60]);
+        expect(after.tones, "okuma anında tek ton").toBe(before.tones + 1);
+      };
+      await accept(`/t/demo/field/receive?receipt=${fx.receiptId}`, CODE, fx.itemName, "3"); // kabul: kayıtlı ürün
+      await accept(`/t/demo/field/putaway?wh=${fx.warehouseId}`, CODE, "E2E kabul", "2"); // yerleştirme: kayıtlı raf (kaynak adımı; raf kodu = CODE)
+    });
+  }
+
 }
 
 function writeMeasures(data: Record<string, unknown>, tag: string, project: string): void {
@@ -671,3 +720,42 @@ test("okuma kapalıyken (uyarı açık) gelen klavye kaması taraması bildirili
   await page.getByRole("button", { name: "Anladım, tekrar okut" }).click();
   await expect(notice).toHaveCount(0);
 });
+
+// T-292b: yatay telefonda (844x390) ve kısa dikey ekranda (390x664) çift okutma bildirimi, tam ekran uyarının başlığını, gövdesini, Geri'yi ve düğmesini örtmez (0 px²).
+// Uzak koşuda da çalışır: yalnız `login` (enterDemoShared) + `gotoPutaway` yolu kullanılır; fikstür yoktur.
+for (const size of [{ n: "844x390", w: 844, h: 390 }, { n: "390x664", w: 390, h: 664 }]) {
+  test(`çift okutma bildirimi uyarının başlığını/gövdesini/Geri'yi/düğmesini örtmez (${size.n}, 0 px²)`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width: size.w, height: size.h });
+    await page.addInitScript(`${NATIVE_STUB} ${FEEDBACK_STUBS}`);
+    await login(page, testInfo);
+    await openCamera(page);
+    await expect(page.getByTestId("camera-overlay")).toHaveAttribute("data-phase", "scanning");
+    await keystrokeScan(page, "0000000000000"); // sunucu reddi → tam ekran uyarı → okuma kapalı
+    const alert = page.getByTestId("scan-alert");
+    await expect(alert).toBeVisible();
+    await keystrokeScan(page, "1111111111116");
+    const notice = page.getByTestId("camera-dropped");
+    await expect(notice).toBeVisible();
+    type Box = { x: number; y: number; width: number; height: number };
+    const area = (a: Box, b: Box): number => Math.max(0, Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x)) * Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y));
+    const n = await notice.boundingBox();
+    const parts: Record<string, Box | null> = {
+      title: await page.locator("#scan-alert-title").boundingBox(),
+      body: await page.locator("#scan-alert-body").boundingBox(),
+      close: await page.getByRole("button", { name: "Anladım, tekrar okut" }).boundingBox(),
+    };
+    const measures: Record<string, number> = {};
+    for (const [k, b] of Object.entries(parts)) {
+      expect(b, `${size.n}: ${k} sayfada var`).not.toBeNull();
+      measures[k] = n !== null && b !== null ? area(n, b) : -1;
+    }
+    writeMeasures({ size: size.n, notice: n, parts, overlapPx2: measures }, `bildirim-${size.n}`, testInfo.project.name);
+    await page.screenshot({ path: path.join(SHOTS, `bildirim-${size.n}.png`) });
+    for (const [k, a] of Object.entries(measures)) expect(a, `${size.n}: bildirim ${k} ile örtüşme (px²)`).toBe(0);
+    const vp = page.viewportSize();
+    expect(n !== null && vp !== null && n.y >= 0 && n.y + n.height <= vp.height, `${size.n}: bildirim görünür alanda`).toBe(true);
+    await expect(notice.getByRole("button")).toHaveCount(0);
+    await page.getByRole("button", { name: "Anladım, tekrar okut" }).click();
+    await expect(notice).toHaveCount(0);
+  });
+}

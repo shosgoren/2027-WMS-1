@@ -1494,15 +1494,25 @@
       "lockedTitle": "Putting away is closed to you",
       "lockedReason": "You cannot put goods away. Tell your manager or call for help."
     },
+    "limit": {
+      "receiveReason": "Only {n} units are still open on this delivery.",
+      "putawayReason": "Only {n} units are at the source.",
+      "cameraAction": "Press {button}.",
+      "pageReceive": "Open on delivery: {n}.",
+      "pageReceiveHit": "Extra not counted. Press Receive.",
+      "pagePutaway": "At source: {n}.",
+      "pagePutawayHit": "{n} at source. Press Put on rack."
+    },
     "camera": {
       "title": "Camera",
       "hint": "Bring the barcode into the frame.",
       "starting": "Opening the camera…",
       "accepted": "Scanned.",
-      "dropped": "A code was read but not processed: reading was off at that moment. Nothing was added.",
+      "dropped": "Code not processed: scanning was off.",
       "ok": "OK",
       "retry": "Try again",
       "notTaken": "Code not processed: scanning was off just now. To count it, press Scan again.",
+      "refused": "This scan was not accepted. Press {button}.",
       "rescan": "Scan again",
       "torchOn": "Torch on",
       "torchOff": "Torch off",
