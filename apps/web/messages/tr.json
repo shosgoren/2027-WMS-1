@@ -1495,10 +1495,11 @@
       "lockedReason": "Yerleştirme için yetkin yok. Yöneticine haber ver ya da yardım çağır."
     },
     "limit": {
-      "receiveReason": "Teslimde en çok {n} adet kalmış.",
-      "receiveAction": "Adet {n}'de kaldı. Devam için Kabul et'e bas.",
+      "receiveReason": "Teslimde yalnız {n} adet kalmış.",
       "putawayReason": "Kaynakta yalnız {n} adet var.",
-      "putawayAction": "Adet {n}'de kaldı. Devam için Rafa koy'a bas."
+      "confirmReceive": "Devam için Kabul et'e bas.",
+      "confirmPutaway": "Devam için Rafa koy'a bas.",
+      "cameraAction": "Kamerayı kapat."
     },
     "camera": {
       "title": "Kamera",
@@ -1509,6 +1510,7 @@
       "ok": "Tamam",
       "retry": "Tekrar dene",
       "notTaken": "Kod işlenmedi: okuma şu an kapalıydı. Saymak için Yeniden okut'a bas.",
+      "refused": "Bu okuma kabul edilmedi. Uyarıdaki adımı uygula.",
       "rescan": "Yeniden okut",
       "torchOn": "Feneri aç",
       "torchOff": "Feneri kapat",

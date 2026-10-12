@@ -71,11 +71,11 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
     async (code: string): Promise<ScanVerdict> => {
       // Eşzamanlı tek çözüm: bayrak ref'tedir; aynı tikteki ikinci okuma kapıda düşer ve bildirilir (`useScanner`).
       // Kapı ref'ten okunur (finally → commit penceresinde uyarı/bitiş durumu henüz render'a düşmemiş olabilir).
-      if (blocked()) return undefined;
-      let verdict: ScanVerdict;
+      if (blocked()) return "refused";
+      let verdict: ScanVerdict = "taken";
       const hit = (n: number): void => {
         setLimitHit(true);
-        verdict = { limit: `${t("limit.putawayReason", { n })} ${t("limit.putawayAction", { n })}` };
+        verdict = { limit: `${t("limit.putawayReason", { n })} ${t("limit.cameraAction")}` };
       };
       busyRef.current = true;
       setLast(code);
@@ -88,7 +88,7 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
           const res = await resolveLocationScanAction({ slug, warehouseId, code });
           if (!res.ok) {
             showAlert("alert.scanTitle", errorKeyOf(res.error, "scan"), res.error.detail === undefined ? res.error.code : `${res.error.code}/${res.error.detail}`);
-            return undefined;
+            return "taken"; // barkod okundu ve sunucuya işlendi; "bu kod sistemde yok" tam ekran uyarıdır (T-286 sözleşmesi)
           }
           const loc = { id: res.data.id, code: res.data.code, name: res.data.name };
           holder.contentChanged();
@@ -104,7 +104,7 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
           const res = await resolveItemScanAction({ slug, code });
           if (!res.ok) {
             showAlert("alert.scanTitle", errorKeyOf(res.error, "scan"), res.error.detail === undefined ? res.error.code : `${res.error.code}/${res.error.detail}`);
-            return undefined;
+            return "taken"; // barkod okundu ve sunucuya işlendi; "bu kod sistemde yok" tam ekran uyarıdır (T-286 sözleşmesi)
           }
           // Yerleştirme stokta (temel birim) çalışır: koli okutunca adım koli içi adettir (`baseQuantity`, K-1); kesirli ise uyarı, sessizce 1 değil.
           // Adım yalnız adedi okutmadan alan yollarda istenir: görevli yerleştirmede miktar görevle sabittir, ondalık ölçekli ürün engellenmez.
@@ -119,10 +119,10 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
             // Onay ekranında (serbest yerleştirme) aynı ürün yeniden okutulursa adet eklenir (iki koli = iki katı); başka ürün engellenir.
             if (current === null || current.id !== res.data.itemId) {
               showAlert("alert.mismatchTitle", "scan_mismatch", "SCAN_MISMATCH");
-              return undefined;
+              return "refused";
             }
             const step = stepOf1();
-            if (step === null) return undefined;
+            if (step === null) return "refused";
             holder.contentChanged();
             setLastName(res.data.itemName);
             const cap = availRef.current;
@@ -136,21 +136,21 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
           if (task !== null) {
             if (scanMismatch(res.data.itemId, [task.itemId])) {
               showAlert("alert.mismatchTitle", "scan_mismatch", "SCAN_MISMATCH");
-              return undefined;
+              return "refused";
             }
           } else if (sourceRef.current !== null) {
             const a = await availableAtLocationAction({ slug, locationId: sourceRef.current.id, itemId: res.data.itemId });
             if (!a.ok) {
               showAlert("alert.scanTitle", errorKeyOf(a.error, "scan"), a.error.code);
-              return undefined;
+              return "refused";
             }
             const have = intOf(a.data.quantity);
             if (have === 0) {
               showAlert("alert.mismatchTitle", "no_stock_here", "NO_STOCK_HERE");
-              return undefined;
+              return "refused";
             }
             const step = stepOf1();
-            if (step === null) return undefined;
+            if (step === null) return "refused";
             setAvail(have);
             // Aynı ürün geri dönüp yeniden okutulduysa adet eklenir; başka ürünse bu okutmanın adedi ile başlar.
             const sameItem = current !== null && current.id === res.data.itemId;
@@ -168,7 +168,7 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
         return verdict;
       } catch {
         showAlert("alert.networkTitle", "network", "NETWORK");
-        return undefined;
+        return "refused";
       } finally {
         busyRef.current = false;
         setBusy(false);
@@ -179,7 +179,8 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
   // Görevsiz yerleştirmede onay ekranında da okuma açıktır (aynı ürün yeniden okutulunca adet artar); görevde adet sabittir.
   const scanning = stage === "source" || stage === "item" || stage === "target" || (stage === "confirm" && task === null);
   const { service: scanner, camera, dropped, clearDropped } = useScanner((v) => onScanned(v), scanning && alert === null && !busy, blocked);
-  const scanPrimary = useScanPrimary(camera, { busy, name: lastName, code: last, alerting: alert !== null });
+  // Çift okutma bildirimi: kamera katmanı açıkken katmanın durum alanında, uyarı açıkken uyarının içinde, aksi hâlde sayfa şeridinde (T-292b).
+  const scanPrimary = useScanPrimary(camera, { busy, name: lastName, code: last, alerting: alert !== null }, dropped && alert === null ? <DroppedNotice show alerting={false} onClose={clearDropped} /> : undefined);
 
   async function confirm() {
     if (busyRef.current || source === null || item === null || target === null) return;
@@ -222,7 +223,7 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
     clearDropped();
   };
   // Çift okutma bildirimi: uyarı yokken akışın içinde (üste bindirilmez), uyarı açıkken uyarının içinde (T-292b).
-  const notice = dropped && alert === null ? <DroppedNotice show alerting={false} onClose={clearDropped} /> : undefined;
+  const notice = dropped && alert === null && !scanPrimary.open ? <DroppedNotice show alerting={false} placement="top" onClose={clearDropped} /> : undefined;
   const alertView = (
     <>
       {alert === null ? null : (
@@ -323,7 +324,7 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
               value={qty}
               min={1}
               max={avail}
-              {...(avail === null ? {} : { limit: { reason: t("limit.putawayReason", { n: avail }), hit: limitHit ? `${t("limit.putawayReason", { n: avail })} ${t("limit.putawayAction", { n: avail })}` : undefined } })}
+              {...(avail === null ? {} : { limit: { reason: t("limit.putawayReason", { n: avail }), hit: limitHit ? `${t("limit.putawayReason", { n: avail })} ${t("limit.confirmPutaway")}` : undefined } })}
               onChange={(n) => {
                 holder.contentChanged();
                 setLimitHit(false);
