@@ -136,6 +136,8 @@ interface Layout {
   buttonClipped: string[];
   buttonWrapped: string[];
   viewportShare: { height: number; width: number };
+  /** Yatay mı (genişlik > yükseklik): K-03 eşiği yöne göre ayrı denetlenir. */
+  landscape: boolean;
   statusFontPx: number;
   statusLines: number;
   statusRole: string | null;
@@ -166,7 +168,7 @@ async function layout(page: Page): Promise<Layout> {
     const fg = px(cs.color); const l1 = lum(fg), l2 = lum(bg); const contrast = (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
     const ix = Math.max(0, Math.min(sr.right, v.right) - Math.max(sr.left, v.left)); const iy = Math.max(0, Math.min(sr.bottom, v.bottom) - Math.max(sr.top, v.top));
     return { scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth, overlayScrollHeight: ov.scrollHeight, innerHeight: window.innerHeight,
-      small, buttons, buttonClipped: clipped, buttonWrapped: wrapped, viewportShare: { height: v.height / o.height, width: v.width / o.width },
+      small, buttons, buttonClipped: clipped, buttonWrapped: wrapped, viewportShare: { height: v.height / o.height, width: v.width / o.width }, landscape: window.innerWidth > window.innerHeight,
       statusFontPx: parseFloat(cs.fontSize), statusLines: Math.round((sr.height - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom)) / lh), statusRole: s.getAttribute('role'), statusOverlapPx2: ix * iy, contrast };
   })()`);
 }
@@ -176,7 +178,9 @@ function expectRubric(m: Layout, label: string, opts: { alert: boolean; maxButto
   expect(m.scrollWidth, `${label} K-01 yatay taşma`).toBeLessThanOrEqual(m.clientWidth);
   expect(m.overlayScrollHeight, `${label} K-01 dikey sığma`).toBeLessThanOrEqual(m.innerHeight);
   expect(m.small, `${label} K-02 48 px altı hedef`).toEqual([]);
-  expect(m.viewportShare.height >= 0.4 || m.viewportShare.width >= 0.4, `${label} K-03 pencere payı ${JSON.stringify(m.viewportShare)}`).toBe(true);
+  // K-03 (T-287c, sıkılaştırma): yöne göre AYRI eşik; dikeyde yükseklik, yatayda genişlik payı >= 0,4 (gevşek `||` kaldırıldı).
+  if (m.landscape) expect(m.viewportShare.width, `${label} K-03 yatay: pencere genişlik payı ${JSON.stringify(m.viewportShare)}`).toBeGreaterThanOrEqual(0.4);
+  else expect(m.viewportShare.height, `${label} K-03 dikey: pencere yükseklik payı ${JSON.stringify(m.viewportShare)}`).toBeGreaterThanOrEqual(0.4);
   expect(m.buttons, `${label} K-04 düğme sayısı`).toBeLessThanOrEqual(opts.maxButtons ?? 4);
   expect(m.buttonClipped, `${label} K-04 kesilen düğme etiketi`).toEqual([]);
   expect(m.buttonWrapped, `${label} K-04 tek satır olmayan düğme etiketi`).toEqual([]);
@@ -385,15 +389,33 @@ test("kamera ile el terminali aynı anda: tek sunucu çağrısı, tek uyarı; ge
   page.on("request", (r) => {
     if (r.method() === "POST") posts.push(r.url());
   });
-  // Aynı turda: kamera kodu hazır (döngü sonraki karede okur) ve terminal tetiği ateşlenir; terminal önce akışa girer.
-  await page.evaluate(`window.__code = ${JSON.stringify(CODE)}`);
+  // Sıra testten denetlenir (zamanlamaya bağlı değil): terminal önce akışa girer ve uyarı açılır; kamera kodu ANCAK ondan sonra sunulur,
+  // yani 250 ms'lik kamera döngüsü ne kadar gecikirse gecikse okuma kapalıyken gelir ve düşürülür.
   await keystrokeScan(page, "0000000000000");
   await expect(page.getByTestId("scan-alert")).toBeVisible();
+  await page.evaluate(`window.__code = ${JSON.stringify(CODE)}`);
   await expect(page.getByTestId("camera-dropped")).toBeVisible();
   await page.waitForTimeout(1500);
   expect(posts.length, "iki kaynaktan tek akış çağrısı (çift işleme yok)").toBe(1);
   await expect(page.getByTestId("scan-alert")).toHaveCount(1);
   await expect(page.getByTestId("last-scan-code")).toContainText("0000000000000");
+  // T-287c (1): akışa iletilmeyen (düşürülen) kamera okuması "Okundu" ekranı ve olumlu bip üretmez; kamera açık kalır, ürün adı bu okumaya bağlanmaz.
+  await expect(overlay).not.toHaveAttribute("data-phase", "accepted");
+  await expect(page.getByTestId("camera-accepted-value")).toHaveCount(0);
+  await expect(page.getByTestId("camera-status")).not.toContainText("Okundu.");
+  await expect(page.getByTestId("camera-status")).toContainText("Kod işlenmedi");
+  expect(await page.evaluate<number>("window.__fb.tones"), "düşürülen okumada olumlu bip çalmaz").toBe(0);
+  // T-287c güvenlik MAJOR-1: düşürülen kod hiçbir yolla işlenmez. Uyarı kapandıktan sonra kamera aynı kodu kendiliğinden yeniden göndermez;
+  // yalnız kullanıcının açık yeni okutma eylemi (Yeniden okut) kabul edilir.
+  await page.getByRole("button", { name: "Anladım, tekrar okut" }).click();
+  await page.waitForTimeout(3000);
+  expect(posts.length, "düşürülen kamera kodu uyarı kapanınca kendiliğinden işlenmez").toBe(1);
+  await expect(page.getByTestId("scan-alert")).toHaveCount(0);
+  await expect(page.getByTestId("last-scan-code")).toContainText("0000000000000");
+  // Açık kullanıcı eylemi ("Yeniden okut") kodu bu kez işler.
+  await overlay.getByRole("button", { name: "Yeniden okut" }).click();
+  await expect(page.getByTestId("scan-alert")).toBeVisible();
+  expect(posts.length, "yeniden okut eylemi kodu bir kez işler").toBe(2);
 });
 
 test("izin reddi: Tekrar dene izin hâlâ kapalıyken rehbere döner (tekrarlı ve çift tık), izin gelince kamerayı açar", async ({ page }, testInfo) => {
@@ -618,6 +640,7 @@ function writeMeasures(data: Record<string, unknown>, tag: string, project: stri
 }
 
 test("okuma kapalıyken (uyarı açık) gelen klavye kaması taraması bildirilir ve başlığı örtmez; normal klavye girişi etkilenmez", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 390, height: 664 }); // kısa ekran: bildirim başlığı, Geri düğmesini ve uyarı düğmesini örtmemeli
   await page.addInitScript(`${NATIVE_STUB} ${FEEDBACK_STUBS}`);
   await login(page, testInfo);
   await openCamera(page);
@@ -635,7 +658,16 @@ test("okuma kapalıyken (uyarı açık) gelen klavye kaması taraması bildirili
   await expect(notice).toBeVisible();
   const n = await notice.boundingBox();
   const h = await page.locator("#scan-alert-title").boundingBox();
-  expect(n !== null && h !== null && n.y + n.height <= h.y, "bildirim ana uyarı başlığını örtmez").toBe(true);
-  await notice.getByRole("button").click();
+  const closeBtn = await page.getByRole("button", { name: "Anladım, tekrar okut" }).boundingBox();
+  const hit = (a: { y: number; height: number }, b: { y: number; height: number }): boolean => a.y < b.y + b.height && b.y < a.y + a.height;
+  expect(n !== null && h !== null && !hit(n, h), "bildirim ana uyarı başlığını örtmez").toBe(true);
+  expect(n !== null && closeBtn !== null && !hit(n, closeBtn), "bildirim uyarının düğmesini örtmez").toBe(true);
+  const backBtn = await page.getByRole("button", { name: "Geri" }).or(page.getByRole("link", { name: "Geri" })).first().boundingBox();
+  expect(backBtn, "Geri düğmesi sayfada var").not.toBeNull();
+  expect(n !== null && backBtn !== null && !hit(n, backBtn), "bildirim Geri düğmesini örtmez").toBe(true);
+  // Uyarı açıkken tek onay düğmesi vardır (uyarınki); bildirim kendi düğmesini göstermez ve uyarı kapanınca kendiliğinden kalkar.
+  await expect(notice.getByRole("button")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Anladım, tekrar okut" })).toHaveCount(1);
+  await page.getByRole("button", { name: "Anladım, tekrar okut" }).click();
   await expect(notice).toHaveCount(0);
 });

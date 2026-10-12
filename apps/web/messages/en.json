@@ -1299,6 +1299,7 @@
     "scanAgain": "Got it, scan again",
     "alert": {
       "scanTitle": "Code not found",
+      "unitTitle": "Quantity not taken",
       "mismatchTitle": "Wrong item",
       "networkTitle": "No connection",
       "putawayTitle": "Could not put on rack"
@@ -1353,7 +1354,11 @@
       "finish_first": "Finish the open item first.",
       "finish_firstAction": "Scan the same item or go back.",
       "no_stock_here": "There is none of this item on this rack.",
-      "no_stock_hereAction": "Scan the right rack."
+      "no_stock_hereAction": "Scan the right rack.",
+      "qty_fractional": "This barcode's quantity is not a whole number.",
+      "qty_fractionalAction": "This screen only works with whole units. Enter the quantity on the desktop.",
+      "unit_mismatch": "This barcode is not in this line's unit.",
+      "unit_mismatchAction": "Scan a barcode in the line's unit or enter the quantity on the desktop."
     },
     "line": {
       "complete": "Done",
@@ -1427,6 +1432,9 @@
       "qtyTitle": "How many arrived?",
       "qtyInstruction": "Check the number and change it if needed.",
       "verify": "Item you scanned:",
+      "scanMore": "Scan one more case",
+      "compound": "{text} · total {total} {unit}",
+      "compoundFailed": "Could not show the case breakdown. The count is correct; you can continue.",
       "received": "Arrived ({unit})",
       "damagedLabel": "Damaged count",
       "hasDamaged": "Add damaged",
@@ -1491,9 +1499,11 @@
       "hint": "Bring the barcode into the frame.",
       "starting": "Opening the camera…",
       "accepted": "Scanned.",
-      "dropped": "A code was read but reading was off. Scan the code again.",
+      "dropped": "A code was read but not processed: reading was off at that moment. Nothing was added.",
       "ok": "OK",
       "retry": "Try again",
+      "notTaken": "Code not processed: scanning was off just now. To count it, press Scan again.",
+      "rescan": "Scan again",
       "torchOn": "Torch on",
       "torchOff": "Torch off",
       "torchFailed": "The torch did not turn on. Move to a lit place or type the barcode.",

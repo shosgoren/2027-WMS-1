@@ -7,7 +7,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { expect, test } from "@playwright/test";
-import type { Page } from "@playwright/test";
+import type { Page, Request } from "@playwright/test";
 
 // Demo girişi hız sınırı kovası: proje başına ayrı istemci adresi playwright.config.ts projelerindedir (receiving-desktop/-mobile); dosya düzeyinde ezilmez (T-280).
 
@@ -34,6 +34,8 @@ interface Fx {
   tenantId: string;
   warehouseId: string;
   unitId: string;
+  /** Koli birimi (1 koli = 12 adet, K-1): koli barkodu bu birime bağlıdır, adet katsayıdan gelir. */
+  koliUnitId: string;
   itemId: string;
   otherItemId: string;
   kabulId: string;
@@ -104,7 +106,7 @@ async function cleanup(): Promise<void> {
     await db("UPDATE public.warehouse_tasks SET status = 'CANCELLED', version = version + 1 WHERE tenant_id = $1 AND item_id IN ($2, $3) AND status IN ('OPEN', 'ASSIGNED')", [f.tenantId, f.itemId, f.otherItemId]);
     await db("UPDATE public.locations SET status = 'ARCHIVED', archived_at = now() WHERE tenant_id = $1 AND id IN ($2, $3, $4, $5)", [f.tenantId, f.kabulId, f.raf1Id, f.raf2Id, f.kilitId]);
     await db("UPDATE public.items SET status = 'ARCHIVED', archived_at = now() WHERE tenant_id = $1 AND id IN ($2, $3)", [f.tenantId, f.itemId, f.otherItemId]);
-    await db("UPDATE public.units SET status = 'ARCHIVED', archived_at = now() WHERE tenant_id = $1 AND id = $2", [f.tenantId, f.unitId]);
+    await db("UPDATE public.units SET status = 'ARCHIVED', archived_at = now() WHERE tenant_id = $1 AND id IN ($2, $3)", [f.tenantId, f.unitId, f.koliUnitId]);
     if (f.createdWarehouse) await db("UPDATE public.warehouses SET status = 'ARCHIVED', archived_at = now() WHERE tenant_id = $1 AND id = $2", [f.tenantId, f.warehouseId]);
   }
 }
@@ -140,18 +142,21 @@ async function seed(): Promise<Fx> {
     const warehouseId = existingWh ?? randomUUID();
     // Tüm kimlikler ÖNCEDEN üretilir ve fikstür temizlik listesine HEMEN kaydedilir: kurulum yarıda kalsa da afterAll temizliği yazılanları geri alır (T-313 güvenlik MINOR).
     const fx: Fx = {
-      createdWarehouse, tenantId, warehouseId, unitId: randomUUID(), itemId: randomUUID(), otherItemId: randomUUID(), kabulId: randomUUID(), raf1Id: randomUUID(), raf2Id: randomUUID(),
+      createdWarehouse, tenantId, warehouseId, unitId: randomUUID(), koliUnitId: randomUUID(), itemId: randomUUID(), otherItemId: randomUUID(), kabulId: randomUUID(), raf1Id: randomUUID(), raf2Id: randomUUID(),
       kilitId: randomUUID(), receiptId: randomUUID(), receiptNo: `KBL-E2E-${run}`, membershipId,
     };
     fixtures.push(fx);
     if (createdWarehouse) await q("INSERT INTO public.warehouses (tenant_id, id, code, name) VALUES ($1,$2,$3,'E2E depo')", [tenantId, warehouseId, `E2E${run}`]);
     await q("INSERT INTO public.units (tenant_id, id, code, name) VALUES ($1,$2,$3,'E2E adet')", [tenantId, fx.unitId, `EA${run}`]);
+    await q("INSERT INTO public.units (tenant_id, id, code, name) VALUES ($1,$2,$3,'E2E koli')", [tenantId, fx.koliUnitId, `EK${run}`]);
     const mkItem = async (id: string, name: string): Promise<void> => {
       await q("INSERT INTO public.items (tenant_id, id, code, name, base_unit_id, tracking_mode, quantity_scale) VALUES ($1,$2,$3,$4,$5,'NONE',0)", [tenantId, id, `E2E-${run}-${name.slice(0, 1)}`, name, fx.unitId]);
     };
     await mkItem(fx.itemId, `Vida ${run}`);
     await mkItem(fx.otherItemId, `Somun ${run}`);
-    await q("INSERT INTO public.item_barcodes (tenant_id, id, item_id, barcode, quantity) VALUES ($1, gen_random_uuid(), $2, $3, 12)", [tenantId, fx.itemId, BARCODE.koli]);
+    // Koli barkodu: KOLI birimine bağlı, miktar alanı boş; adet `unit_conversions` katsayısından (12) gelir (K-1).
+    await q("INSERT INTO public.unit_conversions (tenant_id, id, item_id, unit_id, to_base_factor) VALUES ($1, gen_random_uuid(), $2, $3, 12)", [tenantId, fx.itemId, fx.koliUnitId]);
+    await q("INSERT INTO public.item_barcodes (tenant_id, id, item_id, unit_id, barcode) VALUES ($1, gen_random_uuid(), $2, $3, $4)", [tenantId, fx.itemId, fx.koliUnitId, BARCODE.koli]);
     await q("INSERT INTO public.item_barcodes (tenant_id, id, item_id, barcode) VALUES ($1, gen_random_uuid(), $2, $3)", [tenantId, fx.itemId, BARCODE.tekli]);
     await q("INSERT INTO public.item_barcodes (tenant_id, id, item_id, barcode) VALUES ($1, gen_random_uuid(), $2, $3)", [tenantId, fx.otherItemId, BARCODE.baska]);
     const mkLoc = async (id: string, code: string, kind: "RECEIVING" | "STORAGE"): Promise<void> => {
@@ -174,6 +179,25 @@ async function seed(): Promise<Fx> {
 /** Klavye kaması taramasını taklit eder: STX + karakterler + Enter, tek tikte (tuşlar arası < 30 ms). */
 async function scan(page: Page, code: string): Promise<void> {
   await page.evaluate(`(() => { const send = (key) => document.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true })); send("\\u0002"); for (const ch of ${JSON.stringify(code)}) send(ch); send("Enter"); })()`);
+}
+
+/** Aynı tikte (tek görevde, eşzamanlı) iki tarama: çift tetik / iki kaynak. İkinci okuma çözülmemeli, bildirilmeli. */
+async function scanTwice(page: Page, code: string): Promise<void> {
+  await page.evaluate(`(() => { const send = (key) => document.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true })); for (let i = 0; i < 2; i++) { send("\u0002"); for (const ch of ${JSON.stringify(code)}) send(ch); send("Enter"); } })()`);
+}
+
+/** Mobil görüntüler (T-287c): dikey 390x844 ve yatay 844x390; sonra dikey boyuta dönülür. */
+const T287C_OUT = process.env.T287C_OUT ?? path.resolve(import.meta.dirname, "../../.artifacts/t287c");
+async function shootBoth(page: Page, name: string): Promise<void> {
+  mkdirSync(T287C_OUT, { recursive: true });
+  for (const [label, width, height] of [["390x844", 390, 844], ["844x390", 844, 390]] as const) {
+    await page.setViewportSize({ width, height });
+    const m = await measure(page);
+    expect(m.scrollWidth, `${name} ${label}: yatay taşma`).toBeLessThanOrEqual(m.clientWidth);
+    expect(m.small, `${name} ${label}: 48 px altı hedef`).toEqual([]);
+    await page.screenshot({ path: path.join(T287C_OUT, `${name}-${label}.png`) });
+  }
+  await page.setViewportSize({ width: 390, height: 844 });
 }
 
 async function taps(page: Page): Promise<number> {
@@ -399,12 +423,24 @@ test("kabul → kalite onayı → yerleştirme (görevli ve serbest) + yanlış 
   await expect(page.getByTestId("flow-step")).toHaveAttribute("data-step", "2");
   await page.evaluate("window.__taps = 0"); // uyarı onayları bütçe dışı sayılır (N-16: tarama hatası onayı ayrı satır)
 
-  // Doğru tarama: koli barkodu adet getirir (12).
-  await scan(page, BARCODE.koli);
+  // Doğru tarama: koli barkodu koli içi adedi (12, katsayıdan) getirir. Aynı tikte iki tarama TEK çözümdür: adet 24 olmaz, ikinci okuma bildirilir (T-287c).
+  const posts: string[] = [];
+  const onRequest = (r: Request): void => {
+    if (r.method() === "POST") posts.push(r.headers()["next-action"] ?? "none");
+  };
+  page.on("request", onRequest);
+  await scanTwice(page, BARCODE.koli);
   await expect(page.getByTestId("flow-step")).toHaveAttribute("data-step", "3");
   await expect(page.getByTestId("verified-item")).toHaveText(`Vida ${run}`);
   const qty = page.getByRole("textbox", { name: /^Gelen \(/ });
   await expect(qty).toHaveValue("12");
+  await expect(page.getByTestId("camera-dropped")).toBeVisible();
+  await expect(page.getByTestId("compound-qty")).toHaveText(`1 E2E koli · toplam 12 E2E adet`);
+  page.off("request", onRequest);
+  expect(posts.length, "iki tarama, iki sunucu eylemi: biri barkod çözümü, biri bileşik gösterim").toBe(2);
+  expect(new Set(posts).size, "aynı eylem iki kez çağrılmaz (tek çözüm)").toBe(2);
+  await page.getByTestId("camera-dropped").getByRole("button", { name: "Tamam" }).click();
+  await expect(page.getByTestId("camera-dropped")).toHaveCount(0);
   const q = await measure(page);
   log.qty = q;
   expect(q.primaries).toBe(1);
@@ -430,9 +466,11 @@ test("kabul → kalite onayı → yerleştirme (görevli ve serbest) + yanlış 
   await page.getByRole("button", { name: "Onayla" }).click();
   await expect(page.getByRole("textbox", { name: /^Gelen \(/ })).toHaveValue("12");
   await expect(page.getByText("Okuttuğun ürün:")).toBeVisible();
+  await expect(page.getByTestId("compound-qty")).toHaveText("1 E2E koli · toplam 12 E2E adet");
   // Aynı koli yeniden okutulunca adet eklenir ve kalan (18) ile sınırlanır: 12 + 12 → 18.
   await scan(page, BARCODE.koli);
   await expect(page.getByRole("textbox", { name: /^Gelen \(/ })).toHaveValue("18");
+  await expect(page.getByTestId("compound-qty")).toHaveText("1 E2E koli + 6 E2E adet · toplam 18 E2E adet");
   await page.getByRole("textbox", { name: /^Gelen \(/ }).fill("12");
   await page.getByRole("button", { name: "Hasarlı ekle" }).click();
   await page.getByRole("textbox", { name: "Hasarlı adet" }).fill("2");
@@ -547,13 +585,32 @@ test("kabul → kalite onayı → yerleştirme (görevli ve serbest) + yanlış 
   await expect(page.getByTestId("saved-summary")).toContainText("6 adet kabul edildi");
   await expect(page.getByText("Teslim tamam")).toBeVisible();
 
+  // ---- İki koli (T-287c): yeni teslim (48 beklenen); iki koli okutma = 24 adet = "2 koli" ------------------------------------------------
+  const receipt3 = randomUUID();
+  await db("INSERT INTO public.inbound_receipts (tenant_id, id, warehouse_id, number, supplier_ref, created_by, status) VALUES ($1,$2,$3,$4,'E2E-IRS-3',(SELECT user_id FROM public.tenant_memberships WHERE id = $5),'OPEN')", [
+    fx.tenantId, receipt3, fx.warehouseId, `KBL-E2E3-${run}`, fx.membershipId,
+  ]);
+  await db("INSERT INTO public.inbound_receipt_lines (tenant_id, id, receipt_id, line_no, item_id, unit_id, conversion_factor, expected_quantity) VALUES ($1, gen_random_uuid(), $2, 1, $3, $4, 1, 48)", [fx.tenantId, receipt3, fx.itemId, fx.unitId]);
+  await page.goto(`${base}/field/receive?receipt=${receipt3}`);
+  await page.waitForLoadState("networkidle");
+  await scan(page, BARCODE.koli);
+  await expect(page.getByRole("textbox", { name: /^Gelen \(/ })).toHaveValue("12");
+  await scan(page, BARCODE.koli);
+  await expect(page.getByRole("textbox", { name: /^Gelen \(/ })).toHaveValue("24");
+  await expect(page.getByTestId("compound-qty")).toHaveText("2 E2E koli · toplam 24 E2E adet");
+  if (mobile) await shootBoth(page, "kabul-2-koli");
+  await page.getByRole("button", { name: "Kabul et" }).click();
+  await expect(page.getByTestId("saved-summary")).toContainText("24 adet kabul edildi");
+  const lines3 = await db<{ received: string }>("SELECT received_quantity::text AS received FROM public.inbound_receipt_lines WHERE receipt_id = $1", [receipt3]);
+  expect(lines3[0]?.received, "sunucuya temel birimde 24 gitti (2 x 12)").toBe("24.000000");
+
   // ---- Serbest yerleştirme: kaynak → ürün → hedef → onay ----------------------------------------------------------------------------
   const free = await db<{ q: string }>(
     "SELECT COALESCE(sum(b.quantity),0)::text AS q FROM public.stock_balances b JOIN public.stock_dimensions s ON s.tenant_id=b.tenant_id AND s.id=b.stock_dimension_id WHERE s.tenant_id=$1 AND s.item_id=$2 AND s.location_id=$3 AND s.stock_status='AVAILABLE'",
     [fx.tenantId, fx.itemId, fx.kabulId],
   );
   const left = Number(free[0]?.q);
-  expect(left, "KABUL rafında yerleştirilecek mal kaldı").toBeGreaterThan(0);
+  expect(left, "KABUL rafında en az iki koli (24) yerleştirilecek mal var").toBeGreaterThanOrEqual(24);
   await page.goto(`${base}/field/putaway?wh=${fx.warehouseId}`);
   await expect(page.getByTestId("flow-step")).toHaveAttribute("data-step", "1");
   await page.waitForLoadState("networkidle");
@@ -565,18 +622,33 @@ test("kabul → kalite onayı → yerleştirme (görevli ve serbest) + yanlış 
   await scan(page, BARCODE.baska); // KABUL rafında bu üründen yok
   await expect(page.getByTestId("scan-alert")).toContainText("Bu rafta bu üründen yok.");
   await page.getByRole("button", { name: "Anladım, tekrar okut" }).click();
-  await scan(page, BARCODE.koli); // koli adedi (12) kaynaktaki yerleştirilebilir miktarla (kalan) sınırlanır
+  await scan(page, BARCODE.koli); // koli = koli içi adet (12), kaynaktaki yerleştirilebilir miktarla sınırlı
   await expect(page.getByTestId("flow-step")).toHaveAttribute("data-step", "3");
   await scan(page, CODES.raf2);
   await expect(page.getByTestId("flow-step")).toHaveAttribute("data-step", "4");
-  await expect(page.getByRole("textbox", { name: "Kaç adet?" })).toHaveValue(String(left));
+  const putQty = page.getByRole("textbox", { name: "Kaç adet?" });
+  await expect(putQty).toHaveValue("12");
+  await expect(page.getByTestId("compound-qty")).toHaveText("1 E2E koli · toplam 12 E2E adet");
+  // Onay ekranında aynı koli yeniden okutulunca adet eklenir: iki koli = 24 (T-287c).
+  await scan(page, BARCODE.koli);
+  await expect(putQty).toHaveValue("24");
+  await expect(page.getByTestId("compound-qty")).toHaveText("2 E2E koli · toplam 24 E2E adet");
+  if (mobile) await shootBoth(page, "yerlestirme-2-koli");
+  // Kaynaktaki miktarı aşan okutma kaynaktaki miktarla (left) sınırlanır; sunucu kuralı ayrıca aşılamaz.
+  for (let shown = 24; shown < left; ) {
+    await scan(page, BARCODE.koli);
+    shown = Math.min(left, shown + 12);
+    await expect(putQty).toHaveValue(String(shown));
+  }
+  await expect(putQty).toHaveValue(String(left));
+  await putQty.fill("24");
   await page.getByRole("button", { name: "Rafa koy" }).click();
   await expect(page.getByTestId("saved-summary")).toContainText(CODES.raf2);
   const onRaf2 = await db<{ q: string }>(
     "SELECT COALESCE(sum(b.quantity),0)::text AS q FROM public.stock_balances b JOIN public.stock_dimensions s ON s.tenant_id=b.tenant_id AND s.id=b.stock_dimension_id WHERE s.tenant_id=$1 AND s.item_id=$2 AND s.location_id=$3 AND s.stock_status='AVAILABLE'",
     [fx.tenantId, fx.itemId, fx.raf2Id],
   );
-  expect(Number(onRaf2[0]?.q)).toBe(left);
+  expect(Number(onRaf2[0]?.q), "yerleştirilen miktar temel birimde 2 x 12").toBe(24);
 
   writeFileSync(path.join(OUT, `metrics-flow-${testInfo.project.name}.json`), JSON.stringify(log, null, 2));
   await screens(page, testInfo.project.name);
@@ -814,9 +886,70 @@ test("kamera taraması: Barkodu okut kamerayı açar; kod TEK kez işlenir (çif
   await page.evaluate(`window.__fakeCode = ${JSON.stringify(BARCODE.koli)}`);
   await expect(page.getByTestId("camera-dropped")).toBeVisible();
   await expect(page.getByTestId("camera-dropped")).toContainText("okuma şu an kapalıydı");
+  await expect(page.getByTestId("camera-dropped").getByRole("button")).toHaveCount(0); // uyarı açıkken ikinci onay düğmesi yok
   await page.getByRole("button", { name: "Anladım, tekrar okut" }).click();
-  await page.getByRole("button", { name: "Tamam" }).click();
+  await expect(page.getByTestId("camera-dropped")).toHaveCount(0); // uyarı kapanınca bildirim kendiliğinden kalkar
   await expect(page.getByTestId("flow-step")).toHaveAttribute("data-step", "2"); // kod işlenmedi: yine tarama adımı
+});
+
+test("telefonda kamera ile iki koli: kabul ve yerleştirmede miktar/onay ekranından 'Bir koli daha okut' (açık eylem), tek birincil düğme", async ({ page }) => {
+  const fx = await seed();
+  await db("UPDATE public.tenant_settings SET receiving_qc_enabled = false WHERE tenant_id = $1", [fx.tenantId]);
+  const receipt3 = randomUUID();
+  await db("INSERT INTO public.inbound_receipts (tenant_id, id, warehouse_id, number, supplier_ref, created_by, status) VALUES ($1,$2,$3,$4,'E2E-IRS-C',(SELECT user_id FROM public.tenant_memberships WHERE id = $5),'OPEN')", [
+    fx.tenantId, receipt3, fx.warehouseId, `KBL-E2EC-${run}`, fx.membershipId,
+  ]);
+  await db("INSERT INTO public.inbound_receipt_lines (tenant_id, id, receipt_id, line_no, item_id, unit_id, conversion_factor, expected_quantity) VALUES ($1, gen_random_uuid(), $2, 1, $3, $4, 1, 48)", [fx.tenantId, receipt3, fx.itemId, fx.unitId]);
+  await page.addInitScript(`
+    window.__fakeCode = "";
+    navigator.mediaDevices.getUserMedia = async () => { const c = document.createElement("canvas"); c.width = 64; c.height = 64; c.getContext("2d").fillRect(0, 0, 64, 64); return c.captureStream(5); };
+  `);
+  await login(page, "Yönetici");
+  await page.addInitScript(`window.BarcodeDetector = class { async detect() { return window.__fakeCode ? [{ rawValue: window.__fakeCode }] : []; } };`);
+  await page.setViewportSize({ width: 390, height: 844 });
+  const qty = page.getByRole("textbox", { name: /^Gelen \(/ });
+  const readWithCamera = async (button: string): Promise<void> => {
+    await page.evaluate(`window.__fakeCode = ""`);
+    await page.getByRole("button", { name: button }).click();
+    await expect(page.getByTestId("camera-overlay")).toBeVisible();
+    await page.evaluate(`window.__fakeCode = ${JSON.stringify(BARCODE.koli)}`);
+    await expect(page.getByTestId("camera-overlay")).toHaveCount(0);
+    await page.evaluate(`window.__fakeCode = ""`);
+  };
+  // Kabul: ilk okuma 12, miktar ekranındaki ikincil düğme ikinci koliyi ekler (24); tek birincil düğme (Kabul et) kalır.
+  await page.goto(`/t/demo/field/receive?receipt=${receipt3}`);
+  await page.waitForLoadState("networkidle");
+  await readWithCamera("Barkodu okut");
+  await expect(qty).toHaveValue("12");
+  await expect(page.locator('[data-variant="primary"]:visible')).toHaveCount(1);
+  await readWithCamera("Bir koli daha okut");
+  await expect(qty).toHaveValue("24");
+  // Kiracıda birden çok kabul rafı olabilir: bu çalışmanın rafı seçilir (stok yerleştirmede bu raftan alınır).
+  if ((await page.getByTestId("rack-chips").count()) > 0) await page.getByTestId("rack-chips").getByRole("button", { name: `E2E ${CODES.kabul}` }).click();
+  await expect(page.getByTestId("compound-qty")).toHaveText("2 E2E koli · toplam 24 E2E adet");
+  const m = await measure(page);
+  expect(m.primaries).toBe(1);
+  expect(m.small, "48 px altı hedef").toEqual([]);
+  expect(m.scrollWidth).toBeLessThanOrEqual(m.clientWidth);
+  await page.getByRole("button", { name: "Kabul et" }).click();
+  await expect(page.getByTestId("saved-summary")).toContainText("24 adet kabul edildi");
+  // Yerleştirme (serbest): kaynak ve hedef klavye kamasıyla, ürün ve ikinci koli kamerayla.
+  await page.goto(`/t/demo/field/putaway?wh=${fx.warehouseId}`);
+  await page.waitForLoadState("networkidle");
+  await scan(page, CODES.kabul);
+  await expect(page.getByTestId("flow-step")).toHaveAttribute("data-step", "2");
+  await readWithCamera("Barkodu okut");
+  await expect(page.getByTestId("flow-step")).toHaveAttribute("data-step", "3");
+  await scan(page, CODES.raf1);
+  await expect(page.getByTestId("flow-step")).toHaveAttribute("data-step", "4");
+  const putQty = page.getByRole("textbox", { name: "Kaç adet?" });
+  await expect(putQty).toHaveValue("12");
+  await expect(page.locator('[data-variant="primary"]:visible')).toHaveCount(1);
+  await readWithCamera("Bir koli daha okut");
+  await expect(putQty).toHaveValue("24");
+  await expect(page.getByTestId("compound-qty")).toHaveText("2 E2E koli · toplam 24 E2E adet");
+  await page.getByRole("button", { name: "Rafa koy" }).click();
+  await expect(page.getByTestId("saved-summary")).toContainText(CODES.raf1);
 });
 
 test("yetkisiz kullanıcı: kilit ekranı gerekçe + Yardım çağır yolu; tek birincil", async ({ page }, testInfo) => {

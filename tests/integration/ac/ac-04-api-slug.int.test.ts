@@ -583,6 +583,7 @@ const RECEIPT_ACTIONS: Record<string, Call> = {
   resolveLocationScanAction: (slug) => receiptActions.resolveLocationScanAction!({ slug, warehouseId: B.warehouse, code: "A-01" }),
   availableAtLocationAction: (slug) => receiptActions.availableAtLocationAction!({ slug, locationId: bRcpt.kabul, itemId: fx.B.item }),
   itemUnitsAction: (slug) => receiptActions.itemUnitsAction!({ slug, itemId: fx.B.item }),
+  compoundQuantityAction: (slug) => receiptActions.compoundQuantityAction!({ slug, itemId: fx.B.item, baseQuantity: "5" }),
 };
 
 describe("Server Action'lar", () => {
