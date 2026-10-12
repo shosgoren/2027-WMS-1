@@ -389,10 +389,11 @@ test("kamera ile el terminali aynı anda: tek sunucu çağrısı, tek uyarı; ge
   page.on("request", (r) => {
     if (r.method() === "POST") posts.push(r.url());
   });
-  // Aynı turda: kamera kodu hazır (döngü sonraki karede okur) ve terminal tetiği ateşlenir; terminal önce akışa girer.
-  await page.evaluate(`window.__code = ${JSON.stringify(CODE)}`);
+  // Sıra testten denetlenir (zamanlamaya bağlı değil): terminal önce akışa girer ve uyarı açılır; kamera kodu ANCAK ondan sonra sunulur,
+  // yani 250 ms'lik kamera döngüsü ne kadar gecikirse gecikse okuma kapalıyken gelir ve düşürülür.
   await keystrokeScan(page, "0000000000000");
   await expect(page.getByTestId("scan-alert")).toBeVisible();
+  await page.evaluate(`window.__code = ${JSON.stringify(CODE)}`);
   await expect(page.getByTestId("camera-dropped")).toBeVisible();
   await page.waitForTimeout(1500);
   expect(posts.length, "iki kaynaktan tek akış çağrısı (çift işleme yok)").toBe(1);
