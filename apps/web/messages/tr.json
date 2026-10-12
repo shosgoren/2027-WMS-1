@@ -1502,7 +1502,7 @@
       "dropped": "Bir kod okundu ama işlenmedi: okuma şu an kapalıydı. Adet eklenmedi.",
       "ok": "Tamam",
       "retry": "Tekrar dene",
-      "notTaken": "Kod işlenmedi: okuma şu an kapalıydı.",
+      "notTaken": "Kod işlenmedi: okuma şu an kapalıydı. Saymak için Yeniden okut'a bas.",
       "rescan": "Yeniden okut",
       "torchOn": "Feneri aç",
       "torchOff": "Feneri kapat",

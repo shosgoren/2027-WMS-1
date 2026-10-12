@@ -1502,7 +1502,7 @@
       "dropped": "A code was read but not processed: reading was off at that moment. Nothing was added.",
       "ok": "OK",
       "retry": "Try again",
-      "notTaken": "Code not processed: scanning was off just now.",
+      "notTaken": "Code not processed: scanning was off just now. To count it, press Scan again.",
       "rescan": "Scan again",
       "torchOn": "Torch on",
       "torchOff": "Torch off",

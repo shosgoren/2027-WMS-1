@@ -656,7 +656,7 @@ export function useScanPrimary(camera: (code: string) => boolean, outcome: ScanO
   return { ready, press, overlay: cam ? <CameraOverlay onCode={onCode} onClose={close} onManual={onManual} resolvedName={ownName} /> : null };
 }
 
-/** Okuma kapalıyken gelen kod bildirimi (kaynaktan bağımsız: kamera ya da klavye kaması). Uyarı açıkken de görünür: en üstte (`top-2`, `z-[60]`); tam ekran uyarının başlığı simgenin altında olduğundan başlığı örtmez. */
+/** Okuma kapalıyken gelen kod bildirimi (kaynaktan bağımsız: kamera ya da klavye kaması). Uyarı açıkken de görünür: altta (`bottom-40`, `z-[60]`); dikey ekranda tam ekran uyarının başlığını ve Geri düğmesini örtmez (yatay: T-292b). */
 export function DroppedNotice({ show, alerting, onClose }: { show: boolean; alerting: boolean; onClose: () => void }) {
   const t = useTranslations("receiving");
   if (!show) return null;
