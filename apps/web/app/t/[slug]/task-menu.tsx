@@ -217,9 +217,6 @@ export async function TaskMenu({ slug, allowed, myTasks, now }: TaskMenuProps) {
     warehouses: { allowed: true, href: `${base}/warehouses` },
     // Saha kabulü (T-313): yazma `stock.post`; yetkisiz kullanıcıya bağlantı verilmez (kilit + gerekçe), FORBIDDEN ekranına götürmez.
     receive: { allowed: allowed.stockPost === true, href: `${base}/field/receive` },
-    // "Yanlış bir şey yaptım" (T-333): ters kayıt `reversal.create`; bayrak yalnızca gösterimdir (kilit + gerekçe), hedef sayfa/eylem yetkiyi sunucuda denetler.
-    // Çağıran sayfa `reversalCreate` geçirene kadar döşeme kilitli kalır (aynı kural `receive` için de geçerli).
-    undo: { allowed: allowed.reversalCreate === true, href: `${base}/field/undo` },
   };
   const ordered = orderTasks(TASKS);
   const real = ordered.filter((d) => hrefs[d.key] !== undefined);
