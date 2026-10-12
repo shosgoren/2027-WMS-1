@@ -1124,13 +1124,15 @@ test("T-292b: yatay telefonda kabul miktar ve yerleştirme onayı kaydırmasız 
 });
 
 /** Bir öğenin görünen satır sayısı (yükseklik / satır yüksekliği). */
-async function lines(loc: ReturnType<Page["getByTestId"]>): Promise<number> {
-  return loc.evaluate<number>(`(e) => {
+async function lines(page: Page, selector: string): Promise<number> {
+  return page.evaluate<number>(`(() => {
+    const e = document.querySelector(${JSON.stringify(selector)});
+    if (!e) return -1;
     const cs = getComputedStyle(e);
     const lh = parseFloat(cs.lineHeight);
     const h = e.getBoundingClientRect().height - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
     return Math.round(h / lh);
-  }`);
+  })()`);
 }
 
 /** İki kutunun kesişim alanı (px²). */
@@ -1227,7 +1229,7 @@ test("T-292b: 6 kabul rafında çipler sıkışmaz (48 px, ad kırılmaz), çubu
       const land = size.name === "844x390";
       const chips = page.getByTestId("rack-chips").getByRole("button");
       expect(await chips.count(), "6 ya da daha çok kabul rafı çipi").toBeGreaterThanOrEqual(6);
-      const dims = await chips.evaluateAll<Array<{ w: number; h: number; clipped: boolean; lines: number }>>(`(els) => els.map((e) => { const r = e.getBoundingClientRect(); return { w: Math.round(r.width), h: Math.round(r.height), clipped: e.scrollWidth > e.clientWidth, lines: (() => { const rg = document.createRange(); rg.selectNodeContents(e); return Math.round(rg.getBoundingClientRect().height / 24); })() }; })`);
+      const dims = await page.evaluate<Array<{ w: number; h: number; clipped: boolean; lines: number }>>(`[...document.querySelectorAll('[data-testid="rack-chips"] button')].map((e) => { const r = e.getBoundingClientRect(); const rg = document.createRange(); rg.selectNodeContents(e); return { w: Math.round(r.width), h: Math.round(r.height), clipped: e.scrollWidth > e.clientWidth, lines: Math.round(rg.getBoundingClientRect().height / 24) }; })`);
       const base = await stepFit(page);
       // Sınıra getir: 12 → 24 → 30 (üçüncü okuma sınıra takılır).
       await scan(page, BARCODE.koli);
@@ -1239,9 +1241,9 @@ test("T-292b: 6 kabul rafında çipler sıkışmaz (48 px, ad kırılmaz), çubu
       const atLimit = await stepFit(page);
       await page.getByRole("button", { name: "Hasarlı ekle" }).scrollIntoViewIfNeeded();
       const limBox = await limit.boundingBox();
-      const dmgShown = await page.getByRole("button", { name: "Hasarlı ekle" }).evaluate<boolean>(`(e) => { const r = e.getBoundingClientRect(); const at = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return r.bottom <= window.innerHeight && (at === e || e.contains(at)); }`);
-      const limShown = await limit.evaluate<boolean>(`(e) => { const r = e.getBoundingClientRect(); const at = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return r.bottom <= window.innerHeight && r.top >= 0 && (at === e || e.contains(at)); }`);
-      out[size.name] = { dims, base: { bar: base.barHeight, bodyOverflow: base.bodyOverflow }, atLimit: { bar: atLimit.barHeight, bodyOverflow: atLimit.bodyOverflow, shown: atLimit.shown }, limBox, dmgShown, limShown, limLines: await lines(limit) };
+      const dmgShown = await page.evaluate<boolean>(`(() => { const e = [...document.querySelectorAll('button')].find((b) => (b.textContent || '').trim() === 'Hasarlı ekle'); if (!e) return false; const r = e.getBoundingClientRect(); const at = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return r.bottom <= window.innerHeight && (at === e || e.contains(at)); })()`);
+      const limShown = await page.evaluate<boolean>(`(() => { const e = document.querySelector('[data-testid="qty-limit"]'); if (!e) return false; const r = e.getBoundingClientRect(); const at = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return r.bottom <= window.innerHeight && r.top >= 0 && (at === e || e.contains(at)); })()`);
+      out[size.name] = { dims, base: { bar: base.barHeight, bodyOverflow: base.bodyOverflow }, atLimit: { bar: atLimit.barHeight, bodyOverflow: atLimit.bodyOverflow, shown: atLimit.shown }, limBox, dmgShown, limShown, limLines: await lines(page, '[data-testid="qty-limit"]') };
       writeFileSync(path.join(T292B_OUT, `${T292B_TAG}-6raf-${testInfo.project.name}.json`), JSON.stringify(out, null, 2));
       await page.screenshot({ path: path.join(T292B_OUT, `${T292B_TAG}-${size.name}-6raf-sinir.png`) });
       dims.forEach((d, i) => {
@@ -1253,7 +1255,7 @@ test("T-292b: 6 kabul rafında çipler sıkışmaz (48 px, ad kırılmaz), çubu
       if (atLimit.barHeight !== base.barHeight) failures.push(`${size.name}: sınırda çubuk yüksekliği değişti`);
       if (!dmgShown) failures.push(`${size.name}: sınır iletisi açıkken "Hasarlı ekle" görünür alanda değil`);
       if (!limShown) failures.push(`${size.name}: sınır iletisi (neden) çubuğun altında / görünür değil`);
-      if (await lines(limit) > 3) failures.push(`${size.name}: sınır iletisi 3 satırdan uzun`);
+      if (await lines(page, '[data-testid="qty-limit"]') > 3) failures.push(`${size.name}: sınır iletisi 3 satırdan uzun`);
       for (const k of ["primary", "qtyInput", "rackLabel", "back"]) if (!atLimit.shown[k]) failures.push(`${size.name}: sınırda ${k} görünür değil`);
       // Gerçek dokunuş/tıklama ile doğru çip seçilir (komşu çip hatası yok): her çipi sırayla seç.
       const names = await chips.allTextContents();
@@ -1302,7 +1304,7 @@ test("T-292b: kaynak/kalan sınırını aşan kamera okuması 'Okundu' ve olumlu
     // Katmanda eylem, katmanın arkasındaki düğmeyi değil katmanın çıkışını söyler.
     await expect(page.getByTestId("camera-status")).toContainText("Kamerayı kapat.");
     await expect(page.getByTestId("camera-status")).not.toContainText("bas.");
-    expect(await lines(page.getByTestId("camera-status")), "katman iletisi ≤ 3 satır (K-05)").toBeLessThanOrEqual(3);
+    expect(await lines(page, '[data-testid="camera-status"]'), "katman iletisi ≤ 3 satır (K-05)").toBeLessThanOrEqual(3);
     await expect(page.getByTestId("camera-status")).not.toContainText("Okundu.");
     await expect(page.getByTestId("camera-accepted-value")).toHaveCount(0);
     const after = (await fb()).vibrate.slice(before);
@@ -1318,8 +1320,8 @@ test("T-292b: kaynak/kalan sınırını aşan kamera okuması 'Okundu' ve olumlu
     await expect(limit).toHaveAttribute("role", "alert");
     await expect(limit).toContainText(reason);
     await expect(limit).toContainText(action);
-    expect(await lines(limit), "sayfa iletisi ≤ 3 satır (K-05)").toBeLessThanOrEqual(3);
-    expect(await limit.evaluate<string>("(e) => getComputedStyle(e).fontSize"), "sayfa iletisi katmanla tutarlı boyutta (16 px)").toBe("16px");
+    expect(await lines(page, '[data-testid="qty-limit"]'), "sayfa iletisi ≤ 3 satır (K-05)").toBeLessThanOrEqual(3);
+    expect(await page.evaluate<string>(`getComputedStyle(document.querySelector('[data-testid="qty-limit"]')).fontSize`), "sayfa iletisi katmanla tutarlı boyutta (16 px)").toBe("16px");
     expect(await page.getByTestId("camera-status").count()).toBe(0);
   };
   // Kabul: kalan 30; 12 → 24 → (36 → 30).
@@ -1491,7 +1493,7 @@ test("T-292b: kamera katmanı açıkken çift okutma bildirimi katmanın içinde
     const notice = page.getByTestId("camera-dropped");
     await expect(notice).toHaveCount(1);
     await expect(overlay.getByTestId("camera-dropped")).toBeVisible();
-    const hidden = await notice.evaluate<boolean>(`(e) => { const r = e.getBoundingClientRect(); const at = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return !(at === e || e.contains(at)); }`);
+    const hidden = await page.evaluate<boolean>(`(() => { const e = document.querySelector('[data-testid="camera-dropped"]'); if (!e) return true; const r = e.getBoundingClientRect(); const at = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return !(at === e || e.contains(at)); })()`);
     expect(hidden, `${size.w}x${size.h}: bildirim katmanın arkasında kalmaz (örtülü değil)`).toBe(false);
     const box = await notice.boundingBox();
     const status = await page.getByTestId("camera-status").boundingBox();
