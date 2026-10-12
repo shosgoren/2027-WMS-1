@@ -108,6 +108,14 @@ export default async function SettingsPage({ params, searchParams }: { params: P
           <Button type="submit">{t("save")}</Button>
         </fieldset>
       </form>
+      {locked ? null : (
+        <Link
+          href={`${home}/import`}
+          className="inline-flex min-h-12 min-w-12 items-center justify-center self-start rounded-control border-2 border-border-strong bg-surface px-6 text-base font-bold text-ink focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus"
+        >
+          {t("importLink")}
+        </Link>
+      )}
       <div>
         <Link
           href={home}
