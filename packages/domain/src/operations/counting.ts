@@ -1,6 +1,6 @@
 // Kilitli sayım (T-309; 06 §Sayım ve §Sayım kilidi yaşam döngüsü, ADR-021 §3/§5/§6, 16 Senaryo A adım 11 ve Senaryo D adım 10, AC-13, AC-39).
 //
-// Komutlar ve izinler (A-132): `startCount`/`cancelCount` `document.approve`; `recordCount`/`submitCount` `document.create`; `approveCount` ve
+// Komutlar ve izinler (A-132): `startCount`/`cancelCount` `document.approve`; `recordCount`/`submitCount` `count.perform` (T-335a; COUNTER'ın `document.create`/`stock.view` izni yok); `approveCount` ve
 // `postCountAdjustment` `count_diff.approve`. Oturum durum makinesi 0017 tetikleyicisinde atlamasızdır: COUNTING → SUBMITTED → APPROVED → POSTED
 // (CANCELLED her açık durumdan); `approveCount` COUNTING'den çağrılırsa aynı transaction'da iki geçişi sırayla yapar.
 //
@@ -285,7 +285,7 @@ export async function startCount(params: StockDocCallParams, input: StartCountIn
 async function runSessionCommand<I>(
   params: StockDocCallParams,
   commandType: string,
-  permission: "document.create" | "count_diff.approve",
+  permission: "count.perform" | "count_diff.approve",
   hashInput: I,
   sessionId: string,
   body: (tx: AccessTx, ctx: StockCommandContext, s: SessionRow) => Promise<StockCommandApplied>,
@@ -326,7 +326,7 @@ export interface RecordCountInput {
 }
 
 /**
- * `document.create`: sayım değerlerini yazar (stok YAZMAZ; kilitli lokasyonda serbest). Aynı (lokasyon, ürün, durum) tekrar yazılırsa son değer geçerlidir.
+ * `count.perform`: sayım değerlerini yazar (stok YAZMAZ; kilitli lokasyonda serbest). Aynı (lokasyon, ürün, durum) tekrar yazılırsa son değer geçerlidir.
  * Oturum `COUNTING` ya da `SUBMITTED` olmalı (onaya kadar düzeltilebilir). Lokasyon oturuma kilitli olmalıdır; sayı ürün ölçeğine uymalıdır (`QUANTITY_SCALE`).
  * T-309a (I-06): istemci anahtarı zorunludur; aynı anahtar + aynı girdi tekrarı yeniden yazmaz ve ikinci audit yazmaz (sonradan düzeltilen değer ezilmez),
  * aynı anahtar + farklı girdi `IDEMPOTENCY_MISMATCH`. Kilit planı boştur (stok kilidi yok); oturum başlığı `plan` içinde kilitlenir.
@@ -349,7 +349,7 @@ export async function recordCount(params: StockDocCallParams, input: RecordCount
     sessionId,
     lines: parsed.map((p) => ({ locationId: p.locationId, itemId: p.itemId, stockStatus: p.stockStatus, countedQuantity: typeof p.raw === "string" ? p.raw : null })),
   };
-  await runSessionCommand(params, "stock.count.record", "document.create", hashInput, sessionId, async (tx, ctx, s): Promise<StockCommandApplied> => {
+  await runSessionCommand(params, "stock.count.record", "count.perform", hashInput, sessionId, async (tx, ctx, s): Promise<StockCommandApplied> => {
     const m = ctx.membership;
     if (s.status !== "COUNTING" && s.status !== "SUBMITTED") throw documentState();
     const locations = new Set(await sessionLocationIds(tx, m.tenantId, sessionId));
@@ -399,10 +399,10 @@ function assertAllCounted(lines: readonly LineRow[]): void {
   if (lines.some((l) => l.counted === null)) throw new AppError("VALIDATION_FAILED"); // A-309-3
 }
 
-/** `document.create`: COUNTING → SUBMITTED. Tüm satırlar sayılmış olmalı (A-309-3). Idempotent (T-309a): aynı anahtar tekrarı aynı sonuç, ikinci geçiş/audit yok. */
+/** `count.perform`: COUNTING → SUBMITTED. Tüm satırlar sayılmış olmalı (A-309-3). Idempotent (T-309a): aynı anahtar tekrarı aynı sonuç, ikinci geçiş/audit yok. */
 export async function submitCount(params: StockDocCallParams, input: CountTransitionInput): Promise<{ readonly status: "SUBMITTED" }> {
   const sessionId = uuidOf(input.sessionId);
-  await runSessionCommand(params, "stock.count.submit", "document.create", { sessionId }, sessionId, async (tx, ctx, s) => {
+  await runSessionCommand(params, "stock.count.submit", "count.perform", { sessionId }, sessionId, async (tx, ctx, s) => {
     if (s.status !== "COUNTING") throw documentState();
     assertAllCounted(await readLines(tx, ctx.tenantId, sessionId));
     const r = await tx.execute<{ id: string }>(

@@ -2,11 +2,11 @@
 // `DONE` yalnızca o komutun transaction'ında olur (`completeTask`, `createTasks` iç yardımcıdır: paket dışına açılmaz — `index.ts`).
 //
 // - Genel komutlar: `assignTask` (`document.approve`), `cancelTask` (`document.approve`), `claimTask` (kendine atama; izin görev türüne
-//   bağlıdır: PUTAWAY/PICK/REPUTAWAY `stock.post`, COUNT `document.create`; görev okunmadan tür bilinmediğinden sarmalayıcı izni
-//   `stock.view`, tür izni komut içinde `FORBIDDEN` ile denetlenir). Hepsi `runTenantCommand`; her yazma aynı transaction'da `appendAudit` (I-12).
+//   bağlıdır: PUTAWAY/PICK/REPUTAWAY `stock.post`, COUNT `count.perform`; görev okunmadan tür bilinmediğinden sarmalayıcı izni
+//   `tenant.access`, tür izni komut içinde `FORBIDDEN` ile denetlenir). Hepsi `runTenantCommand`; her yazma aynı transaction'da `appendAudit` (I-12).
 // - Eşzamanlılık: görev satırı `FOR UPDATE`; `expectedVersion` uyuşmazlığı `VERSION_CONFLICT`. Sonlanmış (DONE/CANCELLED) görev
 //   `VALIDATION_FAILED`/`DOCUMENT_STATE` (sürümden ÖNCE denetlenir: sonlanmışlık sürümden bağımsız kesindir).
-// - Sorgular (`stock.view`): `listMyTasks`, `listTasks`; keyset (created_at, id), OFFSET yok (I-14). Depo kapsamı açıksa (A-46) kapsam dışı
+// - Sorgular: `listMyTasks` `tenant.access`, `listTasks` `stock.view`; keyset (created_at, id), OFFSET yok (I-14). Depo kapsamı açıksa (A-46) kapsam dışı
 //   görev görünmez/NOT_FOUND. `tenant_id` yalnızca doğrulanmış üyelikten gelir; kimlik başka tenant'ınsa RLS + tenant süzgeci → NOT_FOUND.
 // - Görev durum geçişleri tek tabloda (`nextTaskStatus`); DB tetikleyicisi (0017 `warehouse_tasks_guard_state`) ikinci savunmadır.
 import { randomUUID } from "node:crypto";
@@ -40,7 +40,7 @@ export const TASK_KIND_PERMISSION: Readonly<Record<TaskKind, Permission>> = Obje
   PUTAWAY: "stock.post",
   PICK: "stock.post",
   REPUTAWAY: "stock.post",
-  COUNT: "document.create",
+  COUNT: "count.perform",
 });
 
 export type TaskEvent = "ASSIGN" | "CLAIM" | "CANCEL" | "COMPLETE";
@@ -322,7 +322,7 @@ export interface ClaimTaskInput {
 export async function claimTask(params: TaskCallParams, input: ClaimTaskInput): Promise<{ readonly version: number }> {
   const taskId = uuid(input.taskId);
   const expectedVersion = version(input.expectedVersion);
-  return runTenantCommand({ ...params, permission: "stock.view" }, async (tx, m) => {
+  return runTenantCommand({ ...params, permission: "tenant.access" }, async (tx, m) => {
     const task = await lockTask(tx, m, taskId);
     if (!hasPermission(m.roles, TASK_KIND_PERMISSION[task.kind])) throw new AppError("FORBIDDEN");
     const next = guardTransition(task, expectedVersion, "CLAIM");
@@ -420,7 +420,7 @@ export interface ListMyTasksInput {
 export async function listMyTasks(params: TaskCallParams, input: ListMyTasksInput = {}): Promise<TaskPage> {
   const limit = limitOf(input.limit);
   const cur = cursorOf(input.after);
-  return runTenantQuery({ ...params, permission: "stock.view" }, async (tx, m) => {
+  return runTenantQuery({ ...params, permission: "tenant.access" }, async (tx, m) => {
     const scope = await resolveWarehouseScope(tx, m);
     const kinds = TASK_KINDS.filter((k) => hasPermission(m.roles, TASK_KIND_PERMISSION[k]));
     const rows = await tx.execute<TaskDbRow>(

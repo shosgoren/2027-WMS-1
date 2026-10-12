@@ -13,6 +13,10 @@ import {
   runTenantQuery,
   type AccessPrincipal,
 } from "../../../packages/domain/src/identity/access.ts";
+import { listMyTasks, claimTask } from "../../../packages/domain/src/operations/tasks.ts";
+import { leaveTenant } from "../../../packages/domain/src/identity/memberships.ts";
+import { listMembers } from "../../../packages/domain/src/identity/member-queries.ts";
+import { listMyActionsTodayAt } from "../../../packages/domain/src/audit/today-impl.ts";
 import { PERMISSIONS, ROLE_KEYS, ROLE_PERMISSIONS, hasPermission, type Permission } from "../../../packages/domain/src/identity/permissions.ts";
 import { readIntEnv } from "../harness/env.ts";
 
@@ -93,15 +97,65 @@ describe("ROLE_PERMISSIONS (A-45)", () => {
   it("matches A-45 exactly", () => {
     expect([...ROLE_PERMISSIONS.TENANT_ADMIN].sort()).toEqual([...PERMISSIONS].sort());
     expect([...ROLE_PERMISSIONS.WAREHOUSE_MANAGER].sort()).toEqual(
-      ["stock.view", "document.create", "document.approve", "stock.post", "reversal.create", "count_diff.approve", "audit.view"].sort(),
+      [
+        "stock.view", "document.create", "document.approve", "stock.post", "reversal.create", "count_diff.approve", "audit.view",
+        "tenant.access", "catalog.view", "count.perform",
+      ].sort(),
     );
-    expect([...ROLE_PERMISSIONS.PICKER].sort()).toEqual(["stock.post", "stock.view"]);
-    expect([...ROLE_PERMISSIONS.COUNTER].sort()).toEqual(["document.create", "stock.view"]);
-    expect([...ROLE_PERMISSIONS.READ_ONLY]).toEqual(["stock.view"]);
+    expect([...ROLE_PERMISSIONS.PICKER].sort()).toEqual(["catalog.view", "stock.post", "stock.view", "tenant.access"]);
+    // T-335a: kör sayım güvencesi rol düzeyinde — COUNTER stok miktarı görmez ve belge oluşturmaz.
+    expect([...ROLE_PERMISSIONS.COUNTER].sort()).toEqual(["catalog.view", "count.perform", "tenant.access"]);
+    expect([...ROLE_PERMISSIONS.READ_ONLY].sort()).toEqual(["catalog.view", "stock.view", "tenant.access"]);
+    expect(hasPermission(["COUNTER"], "stock.view")).toBe(false);
+    expect(hasPermission(["COUNTER"], "document.create")).toBe(false);
+    expect(ROLE_KEYS.filter((r) => hasPermission([r], "count.perform")).sort()).toEqual(["COUNTER", "TENANT_ADMIN", "WAREHOUSE_MANAGER"]);
+    expect(ROLE_KEYS.filter((r) => hasPermission([r], "tenant.access"))).toEqual([...ROLE_KEYS]);
+    expect(ROLE_KEYS.filter((r) => hasPermission([r], "catalog.view"))).toEqual([...ROLE_KEYS]);
     for (const p of ["users.manage", "settings.manage", "takeout.request"] as Permission[]) {
       expect(ROLE_KEYS.filter((r) => hasPermission([r], p))).toEqual(["TENANT_ADMIN"]);
     }
     expect(hasPermission(["constructor"], "stock.view")).toBe(false);
+  });
+});
+
+describe("sayımcı rolü (T-335a)", () => {
+  it("COUNTER: tenant.access ve count.perform geçer; stock.view, document.create, stock.post FORBIDDEN", async () => {
+    const f = await fixture({ role: "COUNTER" });
+    const base = { db: app, principal: principal(f.user), tenantSlug: f.slug };
+    for (const p of ["tenant.access", "catalog.view", "count.perform"] as Permission[]) {
+      expect(await runTenantQuery({ ...base, permission: p }, async () => "ok")).toBe("ok");
+    }
+    for (const p of ["stock.view", "document.create", "stock.post"] as Permission[]) {
+      expect((await failure(runTenantQuery({ ...base, permission: p }, async () => "x"))).code).toBe("FORBIDDEN");
+    }
+  });
+
+  it("PICKER/READ_ONLY: count.perform FORBIDDEN, tenant.access geçer", async () => {
+    for (const role of ["PICKER", "READ_ONLY"]) {
+      const f = await fixture({ role });
+      const base = { db: app, principal: principal(f.user), tenantSlug: f.slug };
+      expect(await runTenantQuery({ ...base, permission: "tenant.access" }, async () => "ok")).toBe("ok");
+      expect((await failure(runTenantQuery({ ...base, permission: "count.perform" }, async () => "x"))).code).toBe("FORBIDDEN");
+    }
+  });
+
+  it("COUNTER: listMyTasks listeler, claimTask sarmalayıcıyı geçer (olmayan görev NOT_FOUND), listMembers görür, bugün yaptıklarım izin kapısını geçer", async () => {
+    const f = await fixture({ role: "COUNTER" });
+    const base = { db: app, principal: principal(f.user), tenantSlug: f.slug };
+    expect((await listMyTasks(base)).items).toEqual([]);
+    expect((await failure(claimTask(base, { taskId: randomUUID(), expectedVersion: 1 }))).code).toBe("NOT_FOUND");
+    expect((await listMembers(base, { demoEmailDomain: null })).length).toBe(1);
+    // fixture tenant_settings satırı içermez: izin kapısı geçilir, NOT_FOUND (FORBIDDEN değil) dönmesi yeterlidir.
+    expect((await failure(listMyActionsTodayAt(base, {}, new Date()))).code).toBe("NOT_FOUND");
+  });
+
+  it("COUNTER tenant'tan ayrılabilir", async () => {
+    const f = await fixture({ role: "COUNTER" });
+    const r = await leaveTenant({ db: app, principal: principal(f.user), tenantSlug: f.slug });
+    expect(typeof r.membershipId).toBe("string");
+    // leaveTenant audit_logs'a yazar (silinemez, append-only): bu tenant/kullanıcı temizliğe alınmaz (memberships testlerindeki gibi).
+    tenants.splice(tenants.indexOf(f.tenant), 1);
+    users.splice(users.indexOf(f.user), 1);
   });
 });
 
@@ -110,7 +164,7 @@ describe("runTenantCommand / runTenantQuery", () => {
     ["TENANT_ADMIN", "users.manage", "stock.view"],
     ["WAREHOUSE_MANAGER", "audit.view", "users.manage"],
     ["PICKER", "stock.post", "document.create"],
-    ["COUNTER", "document.create", "stock.post"],
+    ["COUNTER", "count.perform", "stock.view"],
     ["READ_ONLY", "stock.view", "stock.post"],
   ];
   for (const [role, allowed, denied] of cases) {
