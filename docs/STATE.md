@@ -1,6 +1,6 @@
 # STATE (≤80 satır — her görev sonunda Supervisor günceller)
 
-**Oturum kilidi:** session_01C59FRaUynaDdhNGZoRbKsY · 2026-10-12T13:44Z (zamanlanmış oturum: kilit 3 saatten yeniyse ve başka oturumunsa hiçbir şey yapmadan çık; değilse kendi kimliğinle yenile, her push'ta zamanı güncelle)
+**Oturum kilidi:** session_01C59FRaUynaDdhNGZoRbKsY · 2026-10-12T14:43Z (zamanlanmış oturum: kilit 3 saatten yeniyse ve başka oturumunsa hiçbir şey yapmadan çık; değilse kendi kimliğinle yenile, her push'ta zamanı güncelle)
 **Faz:** 2 stok çekirdeği TAMAM (main) + Faz 3A (int/faz3a: …T-222/253/256/258/259/270/271/272/273/274/304/305/306; tam test:int EXIT=0 82/82 1612+). Kullanıcı UTC+3: saat `date -u` ile. Kota kesintisinde sıfırlanma saatine send_later ZORUNLU.
 **Aktif görev:** T-292b dar 2. tur (tasarım K-05 + 3 MAJOR; istisna) · T-314 sipariş ekranları düzeltme turu (tasarım 16/28 + SR 0·2·6) · T-316 sayım ekranları düzeltme turu (tasarım R 23/32 + SR 0·1·6) · T-334b kör sayım kalan okuma yolları.
 **Son tamamlanan:** #92 paket 10 T-334 kör sayım okumaları (e9c0bcd; CI 15/15; Codex P1 thread açık → T-334b) · #91 paket 9 okuma katmanları (f86a872) · #90 paket 8 · önceki: JOURNAL
