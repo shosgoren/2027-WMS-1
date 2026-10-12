@@ -9,7 +9,7 @@ import { headers } from "next/headers";
 import { z } from "zod";
 import { getAppDb } from "@wms/db";
 import type { Permission } from "@wms/domain/identity/permissions";
-import { getItem, listItemConversions, listUnits, resolveBarcodeQuery } from "@wms/domain/catalog";
+import { formatCompound, getItem, listItemConversions, listUnits, resolveBarcodeQuery } from "@wms/domain/catalog";
 import { approveQuality, createInboundReceipt, getAvailableAtLocation, openInboundReceipt, putaway, receiveGoods } from "@wms/domain/operations";
 import { findLocationByCode } from "@wms/domain/warehouse";
 import { AppError } from "@wms/shared/errors";
@@ -57,6 +57,7 @@ const scanItemSchema = z.object({ slug: slugSchema, code: codeSchema }).strict()
 const scanLocationSchema = z.object({ slug: slugSchema, warehouseId: idSchema, code: codeSchema }).strict();
 const availableSchema = z.object({ slug: slugSchema, locationId: idSchema, itemId: idSchema }).strict();
 const unitsSchema = z.object({ slug: slugSchema, itemId: idSchema }).strict();
+const compoundSchema = z.object({ slug: slugSchema, itemId: idSchema, baseQuantity: decimalSchema }).strict();
 
 // 'use server' dosyası yalnızca async işlev dışa aktarır; bu yardımcı yereldir (davranışı actions.test.ts createReceiptAction üzerinden sınar).
 /** `open` komutunun anahtarı: oluşturma anahtarından belirlenimci türetilir (aynı anahtar → aynı açma anahtarı; tekrar oynatma güvenli). */
@@ -129,13 +130,42 @@ export async function putawayAction(raw: unknown) {
   })(raw);
 }
 
-/** Okutulan ürün barkodunu çözer (koli barkodu adet getirir, A-20). Bulunamaz → NOT_FOUND; belirsiz → VALIDATION_FAILED/BARCODE_AMBIGUOUS. */
+/**
+ * Okutulan ürün barkodunu çözer. Adet kaynağı `baseQuantity`'dir (temel birim; koli barkodunda koli içi adet, K-1) ve `unitFactor` ile birlikte
+ * domain'in `resolveBarcode` çıktısından AYNEN geçer; burada yeniden hesaplanmaz. `quantity` barkodun okutma başına miktarıdır (barkodun kendi birimi).
+ * Bulunamaz → NOT_FOUND; belirsiz → VALIDATION_FAILED/BARCODE_AMBIGUOUS.
+ */
 export async function resolveItemScanAction(raw: unknown) {
   return guardedAction({ schema: scanItemSchema }, async (input, ctx) => {
     const params = readContext(input.slug, ctx);
     const r = await resolveBarcodeQuery(params, input.code);
     const item = await getItem(params, { itemId: r.itemId });
-    return { itemId: r.itemId, itemCode: item.code, itemName: item.name, unitId: r.unitId, quantity: r.quantity };
+    return {
+      itemId: r.itemId,
+      itemCode: item.code,
+      itemName: item.name,
+      unitId: r.unitId,
+      quantity: r.quantity,
+      unitFactor: r.unitFactor,
+      baseQuantity: r.baseQuantity,
+      baseUnitId: item.baseUnitId,
+    };
+  })(raw);
+}
+
+/**
+ * Temel birim miktarının bileşik gösterimi ("2 koli + 3 adet"). Yalnız görüntü: biçimlendirme domain'deki `formatCompound`'dur, saklama temel birimdedir (K-3).
+ * `packed` ürünün dönüşümü (koli vb.) var mı; yoksa bileşik metin düz adetten farksızdır ve ekran göstermez.
+ */
+export async function compoundQuantityAction(raw: unknown) {
+  return guardedAction({ schema: compoundSchema }, async (input, ctx) => {
+    const params = readContext(input.slug, ctx);
+    const item = await getItem(params, { itemId: input.itemId });
+    const conv = await listItemConversions(params, input.itemId);
+    const base = (await listUnits(params)).find((u) => u.id === item.baseUnitId);
+    const baseName = base?.name || base?.code || "";
+    const units = [{ name: baseName, factor: "1" }, ...conv.map((c) => ({ name: c.unitName || c.unitCode, factor: c.factor }))];
+    return { text: formatCompound(input.baseQuantity, units), packed: conv.length > 0, baseName };
   })(raw);
 }
 

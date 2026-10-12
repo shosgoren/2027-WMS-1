@@ -136,6 +136,8 @@ interface Layout {
   buttonClipped: string[];
   buttonWrapped: string[];
   viewportShare: { height: number; width: number };
+  /** Yatay mı (genişlik > yükseklik): K-03 eşiği yöne göre ayrı denetlenir. */
+  landscape: boolean;
   statusFontPx: number;
   statusLines: number;
   statusRole: string | null;
@@ -166,7 +168,7 @@ async function layout(page: Page): Promise<Layout> {
     const fg = px(cs.color); const l1 = lum(fg), l2 = lum(bg); const contrast = (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
     const ix = Math.max(0, Math.min(sr.right, v.right) - Math.max(sr.left, v.left)); const iy = Math.max(0, Math.min(sr.bottom, v.bottom) - Math.max(sr.top, v.top));
     return { scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth, overlayScrollHeight: ov.scrollHeight, innerHeight: window.innerHeight,
-      small, buttons, buttonClipped: clipped, buttonWrapped: wrapped, viewportShare: { height: v.height / o.height, width: v.width / o.width },
+      small, buttons, buttonClipped: clipped, buttonWrapped: wrapped, viewportShare: { height: v.height / o.height, width: v.width / o.width }, landscape: window.innerWidth > window.innerHeight,
       statusFontPx: parseFloat(cs.fontSize), statusLines: Math.round((sr.height - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom)) / lh), statusRole: s.getAttribute('role'), statusOverlapPx2: ix * iy, contrast };
   })()`);
 }
@@ -176,7 +178,9 @@ function expectRubric(m: Layout, label: string, opts: { alert: boolean; maxButto
   expect(m.scrollWidth, `${label} K-01 yatay taşma`).toBeLessThanOrEqual(m.clientWidth);
   expect(m.overlayScrollHeight, `${label} K-01 dikey sığma`).toBeLessThanOrEqual(m.innerHeight);
   expect(m.small, `${label} K-02 48 px altı hedef`).toEqual([]);
-  expect(m.viewportShare.height >= 0.4 || m.viewportShare.width >= 0.4, `${label} K-03 pencere payı ${JSON.stringify(m.viewportShare)}`).toBe(true);
+  // K-03 (T-287c, sıkılaştırma): yöne göre AYRI eşik; dikeyde yükseklik, yatayda genişlik payı >= 0,4 (gevşek `||` kaldırıldı).
+  if (m.landscape) expect(m.viewportShare.width, `${label} K-03 yatay: pencere genişlik payı ${JSON.stringify(m.viewportShare)}`).toBeGreaterThanOrEqual(0.4);
+  else expect(m.viewportShare.height, `${label} K-03 dikey: pencere yükseklik payı ${JSON.stringify(m.viewportShare)}`).toBeGreaterThanOrEqual(0.4);
   expect(m.buttons, `${label} K-04 düğme sayısı`).toBeLessThanOrEqual(opts.maxButtons ?? 4);
   expect(m.buttonClipped, `${label} K-04 kesilen düğme etiketi`).toEqual([]);
   expect(m.buttonWrapped, `${label} K-04 tek satır olmayan düğme etiketi`).toEqual([]);
@@ -394,6 +398,11 @@ test("kamera ile el terminali aynı anda: tek sunucu çağrısı, tek uyarı; ge
   expect(posts.length, "iki kaynaktan tek akış çağrısı (çift işleme yok)").toBe(1);
   await expect(page.getByTestId("scan-alert")).toHaveCount(1);
   await expect(page.getByTestId("last-scan-code")).toContainText("0000000000000");
+  // T-287c (1): akışa iletilmeyen (düşürülen) kamera okuması "Okundu" ekranı ve olumlu bip üretmez; kamera açık kalır, ürün adı bu okumaya bağlanmaz.
+  await expect(overlay).not.toHaveAttribute("data-phase", "accepted");
+  await expect(page.getByTestId("camera-accepted-value")).toHaveCount(0);
+  await expect(page.getByTestId("camera-status")).not.toContainText("Okundu.");
+  expect(await page.evaluate<number>("window.__fb.tones"), "düşürülen okumada olumlu bip çalmaz").toBe(0);
 });
 
 test("izin reddi: Tekrar dene izin hâlâ kapalıyken rehbere döner (tekrarlı ve çift tık), izin gelince kamerayı açar", async ({ page }, testInfo) => {

@@ -1353,7 +1353,9 @@
       "finish_first": "Önce açık ürünü bitir.",
       "finish_firstAction": "Aynı ürünü okut ya da geri dön.",
       "no_stock_here": "Bu rafta bu üründen yok.",
-      "no_stock_hereAction": "Doğru rafı okut."
+      "no_stock_hereAction": "Doğru rafı okut.",
+      "qty_fractional": "Bu barkodun adedi tam sayı değil.",
+      "qty_fractionalAction": "Bu ekran yalnız tam adetle çalışır. Adedi masaüstünden gir."
     },
     "line": {
       "complete": "Tamam",
@@ -1427,6 +1429,8 @@
       "qtyTitle": "Kaç adet geldi?",
       "qtyInstruction": "Sayıyı kontrol et, gerekirse değiştir.",
       "verify": "Okuttuğun ürün:",
+      "compound": "{text} · toplam {total} {unit}",
+      "compoundFailed": "Koli gösterimi alınamadı. Adet doğru; devam edebilirsin.",
       "received": "Gelen ({unit})",
       "damagedLabel": "Hasarlı adet",
       "hasDamaged": "Hasarlı ekle",

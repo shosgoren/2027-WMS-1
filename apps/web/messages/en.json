@@ -1353,7 +1353,9 @@
       "finish_first": "Finish the open item first.",
       "finish_firstAction": "Scan the same item or go back.",
       "no_stock_here": "There is none of this item on this rack.",
-      "no_stock_hereAction": "Scan the right rack."
+      "no_stock_hereAction": "Scan the right rack.",
+      "qty_fractional": "This barcode's quantity is not a whole number.",
+      "qty_fractionalAction": "This screen only works with whole units. Enter the quantity on the desktop."
     },
     "line": {
       "complete": "Done",
@@ -1427,6 +1429,8 @@
       "qtyTitle": "How many arrived?",
       "qtyInstruction": "Check the number and change it if needed.",
       "verify": "Item you scanned:",
+      "compound": "{text} · total {total} {unit}",
+      "compoundFailed": "Could not show the case breakdown. The count is correct; you can continue.",
       "received": "Arrived ({unit})",
       "damagedLabel": "Damaged count",
       "hasDamaged": "Add damaged",

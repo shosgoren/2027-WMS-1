@@ -12,12 +12,24 @@ const openInboundReceipt = vi.hoisted(() => vi.fn());
 const approveQuality = vi.hoisted(() => vi.fn());
 const getAvailableAtLocation = vi.hoisted(() => vi.fn());
 const getPrincipal = vi.hoisted(() => vi.fn());
+const getItem = vi.hoisted(() => vi.fn());
+const listItemConversions = vi.hoisted(() => vi.fn());
+const listUnits = vi.hoisted(() => vi.fn());
+const resolveBarcodeQuery = vi.hoisted(() => vi.fn());
 
 vi.mock("next/headers", () => ({ headers: () => Promise.resolve(new Headers({ origin: "https://app.example.test", "fly-client-ip": "203.0.113.7" })) }));
 vi.mock("../../../../lib/auth-service.ts", () => ({ getAuthService: () => ({ getPrincipal }) }));
 vi.mock("@wms/db", () => ({ getAppDb: () => ({}) }));
 vi.mock("@wms/domain/operations", () => ({ receiveGoods, putaway, createInboundReceipt, openInboundReceipt, approveQuality, getAvailableAtLocation }));
-vi.mock("@wms/domain/catalog", () => ({ getItem: vi.fn(), listItemConversions: vi.fn(), listUnits: vi.fn(), resolveBarcodeQuery: vi.fn(), searchItems: vi.fn() }));
+vi.mock("@wms/domain/catalog", async () => ({
+  getItem,
+  listItemConversions,
+  listUnits,
+  resolveBarcodeQuery,
+  searchItems: vi.fn(),
+  // Gösterim biçimlendirmesi sahtelenmez: gerçek `formatCompound` (saf fonksiyon) çalışır.
+  formatCompound: (await vi.importActual<typeof import("@wms/domain/catalog/quantity")>("@wms/domain/catalog/quantity")).formatCompound,
+}));
 vi.mock("@wms/domain/warehouse", () => ({ findLocationByCode: vi.fn() }));
 vi.mock("../../../../lib/rate-limit.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../../lib/rate-limit.ts")>()),
@@ -26,7 +38,8 @@ vi.mock("../../../../lib/rate-limit.ts", async (importOriginal) => ({
 vi.mock("next-intl/server", () => ({ getTranslations: () => Promise.resolve((key: string) => key) }));
 vi.mock("@wms/domain/identity/access", () => ({ runTenantQuery: () => Promise.resolve("t1") }));
 
-import { approveQualityAction, createReceiptAction, putawayAction, receiveGoodsAction } from "./actions.ts";
+import { approveQualityAction, compoundQuantityAction, createReceiptAction, putawayAction, receiveGoodsAction, resolveItemScanAction } from "./actions.ts";
+import { scanStepOf } from "../field/receive/receive-flow.tsx";
 import { createKeyHolder, errorKeyOf, intOf, scanMismatch, submitWithKey, type ActionResult } from "./receipt-form.tsx";
 
 const RID = "11111111-1111-4111-8111-111111111111";
@@ -174,6 +187,49 @@ describe("domain çağrısı: anahtar ve miktar dizgileri olduğu gibi gider (I-
     approveQuality.mockResolvedValue({ replayed: false });
     expect(await approveQualityAction({ slug: "acme", clientKey: KEY, receiptId: RID })).toEqual({ ok: true, data: { replayed: false } });
     expect(approveQuality.mock.calls[0]?.[1]).toMatchObject({ receiptId: RID });
+  });
+});
+
+const UNIT_ADET = "77777777-7777-4777-8777-777777777777";
+const UNIT_KOLI = "88888888-8888-4888-8888-888888888888";
+
+describe("koli okutma (T-287c; K-1/K-3, I-09): adet temel birimde sunucudan gelir", () => {
+  it("resolveItemScanAction: baseQuantity, unitFactor ve baseUnitId domain çıktısından AYNEN geçer (istemci çarpmaz)", async () => {
+    resolveBarcodeQuery.mockResolvedValue({ itemId: ITEM, unitId: UNIT_KOLI, quantity: "1", unitFactor: "12.000000", baseQuantity: "12.000000" });
+    getItem.mockResolvedValue({ code: "VIDA", name: "Vida", baseUnitId: UNIT_ADET });
+    const res = await resolveItemScanAction({ slug: "acme", code: "869001" });
+    expect(res).toEqual({
+      ok: true,
+      data: { itemId: ITEM, itemCode: "VIDA", itemName: "Vida", unitId: UNIT_KOLI, quantity: "1", unitFactor: "12.000000", baseQuantity: "12.000000", baseUnitId: UNIT_ADET },
+    });
+  });
+
+  it("compoundQuantityAction: temel birim miktarı 'N koli + K adet' bileşik metne çevrilir; dönüşümsüz üründe packed=false", async () => {
+    getItem.mockResolvedValue({ baseUnitId: UNIT_ADET });
+    listUnits.mockResolvedValue([{ id: UNIT_ADET, code: "ADET", name: "adet" }]);
+    listItemConversions.mockResolvedValue([{ unitId: UNIT_KOLI, unitCode: "KOLI", unitName: "koli", factor: "12.000000" }]);
+    expect(await compoundQuantityAction({ slug: "acme", itemId: ITEM, baseQuantity: "27" })).toEqual({ ok: true, data: { text: "2 koli + 3 adet", packed: true, baseName: "adet" } });
+    expect(await compoundQuantityAction({ slug: "acme", itemId: ITEM, baseQuantity: "24" })).toMatchObject({ ok: true, data: { text: "2 koli" } });
+    listItemConversions.mockResolvedValue([]);
+    expect(await compoundQuantityAction({ slug: "acme", itemId: ITEM, baseQuantity: "5" })).toEqual({ ok: true, data: { text: "5 adet", packed: false, baseName: "adet" } });
+  });
+
+  it("compoundQuantityAction: geçersiz miktar sunucu hata koduyla döner (yutulmaz)", async () => {
+    getItem.mockResolvedValue({ baseUnitId: UNIT_ADET });
+    listUnits.mockResolvedValue([{ id: UNIT_ADET, code: "ADET", name: "adet" }]);
+    listItemConversions.mockResolvedValue([]);
+    const res = await compoundQuantityAction({ slug: "acme", itemId: ITEM, baseQuantity: "-1" });
+    expect(res).toMatchObject({ ok: false, error: { code: "VALIDATION_FAILED" } });
+  });
+
+  it("scanStepOf: temel birimde koli = koli içi adet; iki okutma iki koli; koli satırında koli = 1; kesirli null; bilinmeyen birim 1", () => {
+    const koli = { unitId: UNIT_KOLI, quantity: "1", baseQuantity: "12.000000", baseUnitId: UNIT_ADET };
+    expect(scanStepOf(koli, UNIT_ADET)).toBe(12);
+    expect((scanStepOf(koli, UNIT_ADET) ?? 0) * 2).toBe(24);
+    expect(scanStepOf(koli, UNIT_KOLI)).toBe(1);
+    expect(scanStepOf({ ...koli, baseQuantity: "0.5" }, UNIT_ADET)).toBeNull();
+    expect(scanStepOf({ ...koli, unitId: UNIT_ADET, quantity: "12", baseQuantity: "12" }, UNIT_ADET)).toBe(12);
+    expect(scanStepOf(koli, "99999999-9999-4999-8999-999999999999")).toBe(1);
   });
 });
 

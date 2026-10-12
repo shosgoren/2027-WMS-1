@@ -4,7 +4,7 @@
 // bu dosya yalnızca girdi toplar, sunucu hatasını (kod + sonraki eylem) gösterir. Bu dosyadaki ortak saha parçaları `putaway-flow.tsx` ile paylaşılır.
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useId, useRef, useState, useTransition } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, useTransition } from "react";
 import { useTranslations } from "next-intl";
 import { Banner, ChevronDown, CircleAlert, CircleCheck, PackagePlus, ScanField, ScanLine } from "@wms/ui";
 import { ScannerService, gateScan, type ScanSource, type ScannerSource } from "../../../../../lib/scanner/scanner-core.ts";
@@ -12,7 +12,7 @@ import { createKeystrokeSource } from "../../../../../lib/scanner/keystroke-sour
 import { cameraFeedback, classifyCameraError, createFrameDecoder, iosShareLocation, openCamera, platformOf, startScanLoop } from "../../../../../lib/scanner/camera-source.ts";
 import type { CameraFailure, CameraSession, FrameDecoder, RejectReason } from "../../../../../lib/scanner/camera-source.ts";
 import { ErrorNotice, LineStatus, errorKeyOf, intOf, scanMismatch, submitWithKey, useKeyHolder, type ErrorInfo, type ReceiptDetail, type ReceiptLineView } from "../../receipts/receipt-form.tsx";
-import { receiveGoodsAction, resolveItemScanAction } from "../../receipts/actions.ts";
+import { compoundQuantityAction, receiveGoodsAction, resolveItemScanAction } from "../../receipts/actions.ts";
 
 const FOCUS = "focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus";
 /** Saha alt gezinme çubuğunun yüksekliği (field/layout.tsx: min-h-14 + py-2 + border-t-2 = 74 px); sabit birincil çubuk hemen üstünde durur. */
@@ -205,17 +205,36 @@ export function QtyStepper({ label, value, min, max, onChange }: { label: string
   );
 }
 
+/** Durum değeri + eşzamanlı okunabilir ref: yazım ref'e HEMEN, görüntüye yeniden çizimle düşer (aynı tikteki ardışık okumalar eski kapanıştan okumaz). */
+export function useStateRef<T>(initial: T): readonly [T, (v: T) => void, { readonly current: T }] {
+  const [value, setValue] = useState(initial);
+  const ref = useRef(initial);
+  const set = useCallback((v: T): void => {
+    ref.current = v;
+    setValue(v);
+  }, []);
+  return [value, set, ref];
+}
+
 /**
  * Tarama kaynakları: klavye kaması (DataWedge) ve kamera servis arkasındadır (ADR-010); etkin ekran tek dinleyicidir. `enabled=false` iken tarama iletilmez.
- * `camera(code)` kamera okumasını aynı servis yoluyla (`source: "camera"`) iletir.
+ * `busyRef` işlem sürerken eşzamanlı ayarlanan bayraktır (yeniden çizim beklemez): aynı tikte gelen ikinci okuma çözülmez, bildirilir.
+ * `camera(code)` kamera okumasını aynı servis yoluyla (`source: "camera"`) iletir ve İLETİLİP İLETİLMEDİĞİNİ döndürür (düşürülen okuma `false`).
  */
-export function useScanner(handler: (value: string, source: ScanSource) => void, enabled: boolean): { service: ScannerService | null; camera: (code: string) => void; dropped: boolean; clearDropped: () => void } {
+export function useScanner(
+  handler: (value: string, source: ScanSource) => void,
+  enabled: boolean,
+  busyRef?: { readonly current: boolean },
+): { service: ScannerService | null; camera: (code: string) => boolean; dropped: boolean; clearDropped: () => void } {
   const [service, setService] = useState<ScannerService | null>(null);
   const [dropped, setDropped] = useState(false);
   const enabledRef = useRef(enabled);
-  enabledRef.current = enabled;
   const ref = useRef(handler);
-  ref.current = handler;
+  // Atamalar render sırasında değil, yerleşimde (commit) yapılır: iptal edilen/yarım çizimler ref'i kirletmez (T-286 delta SR MINOR-3).
+  useLayoutEffect(() => {
+    enabledRef.current = enabled;
+    ref.current = handler;
+  });
   const cameraEmit = useRef<((v: string) => void) | null>(null);
   useEffect(() => {
     const s = new ScannerService();
@@ -238,20 +257,25 @@ export function useScanner(handler: (value: string, source: ScanSource) => void,
     if (service === null) return undefined;
     return service.onScan(
       gateScan(
-        () => enabledRef.current,
+        () => enabledRef.current && busyRef?.current !== true,
         (v, src) => ref.current(v, src),
         () => setDropped(true),
       ),
     );
-  }, [service]);
-  // Okuma kapalıyken (işlem sürüyor ya da uyarı açık) gelen kamera kodu SESSİZCE düşmez: kullanıcıya bildirilir (T-313 güvenlik MINOR).
-  const camera = useCallback((code: string) => {
-    if (!enabledRef.current) {
-      setDropped(true);
-      return;
-    }
-    cameraEmit.current?.(code);
-  }, []);
+  }, [service, busyRef]);
+  // Okuma kapalıyken (işlem sürüyor ya da uyarı açık) gelen kamera kodu SESSİZCE düşmez: kullanıcıya bildirilir (T-313 güvenlik MINOR) ve çağırana `false` döner.
+  const camera = useCallback(
+    (code: string): boolean => {
+      const emit = cameraEmit.current;
+      if (!enabledRef.current || busyRef?.current === true || emit === null) {
+        setDropped(true);
+        return false;
+      }
+      emit(code);
+      return true;
+    },
+    [busyRef],
+  );
   const clearDropped = useCallback(() => setDropped(false), []);
   return { service, camera, dropped, clearDropped };
 }
@@ -270,17 +294,21 @@ const cameraPossible = (): boolean => typeof window !== "undefined" && typeof na
 const ACCEPT_MAX_MS = 10_000;
 const ACCEPT_IDLE_MS = 1500;
 const ACCEPT_AFTER_RESOLVE_MS = 700;
+/** Akışa iletilmeyen (düşürülen) kamera okumasından sonra yeniden okuma gecikmesi (ms). */
+const DROP_RETRY_MS = 800;
 
 /**
  * Kamera katmanı (T-286): arka kamera + çözücü (yerleşik API ya da uygulama içi WASM, `camera-source.ts`). Yanlış okuma SATIR İÇİ gösterilir, katman ve kamera açık kalır;
  * doğru okuma yeşil onay + okunan kod (çözülmüşse ürün adı) + kısa bip + titreşimle bildirilir. Hata mesajı neden + sonraki eylemi söyler; "Elle gir" her durumda görünür
  * (kamera yoksa/izin yoksa birincil). Klavye kaması (el terminali) katman açıkken de çalışır: katman klavye kaynağını engellemez.
  */
-export function CameraOverlay({ onCode, onClose, onManual, resolvedName }: { onCode: (code: string) => void; onClose: () => void; onManual: () => void; resolvedName?: string | undefined }) {
+export function CameraOverlay({ onCode, onClose, onManual, resolvedName }: { onCode: (code: string) => boolean; onClose: () => void; onManual: () => void; resolvedName?: string | undefined }) {
   const t = useTranslations("receiving");
   const video = useRef<HTMLVideoElement>(null);
   const onCodeRef = useRef(onCode);
-  onCodeRef.current = onCode;
+  useLayoutEffect(() => {
+    onCodeRef.current = onCode;
+  });
   const session = useRef<CameraSession | null>(null);
   const [state, setState] = useState<CamPhase>({ phase: "starting" });
   const [attempt, setAttempt] = useState(0);
@@ -289,6 +317,7 @@ export function CameraOverlay({ onCode, onClose, onManual, resolvedName }: { onC
   useEffect(() => {
     let cancelled = false;
     let stopLoop: (() => void) | null = null;
+    let retry: ReturnType<typeof setTimeout> | null = null;
     let cam: CameraSession | null = null;
     setState({ phase: "starting" });
     setTorch({ supported: false, on: false, failed: false });
@@ -330,25 +359,34 @@ export function CameraOverlay({ onCode, onClose, onManual, resolvedName }: { onC
       setDecoderKind(decoder.kind);
       setState({ phase: "scanning" });
       const opened = cam;
-      stopLoop = startScanLoop({
-        decoder,
-        video: v,
-        onRejected: (reason) => {
-          cameraFeedback("bad");
-          setState({ phase: "rejected", reason });
-        },
-        onAccepted: (value) => {
-          // Tek kabul: döngü kendini durdurdu; akış da hemen kapanır (aynı kod ikinci kez gönderilemez). Katmanı kapatma kararı üsttedir (ürün çözülünce).
-          v.pause(); // son kare pencerede kalır (okunan barkod görünür)
-          opened.stop();
-          cameraFeedback("ok");
-          setState({ phase: "accepted", value });
-          onCodeRef.current(value);
-        },
-      });
+      const begin = (): void => {
+        stopLoop = startScanLoop({
+          decoder,
+          video: v,
+          onRejected: (reason) => {
+            cameraFeedback("bad");
+            setState({ phase: "rejected", reason });
+          },
+          onAccepted: (value) => {
+            // Okuma akışa İLETİLMEDİYSE (işlem sürüyor/uyarı açık) kabul edilmiş sayılmaz: "Okundu" ekranı ve olumlu bip yok, akış açık kalır, kısa süre sonra yeniden okunur
+            // (kullanıcıya düşme bildirimi üsttedir). Yeniden okuma döngüsü kamera akışını yeniden açmaz.
+            if (!onCodeRef.current(value)) {
+              retry = setTimeout(begin, DROP_RETRY_MS);
+              return;
+            }
+            // Tek kabul: döngü kendini durdurdu; akış da hemen kapanır (aynı kod ikinci kez gönderilemez). Katmanı kapatma kararı üsttedir (ürün çözülünce).
+            v.pause(); // son kare pencerede kalır (okunan barkod görünür)
+            opened.stop();
+            cameraFeedback("ok");
+            setState({ phase: "accepted", value });
+          },
+        });
+      };
+      begin();
     })();
     return () => {
       cancelled = true;
+      if (retry !== null) clearTimeout(retry);
       if (stopLoop !== null) stopLoop();
       cam?.stop();
       session.current = null;
@@ -542,6 +580,8 @@ export function ScanPanel({ service, prompt, last, lastName, ready, hue }: { ser
 export interface ScanOutcome {
   readonly busy: boolean;
   readonly name: string | undefined;
+  /** `name`in ait olduğu okuma (son okunan kod): kamera katmanı adı yalnız KENDİ okumasının kodu bununla eşleşirse gösterir. */
+  readonly code: string;
   readonly alerting: boolean;
 }
 
@@ -549,21 +589,23 @@ export interface ScanOutcome {
  * Tarama adımının birincil düğmesi: kamera yolu kurulabiliyorsa kamera katmanını açar (telefon; T-286); kurulamıyorsa okuyucuyu (el terminali tetiği) hazırlar.
  * El terminali (klavye kaması) kamera katmanı açıkken de açıkken de çalışır: kaynak servistedir, katmana bağlı değildir.
  */
-export function useScanPrimary(camera: (code: string) => void, outcome: ScanOutcome): { ready: boolean; press: () => void; overlay: React.ReactNode } {
+export function useScanPrimary(camera: (code: string) => boolean, outcome: ScanOutcome): { ready: boolean; press: () => void; overlay: React.ReactNode } {
   const [cam, setCam] = useState(false);
   const [ready, setReady] = useState(false);
-  const [accepted, setAccepted] = useState(false);
+  // Katmanın kabul ettiği okuma (kod); yalnız akışa İLETİLEN okuma kabul sayılır (düşürülen okuma "Okundu" göstermez).
+  const [accepted, setAccepted] = useState<string | null>(null);
   const wantManual = useRef(false);
   const onCode = useCallback(
-    (code: string) => {
-      setAccepted(true);
-      camera(code);
+    (code: string): boolean => {
+      const forwarded = camera(code);
+      if (forwarded) setAccepted(code);
+      return forwarded;
     },
     [camera],
   );
   const close = useCallback(() => {
     setCam(false);
-    setAccepted(false);
+    setAccepted(null);
   }, []);
   const onManual = useCallback(() => {
     wantManual.current = true;
@@ -571,13 +613,15 @@ export function useScanPrimary(camera: (code: string) => void, outcome: ScanOutc
   }, [close]);
   // Okuma kabul edildi: çözüm sürerken (busy) katman açık kalır (üst sınır ACCEPT_MAX_MS); çözülünce (ad geldi ya da hata uyarısı açıldı) kısa süre sonra,
   // hiçbir şey olmuyorsa (okuma kapalı vb.) ACCEPT_IDLE_MS sonra kapanır.
+  // Ad yalnız katmanın KENDİ okumasına bağlıdır (başka kaynaktan gelen önceki/sonraki okumanın adı sayılmaz).
+  const ownName = accepted !== null && outcome.code === accepted ? outcome.name : undefined;
   useEffect(() => {
-    if (!accepted) return undefined;
-    const resolved = outcome.name !== undefined || outcome.alerting;
+    if (accepted === null) return undefined;
+    const resolved = ownName !== undefined || outcome.alerting;
     const ms = outcome.busy ? ACCEPT_MAX_MS : resolved ? ACCEPT_AFTER_RESOLVE_MS : ACCEPT_IDLE_MS;
     const timer = setTimeout(close, ms);
     return () => clearTimeout(timer);
-  }, [accepted, outcome.busy, outcome.name, outcome.alerting, close]);
+  }, [accepted, outcome.busy, ownName, outcome.alerting, close]);
   // "Elle gir": katman kapanınca tarama panelindeki ScanField elle giriş kipine geçer (aynı bileşen, ikinci bir giriş yolu yok).
   useEffect(() => {
     if (cam || !wantManual.current) return;
@@ -591,7 +635,7 @@ export function useScanPrimary(camera: (code: string) => void, outcome: ScanOutc
       if (typeof navigator !== "undefined" && typeof navigator.vibrate === "function") navigator.vibrate(30);
     }
   };
-  return { ready, press, overlay: cam ? <CameraOverlay onCode={onCode} onClose={close} onManual={onManual} resolvedName={accepted ? outcome.name : undefined} /> : null };
+  return { ready, press, overlay: cam ? <CameraOverlay onCode={onCode} onClose={close} onManual={onManual} resolvedName={ownName} /> : null };
 }
 
 /** Okuma kapalıyken gelen kod bildirimi (kaynaktan bağımsız: kamera ya da klavye kaması). Uyarı açıkken de görünür: en üstte (`top-2`, `z-[60]`); tam ekran uyarının başlığı simgenin altında olduğundan başlığı örtmez. */
@@ -608,6 +652,70 @@ export function DroppedNotice({ show, onClose }: { show: boolean; onClose: () =>
   );
 }
 
+/** Okuma çözümünün adet alanları (`resolveItemScanAction` çıktısı; sunucuda `resolveBarcode`'dan gelir, burada yeniden hesaplanmaz). */
+export interface ScanQty {
+  readonly unitId: string;
+  readonly quantity: string;
+  readonly baseQuantity: string;
+  readonly baseUnitId: string;
+}
+const sameId = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
+const wholeOf = (s: string): number | null => {
+  const n = intOf(s);
+  return n === null || n < 1 ? null : n;
+};
+
+/**
+ * Bir okutmanın, saydığımız birimde (`countUnitId`) kaç adım artıracağı (K-1/K-3; yuvarlama yok, kesirli koli yok).
+ * Sayılan birim temel birimse artış `baseQuantity`'dir (koli okutunca koli içi adet); sayılan birim barkodun kendi birimiyse okutma başına miktar (koli = 1);
+ * ikisi de değilse 1 (A-287c-1: birimler arası katsayı istemcide yoktur, uydurulmaz). Tam sayı olmayan sonuç `null` (ekran uyarır, sessizce 1 yapmaz).
+ */
+export function scanStepOf(scan: ScanQty, countUnitId: string): number | null {
+  if (sameId(countUnitId, scan.baseUnitId)) return wholeOf(scan.baseQuantity);
+  if (sameId(countUnitId, scan.unitId)) return wholeOf(scan.quantity);
+  return 1;
+}
+export const isBaseUnit = (unitId: string, baseUnitId: string): boolean => sameId(unitId, baseUnitId);
+
+/** Temel birim miktarının bileşik gösterimi ("2 koli + 3 adet") + toplam; metin sunucuda `formatCompound` ile üretilir (yalnız görüntü). Ürünün koli dönüşümü yoksa görünmez. */
+export function CompoundLine({ slug, itemId, baseQty }: { slug: string; itemId: string; baseQty: number }) {
+  const t = useTranslations("receiving");
+  const key = `${itemId}|${baseQty}`;
+  const [view, setView] = useState<{ key: string; text: string; total: number; unit: string } | { key: string; failed: true } | null>(null);
+  useEffect(() => {
+    let live = true;
+    // Adım tuşlarına art arda basış her basışta sunucuya gitmesin: kısa gecikmeyle son değer sorulur.
+    const timer = setTimeout(() => {
+      compoundQuantityAction({ slug, itemId, baseQuantity: String(baseQty) })
+        .then((r) => {
+          if (!live) return;
+          if (!r.ok) setView({ key, failed: true });
+          else setView(r.data.packed ? { key, text: r.data.text, total: baseQty, unit: r.data.baseName } : null);
+        })
+        .catch(() => {
+          if (live) setView({ key, failed: true });
+        });
+    }, 200);
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
+  }, [slug, itemId, baseQty, key]);
+  if (view === null || view.key !== key) return null;
+  if ("failed" in view) {
+    return (
+      <p role="status" data-testid="compound-qty" data-state="failed" className="break-words text-base font-semibold text-ink-muted">
+        {t("flow.compoundFailed")}
+      </p>
+    );
+  }
+  return (
+    <p data-testid="compound-qty" data-state="ok" className="break-words text-base font-bold text-ink [@media(max-height:700px)]:text-sm">
+      {t("flow.compound", { text: view.text, total: view.total, unit: view.unit })}
+    </p>
+  );
+}
+
 export interface AlertState {
   readonly titleKey: string;
   readonly reasonKey: string;
@@ -621,6 +729,8 @@ export interface AlertState {
 type Stage = "scan" | "qty" | "done";
 interface Picked {
   readonly line: ReceiptLineView;
+  /** Satır birimi temel birim mi: öyleyse `received` temel birimdedir ve bileşik gösterim (koli + adet) anlamlıdır. */
+  readonly lineIsBase: boolean;
   readonly received: number;
   readonly damaged: number;
   readonly locationId: string;
@@ -637,8 +747,10 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
   const router = useRouter();
   const [refreshing, startTransition] = useTransition();
   const holder = useKeyHolder();
-  const [stage, setStage] = useState<Stage>("scan");
-  const [picked, setPicked] = useState<Picked | null>(null);
+  // `stage`/`picked` ref'le de okunur: aynı tikte ardışık okumalar eski kapanıştan değil güncel durumdan hesaplanır (koli artışı kaybolmaz).
+  const [stage, setStage, stageRef] = useStateRef<Stage>("scan");
+  const [picked, setPicked, pickedRef] = useStateRef<Picked | null>(null);
+  const busyRef = useRef(false);
   const [showDamaged, setShowDamaged] = useState(false);
   const [last, setLast] = useState("");
   const [lastName, setLastName] = useState<string | undefined>(undefined);
@@ -649,65 +761,76 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
 
   const base = `/t/${encodeURIComponent(slug)}/field/receive`;
   const open = receipt.lines.filter((l) => intOf(l.open) !== 0);
-  const itemIds = receipt.lines.map((l) => l.itemId);
 
   const onScanned = useCallback(
     async (code: string) => {
-      if (busy || alert !== null) return;
+      // Eşzamanlı tek çözüm: bayrak ref'tedir (yeniden çizim beklemez); aynı tikteki ikinci okuma kapıda düşer ve bildirilir (`useScanner`).
+      if (busyRef.current) return;
+      busyRef.current = true;
       setLast(code);
       setLastName(undefined);
       setBusy(true);
       setError(null);
-      let res: Awaited<ReturnType<typeof resolveItemScanAction>>;
       try {
-        res = await resolveItemScanAction({ slug, code });
-      } catch {
-        setBusy(false);
-        setAlert({ titleKey: "alert.networkTitle", reasonKey: "network", code: "NETWORK" });
-        return;
-      }
-      setBusy(false);
-      if (!res.ok) {
-        const key = errorKeyOf(res.error, "scan");
-        setAlert({ titleKey: "alert.scanTitle", reasonKey: key, code: res.error.detail === undefined ? res.error.code : `${res.error.code}/${res.error.detail}` });
-        return;
-      }
-      const { itemId, quantity, unitId } = res.data;
-      if (scanMismatch(itemId, itemIds)) {
-        setAlert({ titleKey: "alert.mismatchTitle", reasonKey: "scan_mismatch", code: "SCAN_MISMATCH" });
-        return;
-      }
-      const line = open.find((l) => l.itemId === itemId);
-      if (line === undefined) {
-        setAlert({ titleKey: "alert.mismatchTitle", reasonKey: "line_done", code: "LINE_COMPLETE" });
-        return;
-      }
-      setLastName(line.itemName);
-      const max = intOf(line.open);
-      // Koli barkodu adedi (A-20): yalnızca barkod birimi satır birimiyle aynıysa varsayılan olur; değilse 1 (kullanıcı değiştirir).
-      const perScan = unitId === line.unitId ? (intOf(quantity) ?? 1) : 1;
-      if (stage === "qty" && picked !== null && picked.line.id === line.id) {
-        // Aynı ürünün koli barkodu yeniden okutuldu: adet eklenir.
+        let res: Awaited<ReturnType<typeof resolveItemScanAction>>;
+        try {
+          res = await resolveItemScanAction({ slug, code });
+        } catch {
+          setAlert({ titleKey: "alert.networkTitle", reasonKey: "network", code: "NETWORK" });
+          return;
+        }
+        if (!res.ok) {
+          const key = errorKeyOf(res.error, "scan");
+          setAlert({ titleKey: "alert.scanTitle", reasonKey: key, code: res.error.detail === undefined ? res.error.code : `${res.error.code}/${res.error.detail}` });
+          return;
+        }
+        const itemId = res.data.itemId;
+        const lines = receipt.lines;
+        if (scanMismatch(itemId, lines.map((l) => l.itemId))) {
+          setAlert({ titleKey: "alert.mismatchTitle", reasonKey: "scan_mismatch", code: "SCAN_MISMATCH" });
+          return;
+        }
+        const line = lines.filter((l) => intOf(l.open) !== 0).find((l) => l.itemId === itemId);
+        if (line === undefined) {
+          setAlert({ titleKey: "alert.mismatchTitle", reasonKey: "line_done", code: "LINE_COMPLETE" });
+          return;
+        }
+        setLastName(line.itemName);
+        const max = intOf(line.open);
+        // Okutma başına adım (K-1): satır temel birimdeyse `baseQuantity` (koli okutunca koli içi adet), satır birimi barkod birimiyse okutma başına miktar; kesirli ise uyarı.
+        const step = scanStepOf(res.data, line.unitId);
+        if (step === null) {
+          setAlert({ titleKey: "alert.scanTitle", reasonKey: "qty_fractional", code: "QUANTITY_NOT_WHOLE" });
+          return;
+        }
+        const cur = pickedRef.current;
+        if (stageRef.current === "qty" && cur !== null && cur.line.id === line.id) {
+          // Aynı ürünün koli barkodu yeniden okutuldu: adet eklenir (iki koli = iki katı).
+          holder.contentChanged();
+          setPicked({ ...cur, received: Math.min(max ?? Infinity, cur.received + step) });
+          return;
+        }
+        if (stageRef.current === "qty" && cur !== null) {
+          setAlert({ titleKey: "alert.mismatchTitle", reasonKey: "finish_first", code: "SCAN_MISMATCH" });
+          return;
+        }
         holder.contentChanged();
-        setPicked({ ...picked, received: Math.min(max ?? Infinity, picked.received + perScan) });
-        return;
+        setShowDamaged(false);
+        setPicked({ line, lineIsBase: isBaseUnit(line.unitId, res.data.baseUnitId), received: Math.max(1, Math.min(max ?? Infinity, step)), damaged: 0, locationId: receipt.receivingLocations[0]?.id ?? "" });
+        setStage("qty");
+      } finally {
+        busyRef.current = false;
+        setBusy(false);
       }
-      if (stage === "qty" && picked !== null) {
-        setAlert({ titleKey: "alert.mismatchTitle", reasonKey: "finish_first", code: "SCAN_MISMATCH" });
-        return;
-      }
-      holder.contentChanged();
-      setShowDamaged(false);
-      setPicked({ line, received: Math.max(1, Math.min(max ?? Infinity, perScan)), damaged: 0, locationId: receipt.receivingLocations[0]?.id ?? "" });
-      setStage("qty");
     },
-    [busy, alert, slug, stage, picked, receipt],
+    [slug, receipt, holder, setPicked, setStage, pickedRef, stageRef],
   );
-  const { service: scanner, camera, dropped, clearDropped } = useScanner((v) => void onScanned(v), stage !== "done" && alert === null && !busy);
-  const scanPrimary = useScanPrimary(camera, { busy, name: lastName, alerting: alert !== null });
+  const { service: scanner, camera, dropped, clearDropped } = useScanner((v) => void onScanned(v), stage !== "done" && alert === null && !busy, busyRef);
+  const scanPrimary = useScanPrimary(camera, { busy, name: lastName, code: last, alerting: alert !== null });
 
   async function confirm() {
-    if (picked === null || busy) return;
+    if (picked === null || busyRef.current) return;
+    busyRef.current = true;
     setBusy(true);
     setError(null);
     const out = await submitWithKey(holder, (clientKey) =>
@@ -725,6 +848,7 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
         ],
       }),
     );
+    busyRef.current = false;
     setBusy(false);
     if (!out.ok) {
       setError(out.error);
@@ -857,13 +981,14 @@ export function ReceiveFlow({ slug, receipt }: { slug: string; receipt: ReceiptD
             </PrimaryButton>
           }
         >
-          <section className="flex min-w-0 flex-col gap-1 rounded-card border-2 border-border bg-surface p-3" aria-label={t("flow.verify")}>
+          <section className="flex min-w-0 flex-col gap-1 rounded-card border-2 border-border bg-surface p-3 [@media(max-height:700px)]:p-2" aria-label={t("flow.verify")}>
             <p className="text-sm font-bold text-ink-muted">{t("flow.verify")}</p>
             <p className="break-words text-2xl font-extrabold text-ink" data-testid="verified-item">
               {picked.line.itemName}
             </p>
             <p className="break-words text-sm text-ink-muted [@media(max-height:700px)]:hidden">{picked.line.itemCode}</p>
             <LineStatus expected={picked.line.expected} received={picked.line.received} damaged={picked.line.damaged} open={picked.line.open} />
+            {picked.lineIsBase ? <CompoundLine slug={slug} itemId={picked.line.itemId} baseQty={picked.received} /> : null}
           </section>
           <QtyStepper
             label={t("flow.received", { unit: picked.line.unitName })}

@@ -2,12 +2,12 @@
 // Saha yerleştirme (T-313): [kaynak (KABUL) →] ürün okut → hedef lokasyon okut → onay → bitti. `PUTAWAY` görevinden (miktar ve ürün görevle birebir:
 // poka-yoke, A-305-7) ya da serbest başlar. Yetki, sayım kilidi (`LOCATION_LOCKED`), hedef lokasyon türü ve stok kuralları domain'dedir (`putaway`);
 // bu dosya yalnızca girdi toplar ve sunucu hatasını (kod + sonraki eylem) gösterir. Ortak saha parçaları `receive-flow.tsx`'tedir.
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
 import { Banner, CircleCheck, MapPinned } from "@wms/ui";
 import { ErrorNotice, errorKeyOf, intOf, scanMismatch, submitWithKey, useKeyHolder, type ErrorInfo } from "../../receipts/receipt-form.tsx";
 import { availableAtLocationAction, putawayAction, resolveItemScanAction, resolveLocationScanAction } from "../../receipts/actions.ts";
-import { DroppedNotice, FlowShell, PrimaryButton, PrimaryLink, QtyStepper, ScanAlert, ScanPanel, useScanPrimary, useScanner, type AlertState } from "../receive/receive-flow.tsx";
+import { CompoundLine, DroppedNotice, FlowShell, PrimaryButton, PrimaryLink, QtyStepper, ScanAlert, ScanPanel, scanStepOf, useScanPrimary, useScanner, useStateRef, type AlertState } from "../receive/receive-flow.tsx";
 
 export interface PutawayTask {
   readonly id: string;
@@ -38,12 +38,14 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
   const tasksHref = `${fieldHome}/tasks`;
   const total = task === null ? 5 : 4;
   const first: Stage = task === null ? "source" : "item";
-  const [stage, setStage] = useState<Stage>(first);
-  const [source, setSource] = useState<Loc | null>(task === null ? null : { id: task.sourceId, code: task.sourceCode, name: task.sourceName });
-  const [item, setItem] = useState<Item | null>(task === null ? null : { id: task.itemId, name: task.itemName, code: task.itemCode });
+  // Okumayla değişen durum ref'le de okunur: aynı tikte ardışık okumalar eski kapanıştan değil güncel durumdan hesaplanır (koli artışı kaybolmaz).
+  const [stage, setStage, stageRef] = useStateRef<Stage>(first);
+  const [source, setSource, sourceRef] = useStateRef<Loc | null>(task === null ? null : { id: task.sourceId, code: task.sourceCode, name: task.sourceName });
+  const [item, setItem, itemRef] = useStateRef<Item | null>(task === null ? null : { id: task.itemId, name: task.itemName, code: task.itemCode });
   const [target, setTarget] = useState<Loc | null>(null);
-  const [qty, setQty] = useState(intOf(task?.quantity) ?? 1);
-  const [avail, setAvail] = useState<number | null>(null);
+  const [qty, setQty, qtyRef] = useStateRef(intOf(task?.quantity) ?? 1);
+  const [avail, setAvail, availRef] = useStateRef<number | null>(null);
+  const busyRef = useRef(false);
   const [last, setLast] = useState("");
   const [lastName, setLastName] = useState<string | undefined>(undefined);
   const [busy, setBusy] = useState(false);
@@ -59,13 +61,16 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
 
   const onScanned = useCallback(
     async (code: string) => {
-      if (busy || alert !== null) return;
+      // Eşzamanlı tek çözüm: bayrak ref'tedir; aynı tikteki ikinci okuma kapıda düşer ve bildirilir (`useScanner`).
+      if (busyRef.current) return;
+      busyRef.current = true;
       setLast(code);
       setLastName(undefined);
       setBusy(true);
       setError(null);
       try {
-        if (stage === "source" || stage === "target") {
+        const at = stageRef.current;
+        if (at === "source" || at === "target") {
           const res = await resolveLocationScanAction({ slug, warehouseId, code });
           if (!res.ok) {
             showAlert("alert.scanTitle", errorKeyOf(res.error, "scan"), res.error.detail === undefined ? res.error.code : `${res.error.code}/${res.error.detail}`);
@@ -74,26 +79,45 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
           const loc = { id: res.data.id, code: res.data.code, name: res.data.name };
           holder.contentChanged();
           setLastName(loc.name);
-          if (stage === "source") {
+          if (at === "source") {
             setSource(loc);
             setStage("item");
           } else {
             setTarget(loc);
             setStage("confirm");
           }
-        } else if (stage === "item") {
+        } else if (at === "item" || at === "confirm") {
           const res = await resolveItemScanAction({ slug, code });
           if (!res.ok) {
             showAlert("alert.scanTitle", errorKeyOf(res.error, "scan"), res.error.detail === undefined ? res.error.code : `${res.error.code}/${res.error.detail}`);
             return;
           }
+          // Yerleştirme stokta (temel birim) çalışır: koli okutunca adım koli içi adettir (`baseQuantity`, K-1); kesirli ise uyarı, sessizce 1 değil.
+          const step = scanStepOf(res.data, res.data.baseUnitId);
+          if (step === null) {
+            showAlert("alert.scanTitle", "qty_fractional", "QUANTITY_NOT_WHOLE");
+            return;
+          }
+          const current = itemRef.current;
+          if (at === "confirm") {
+            // Onay ekranında (serbest yerleştirme) aynı ürün yeniden okutulursa adet eklenir (iki koli = iki katı); başka ürün engellenir.
+            if (current === null || current.id !== res.data.itemId) {
+              showAlert("alert.mismatchTitle", "scan_mismatch", "SCAN_MISMATCH");
+              return;
+            }
+            holder.contentChanged();
+            setLastName(res.data.itemName);
+            setQty(Math.min(availRef.current ?? Infinity, qtyRef.current + step));
+            return;
+          }
+          let nextQty = intOf(task?.quantity) ?? 1;
           if (task !== null) {
             if (scanMismatch(res.data.itemId, [task.itemId])) {
               showAlert("alert.mismatchTitle", "scan_mismatch", "SCAN_MISMATCH");
               return;
             }
-          } else if (source !== null) {
-            const a = await availableAtLocationAction({ slug, locationId: source.id, itemId: res.data.itemId });
+          } else if (sourceRef.current !== null) {
+            const a = await availableAtLocationAction({ slug, locationId: sourceRef.current.id, itemId: res.data.itemId });
             if (!a.ok) {
               showAlert("alert.scanTitle", errorKeyOf(a.error, "scan"), a.error.code);
               return;
@@ -104,7 +128,10 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
               return;
             }
             setAvail(have);
-            setQty(Math.max(1, Math.min(have ?? Infinity, intOf(res.data.quantity) ?? 1)));
+            // Aynı ürün geri dönüp yeniden okutulduysa adet eklenir; başka ürünse bu okutmanın adedi ile başlar.
+            const sameItem = current !== null && current.id === res.data.itemId;
+            nextQty = Math.max(1, Math.min(have ?? Infinity, (sameItem ? qtyRef.current : 0) + step));
+            setQty(nextQty);
           }
           holder.contentChanged();
           setLastName(res.data.itemName);
@@ -114,17 +141,20 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
       } catch {
         showAlert("alert.networkTitle", "network", "NETWORK");
       } finally {
+        busyRef.current = false;
         setBusy(false);
       }
     },
-    [busy, alert, stage, slug, warehouseId, task, source],
+    [slug, warehouseId, task, holder, setStage, setSource, setItem, setQty, setAvail, stageRef, sourceRef, itemRef, qtyRef, availRef],
   );
-  const scanning = stage === "source" || stage === "item" || stage === "target";
-  const { service: scanner, camera, dropped, clearDropped } = useScanner((v) => void onScanned(v), scanning && alert === null && !busy);
-  const scanPrimary = useScanPrimary(camera, { busy, name: lastName, alerting: alert !== null });
+  // Görevsiz yerleştirmede onay ekranında da okuma açıktır (aynı ürün yeniden okutulunca adet artar); görevde adet sabittir.
+  const scanning = stage === "source" || stage === "item" || stage === "target" || (stage === "confirm" && task === null);
+  const { service: scanner, camera, dropped, clearDropped } = useScanner((v) => void onScanned(v), scanning && alert === null && !busy, busyRef);
+  const scanPrimary = useScanPrimary(camera, { busy, name: lastName, code: last, alerting: alert !== null });
 
   async function confirm() {
-    if (busy || source === null || item === null || target === null) return;
+    if (busyRef.current || source === null || item === null || target === null) return;
+    busyRef.current = true;
     setBusy(true);
     setError(null);
     const out = await submitWithKey(holder, (clientKey) =>
@@ -138,6 +168,7 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
         quantity: String(qty),
       }),
     );
+    busyRef.current = false;
     setBusy(false);
     if (!out.ok) {
       const key = errorKeyOf(out.error, "putaway");
@@ -257,6 +288,7 @@ export function PutawayFlow({ slug, warehouseId, task }: { slug: string; warehou
             <p className="break-words text-base text-ink">
               {t("putaway.fromTo", { from: source.name || source.code, to: target.name || target.code })}
             </p>
+            <CompoundLine slug={slug} itemId={item.id} baseQty={qty} />
           </section>
           {task !== null ? (
             <p className="rounded-card bg-bg p-3 text-lg font-bold text-ink" data-testid="fixed-qty">
