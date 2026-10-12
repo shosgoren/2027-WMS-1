@@ -191,15 +191,19 @@ export async function getInboundReceipt(params: TaskCallParams, input: { readonl
   });
 }
 
+/** Kör sayımda maskeli biçim (T-334). */
+export type AvailableAtLocation = { readonly quantity: string } | { readonly quantity: null; readonly countLocked: true };
+
 /**
  * Bir lokasyondaki bir ürünün yerleştirilebilir (AVAILABLE, rezervesiz) miktarı; yoksa `"0"`. Lokasyon başka tenant'ınsa/olmayansa/kapsam
  * dışıysa `NOT_FOUND`. Yalnızca gösterim (varsayılan miktar); yerleştirme kuralları `putaway` komutundadır.
- * Kör sayım (T-334, A-334-1): lokasyon COUNTING kilidindeyse `countLocked: true`; `count_diff.approve` sahibi değilse `quantity` `null`.
+ * Kör sayım (T-334, A-334-1): lokasyon COUNTING kilidinde ve çağıran `count_diff.approve` sahibi değilse `{ quantity: null, countLocked: true }`;
+ * aksi halde (kilitsiz ya da yetkili) eski biçim `{ quantity }` (counting.int.test.ts AC-13 tam biçimi sabitler).
  */
 export async function getAvailableAtLocation(
   params: TaskCallParams,
   input: { readonly locationId: string; readonly itemId: string },
-): Promise<{ readonly quantity: string | null; readonly countLocked: boolean }> {
+): Promise<AvailableAtLocation> {
   const locationId = uuid(input.locationId);
   const itemId = uuid(input.itemId);
   return runTenantQuery({ ...params, permission: "stock.view" }, async (tx, m) => {
@@ -208,8 +212,7 @@ export async function getAvailableAtLocation(
     );
     if (loc[0] === undefined) throw new AppError("NOT_FOUND");
     await assertWarehouseVisible(tx, m, [loc[0].warehouse_id]);
-    const countLocked = (await countLockedLocationIds(tx, m.tenantId, [locationId])).has(locationId);
-    if (countLocked && isCountBlind(m.roles)) return { quantity: null, countLocked };
+    if (isCountBlind(m.roles) && (await countLockedLocationIds(tx, m.tenantId, [locationId])).has(locationId)) return { quantity: null, countLocked: true };
     const sum = await tx.execute<{ q: string }>(
       sql`SELECT COALESCE(sum(b.quantity - b.reserved_quantity), 0)::text AS q
             FROM public.stock_dimensions s
@@ -217,7 +220,7 @@ export async function getAvailableAtLocation(
            WHERE s.tenant_id = ${m.tenantId}::uuid AND s.location_id = ${locationId}::uuid AND s.item_id = ${itemId}::uuid
              AND s.stock_status = 'AVAILABLE'`,
     );
-    return { quantity: sum[0]?.q ?? "0", countLocked };
+    return { quantity: sum[0]?.q ?? "0" };
   });
 }
 
