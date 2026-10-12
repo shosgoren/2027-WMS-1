@@ -366,13 +366,14 @@ describe("yetki (A-68): kart yazma settings.manage ister, okuma stock.view", () 
     expect(await renameLocation(admin(A), { locationId: loc.locationId, name: "P yeni" })).toEqual({ changed: true });
   });
 
-  it("okuma stock.view ile serbest: READ_ONLY / PICKER / WAREHOUSE_MANAGER listeler, ağaç ve kod aramasını okur; yalnız-COUNTER FORBIDDEN (T-335a)", async () => {
+  it("okuma stock.view ile serbest: READ_ONLY / PICKER / WAREHOUSE_MANAGER listeler, ağaç ve kod aramasını okur; yalnız-COUNTER listeyi/ağacı göremez ama kod çözebilir (T-335a, T-335b)", async () => {
     const { warehouseId } = await createWarehouse(admin(A), { code: uniq("rd-"), name: "Rd" });
     const loc = await createLocation(admin(A), { warehouseId, code: "RD1", name: "R", kind: "STORAGE" });
     const c = call(A, "counter");
     expect((await failure(listWarehouses(c))).code).toBe("FORBIDDEN");
     expect((await failure(getLocationTree(c, { warehouseId }))).code).toBe("FORBIDDEN");
-    expect((await failure(findLocationByCode(c, { warehouseId, code: "rd1" }))).code).toBe("FORBIDDEN");
+    // T-335b (A-335-3): kod çözme catalog.view'a taşındı; yalnız-COUNTER lokasyon kartını (miktarsız) çözer.
+    expect((await findLocationByCode(c, { warehouseId, code: "rd1" }))?.id).toBe(loc.locationId);
     for (const who of ["manager", "picker", "readOnly"] as const) {
       const p = call(A, who);
       expect((await listWarehouses(p)).items.some((w) => w.id === warehouseId), who).toBe(true);

@@ -376,7 +376,8 @@ export async function findLocationByCode(
 ): Promise<(LocationRow & { readonly renamedFrom?: string }) | null> {
   const warehouseId = parseUuid(input.warehouseId);
   const code = normalizeCode(input.code);
-  return runTenantQuery({ ...params, permission: "stock.view" }, async (tx, m) => {
+  // T-335b (A-335-3): LocationRow miktarsızdır (kimlik/kod/ad/derinlik/tür/pickBlocked/durum) → `catalog.view`.
+  return runTenantQuery({ ...params, permission: "catalog.view" }, async (tx, m) => {
     await assertWarehouseExists(tx, m.tenantId, warehouseId);
     await assertWarehouseVisible(tx, m, [warehouseId]);
     const rows = await tx.execute<LocationDbRow>(

@@ -257,5 +257,6 @@ export async function resolveBarcode(tx: AccessTx, tenantId: string, raw: string
 }
 
 export function resolveBarcodeQuery(params: Omit<CatalogCommandParams, "requestId">, raw: string): Promise<ResolvedBarcode> {
-  return runTenantQuery({ ...params, permission: "stock.view" }, (tx, actor) => resolveBarcode(tx, actor.tenantId, raw));
+  // T-335b (A-335-3): çözüm sonucundaki `quantity` barkodun paket miktarıdır (stok değil) → `catalog.view`.
+  return runTenantQuery({ ...params, permission: "catalog.view" }, (tx, actor) => resolveBarcode(tx, actor.tenantId, raw));
 }

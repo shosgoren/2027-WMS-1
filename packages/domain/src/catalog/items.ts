@@ -1,4 +1,4 @@
-// Ürün kartı komutları (T-208; A-68, A-87, A-16, A-33). Yazma `settings.manage`, okuma `stock.view`.
+// Ürün kartı komutları (T-208; A-68, A-87, A-16, A-33). Yazma `settings.manage`, okuma `stock.view` (getItem: `catalog.view`, T-335b).
 //
 // - Stok DEĞİŞTİRMEZ (G-01); yalnızca katalog satırı yazar ve stok tablolarını OKUR. Bu yüzden `acquireStockLocks`
 //   kullanılmaz; arşiv/stok-denetimi için yalnızca ürün KATALOG satırı `FOR UPDATE` ile kilitlenir (stok kilidi değil).
@@ -228,7 +228,8 @@ export async function archiveItem(params: CatalogCommandParams, input: { readonl
 
 export async function getItem(params: Omit<CatalogCommandParams, "requestId">, input: { readonly itemId: string }): Promise<ItemRow> {
   const itemId = parseUuid(input.itemId);
-  return runTenantQuery({ ...params, permission: "stock.view" }, async (tx, actor) => {
+  // T-335b (A-335-3): ürün kartı miktarsızdır (ItemRow: kod/ad/birim/izleme/ölçek/politika/durum) → `catalog.view`.
+  return runTenantQuery({ ...params, permission: "catalog.view" }, async (tx, actor) => {
     const r = await loadItem(tx, actor.tenantId, itemId);
     if (r === undefined) throw new AppError("NOT_FOUND");
     return toRow(r);
